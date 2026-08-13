@@ -1,0 +1,150 @@
+//! Typed persistent identifiers and the state-owned deterministic ID allocator.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! define_id {
+    ($name:ident, $label:literal) => {
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
+        pub struct $name(u32);
+
+        impl $name {
+            pub const fn raw(self) -> u32 {
+                self.0
+            }
+
+            pub(crate) const fn from_raw(raw: u32) -> Self {
+                Self(raw)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, concat!($label, "-{}"), self.0)
+            }
+        }
+    };
+}
+
+define_id!(OrganizationId, "org");
+define_id!(CharacterId, "char");
+define_id!(NeighborhoodId, "neighborhood");
+define_id!(BusinessId, "business");
+define_id!(OperationId, "operation");
+define_id!(InformationId, "information");
+define_id!(InvestigationId, "investigation");
+define_id!(EvidenceId, "evidence");
+define_id!(ReportId, "report");
+define_id!(HistoryEventId, "history");
+define_id!(FinancialAccountId, "account");
+define_id!(LedgerTransactionId, "transaction");
+define_id!(DecisionRequestId, "decision");
+define_id!(MandateId, "mandate");
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct IdCounters {
+    organization: u32,
+    character: u32,
+    neighborhood: u32,
+    business: u32,
+    operation: u32,
+    information: u32,
+    investigation: u32,
+    evidence: u32,
+    report: u32,
+    history_event: u32,
+    financial_account: u32,
+    ledger_transaction: u32,
+    decision_request: u32,
+    mandate: u32,
+}
+
+impl IdCounters {
+    pub(crate) fn new() -> Self {
+        Self {
+            organization: 1,
+            character: 1,
+            neighborhood: 1,
+            business: 1,
+            operation: 1,
+            information: 1,
+            investigation: 1,
+            evidence: 1,
+            report: 1,
+            history_event: 1,
+            financial_account: 1,
+            ledger_transaction: 1,
+            decision_request: 1,
+            mandate: 1,
+        }
+    }
+
+    fn take(counter: &mut u32, label: &'static str) -> u32 {
+        let current = *counter;
+        *counter = counter
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("persistent {label} ID space exhausted"));
+        current
+    }
+
+    pub(crate) fn next_organization(&mut self) -> OrganizationId {
+        OrganizationId::from_raw(Self::take(&mut self.organization, "organization"))
+    }
+
+    pub(crate) fn next_character(&mut self) -> CharacterId {
+        CharacterId::from_raw(Self::take(&mut self.character, "character"))
+    }
+
+    pub(crate) fn next_neighborhood(&mut self) -> NeighborhoodId {
+        NeighborhoodId::from_raw(Self::take(&mut self.neighborhood, "neighborhood"))
+    }
+
+    pub(crate) fn next_business(&mut self) -> BusinessId {
+        BusinessId::from_raw(Self::take(&mut self.business, "business"))
+    }
+
+    pub(crate) fn next_operation(&mut self) -> OperationId {
+        OperationId::from_raw(Self::take(&mut self.operation, "operation"))
+    }
+
+    pub(crate) fn next_information(&mut self) -> InformationId {
+        InformationId::from_raw(Self::take(&mut self.information, "information"))
+    }
+
+    pub(crate) fn next_investigation(&mut self) -> InvestigationId {
+        InvestigationId::from_raw(Self::take(&mut self.investigation, "investigation"))
+    }
+
+    pub(crate) fn next_evidence(&mut self) -> EvidenceId {
+        EvidenceId::from_raw(Self::take(&mut self.evidence, "evidence"))
+    }
+
+    pub(crate) fn next_report(&mut self) -> ReportId {
+        ReportId::from_raw(Self::take(&mut self.report, "report"))
+    }
+
+    pub(crate) fn next_history_event(&mut self) -> HistoryEventId {
+        HistoryEventId::from_raw(Self::take(&mut self.history_event, "history event"))
+    }
+
+    pub(crate) fn next_financial_account(&mut self) -> FinancialAccountId {
+        FinancialAccountId::from_raw(Self::take(&mut self.financial_account, "financial account"))
+    }
+
+    pub(crate) fn next_ledger_transaction(&mut self) -> LedgerTransactionId {
+        LedgerTransactionId::from_raw(Self::take(
+            &mut self.ledger_transaction,
+            "ledger transaction",
+        ))
+    }
+
+    pub(crate) fn next_decision_request(&mut self) -> DecisionRequestId {
+        DecisionRequestId::from_raw(Self::take(&mut self.decision_request, "decision request"))
+    }
+
+    pub(crate) fn next_mandate(&mut self) -> MandateId {
+        MandateId::from_raw(Self::take(&mut self.mandate, "mandate"))
+    }
+}
