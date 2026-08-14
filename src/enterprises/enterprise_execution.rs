@@ -1,0 +1,1546 @@
+//! Enterprise establishment, lifecycle, cycle planning, and atomic settlement for persistent routine activity.
+
+use crate::core::attention::AttentionClass;
+use crate::core::entity::EntityRef;
+use crate::core::id::{
+    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, OrganizationId,
+};
+use crate::core::state::AppState;
+use crate::core::time::{SimDuration, SimTime};
+use crate::delegation::delegation_system::{
+    resolve_mandate_authority, resolve_policy_for_manager, validate_mandate_authority_snapshot,
+    DelegationError,
+};
+use crate::delegation::{
+    MandateAuthority, ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope,
+};
+use crate::enterprises::{
+    build_enterprise_record, EnterpriseCycleRecord, EnterpriseDraft, EnterpriseLocation,
+    EnterpriseStatus,
+};
+use crate::finance::finance_system::{
+    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+};
+use crate::finance::{
+    AccountKind, AccountLifecycle, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
+};
+use crate::intelligence::intelligence_system::{
+    validate_record_information, IntelligenceError, ValidatedInformation,
+};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
+};
+use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
+use crate::world::{
+    BusinessFunction, CapabilityKind, Lifecycle, NeighborhoodProfile, PolicySetting, Rating,
+};
+use thiserror::Error;
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum EnterpriseError {
+    #[error("enterprise {0} does not exist")]
+    MissingEnterprise(EnterpriseId),
+    #[error("organization {0} does not exist or is inactive")]
+    InvalidOrganization(OrganizationId),
+    #[error("enterprise authority belongs to organization {authority_organization}, not {enterprise_organization}")]
+    AuthorityOrganizationMismatch {
+        authority_organization: OrganizationId,
+        enterprise_organization: OrganizationId,
+    },
+    #[error("authority scope {scope:?} does not cover enterprise location {location:?}")]
+    AuthorityLocationMismatch {
+        scope: ResponsibilityScope,
+        location: EnterpriseLocation,
+    },
+    #[error("enterprise location {0:?} does not exist or is inactive")]
+    InvalidLocation(EnterpriseLocation),
+    #[error("business {business} lacks required enterprise function {function:?}")]
+    MissingBusinessFunction {
+        business: BusinessId,
+        function: BusinessFunction,
+    },
+    #[error("financial account {0} does not exist")]
+    MissingAccount(FinancialAccountId),
+    #[error("financial account {account} is not owned by organization {organization}")]
+    AccountOwnerMismatch {
+        account: FinancialAccountId,
+        organization: OrganizationId,
+    },
+    #[error("enterprise cash account {0} must be street or concealed cash")]
+    InvalidCashAccountKind(FinancialAccountId),
+    #[error("enterprise settlement account {0} must be a settlement account")]
+    InvalidSettlementAccountKind(FinancialAccountId),
+    #[error("enterprise financial account {0} is not open")]
+    AccountNotOpen(FinancialAccountId),
+    #[error("settlement account {account} is already reserved by enterprise {enterprise}")]
+    SettlementAccountInUse {
+        account: FinancialAccountId,
+        enterprise: EnterpriseId,
+    },
+    #[error("enterprise {0} is not active")]
+    EnterpriseNotActive(EnterpriseId),
+    #[error("enterprise {0} is not suspended")]
+    EnterpriseNotSuspended(EnterpriseId),
+    #[error("enterprise {0} is already closed")]
+    EnterpriseClosed(EnterpriseId),
+    #[error("enterprise {enterprise} is not due for a cycle until {due_at:?}")]
+    CycleNotDue {
+        enterprise: EnterpriseId,
+        due_at: SimTime,
+    },
+    #[error(
+        "enterprise cycle variance {basis_points} basis points exceeds authored limit {limit}"
+    )]
+    VarianceOutOfRange { basis_points: i16, limit: u16 },
+    #[error("enterprise economics overflowed while resolving cycle {0}")]
+    ArithmeticOverflow(EnterpriseId),
+    #[error("enterprise {enterprise} changed after validation; expected version {expected}, found {found}")]
+    StaleEnterprise {
+        enterprise: EnterpriseId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
+        "enterprise cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleCycleTime { expected: SimTime, found: SimTime },
+    #[error(transparent)]
+    Delegation(#[from] DelegationError),
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
+    #[error(transparent)]
+    Intelligence(#[from] IntelligenceError),
+}
+
+pub struct ValidatedEnterpriseEstablishment {
+    draft: EnterpriseDraft,
+    authority: ResolvedMandateAuthority,
+    cycle_duration: SimDuration,
+}
+
+impl ValidatedEnterpriseEstablishment {
+    pub fn commit(self, state: &mut AppState) -> Result<EnterpriseId, EnterpriseError> {
+        validate_mandate_authority_snapshot(state, self.authority)?;
+        validate_enterprise_environment(
+            state,
+            self.draft.organization,
+            self.draft.authority,
+            self.draft.location,
+        )?;
+        validate_enterprise_accounts(
+            state,
+            self.draft.organization,
+            self.draft.cash_account,
+            self.draft.settlement_account,
+            None,
+        )?;
+        let id = state.ids.next_enterprise();
+        let established_at = state.now();
+        let next_cycle_at = established_at + self.cycle_duration;
+        state.enterprises.insert(build_enterprise_record(
+            id,
+            self.draft,
+            established_at,
+            next_cycle_at,
+        ));
+        Ok(id)
+    }
+}
+
+pub fn validate_establish_enterprise(
+    registry: &Registry,
+    state: &AppState,
+    draft: EnterpriseDraft,
+) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
+    let definition = registry.get_enterprise(draft.kind);
+    let authority = resolve_mandate_authority(state, draft.authority)?;
+    validate_enterprise_environment(state, draft.organization, draft.authority, draft.location)?;
+    validate_business_location_requirements(definition, state, draft.location)?;
+    validate_enterprise_accounts(
+        state,
+        draft.organization,
+        draft.cash_account,
+        draft.settlement_account,
+        None,
+    )?;
+    let cycle_duration = definition.economics().cycle();
+    Ok(ValidatedEnterpriseEstablishment {
+        draft,
+        authority,
+        cycle_duration,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnterpriseCyclePlan {
+    enterprise: EnterpriseId,
+    expected_enterprise_version: u32,
+    authority: ResolvedMandateAuthority,
+    occurred_at: SimTime,
+    next_cycle_at: SimTime,
+    gross_revenue: Money,
+    operating_cost: Money,
+    net_cash: Money,
+    variance_basis_points: i16,
+    attention: AttentionClass,
+    manager_management: Option<Rating>,
+    policy_setting: Option<PolicySetting>,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+}
+
+impl EnterpriseCyclePlan {
+    pub fn enterprise(&self) -> EnterpriseId {
+        self.enterprise
+    }
+    pub fn gross_revenue(&self) -> Money {
+        self.gross_revenue
+    }
+    pub fn operating_cost(&self) -> Money {
+        self.operating_cost
+    }
+    pub fn net_cash(&self) -> Money {
+        self.net_cash
+    }
+    pub fn variance_basis_points(&self) -> i16 {
+        self.variance_basis_points
+    }
+    pub fn attention(&self) -> AttentionClass {
+        self.attention
+    }
+    pub fn policy_setting(&self) -> Option<PolicySetting> {
+        self.policy_setting
+    }
+}
+
+pub fn decide_enterprise_cycle(
+    registry: &Registry,
+    state: &AppState,
+    enterprise: EnterpriseId,
+    variance_basis_points: i16,
+) -> Result<EnterpriseCyclePlan, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
+    if record.status() != EnterpriseStatus::Active {
+        return Err(EnterpriseError::EnterpriseNotActive(enterprise));
+    }
+    let due_at = record
+        .next_cycle_at()
+        .ok_or(EnterpriseError::EnterpriseNotActive(enterprise))?;
+    if state.now() < due_at {
+        return Err(EnterpriseError::CycleNotDue { enterprise, due_at });
+    }
+    let definition = registry.get_enterprise(record.kind());
+    let variance_limit = definition.economics().gross_variance_basis_points();
+    if i32::from(variance_basis_points).unsigned_abs() > u32::from(variance_limit) {
+        return Err(EnterpriseError::VarianceOutOfRange {
+            basis_points: variance_basis_points,
+            limit: variance_limit,
+        });
+    }
+    let authority = resolve_mandate_authority(state, record.authority())?;
+    validate_enterprise_environment(
+        state,
+        record.organization(),
+        record.authority(),
+        record.location(),
+    )?;
+    validate_business_location_requirements(definition, state, record.location())?;
+    validate_enterprise_accounts(
+        state,
+        record.organization(),
+        record.cash_account(),
+        record.settlement_account(),
+        Some(record.id()),
+    )?;
+    let neighborhood = resolve_location_profile(state, record.location())?;
+    let manager = state
+        .world
+        .get_character(record.manager())
+        .expect("resolved enterprise authority manager must exist");
+    let manager_management = manager.capability(CapabilityKind::Management);
+    let economics = definition.economics();
+    let gross_before_variance =
+        resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
+    let gross_revenue =
+        apply_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
+    let operating_cost = resolve_operating_cost(enterprise, economics, neighborhood)?;
+    let net_cash = gross_revenue
+        .checked_sub(operating_cost)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    let policy_setting = match definition.policy() {
+        Some(kind) => Some(resolve_policy_for_manager(state, record.manager(), kind)?.setting),
+        None => None,
+    };
+    let attention = if i32::from(variance_basis_points).unsigned_abs()
+        >= u32::from(economics.notable_variance_basis_points())
+    {
+        AttentionClass::Notable
+    } else {
+        AttentionClass::Routine
+    };
+    Ok(EnterpriseCyclePlan {
+        enterprise,
+        expected_enterprise_version: record.version(),
+        authority,
+        occurred_at: state.now(),
+        next_cycle_at: due_at + economics.cycle(),
+        gross_revenue,
+        operating_cost,
+        net_cash,
+        variance_basis_points,
+        attention,
+        manager_management,
+        policy_setting,
+        cash_account: record.cash_account(),
+        settlement_account: record.settlement_account(),
+    })
+}
+
+pub struct ValidatedEnterpriseCycle {
+    plan: EnterpriseCyclePlan,
+    ledger: Option<ValidatedLedgerTransaction>,
+    information: Option<ValidatedInformation>,
+}
+
+impl ValidatedEnterpriseCycle {
+    pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
+        let record = state
+            .enterprises
+            .get_enterprise(self.plan.enterprise)
+            .ok_or(EnterpriseError::MissingEnterprise(self.plan.enterprise))?;
+        if record.version() != self.plan.expected_enterprise_version {
+            return Err(EnterpriseError::StaleEnterprise {
+                enterprise: self.plan.enterprise,
+                expected: self.plan.expected_enterprise_version,
+                found: record.version(),
+            });
+        }
+        if record.status() != EnterpriseStatus::Active {
+            return Err(EnterpriseError::EnterpriseNotActive(self.plan.enterprise));
+        }
+        if state.now() != self.plan.occurred_at {
+            return Err(EnterpriseError::StaleCycleTime {
+                expected: self.plan.occurred_at,
+                found: state.now(),
+            });
+        }
+        validate_mandate_authority_snapshot(state, self.plan.authority)?;
+        validate_enterprise_accounts(
+            state,
+            record.organization(),
+            self.plan.cash_account,
+            self.plan.settlement_account,
+            Some(record.id()),
+        )?;
+        let transaction = match self.ledger {
+            Some(ledger) => Some(ledger.commit(state)?),
+            None => None,
+        };
+        let information = self
+            .information
+            .map(|information| information.commit(state));
+        let cycle_id = state.ids.next_enterprise_cycle();
+        state.enterprises.apply_cycle(
+            EnterpriseCycleRecord {
+                id: cycle_id,
+                enterprise: self.plan.enterprise,
+                occurred_at: self.plan.occurred_at,
+                gross_revenue: self.plan.gross_revenue,
+                operating_cost: self.plan.operating_cost,
+                net_cash: self.plan.net_cash,
+                variance_basis_points: self.plan.variance_basis_points,
+                attention: self.plan.attention,
+                manager_management: self.plan.manager_management,
+                policy_setting: self.plan.policy_setting,
+                transaction,
+                information,
+            },
+            self.plan.next_cycle_at,
+        );
+        Ok(cycle_id)
+    }
+}
+
+pub fn validate_enterprise_cycle_plan(
+    state: &AppState,
+    plan: EnterpriseCyclePlan,
+) -> Result<ValidatedEnterpriseCycle, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(plan.enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(plan.enterprise))?;
+    if record.version() != plan.expected_enterprise_version {
+        return Err(EnterpriseError::StaleEnterprise {
+            enterprise: plan.enterprise,
+            expected: plan.expected_enterprise_version,
+            found: record.version(),
+        });
+    }
+    if record.status() != EnterpriseStatus::Active {
+        return Err(EnterpriseError::EnterpriseNotActive(plan.enterprise));
+    }
+    if state.now() != plan.occurred_at {
+        return Err(EnterpriseError::StaleCycleTime {
+            expected: plan.occurred_at,
+            found: state.now(),
+        });
+    }
+    validate_mandate_authority_snapshot(state, plan.authority)?;
+    validate_enterprise_accounts(
+        state,
+        record.organization(),
+        plan.cash_account,
+        plan.settlement_account,
+        Some(record.id()),
+    )?;
+    let ledger = if plan.net_cash == Money::ZERO {
+        None
+    } else {
+        Some(validate_record_transaction(
+            state,
+            LedgerTransactionDraft {
+                occurred_at: plan.occurred_at,
+                memo: format!("Routine enterprise settlement for {}", plan.enterprise),
+                postings: vec![
+                    LedgerPosting {
+                        account: plan.cash_account,
+                        amount: plan.net_cash,
+                    },
+                    LedgerPosting {
+                        account: plan.settlement_account,
+                        amount: Money::from_cents(
+                            plan.net_cash
+                                .cents()
+                                .checked_neg()
+                                .ok_or(EnterpriseError::ArithmeticOverflow(plan.enterprise))?,
+                        ),
+                    },
+                ],
+                authorization: None,
+            },
+        )?)
+    };
+    let information = match plan.attention {
+        AttentionClass::Notable => Some(validate_record_information(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(record.organization()),
+                source_kind: InformationSourceKind::AfterAction,
+                source_entity: Some(EntityRef::Character(record.manager())),
+                subject: EntityRef::Enterprise(record.id()),
+                observed_at: plan.occurred_at,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: format!(
+                    "Enterprise cycle reported gross {} cents, operating cost {} cents, net cash {} cents, with variance {} basis points.",
+                    plan.gross_revenue.cents(),
+                    plan.operating_cost.cents(),
+                    plan.net_cash.cents(),
+                    plan.variance_basis_points,
+                ),
+            },
+        )?),
+        AttentionClass::Routine => None,
+        AttentionClass::Exception | AttentionClass::Crisis => {
+            unreachable!("enterprise cycle plans only produce routine or notable attention")
+        }
+    };
+    Ok(ValidatedEnterpriseCycle {
+        plan,
+        ledger,
+        information,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnterpriseStatusChange {
+    Suspend,
+    Resume,
+    Close,
+}
+
+pub struct ValidatedEnterpriseStatusChange {
+    enterprise: EnterpriseId,
+    expected_version: u32,
+    change: EnterpriseStatusChange,
+    cycle_duration: Option<SimDuration>,
+    authority: Option<ResolvedMandateAuthority>,
+}
+
+impl ValidatedEnterpriseStatusChange {
+    pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+        let record = state
+            .enterprises
+            .get_enterprise(self.enterprise)
+            .ok_or(EnterpriseError::MissingEnterprise(self.enterprise))?;
+        if record.version() != self.expected_version {
+            return Err(EnterpriseError::StaleEnterprise {
+                enterprise: self.enterprise,
+                expected: self.expected_version,
+                found: record.version(),
+            });
+        }
+        if let Some(authority) = self.authority {
+            validate_mandate_authority_snapshot(state, authority)?;
+            validate_enterprise_environment(
+                state,
+                record.organization(),
+                record.authority(),
+                record.location(),
+            )?;
+            validate_enterprise_accounts(
+                state,
+                record.organization(),
+                record.cash_account(),
+                record.settlement_account(),
+                Some(record.id()),
+            )?;
+        }
+        let next_status = match self.change {
+            EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
+            EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
+            EnterpriseStatusChange::Close => EnterpriseStatus::Closed,
+        };
+        let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
+        state
+            .enterprises
+            .set_status(self.enterprise, next_status, next_cycle_at);
+        Ok(())
+    }
+}
+
+pub fn validate_suspend_enterprise(
+    state: &AppState,
+    enterprise: EnterpriseId,
+) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
+    if record.status() != EnterpriseStatus::Active {
+        return Err(match record.status() {
+            EnterpriseStatus::Active => unreachable!(),
+            EnterpriseStatus::Suspended => EnterpriseError::EnterpriseNotActive(enterprise),
+            EnterpriseStatus::Closed => EnterpriseError::EnterpriseClosed(enterprise),
+        });
+    }
+    Ok(ValidatedEnterpriseStatusChange {
+        enterprise,
+        expected_version: record.version(),
+        change: EnterpriseStatusChange::Suspend,
+        cycle_duration: None,
+        authority: None,
+    })
+}
+
+pub fn validate_resume_enterprise(
+    registry: &Registry,
+    state: &AppState,
+    enterprise: EnterpriseId,
+) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
+    match record.status() {
+        EnterpriseStatus::Active => {
+            return Err(EnterpriseError::EnterpriseNotSuspended(enterprise))
+        }
+        EnterpriseStatus::Suspended => {}
+        EnterpriseStatus::Closed => return Err(EnterpriseError::EnterpriseClosed(enterprise)),
+    }
+    let authority = resolve_mandate_authority(state, record.authority())?;
+    validate_enterprise_environment(
+        state,
+        record.organization(),
+        record.authority(),
+        record.location(),
+    )?;
+    let definition = registry.get_enterprise(record.kind());
+    validate_business_location_requirements(definition, state, record.location())?;
+    validate_enterprise_accounts(
+        state,
+        record.organization(),
+        record.cash_account(),
+        record.settlement_account(),
+        Some(record.id()),
+    )?;
+    let cycle_duration = definition.economics().cycle();
+    Ok(ValidatedEnterpriseStatusChange {
+        enterprise,
+        expected_version: record.version(),
+        change: EnterpriseStatusChange::Resume,
+        cycle_duration: Some(cycle_duration),
+        authority: Some(authority),
+    })
+}
+
+pub fn validate_close_enterprise(
+    state: &AppState,
+    enterprise: EnterpriseId,
+) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
+    if record.status() == EnterpriseStatus::Closed {
+        return Err(EnterpriseError::EnterpriseClosed(enterprise));
+    }
+    Ok(ValidatedEnterpriseStatusChange {
+        enterprise,
+        expected_version: record.version(),
+        change: EnterpriseStatusChange::Close,
+        cycle_duration: None,
+        authority: None,
+    })
+}
+
+pub(crate) fn due_active_enterprises(state: &AppState) -> Vec<EnterpriseId> {
+    state.enterprises.due_at_or_before(state.now())
+}
+
+fn validate_enterprise_environment(
+    state: &AppState,
+    organization: OrganizationId,
+    authority: MandateAuthority,
+    location: EnterpriseLocation,
+) -> Result<(), EnterpriseError> {
+    let organization_record = state
+        .world
+        .get_organization(organization)
+        .ok_or(EnterpriseError::InvalidOrganization(organization))?;
+    if organization_record.lifecycle() != Lifecycle::Active {
+        return Err(EnterpriseError::InvalidOrganization(organization));
+    }
+    let resolved = resolve_mandate_authority(state, authority)?;
+    if resolved.organization() != organization {
+        return Err(EnterpriseError::AuthorityOrganizationMismatch {
+            authority_organization: resolved.organization(),
+            enterprise_organization: organization,
+        });
+    }
+    let neighborhood = resolve_location_neighborhood(state, location)?;
+    if !can_authority_cover_location(authority.scope, location, neighborhood) {
+        return Err(EnterpriseError::AuthorityLocationMismatch {
+            scope: authority.scope,
+            location,
+        });
+    }
+    Ok(())
+}
+
+fn can_authority_cover_location(
+    scope: ResponsibilityScope,
+    location: EnterpriseLocation,
+    neighborhood: crate::core::id::NeighborhoodId,
+) -> bool {
+    match scope {
+        ResponsibilityScope::Function(ResponsibilityFunction::Enterprise) => true,
+        ResponsibilityScope::Function(
+            ResponsibilityFunction::Territory
+            | ResponsibilityFunction::Operations
+            | ResponsibilityFunction::Intelligence
+            | ResponsibilityFunction::Finance
+            | ResponsibilityFunction::Legal
+            | ResponsibilityFunction::Political
+            | ResponsibilityFunction::Personnel,
+        ) => false,
+        ResponsibilityScope::Neighborhood(id) => id == neighborhood,
+        ResponsibilityScope::Business(id) => {
+            matches!(location, EnterpriseLocation::Business(location_id) if location_id == id)
+        }
+    }
+}
+
+fn resolve_location_neighborhood(
+    state: &AppState,
+    location: EnterpriseLocation,
+) -> Result<crate::core::id::NeighborhoodId, EnterpriseError> {
+    match location {
+        EnterpriseLocation::Neighborhood(id) => {
+            let neighborhood = state
+                .world
+                .get_neighborhood(id)
+                .ok_or(EnterpriseError::InvalidLocation(location))?;
+            if neighborhood.lifecycle() != Lifecycle::Active {
+                return Err(EnterpriseError::InvalidLocation(location));
+            }
+            Ok(id)
+        }
+        EnterpriseLocation::Business(id) => {
+            let business = state
+                .world
+                .get_business(id)
+                .ok_or(EnterpriseError::InvalidLocation(location))?;
+            if business.lifecycle() != Lifecycle::Active {
+                return Err(EnterpriseError::InvalidLocation(location));
+            }
+            let neighborhood = state
+                .world
+                .get_neighborhood(business.neighborhood())
+                .ok_or(EnterpriseError::InvalidLocation(location))?;
+            if neighborhood.lifecycle() != Lifecycle::Active {
+                return Err(EnterpriseError::InvalidLocation(location));
+            }
+            Ok(business.neighborhood())
+        }
+    }
+}
+
+fn resolve_location_profile(
+    state: &AppState,
+    location: EnterpriseLocation,
+) -> Result<NeighborhoodProfile, EnterpriseError> {
+    let neighborhood = resolve_location_neighborhood(state, location)?;
+    Ok(state
+        .world
+        .get_neighborhood(neighborhood)
+        .expect("validated enterprise neighborhood must exist")
+        .profile())
+}
+
+fn validate_business_location_requirements(
+    definition: &EnterpriseDefinition,
+    state: &AppState,
+    location: EnterpriseLocation,
+) -> Result<(), EnterpriseError> {
+    let EnterpriseLocation::Business(business_id) = location else {
+        return Ok(());
+    };
+    let business = state
+        .world
+        .get_business(business_id)
+        .ok_or(EnterpriseError::InvalidLocation(location))?;
+    for function in definition.required_business_functions() {
+        if !business.has_function(*function) {
+            return Err(EnterpriseError::MissingBusinessFunction {
+                business: business_id,
+                function: *function,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_enterprise_accounts(
+    state: &AppState,
+    organization: OrganizationId,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    current_enterprise: Option<EnterpriseId>,
+) -> Result<(), EnterpriseError> {
+    let cash = state
+        .finance
+        .get_account(cash_account)
+        .ok_or(EnterpriseError::MissingAccount(cash_account))?;
+    let settlement = state
+        .finance
+        .get_account(settlement_account)
+        .ok_or(EnterpriseError::MissingAccount(settlement_account))?;
+    for account in [cash, settlement] {
+        if account.owner() != FinancialOwner::Organization(organization) {
+            return Err(EnterpriseError::AccountOwnerMismatch {
+                account: account.id(),
+                organization,
+            });
+        }
+        if account.lifecycle() != AccountLifecycle::Open {
+            return Err(EnterpriseError::AccountNotOpen(account.id()));
+        }
+    }
+    match cash.kind() {
+        AccountKind::StreetCash | AccountKind::ConcealedCash => {}
+        AccountKind::AccountedFunds
+        | AccountKind::LegitimateOperating
+        | AccountKind::Receivable
+        | AccountKind::Payable
+        | AccountKind::Settlement => {
+            return Err(EnterpriseError::InvalidCashAccountKind(cash_account))
+        }
+    }
+    match settlement.kind() {
+        AccountKind::Settlement => {}
+        AccountKind::StreetCash
+        | AccountKind::ConcealedCash
+        | AccountKind::AccountedFunds
+        | AccountKind::LegitimateOperating
+        | AccountKind::Receivable
+        | AccountKind::Payable => {
+            return Err(EnterpriseError::InvalidSettlementAccountKind(
+                settlement_account,
+            ))
+        }
+    }
+    if let Some(existing) = state
+        .enterprises
+        .get_by_settlement_account(settlement_account)
+    {
+        if Some(existing.id()) != current_enterprise {
+            return Err(EnterpriseError::SettlementAccountInUse {
+                account: settlement_account,
+                enterprise: existing.id(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn resolve_gross_before_variance(
+    enterprise: EnterpriseId,
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    management: Option<Rating>,
+) -> Result<Money, EnterpriseError> {
+    let components = [
+        weighted_rating(
+            enterprise,
+            economics.demand_revenue_per_point(),
+            profile.economy.illicit_demand,
+        )?,
+        weighted_rating(
+            enterprise,
+            economics.commerce_revenue_per_point(),
+            profile.economy.commercial_activity,
+        )?,
+        weighted_rating(
+            enterprise,
+            economics.wealth_revenue_per_point(),
+            profile.economy.wealth,
+        )?,
+        weighted_optional_rating(
+            enterprise,
+            economics.management_revenue_per_point(),
+            management,
+        )?,
+    ];
+    let mut gross = economics.base_gross();
+    for component in components {
+        gross = gross
+            .checked_add(component)
+            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    }
+    Ok(gross)
+}
+
+fn resolve_operating_cost(
+    enterprise: EnterpriseId,
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+) -> Result<Money, EnterpriseError> {
+    economics
+        .base_operating_cost()
+        .checked_add(weighted_rating(
+            enterprise,
+            economics.police_cost_per_point(),
+            profile.institutions.police_presence,
+        )?)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
+}
+
+fn weighted_optional_rating(
+    enterprise: EnterpriseId,
+    per_point: Money,
+    rating: Option<Rating>,
+) -> Result<Money, EnterpriseError> {
+    match rating {
+        Some(value) => weighted_rating(enterprise, per_point, value),
+        None => Ok(Money::ZERO),
+    }
+}
+
+fn weighted_rating(
+    enterprise: EnterpriseId,
+    per_point: Money,
+    rating: Rating,
+) -> Result<Money, EnterpriseError> {
+    let cents = per_point
+        .cents()
+        .checked_mul(i64::from(rating.value()))
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    Ok(Money::from_cents(cents))
+}
+
+fn apply_basis_point_variance(
+    enterprise: EnterpriseId,
+    amount: Money,
+    basis_points: i16,
+) -> Result<Money, EnterpriseError> {
+    let factor = 10_000_i128 + i128::from(basis_points);
+    let adjusted = i128::from(amount.cents())
+        .checked_mul(factor)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?
+        / 10_000_i128;
+    let cents =
+        i64::try_from(adjusted).map_err(|_| EnterpriseError::ArithmeticOverflow(enterprise))?;
+    Ok(Money::from_cents(cents))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::core::invariants::validate_invariants;
+    use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::core::simulation::run_tick;
+    use crate::delegation::delegation_system::{
+        validate_assign_mandate, validate_revise_mandate, validate_revoke_mandate, DelegationError,
+        MandateRevisionDraft,
+    };
+    use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+    use crate::enterprises::enterprise_reporting::{
+        resolve_enterprise_financial_summary, resolve_manager_enterprise_financial_summary,
+        resolve_neighborhood_enterprise_financial_summary,
+        resolve_organization_enterprise_financial_summary,
+    };
+    use crate::enterprises::EnterpriseKind;
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{FinancialAccountDraft, FinancialOwner};
+    use crate::reports::enterprise_financial_report::validate_enterprise_financial_report;
+    use crate::reports::ReportKind;
+    use crate::world::world_system::{
+        insert_business, insert_character, insert_neighborhood, insert_organization,
+    };
+    use crate::world::{
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, OrganizationDraft, OrganizationKind,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    struct EnterpriseFixture {
+        state: AppState,
+        authority: MandateAuthority,
+        organization: OrganizationId,
+        location: EnterpriseLocation,
+        cash: FinancialAccountId,
+        settlement: FinancialAccountId,
+    }
+
+    fn rating(value: u8) -> Rating {
+        Rating::try_new(value).expect("fixture rating must be valid")
+    }
+
+    fn make_test_enterprise_fixture() -> EnterpriseFixture {
+        let registry = build_registry();
+        let mut state = AppState::new(0xE17E_1931);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Enterprise Test Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("organization fixture should validate");
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Market Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(60),
+                        commercial_activity: rating(70),
+                        illicit_demand: rating(50),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(40),
+                        political_influence: rating(55),
+                        social_cohesion: rating(65),
+                        visible_violence_tolerance: rating(25),
+                    },
+                },
+            },
+        )
+        .expect("neighborhood fixture should validate");
+        let manager = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Enterprise Manager".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("manager fixture should validate");
+        let mandate = validate_assign_mandate(
+            &registry,
+            &state,
+            MandateDraft {
+                organization,
+                manager,
+                scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(neighborhood)]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect("mandate fixture should validate")
+        .commit(&mut state)
+        .expect("mandate fixture should commit");
+        let cash = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::StreetCash,
+                label: "Enterprise cash".to_owned(),
+            },
+        )
+        .expect("cash account fixture should validate");
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::Settlement,
+                label: "Enterprise external settlement".to_owned(),
+            },
+        )
+        .expect("settlement account fixture should validate");
+        EnterpriseFixture {
+            state,
+            authority: MandateAuthority {
+                mandate,
+                manager,
+                scope: ResponsibilityScope::Neighborhood(neighborhood),
+            },
+            organization,
+            location: EnterpriseLocation::Neighborhood(neighborhood),
+            cash,
+            settlement,
+        }
+    }
+
+    fn establish_protection(registry: &Registry, fixture: &mut EnterpriseFixture) -> EnterpriseId {
+        validate_establish_enterprise(
+            registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Protection,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("enterprise fixture should validate")
+        .commit(&mut fixture.state)
+        .expect("enterprise fixture should commit")
+    }
+
+    #[test]
+    fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+
+        let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
+            .expect("due enterprise cycle should resolve");
+        assert_eq!(plan.gross_revenue(), Money::from_cents(22_000));
+        assert_eq!(plan.operating_cost(), Money::from_cents(3_900));
+        assert_eq!(plan.net_cash(), Money::from_cents(18_100));
+        assert_eq!(
+            plan.policy_setting(),
+            Some(PolicySetting::CollectionForce(
+                crate::world::ForcePolicy::ThreatsOnly
+            ))
+        );
+
+        let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
+            .expect("cycle plan should validate")
+            .commit(&mut fixture.state)
+            .expect("cycle settlement should commit");
+        let cycle_record = fixture
+            .state
+            .enterprises()
+            .get_cycle(cycle)
+            .expect("cycle should exist");
+        assert!(cycle_record.transaction().is_some());
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.cash)
+                .expect("cash account should exist")
+                .balance(),
+            Money::from_cents(18_100)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.settlement)
+                .expect("settlement account should exist")
+                .balance(),
+            Money::from_cents(-18_100)
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn settlement_account_is_exclusive_to_one_enterprise_history() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let first = establish_protection(&registry, &mut fixture);
+
+        let error = match validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Gambling,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        ) {
+            Ok(_) => panic!("settlement account reuse must fail before mutation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            EnterpriseError::SettlementAccountInUse {
+                account: fixture.settlement,
+                enterprise: first,
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .enterprises_at(fixture.location)
+                .count(),
+            1
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn business_hosted_gambling_requires_concrete_venue_functions() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let neighborhood = match fixture.location {
+            EnterpriseLocation::Neighborhood(id) => id,
+            EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+        };
+        let incomplete_venue = insert_business(
+            &registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: "Sparse Storefront".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                neighborhood,
+                owner: BusinessOwner::Independent,
+            },
+        )
+        .expect("incomplete venue should still be a valid business");
+
+        let error = match validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Gambling,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: EnterpriseLocation::Business(incomplete_venue),
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        ) {
+            Ok(_) => panic!("gambling must reject a venue without its required functions"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            EnterpriseError::MissingBusinessFunction {
+                business: incomplete_venue,
+                function: BusinessFunction::CashIntensive,
+            }
+        );
+
+        let valid_venue = insert_business(
+            &registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: "Market Social Club".to_owned(),
+                kind: BusinessKind::Hospitality,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::MeetingSpace,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood,
+                owner: BusinessOwner::Organization(fixture.organization),
+            },
+        )
+        .expect("complete venue should validate");
+        let enterprise = validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Gambling,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: EnterpriseLocation::Business(valid_venue),
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("gambling should accept a venue with all required functions")
+        .commit(&mut fixture.state)
+        .expect("business-hosted enterprise should commit");
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("enterprise should exist")
+                .location(),
+            EnterpriseLocation::Business(valid_venue)
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn suspension_removes_enterprise_from_due_work_and_resume_reschedules_it() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        validate_suspend_enterprise(&fixture.state, enterprise)
+            .expect("active enterprise should suspend")
+            .commit(&mut fixture.state)
+            .expect("suspension should commit");
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        assert!(due_active_enterprises(&fixture.state).is_empty());
+
+        let resume = validate_resume_enterprise(&registry, &fixture.state, enterprise)
+            .expect("suspended enterprise with valid authority should resume");
+        fixture.state.advance_clock(SimDuration::from_minutes(30));
+        resume
+            .commit(&mut fixture.state)
+            .expect("resume should commit");
+        let record = fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("enterprise should exist");
+        assert_eq!(record.status(), EnterpriseStatus::Active);
+        assert_eq!(
+            record.next_cycle_at(),
+            Some(fixture.state.now() + SimDuration::from_minutes(1_440))
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn enterprise_establishment_schedule_starts_at_commit_time() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let establishment = validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Protection,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("enterprise should validate before delayed commit");
+        fixture.state.advance_clock(SimDuration::from_minutes(60));
+        let enterprise = establishment
+            .commit(&mut fixture.state)
+            .expect("delayed enterprise establishment should commit");
+        let record = fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("enterprise should exist");
+        assert_eq!(record.established_at(), SimTime::from_minutes(60));
+        assert_eq!(record.next_cycle_at(), Some(SimTime::from_minutes(1_500)));
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn stale_cycle_plan_cannot_commit_after_enterprise_lifecycle_change() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
+            .expect("cycle should resolve");
+        validate_suspend_enterprise(&fixture.state, enterprise)
+            .expect("enterprise should suspend")
+            .commit(&mut fixture.state)
+            .expect("suspension should commit");
+
+        let error = match validate_enterprise_cycle_plan(&fixture.state, plan) {
+            Ok(_) => panic!("cycle plan must become stale after lifecycle mutation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            EnterpriseError::StaleEnterprise {
+                enterprise,
+                expected: 1,
+                found: 2,
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.cash)
+                .expect("cash account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn active_enterprise_blocks_authority_removal_until_suspended() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        let mandate = fixture.authority.mandate;
+
+        let revoke_error = validate_revoke_mandate(&fixture.state, mandate)
+            .expect_err("active routine work must block mandate revocation");
+        assert_eq!(
+            revoke_error,
+            DelegationError::ActiveEnterpriseDependency {
+                mandate,
+                enterprise,
+            }
+        );
+
+        let replacement_scope = ResponsibilityScope::Function(ResponsibilityFunction::Finance);
+        let revision_error = validate_revise_mandate(
+            &registry,
+            &fixture.state,
+            mandate,
+            MandateRevisionDraft {
+                scopes: BTreeSet::from([replacement_scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect_err("active routine work must preserve its delegated scope");
+        assert_eq!(
+            revision_error,
+            DelegationError::ActiveEnterpriseScopeDependency {
+                mandate,
+                enterprise,
+                scope: fixture.authority.scope,
+            }
+        );
+
+        validate_suspend_enterprise(&fixture.state, enterprise)
+            .expect("enterprise should suspend before authority is removed")
+            .commit(&mut fixture.state)
+            .expect("enterprise suspension should commit");
+        validate_revoke_mandate(&fixture.state, mandate)
+            .expect("suspended routine work should release active mandate dependency")
+            .commit(&mut fixture.state)
+            .expect("mandate revocation should commit after suspension");
+
+        let resume_error = match validate_resume_enterprise(&registry, &fixture.state, enterprise) {
+            Ok(_) => panic!("enterprise must not resume under revoked authority"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            resume_error,
+            EnterpriseError::Delegation(DelegationError::InactiveMandate(mandate))
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn save_round_trip_preserves_due_schedule_and_deterministic_cycle_resolution() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_439));
+
+        let envelope = build_save(&registry, &fixture.state)
+            .expect("active enterprise state should build a valid save");
+        let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("save envelope should deserialize");
+        let mut restored =
+            restore_save(&registry, decoded).expect("enterprise save should restore cleanly");
+        assert_eq!(
+            restored
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("restored enterprise should exist")
+                .next_cycle_at(),
+            Some(SimTime::from_minutes(1_440))
+        );
+
+        let original_outcome = run_tick(&registry, &mut fixture.state);
+        let restored_outcome = run_tick(&registry, &mut restored);
+        assert_eq!(original_outcome, restored_outcome);
+        assert_eq!(original_outcome.enterprise_cycles.len(), 1);
+        let cycle = original_outcome.enterprise_cycles[0];
+        let original_cycle = fixture
+            .state
+            .enterprises()
+            .get_cycle(cycle)
+            .expect("original cycle should exist");
+        let restored_cycle = restored
+            .enterprises()
+            .get_cycle(cycle)
+            .expect("restored continuation should create the same cycle ID");
+        assert_eq!(
+            original_cycle.gross_revenue(),
+            restored_cycle.gross_revenue()
+        );
+        assert_eq!(
+            original_cycle.operating_cost(),
+            restored_cycle.operating_cost()
+        );
+        assert_eq!(original_cycle.net_cash(), restored_cycle.net_cash());
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.cash)
+                .expect("original cash account should exist")
+                .balance(),
+            restored
+                .finance()
+                .get_account(fixture.cash)
+                .expect("restored cash account should exist")
+                .balance()
+        );
+        validate_invariants(&fixture.state);
+        validate_invariants(&restored);
+    }
+
+    #[test]
+    fn financial_reporting_drills_down_without_cached_totals() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        for variance in [0, 700] {
+            fixture
+                .state
+                .advance_clock(SimDuration::from_minutes(1_440));
+            let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, variance)
+                .expect("due cycle should resolve for reporting fixture");
+            validate_enterprise_cycle_plan(&fixture.state, plan)
+                .expect("reporting fixture cycle should validate")
+                .commit(&mut fixture.state)
+                .expect("reporting fixture cycle should commit");
+        }
+
+        let period_start = SimTime::ZERO;
+        let period_end = fixture.state.now();
+        let enterprise_summary = resolve_enterprise_financial_summary(
+            &fixture.state,
+            enterprise,
+            period_start,
+            period_end,
+        )
+        .expect("enterprise financial summary should resolve");
+        let organization_summary = resolve_organization_enterprise_financial_summary(
+            &fixture.state,
+            fixture.organization,
+            period_start,
+            period_end,
+        )
+        .expect("organization financial summary should resolve");
+        let manager_summary = resolve_manager_enterprise_financial_summary(
+            &fixture.state,
+            fixture.authority.manager,
+            period_start,
+            period_end,
+        )
+        .expect("manager financial summary should resolve");
+        let neighborhood = match fixture.location {
+            EnterpriseLocation::Neighborhood(id) => id,
+            EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+        };
+        let neighborhood_summary = resolve_neighborhood_enterprise_financial_summary(
+            &fixture.state,
+            neighborhood,
+            period_start,
+            period_end,
+        )
+        .expect("neighborhood financial summary should resolve");
+
+        assert_eq!(enterprise_summary.totals.enterprise_count, 1);
+        assert_eq!(enterprise_summary.totals.cycle_count, 2);
+        assert_eq!(enterprise_summary.totals.notable_cycle_count, 1);
+        assert_eq!(enterprise_summary.totals, organization_summary.totals);
+        assert_eq!(enterprise_summary.totals, manager_summary.totals);
+        assert_eq!(enterprise_summary.totals, neighborhood_summary.totals);
+        assert_eq!(
+            enterprise_summary
+                .by_kind
+                .get(&EnterpriseKind::Protection)
+                .expect("protection bucket should exist"),
+            &enterprise_summary.totals
+        );
+        let cycle_net = fixture
+            .state
+            .enterprises()
+            .cycles_for(enterprise)
+            .try_fold(Money::ZERO, |total, cycle| {
+                total.checked_add(cycle.net_cash())
+            })
+            .expect("reporting fixture total should not overflow");
+        assert_eq!(enterprise_summary.totals.net_cash, cycle_net);
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.cash)
+                .expect("cash account should exist")
+                .balance(),
+            enterprise_summary.totals.net_cash
+        );
+        let report = validate_enterprise_financial_report(
+            &fixture.state,
+            fixture.organization,
+            period_start,
+            period_end,
+        )
+        .expect("financial report should synthesize only recipient-known enterprise information")
+        .commit(&mut fixture.state);
+        let report = fixture
+            .state
+            .reports()
+            .get_report(report)
+            .expect("generated financial report should persist");
+        assert_eq!(report.kind(), ReportKind::Financial);
+        assert_eq!(report.entries().len(), 2);
+        assert_eq!(report.entries()[0].attention, AttentionClass::Routine);
+        assert_eq!(report.entries()[1].attention, AttentionClass::Notable);
+        assert_eq!(report.entries()[1].sources.len(), 1);
+        assert!(report.entries()[1]
+            .entities
+            .contains(&EntityRef::Enterprise(enterprise)));
+        validate_invariants(&fixture.state);
+    }
+}

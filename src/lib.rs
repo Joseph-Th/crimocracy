@@ -4,6 +4,8 @@ pub mod content;
 pub mod core;
 pub mod decisions;
 pub mod delegation;
+pub mod economy;
+pub mod enterprises;
 pub mod finance;
 pub mod history;
 pub mod intelligence;

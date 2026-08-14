@@ -3,7 +3,10 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{FinancialAccountId, LedgerTransactionId, MandateId};
 use crate::core::state::AppState;
-use crate::delegation::MandateStatus;
+use crate::delegation::delegation_system::{
+    resolve_mandate_authority, validate_mandate_authority_snapshot, DelegationError,
+};
+use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::finance::{
     build_budget_usage, AccountLifecycle, BudgetUsageRecord, FinancialAccountDraft,
     FinancialAccountRecord, LedgerTransactionDraft, LedgerTransactionRecord, Money,
@@ -45,6 +48,8 @@ pub enum FinanceError {
     MissingMandate(MandateId),
     #[error("mandate {0} is not active")]
     InactiveMandate(MandateId),
+    #[error("delegated authority is invalid: {0}")]
+    Delegation(#[from] DelegationError),
     #[error("mandate {0} has no budget authority")]
     MissingBudget(MandateId),
     #[error("mandate {mandate} budget requires posting from funding account {account}")]
@@ -65,14 +70,6 @@ pub enum FinanceError {
         limit_cents: i64,
         used_cents: i64,
         requested_cents: i64,
-    },
-    #[error(
-        "mandate {mandate} changed after validation; expected version {expected}, found {found}"
-    )]
-    StaleMandate {
-        mandate: MandateId,
-        expected: u32,
-        found: u32,
     },
 }
 
@@ -104,7 +101,7 @@ pub struct ValidatedLedgerTransaction {
     balances: BTreeMap<FinancialAccountId, Money>,
     expected_versions: BTreeMap<FinancialAccountId, u32>,
     budget_usage: Option<BudgetUsageRecord>,
-    expected_mandate_version: Option<(MandateId, u32)>,
+    authority_snapshot: Option<ResolvedMandateAuthority>,
 }
 
 impl ValidatedLedgerTransaction {
@@ -122,21 +119,8 @@ impl ValidatedLedgerTransaction {
                 });
             }
         }
-        if let Some((mandate, expected)) = self.expected_mandate_version {
-            let record = state
-                .delegation
-                .get_mandate(mandate)
-                .ok_or(FinanceError::MissingMandate(mandate))?;
-            if record.version() != expected {
-                return Err(FinanceError::StaleMandate {
-                    mandate,
-                    expected,
-                    found: record.version(),
-                });
-            }
-            if record.status() != MandateStatus::Active {
-                return Err(FinanceError::InactiveMandate(mandate));
-            }
+        if let Some(snapshot) = self.authority_snapshot {
+            validate_mandate_authority_snapshot(state, snapshot)?;
         }
         let id = state.ids.next_ledger_transaction();
         let LedgerTransactionDraft {
@@ -213,7 +197,7 @@ pub fn validate_record_transaction(
         balances,
         expected_versions,
         budget_usage: budget_validation.usage,
-        expected_mandate_version: budget_validation.expected_mandate_version,
+        authority_snapshot: budget_validation.authority_snapshot,
     })
 }
 
@@ -269,26 +253,25 @@ pub fn resolve_budget_usage(
 
 struct ResolvedBudgetValidation {
     usage: Option<BudgetUsageRecord>,
-    expected_mandate_version: Option<(MandateId, u32)>,
+    authority_snapshot: Option<ResolvedMandateAuthority>,
 }
 
 fn resolve_transaction_budget(
     state: &AppState,
     draft: &LedgerTransactionDraft,
 ) -> Result<ResolvedBudgetValidation, FinanceError> {
-    let Some(mandate) = draft.authorization else {
+    let Some(authorization) = draft.authorization else {
         return Ok(ResolvedBudgetValidation {
             usage: None,
-            expected_mandate_version: None,
+            authority_snapshot: None,
         });
     };
+    let mandate = authorization.mandate;
+    let authority_snapshot = resolve_mandate_authority(state, authorization)?;
     let record = state
         .delegation
         .get_mandate(mandate)
         .ok_or(FinanceError::MissingMandate(mandate))?;
-    if record.status() != MandateStatus::Active {
-        return Err(FinanceError::InactiveMandate(mandate));
-    }
     let budget = record
         .budget()
         .ok_or(FinanceError::MissingBudget(mandate))?;
@@ -327,13 +310,14 @@ fn resolve_transaction_budget(
     }
     Ok(ResolvedBudgetValidation {
         usage: Some(build_budget_usage(
-            mandate,
+            authorization,
+            authority_snapshot.mandate_version(),
             budget.funding_account,
             summary.period_start,
             summary.period_end,
             requested,
         )),
-        expected_mandate_version: Some((mandate, record.version())),
+        authority_snapshot: Some(authority_snapshot),
     })
 }
 
@@ -344,19 +328,27 @@ mod tests {
     use crate::core::invariants::validate_invariants;
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::delegation::delegation_system::{
-        validate_assign_mandate, validate_revise_mandate, MandateRevisionDraft,
+        validate_assign_mandate, validate_revise_mandate, DelegationError, MandateRevisionDraft,
     };
     use crate::delegation::{
-        BudgetAuthority, BudgetPeriod, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
+        BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
+        ResponsibilityScope,
     };
     use crate::finance::{
         AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     };
-    use crate::world::world_system::{insert_character, insert_organization};
+    use crate::world::world_system::{
+        insert_character, insert_organization, validate_reassign_character,
+    };
     use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
     use std::collections::{BTreeMap, BTreeSet};
 
-    fn make_test_budget() -> (AppState, MandateId, FinancialAccountId, FinancialAccountId) {
+    fn make_test_budget() -> (
+        AppState,
+        MandateAuthority,
+        FinancialAccountId,
+        FinancialAccountId,
+    ) {
         let registry = build_registry();
         let mut state = AppState::new(53);
         let organization = insert_organization(
@@ -421,7 +413,16 @@ mod tests {
         .expect("mandate fixture should validate")
         .commit(&mut state)
         .expect("validated mandate should remain current");
-        (state, mandate, funding, destination)
+        (
+            state,
+            MandateAuthority {
+                mandate,
+                manager,
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Finance),
+            },
+            funding,
+            destination,
+        )
     }
 
     #[test]
@@ -525,6 +526,89 @@ mod tests {
                 .expect("safe account should exist")
                 .balance(),
             Money::from_cents(2_500)
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn validated_budget_transaction_becomes_stale_after_manager_hierarchy_change() {
+        let registry = build_registry();
+        let (mut state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
+        let transaction = validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Pending manager-authorized allocation".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: funding,
+                        amount: Money::from_cents(-500),
+                    },
+                    LedgerPosting {
+                        account: destination,
+                        amount: Money::from_cents(500),
+                    },
+                ],
+                authorization: Some(authorization),
+            },
+        )
+        .expect("transaction should validate against the current manager snapshot");
+        let organization = state
+            .delegation()
+            .get_mandate(mandate)
+            .expect("mandate should exist")
+            .organization();
+        let supervisor = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Budget Supervisor".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("supervisor fixture should validate");
+        validate_reassign_character(
+            &state,
+            authorization.manager,
+            Some(organization),
+            Some(supervisor),
+        )
+        .expect("same-organization hierarchy change should validate")
+        .commit(&mut state)
+        .expect("hierarchy change should commit");
+
+        let error = transaction
+            .commit(&mut state)
+            .expect_err("manager-dependent transaction must reject a stale manager snapshot");
+        assert_eq!(
+            error,
+            FinanceError::Delegation(DelegationError::StaleManager {
+                manager: authorization.manager,
+                expected: 1,
+                found: 2,
+            })
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(funding)
+                .expect("funding account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(destination)
+                .expect("destination account should exist")
+                .balance(),
+            Money::ZERO
         );
         validate_invariants(&state);
     }
@@ -724,7 +808,8 @@ mod tests {
 
     #[test]
     fn mandate_budget_usage_is_derived_from_ledger_and_enforced() {
-        let (mut state, mandate, funding, destination) = make_test_budget();
+        let (mut state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
         validate_record_transaction(
             &state,
             LedgerTransactionDraft {
@@ -740,7 +825,7 @@ mod tests {
                         amount: Money::from_cents(1_500),
                     },
                 ],
-                authorization: Some(mandate),
+                authorization: Some(authorization),
             },
         )
         .expect("transaction within delegated budget should validate")
@@ -768,7 +853,7 @@ mod tests {
                         amount: Money::from_cents(1_100),
                     },
                 ],
-                authorization: Some(mandate),
+                authorization: Some(authorization),
             },
         ) {
             Ok(_) => panic!("transaction exceeding delegated budget must fail validation"),
@@ -805,7 +890,8 @@ mod tests {
     #[test]
     fn validated_budget_transaction_becomes_stale_after_mandate_revision() {
         let registry = build_registry();
-        let (mut state, mandate, funding, destination) = make_test_budget();
+        let (mut state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
         let transaction = validate_record_transaction(
             &state,
             LedgerTransactionDraft {
@@ -821,7 +907,7 @@ mod tests {
                         amount: Money::from_cents(500),
                     },
                 ],
-                authorization: Some(mandate),
+                authorization: Some(authorization),
             },
         )
         .expect("transaction should validate against current mandate");
@@ -849,11 +935,11 @@ mod tests {
             .expect_err("transaction validated against old authority must be stale");
         assert_eq!(
             error,
-            FinanceError::StaleMandate {
+            FinanceError::Delegation(DelegationError::StaleMandate {
                 mandate,
                 expected: 1,
                 found: 2,
-            }
+            })
         );
         assert_eq!(
             state
@@ -876,8 +962,9 @@ mod tests {
 
     #[test]
     fn save_round_trip_preserves_budget_history_and_remaining_authority() {
-        let (mut state, mandate, funding, destination) = make_test_budget();
-        validate_record_transaction(
+        let (mut state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
+        let transaction = validate_record_transaction(
             &state,
             LedgerTransactionDraft {
                 occurred_at: state.now(),
@@ -892,7 +979,7 @@ mod tests {
                         amount: Money::from_cents(1_000),
                     },
                 ],
-                authorization: Some(mandate),
+                authorization: Some(authorization),
             },
         )
         .expect("budgeted transaction should validate")
@@ -914,6 +1001,150 @@ mod tests {
             restored.finance().transactions_for_mandate(mandate).count(),
             1
         );
+        let persisted_usage = restored
+            .finance()
+            .get_transaction(transaction)
+            .expect("restored transaction should exist")
+            .budget_usage()
+            .expect("restored transaction should preserve its authority snapshot");
+        assert_eq!(persisted_usage.mandate(), mandate);
+        assert_eq!(persisted_usage.mandate_version(), 1);
+        assert_eq!(persisted_usage.manager(), authorization.manager);
+        assert_eq!(persisted_usage.scope(), authorization.scope);
         validate_invariants(&restored);
+    }
+
+    #[test]
+    fn delegated_spend_rejects_manager_who_does_not_own_mandate() {
+        let registry = build_registry();
+        let (mut state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
+        let organization = state
+            .delegation()
+            .get_mandate(mandate)
+            .expect("mandate should exist")
+            .organization();
+        let other_manager = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Other Manager".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("second manager fixture should validate");
+        let invalid_authorization = MandateAuthority {
+            manager: other_manager,
+            ..authorization
+        };
+
+        let error = match validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Unauthorized delegated allocation".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: funding,
+                        amount: Money::from_cents(-500),
+                    },
+                    LedgerPosting {
+                        account: destination,
+                        amount: Money::from_cents(500),
+                    },
+                ],
+                authorization: Some(invalid_authorization),
+            },
+        ) {
+            Ok(_) => panic!("foreign manager must not exercise another manager's mandate"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            FinanceError::Delegation(DelegationError::AuthorityManagerMismatch {
+                mandate,
+                manager: other_manager,
+                expected: authorization.manager,
+            })
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(funding)
+                .expect("funding account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(destination)
+                .expect("destination account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn delegated_spend_rejects_scope_outside_mandate() {
+        let (state, authorization, funding, destination) = make_test_budget();
+        let mandate = authorization.mandate;
+        let invalid_scope = ResponsibilityScope::Function(ResponsibilityFunction::Operations);
+        let invalid_authorization = MandateAuthority {
+            scope: invalid_scope,
+            ..authorization
+        };
+
+        let error = match validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Out-of-scope delegated allocation".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: funding,
+                        amount: Money::from_cents(-500),
+                    },
+                    LedgerPosting {
+                        account: destination,
+                        amount: Money::from_cents(500),
+                    },
+                ],
+                authorization: Some(invalid_authorization),
+            },
+        ) {
+            Ok(_) => panic!("mandate must not authorize spending outside its scopes"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            FinanceError::Delegation(DelegationError::ScopeOutsideMandate {
+                mandate,
+                scope: invalid_scope,
+            })
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(funding)
+                .expect("funding account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(destination)
+                .expect("destination account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_invariants(&state);
     }
 }

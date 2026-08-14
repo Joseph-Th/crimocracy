@@ -1,5 +1,7 @@
 //! Persisted player-facing reports; `report_system` validates source and entity links before insertion.
 
+pub mod enterprise_financial_report;
+pub mod organization_financial_report;
 pub mod report_system;
 
 use crate::core::attention::AttentionClass;

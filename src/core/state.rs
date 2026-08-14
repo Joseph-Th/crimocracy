@@ -5,6 +5,8 @@ use crate::core::id::{IdCounters, OrganizationId};
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::DecisionState;
 use crate::delegation::DelegationState;
+use crate::economy::EconomyState;
+use crate::enterprises::EnterpriseState;
 use crate::finance::FinanceState;
 use crate::history::HistoryState;
 use crate::intelligence::IntelligenceState;
@@ -17,7 +19,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 6;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -45,6 +47,8 @@ pub struct AppState {
     pub(crate) world: WorldState,
     pub(crate) decisions: DecisionState,
     pub(crate) delegation: DelegationState,
+    pub(crate) economy: EconomyState,
+    pub(crate) enterprises: EnterpriseState,
     pub(crate) finance: FinanceState,
     pub(crate) social: SocialState,
     pub(crate) intelligence: IntelligenceState,
@@ -69,6 +73,8 @@ impl AppState {
             world: WorldState::new(),
             decisions: DecisionState::new(),
             delegation: DelegationState::new(),
+            economy: EconomyState::new(),
+            enterprises: EnterpriseState::new(),
             finance: FinanceState::new(),
             social: SocialState::new(),
             intelligence: IntelligenceState::new(),
@@ -97,6 +103,14 @@ impl AppState {
 
     pub fn delegation(&self) -> &DelegationState {
         &self.delegation
+    }
+
+    pub fn economy(&self) -> &EconomyState {
+        &self.economy
+    }
+
+    pub fn enterprises(&self) -> &EnterpriseState {
+        &self.enterprises
     }
 
     pub fn finance(&self) -> &FinanceState {
@@ -181,8 +195,13 @@ mod tests {
         validate_revoke_mandate, DelegationError, MandateRevisionDraft, PolicySource,
     };
     use crate::delegation::{
-        BudgetAuthority, BudgetPeriod, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
+        BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
+        ResponsibilityScope,
     };
+    use crate::economy::business_economy_system::validate_establish_business_economy;
+    use crate::economy::BusinessEconomyDraft;
+    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+    use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
     use crate::finance::finance_system::{
         insert_account, resolve_budget_usage, validate_record_transaction,
     };
@@ -192,9 +211,12 @@ mod tests {
     };
     use crate::history::history_system::validate_record_event;
     use crate::history::{HistoryEventDraft, HistoryEventKind};
-    use crate::intelligence::intelligence_system::validate_record_information;
+    use crate::intelligence::intelligence_system::{
+        validate_information_transfer, validate_record_information,
+    };
     use crate::intelligence::{
-        InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
+        InformationDraft, InformationSourceKind, InformationTransferDraft, KnowledgeHolder,
+        Reliability, Specificity,
     };
     use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
     use crate::legal::{
@@ -207,6 +229,7 @@ mod tests {
         OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
         OperationKind, OperationObjective, RoleKind,
     };
+    use crate::reports::organization_financial_report::validate_organization_financial_report;
     use crate::reports::report_system::validate_record_report;
     use crate::reports::{ReportDraft, ReportEntry, ReportKind};
     use crate::social::relationship_system::validate_set_relationship;
@@ -216,9 +239,10 @@ mod tests {
         insert_organization, validate_reassign_character, WorldError,
     };
     use crate::world::{
-        AutonomyLevel, BusinessDraft, BusinessOwner, CapabilityKind, CharacterDraft, ForcePolicy,
-        NeighborhoodDraft, OrganizationDraft, OrganizationKind, PolicyKind, PolicySetting, Rating,
-        TraitKind,
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CapabilityKind, CharacterDraft, ForcePolicy, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+        PolicyKind, PolicySetting, Rating, TraitKind,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -274,6 +298,19 @@ mod tests {
             &mut state,
             NeighborhoodDraft {
                 name: "South Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(45),
+                        commercial_activity: rating(70),
+                        illicit_demand: rating(72),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(58),
+                        political_influence: rating(64),
+                        social_cohesion: rating(68),
+                        visible_violence_tolerance: rating(30),
+                    },
+                },
             },
         )
         .expect("neighborhood fixture should validate");
@@ -359,14 +396,51 @@ mod tests {
         .expect("rival recruiter fixture should validate");
 
         let garage = insert_business(
+            &registry,
             &mut state,
             BusinessDraft {
                 name: "Fulton Garage".to_owned(),
+                kind: BusinessKind::Automotive,
+                functions: BTreeSet::from([
+                    BusinessFunction::VehicleFleet,
+                    BusinessFunction::Warehousing,
+                    BusinessFunction::MeetingSpace,
+                ]),
                 neighborhood: south_ward,
                 owner: BusinessOwner::Organization(player),
             },
         )
         .expect("business fixture should validate");
+        let business_operating = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(garage),
+                kind: AccountKind::LegitimateOperating,
+                label: "Fulton Garage operating funds".to_owned(),
+            },
+        )
+        .expect("business operating account fixture should validate");
+        let business_settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(garage),
+                kind: AccountKind::Settlement,
+                label: "Fulton Garage customer settlement".to_owned(),
+            },
+        )
+        .expect("business settlement account fixture should validate");
+        validate_establish_business_economy(
+            &registry,
+            &state,
+            BusinessEconomyDraft {
+                business: garage,
+                operating_account: business_operating,
+                settlement_account: business_settlement,
+            },
+        )
+        .expect("business economy fixture should validate")
+        .commit(&mut state)
+        .expect("business economy fixture should commit");
 
         let budget_funding = insert_account(
             &mut state,
@@ -420,10 +494,10 @@ mod tests {
         .expect("cross-organization relationship fixture should validate")
         .commit(&mut state);
 
-        let information = validate_record_information(
+        let field_information = validate_record_information(
             &state,
             InformationDraft {
-                holder: KnowledgeHolder::Organization(player),
+                holder: KnowledgeHolder::Character(lieutenant),
                 source_kind: InformationSourceKind::PoliceContact,
                 source_entity: Some(EntityRef::Character(detective)),
                 subject: EntityRef::Character(associate),
@@ -433,8 +507,18 @@ mod tests {
                 summary: "Central Precinct is asking questions about Frank Dello.".to_owned(),
             },
         )
-        .expect("information fixture should validate")
+        .expect("field information fixture should validate")
         .commit(&mut state);
+        let information = validate_information_transfer(
+            &state,
+            InformationTransferDraft {
+                source: field_information,
+                recipient: KnowledgeHolder::Organization(player),
+            },
+        )
+        .expect("member information should transfer into organization knowledge")
+        .commit(&mut state)
+        .expect("validated organization information transfer should commit");
 
         let investigation = validate_open_investigation(
             &state,
@@ -483,7 +567,8 @@ mod tests {
             },
         )
         .expect("operation fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("validated operation should remain current");
 
         let mandate = validate_assign_mandate(
             &registry,
@@ -558,6 +643,7 @@ mod tests {
 
     #[test]
     fn test_mixed_scenario_soak_preserves_invariants() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation,
@@ -581,10 +667,70 @@ mod tests {
             .find(|account| account.kind() == AccountKind::Payable)
             .expect("fixture should have budget destination account")
             .id();
+        let budget_authorization = MandateAuthority {
+            mandate,
+            manager: state
+                .delegation()
+                .get_mandate(mandate)
+                .expect("soak mandate should exist")
+                .manager(),
+            scope: ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+        };
+        let enterprise_neighborhood = state
+            .delegation()
+            .get_mandate(mandate)
+            .expect("soak mandate should exist")
+            .scopes()
+            .iter()
+            .find_map(|scope| match scope {
+                ResponsibilityScope::Neighborhood(id) => Some(*id),
+                ResponsibilityScope::Business(_) | ResponsibilityScope::Function(_) => None,
+            })
+            .expect("soak mandate should contain a neighborhood scope");
+        let player_organization = state
+            .player_organization()
+            .expect("fixture should have player organization");
+        let enterprise_cash = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(player_organization),
+                kind: AccountKind::StreetCash,
+                label: "South Ward enterprise cash".to_owned(),
+            },
+        )
+        .expect("enterprise cash account should validate");
+        let enterprise_settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(player_organization),
+                kind: AccountKind::Settlement,
+                label: "South Ward enterprise settlement".to_owned(),
+            },
+        )
+        .expect("enterprise settlement account should validate");
+        let enterprise = validate_establish_enterprise(
+            &registry,
+            &state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Protection,
+                organization: player_organization,
+                authority: MandateAuthority {
+                    mandate,
+                    manager: budget_authorization.manager,
+                    scope: ResponsibilityScope::Neighborhood(enterprise_neighborhood),
+                },
+                location: EnterpriseLocation::Neighborhood(enterprise_neighborhood),
+                cash_account: enterprise_cash,
+                settlement_account: enterprise_settlement,
+            },
+        )
+        .expect("delegated routine enterprise should validate")
+        .commit(&mut state)
+        .expect("delegated routine enterprise should commit");
 
         let mut pending_decision = None;
         for minute in 1..=5_000_u64 {
-            let outcome = run_tick(&mut state);
+            let outcome = run_tick(&registry, &mut state);
             assert_eq!(outcome.now.as_minutes(), minute);
             match minute {
                 10 => assert_eq!(outcome.started_operations, vec![operation]),
@@ -671,12 +817,16 @@ mod tests {
                                     amount: Money::from_cents(50_000),
                                 },
                             ],
-                            authorization: Some(mandate),
+                            authorization: Some(budget_authorization),
                         },
                     )
                     .expect("delegated expense should fit the mandate budget")
                     .commit(&mut state)
                     .expect("validated delegated expense should remain current");
+                }
+                1_440 | 2_880 | 4_320 => {
+                    assert_eq!(outcome.business_cycles.len(), 1);
+                    assert_eq!(outcome.enterprise_cycles.len(), 1);
                 }
                 _ => {}
             }
@@ -686,18 +836,65 @@ mod tests {
             .expect("soak mandate budget should remain resolvable");
         assert_eq!(budget.used, Money::from_cents(50_000));
         assert_eq!(budget.remaining, Money::from_cents(200_000));
+        assert_eq!(state.economy().cycles().count(), 3);
+        assert_eq!(state.enterprises().cycles_for(enterprise).count(), 3);
+        let enterprise_net = state
+            .enterprises()
+            .cycles_for(enterprise)
+            .try_fold(Money::ZERO, |total, cycle| {
+                total.checked_add(cycle.net_cash())
+            })
+            .expect("soak enterprise cycle totals should not overflow");
+        assert_eq!(
+            state
+                .finance()
+                .get_account(enterprise_cash)
+                .expect("enterprise cash account should exist")
+                .balance(),
+            enterprise_net
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(enterprise_settlement)
+                .expect("enterprise settlement account should exist")
+                .balance(),
+            Money::from_cents(
+                enterprise_net
+                    .cents()
+                    .checked_neg()
+                    .expect("enterprise soak net should be negatable")
+            )
+        );
+        let financial_report = validate_organization_financial_report(
+            &state,
+            state
+                .player_organization()
+                .expect("fixture should have player organization"),
+            SimTime::ZERO,
+            state.now(),
+        )
+        .expect("combined organization financial report should validate after soak")
+        .commit(&mut state);
+        let financial_report = state
+            .reports()
+            .get_report(financial_report)
+            .expect("combined organization financial report should persist");
+        assert_eq!(financial_report.kind(), ReportKind::Financial);
+        assert!(!financial_report.entries().is_empty());
         crate::core::invariants::validate_invariants(&state);
     }
 
     #[test]
     fn active_operation_assignment_blocks_organization_reassignment() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation,
             mandate: _,
         } = make_test_scenario();
         for _ in 0..10 {
-            run_tick(&mut state);
+            run_tick(&registry, &mut state);
         }
         let participant = *state
             .operations()
@@ -735,13 +932,14 @@ mod tests {
 
     #[test]
     fn decision_request_rejects_non_interrupting_attention_without_mutation() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation,
             mandate: _,
         } = make_test_scenario();
         for _ in 0..10 {
-            run_tick(&mut state);
+            run_tick(&registry, &mut state);
         }
         let record = state
             .operations()
@@ -780,13 +978,14 @@ mod tests {
 
     #[test]
     fn stale_decision_resolution_cannot_commit_twice() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation,
             mandate: _,
         } = make_test_scenario();
         for _ in 0..10 {
-            run_tick(&mut state);
+            run_tick(&registry, &mut state);
         }
         let leader = state
             .operations()
@@ -976,13 +1175,14 @@ mod tests {
 
     #[test]
     fn save_round_trip_preserves_pending_decision_and_attention_settings() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation,
             mandate: _,
         } = make_test_scenario();
         for _ in 0..10 {
-            run_tick(&mut state);
+            run_tick(&registry, &mut state);
         }
 
         set_auto_pause(&mut state, AttentionClass::Exception, false);
@@ -1033,7 +1233,6 @@ mod tests {
         .expect("pending-decision report should validate")
         .commit(&mut state);
 
-        let registry = build_registry();
         let envelope = build_save(&registry, &state).expect("valid pending state should save");
         let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
         let decoded: SaveEnvelope =
@@ -1106,19 +1305,19 @@ mod tests {
 
     #[test]
     fn save_round_trip_preserves_deterministic_continuation() {
+        let registry = build_registry();
         let TestScenario {
             mut state,
             operation: _,
             mandate: _,
         } = make_test_scenario();
         for _ in 0..37 {
-            run_tick(&mut state);
+            run_tick(&registry, &mut state);
         }
         for _ in 0..16 {
             decide_index(&mut state, 23).expect("non-empty random choice should resolve");
         }
 
-        let registry = build_registry();
         let envelope = build_save(&registry, &state).expect("valid state should build a save");
         let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
         let decoded: SaveEnvelope =

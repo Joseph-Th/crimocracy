@@ -1,8 +1,8 @@
 //! Cross-subsystem entity references used by intelligence, history, reports, and investigations.
 
 use crate::core::id::{
-    BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId, InvestigationId,
-    MandateId, NeighborhoodId, OperationId, OrganizationId,
+    BusinessId, CharacterId, DecisionRequestId, EnterpriseId, EvidenceId, FinancialAccountId,
+    InvestigationId, MandateId, NeighborhoodId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ pub enum EntityRef {
     FinancialAccount(FinancialAccountId),
     DecisionRequest(DecisionRequestId),
     Mandate(MandateId),
+    Enterprise(EnterpriseId),
 }
 
 pub(crate) fn is_entity_present(state: &AppState, entity: EntityRef) -> bool {
@@ -33,5 +34,6 @@ pub(crate) fn is_entity_present(state: &AppState, entity: EntityRef) -> bool {
         EntityRef::FinancialAccount(id) => state.finance.get_account(id).is_some(),
         EntityRef::DecisionRequest(id) => state.decisions.get_decision(id).is_some(),
         EntityRef::Mandate(id) => state.delegation.get_mandate(id).is_some(),
+        EntityRef::Enterprise(id) => state.enterprises.get_enterprise(id).is_some(),
     }
 }

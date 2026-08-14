@@ -14,6 +14,15 @@ pub enum KnowledgeHolder {
     Organization(OrganizationId),
 }
 
+impl KnowledgeHolder {
+    pub const fn entity(self) -> EntityRef {
+        match self {
+            Self::Character(id) => EntityRef::Character(id),
+            Self::Organization(id) => EntityRef::Organization(id),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InformationSourceKind {
     DirectObservation,
@@ -26,6 +35,7 @@ pub enum InformationSourceKind {
     StreetRumor,
     Intercept,
     AfterAction,
+    InternalReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +66,7 @@ pub struct InformationRecord {
     recorded_at: SimTime,
     reliability: Reliability,
     specificity: Specificity,
+    derived_from: BTreeSet<InformationId>,
     summary: String,
 }
 
@@ -87,6 +98,9 @@ impl InformationRecord {
     pub fn specificity(&self) -> Specificity {
         self.specificity
     }
+    pub fn derived_from(&self) -> &BTreeSet<InformationId> {
+        &self.derived_from
+    }
     pub fn summary(&self) -> &str {
         &self.summary
     }
@@ -97,6 +111,7 @@ pub struct IntelligenceState {
     records: BTreeMap<InformationId, InformationRecord>,
     by_holder: BTreeMap<KnowledgeHolder, BTreeSet<InformationId>>,
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
+    derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
 }
 
 impl IntelligenceState {
@@ -126,6 +141,16 @@ impl IntelligenceState {
             .flatten()
             .filter_map(|id| self.records.get(id))
     }
+    pub fn information_derived_from(
+        &self,
+        source: InformationId,
+    ) -> impl Iterator<Item = &InformationRecord> {
+        self.derived_by_source
+            .get(&source)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.records.get(id))
+    }
     pub(crate) fn information(&self) -> impl Iterator<Item = &InformationRecord> {
         self.records.values()
     }
@@ -139,6 +164,12 @@ impl IntelligenceState {
             .entry(record.subject())
             .or_default()
             .insert(id);
+        for source in record.derived_from() {
+            self.derived_by_source
+                .entry(*source)
+                .or_default()
+                .insert(id);
+        }
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -161,6 +192,15 @@ impl IntelligenceState {
             {
                 return false;
             }
+            for source in record.derived_from() {
+                if !self
+                    .derived_by_source
+                    .get(source)
+                    .is_some_and(|ids| ids.contains(&record.id()))
+                {
+                    return false;
+                }
+            }
         }
         for (holder, ids) in &self.by_holder {
             for id in ids {
@@ -179,6 +219,20 @@ impl IntelligenceState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.subject() == *subject)
+                {
+                    return false;
+                }
+            }
+        }
+        for (source, ids) in &self.derived_by_source {
+            if !self.records.contains_key(source) {
+                return false;
+            }
+            for id in ids {
+                if !self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| record.derived_from().contains(source))
                 {
                     return false;
                 }
@@ -204,6 +258,14 @@ impl IntelligenceState {
                     .is_some_and(|ids| ids.contains(&record.id())),
                 "Index Completeness: information subject index is missing a record"
             );
+            for source in record.derived_from() {
+                debug_assert!(
+                    self.derived_by_source
+                        .get(source)
+                        .is_some_and(|ids| ids.contains(&record.id())),
+                    "Index Completeness: information provenance index is missing a derived record"
+                );
+            }
         }
     }
 }
@@ -217,4 +279,9 @@ pub struct InformationDraft {
     pub reliability: Reliability,
     pub specificity: Specificity,
     pub summary: String,
+}
+
+pub struct InformationTransferDraft {
+    pub source: InformationId,
+    pub recipient: KnowledgeHolder,
 }

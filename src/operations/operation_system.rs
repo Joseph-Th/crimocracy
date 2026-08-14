@@ -9,6 +9,7 @@ use crate::operations::{
 };
 use crate::registry::Registry;
 use crate::world::Lifecycle;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +36,20 @@ pub enum OperationError {
         leader: CharacterId,
         organization: OrganizationId,
     },
+    #[error("character {0} assigned to an operation is not active")]
+    InactiveParticipant(CharacterId),
+    #[error(
+        "character {character} changed after operation validation; expected version {expected}, found {found}"
+    )]
+    StaleParticipant {
+        character: CharacterId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
+        "operation authorization expired at simulation minute {scheduled_for}; current minute is {now}"
+    )]
+    AuthorizationExpired { scheduled_for: u64, now: u64 },
     #[error("operation approach is not supported by the operation definition")]
     UnsupportedApproach,
     #[error("operation is missing required role {0:?}")]
@@ -59,10 +74,55 @@ pub enum OperationError {
 #[derive(Debug)]
 pub struct ValidatedOperation {
     draft: OperationDraft,
+    expected_participant_versions: BTreeMap<CharacterId, u32>,
 }
 
 impl ValidatedOperation {
-    pub fn commit(self, state: &mut AppState) -> OperationId {
+    pub fn commit(self, state: &mut AppState) -> Result<OperationId, OperationError> {
+        if state.now() > self.draft.scheduled_for {
+            return Err(OperationError::AuthorizationExpired {
+                scheduled_for: self.draft.scheduled_for.as_minutes(),
+                now: state.now().as_minutes(),
+            });
+        }
+        let organization = state
+            .world
+            .get_organization(self.draft.responsible_organization)
+            .ok_or(OperationError::MissingOrganization(
+                self.draft.responsible_organization,
+            ))?;
+        if organization.lifecycle() != Lifecycle::Active {
+            return Err(OperationError::MissingOrganization(
+                self.draft.responsible_organization,
+            ));
+        }
+        for (participant, expected) in &self.expected_participant_versions {
+            let record = state
+                .world
+                .get_character(*participant)
+                .ok_or(OperationError::MissingCharacter(*participant))?;
+            if record.version() != *expected {
+                return Err(OperationError::StaleParticipant {
+                    character: *participant,
+                    expected: *expected,
+                    found: record.version(),
+                });
+            }
+            if record.lifecycle() != Lifecycle::Active {
+                return Err(OperationError::InactiveParticipant(*participant));
+            }
+        }
+        let leader = state
+            .world
+            .get_character(self.draft.leader)
+            .ok_or(OperationError::MissingCharacter(self.draft.leader))?;
+        if leader.organization() != Some(self.draft.responsible_organization) {
+            return Err(OperationError::InvalidLeader {
+                leader: self.draft.leader,
+                organization: self.draft.responsible_organization,
+            });
+        }
+
         let OperationDraft {
             title,
             kind,
@@ -93,7 +153,7 @@ impl ValidatedOperation {
                 version: 1,
             },
         });
-        id
+        Ok(id)
     }
 }
 
@@ -131,6 +191,7 @@ pub fn validate_authorize_operation(
     if draft.scheduled_for < state.now() {
         return Err(OperationError::ScheduledInPast);
     }
+    let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
     if !definition.supported_approaches().contains(&draft.approach) {
@@ -142,9 +203,14 @@ pub fn validate_authorize_operation(
         }
     }
     for participant in draft.roles.values() {
-        if state.world.get_character(*participant).is_none() {
-            return Err(OperationError::MissingCharacter(*participant));
+        let record = state
+            .world
+            .get_character(*participant)
+            .ok_or(OperationError::MissingCharacter(*participant))?;
+        if record.lifecycle() != Lifecycle::Active {
+            return Err(OperationError::InactiveParticipant(*participant));
         }
+        expected_participant_versions.insert(*participant, record.version());
     }
     for entity in draft.objective.referenced_entities() {
         if !is_entity_present(state, entity) {
@@ -181,7 +247,10 @@ pub fn validate_authorize_operation(
         }
     }
 
-    Ok(ValidatedOperation { draft })
+    Ok(ValidatedOperation {
+        draft,
+        expected_participant_versions,
+    })
 }
 
 pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
@@ -241,10 +310,13 @@ mod tests {
     };
     use crate::world::world_system::{
         insert_business, insert_character, insert_neighborhood, insert_organization,
+        validate_reassign_character,
     };
     use crate::world::{
-        AutonomyLevel, BusinessDraft, BusinessOwner, CharacterDraft, NeighborhoodDraft,
-        OrganizationDraft, OrganizationKind,
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+        Rating,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -278,13 +350,38 @@ mod tests {
             &mut state,
             NeighborhoodDraft {
                 name: "Test Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: Rating::try_new(50).expect("fixture rating should validate"),
+                        commercial_activity: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                        illicit_demand: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                        political_influence: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                        social_cohesion: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                        visible_violence_tolerance: Rating::try_new(50)
+                            .expect("fixture rating should validate"),
+                    },
+                },
             },
         )
         .expect("neighborhood fixture should validate");
         let business = insert_business(
+            &registry,
             &mut state,
             BusinessDraft {
                 name: "Test Business".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                ]),
                 neighborhood,
                 owner: BusinessOwner::Independent,
             },
@@ -327,7 +424,8 @@ mod tests {
             make_test_draft(organization, leader, target),
         )
         .expect("operation fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("validated operation should remain current");
 
         apply_transition(&mut state, operation, OperationTransition::Begin)
             .expect("authorized operation should begin");
@@ -386,7 +484,8 @@ mod tests {
         draft.scheduled_for = SimTime::from_minutes(30);
         let operation = validate_authorize_operation(&registry, &state, draft)
             .expect("future operation should validate")
-            .commit(&mut state);
+            .commit(&mut state)
+            .expect("validated operation should remain current");
         let version = state
             .operations()
             .get_operation(operation)
@@ -402,6 +501,74 @@ mod tests {
             .expect("operation should still exist");
         assert_eq!(record.status(), OperationStatus::Authorized);
         assert_eq!(record.version(), version);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn stale_authorization_cannot_commit_after_leader_reassignment() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let validated = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("operation should validate against the original hierarchy");
+
+        validate_reassign_character(&state, leader, None, None)
+            .expect("leader should be reassignable before the operation is committed")
+            .commit(&mut state)
+            .expect("reassignment should commit");
+
+        let error = validated
+            .commit(&mut state)
+            .expect_err("stale authorization must not create an invalid operation");
+        assert_eq!(
+            error,
+            OperationError::StaleParticipant {
+                character: leader,
+                expected: 1,
+                found: 2,
+            }
+        );
+        assert_eq!(
+            state
+                .operations()
+                .operations_for_organization(organization)
+                .count(),
+            0
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn authorization_expires_if_scheduled_time_passes_before_commit() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.scheduled_for = SimTime::from_minutes(2);
+        let validated = validate_authorize_operation(&registry, &state, draft)
+            .expect("future operation should validate");
+
+        for _ in 0..3 {
+            crate::core::simulation::run_tick(&registry, &mut state);
+        }
+
+        let error = validated
+            .commit(&mut state)
+            .expect_err("authorization must expire once its scheduled time is in the past");
+        assert_eq!(
+            error,
+            OperationError::AuthorizationExpired {
+                scheduled_for: 2,
+                now: 3,
+            }
+        );
+        assert_eq!(
+            state
+                .operations()
+                .operations_for_organization(organization)
+                .count(),
+            0
+        );
         validate_invariants(&state);
     }
 }

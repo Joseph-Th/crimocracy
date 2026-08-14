@@ -1,0 +1,1061 @@
+//! Business operating lifecycle, deterministic cycle planning, and atomic ledger settlement.
+
+use crate::core::attention::AttentionClass;
+use crate::core::entity::EntityRef;
+use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId};
+use crate::core::state::AppState;
+use crate::core::time::{SimDuration, SimTime};
+use crate::economy::{
+    build_business_economy_record, BusinessCycleRecord, BusinessEconomyDraft,
+    BusinessOperatingStatus,
+};
+use crate::finance::finance_system::{
+    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+};
+use crate::finance::{
+    AccountKind, AccountLifecycle, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
+};
+use crate::intelligence::intelligence_system::{
+    validate_record_information, IntelligenceError, ValidatedInformation,
+};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
+};
+use crate::registry::{BusinessEconomicsDefinition, Registry};
+use crate::world::{BusinessOwner, Lifecycle, NeighborhoodProfile};
+use thiserror::Error;
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum BusinessEconomyError {
+    #[error("business {0} does not exist")]
+    MissingBusiness(BusinessId),
+    #[error("business {0} has no operating economy record")]
+    MissingBusinessEconomy(BusinessId),
+    #[error("business {0} references a missing neighborhood")]
+    MissingBusinessNeighborhood(BusinessId),
+    #[error("business {0} is not active")]
+    InactiveBusiness(BusinessId),
+    #[error("business {0} already has an operating economy record")]
+    ExistingBusinessEconomy(BusinessId),
+    #[error("financial account {0} does not exist")]
+    MissingAccount(FinancialAccountId),
+    #[error("business economy account {account} is not owned by business {business}")]
+    AccountOwnerMismatch {
+        business: BusinessId,
+        account: FinancialAccountId,
+    },
+    #[error("business operating account {0} must be legitimate operating funds")]
+    InvalidOperatingAccountKind(FinancialAccountId),
+    #[error("business settlement account {0} must be a settlement account")]
+    InvalidSettlementAccountKind(FinancialAccountId),
+    #[error("business economy account {0} is not open")]
+    AccountNotOpen(FinancialAccountId),
+    #[error("settlement account {account} is already assigned to business {business}")]
+    SettlementAccountInUse {
+        account: FinancialAccountId,
+        business: BusinessId,
+    },
+    #[error("business {0} operating economy is not active")]
+    EconomyNotActive(BusinessId),
+    #[error("business {0} operating economy is not suspended")]
+    EconomyNotSuspended(BusinessId),
+    #[error("business {0} operating economy is already closed")]
+    EconomyClosed(BusinessId),
+    #[error("business {business} is not due for a cycle until {due_at:?}")]
+    CycleNotDue {
+        business: BusinessId,
+        due_at: SimTime,
+    },
+    #[error("business cycle variance {basis_points} basis points exceeds authored limit {limit}")]
+    VarianceOutOfRange { basis_points: i16, limit: u16 },
+    #[error("business economics overflowed while resolving business {0}")]
+    ArithmeticOverflow(BusinessId),
+    #[error("business {business} economy changed after validation; expected version {expected}, found {found}")]
+    StaleEconomy {
+        business: BusinessId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
+        "business cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleCycleTime { expected: SimTime, found: SimTime },
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
+    #[error(transparent)]
+    Intelligence(#[from] IntelligenceError),
+}
+
+pub struct ValidatedBusinessEconomyEstablishment {
+    draft: BusinessEconomyDraft,
+    cycle_duration: SimDuration,
+}
+
+impl ValidatedBusinessEconomyEstablishment {
+    pub fn commit(self, state: &mut AppState) -> Result<BusinessId, BusinessEconomyError> {
+        validate_business(state, self.draft.business)?;
+        if state
+            .economy
+            .get_business_economy(self.draft.business)
+            .is_some()
+        {
+            return Err(BusinessEconomyError::ExistingBusinessEconomy(
+                self.draft.business,
+            ));
+        }
+        validate_accounts(
+            state,
+            self.draft.business,
+            self.draft.operating_account,
+            self.draft.settlement_account,
+            None,
+        )?;
+        let business = self.draft.business;
+        let established_at = state.now();
+        let next_cycle_at = established_at + self.cycle_duration;
+        state.economy.insert(build_business_economy_record(
+            self.draft,
+            established_at,
+            next_cycle_at,
+        ));
+        Ok(business)
+    }
+}
+
+pub fn validate_establish_business_economy(
+    registry: &Registry,
+    state: &AppState,
+    draft: BusinessEconomyDraft,
+) -> Result<ValidatedBusinessEconomyEstablishment, BusinessEconomyError> {
+    let business = validate_business(state, draft.business)?;
+    if state.economy.get_business_economy(draft.business).is_some() {
+        return Err(BusinessEconomyError::ExistingBusinessEconomy(
+            draft.business,
+        ));
+    }
+    validate_accounts(
+        state,
+        draft.business,
+        draft.operating_account,
+        draft.settlement_account,
+        None,
+    )?;
+    let cycle_duration = registry.get_business(business.kind()).economics().cycle();
+    Ok(ValidatedBusinessEconomyEstablishment {
+        draft,
+        cycle_duration,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusinessCyclePlan {
+    business: BusinessId,
+    expected_economy_version: u32,
+    occurred_at: SimTime,
+    next_cycle_at: SimTime,
+    gross_revenue: Money,
+    operating_cost: Money,
+    net_cash: Money,
+    variance_basis_points: i16,
+    attention: AttentionClass,
+    operating_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+}
+
+impl BusinessCyclePlan {
+    pub fn business(&self) -> BusinessId {
+        self.business
+    }
+    pub fn gross_revenue(&self) -> Money {
+        self.gross_revenue
+    }
+    pub fn operating_cost(&self) -> Money {
+        self.operating_cost
+    }
+    pub fn net_cash(&self) -> Money {
+        self.net_cash
+    }
+    pub fn variance_basis_points(&self) -> i16 {
+        self.variance_basis_points
+    }
+    pub fn attention(&self) -> AttentionClass {
+        self.attention
+    }
+}
+
+pub fn decide_business_cycle(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+    variance_basis_points: i16,
+) -> Result<BusinessCyclePlan, BusinessEconomyError> {
+    let business_record = validate_business(state, business)?;
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    if economy.status() != BusinessOperatingStatus::Active {
+        return Err(BusinessEconomyError::EconomyNotActive(business));
+    }
+    let due_at = economy
+        .next_cycle_at()
+        .ok_or(BusinessEconomyError::EconomyNotActive(business))?;
+    if state.now() < due_at {
+        return Err(BusinessEconomyError::CycleNotDue { business, due_at });
+    }
+    validate_accounts(
+        state,
+        business,
+        economy.operating_account(),
+        economy.settlement_account(),
+        Some(business),
+    )?;
+    let definition = registry.get_business(business_record.kind());
+    let economics = definition.economics();
+    let variance_limit = economics.gross_variance_basis_points();
+    if i32::from(variance_basis_points).unsigned_abs() > u32::from(variance_limit) {
+        return Err(BusinessEconomyError::VarianceOutOfRange {
+            basis_points: variance_basis_points,
+            limit: variance_limit,
+        });
+    }
+    let neighborhood = state
+        .world
+        .get_neighborhood(business_record.neighborhood())
+        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
+    if neighborhood.lifecycle() != Lifecycle::Active {
+        return Err(BusinessEconomyError::InactiveBusiness(business));
+    }
+    let profile = neighborhood.profile();
+    let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
+    let gross_revenue =
+        apply_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
+    let operating_cost = economics.base_operating_cost();
+    let net_cash = gross_revenue
+        .checked_sub(operating_cost)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
+    let attention = if i32::from(variance_basis_points).unsigned_abs()
+        >= u32::from(economics.notable_variance_basis_points())
+    {
+        AttentionClass::Notable
+    } else {
+        AttentionClass::Routine
+    };
+    Ok(BusinessCyclePlan {
+        business,
+        expected_economy_version: economy.version(),
+        occurred_at: state.now(),
+        next_cycle_at: due_at + economics.cycle(),
+        gross_revenue,
+        operating_cost,
+        net_cash,
+        variance_basis_points,
+        attention,
+        operating_account: economy.operating_account(),
+        settlement_account: economy.settlement_account(),
+    })
+}
+
+pub struct ValidatedBusinessCycle {
+    plan: BusinessCyclePlan,
+    ledger: Option<ValidatedLedgerTransaction>,
+    information: Option<ValidatedInformation>,
+}
+
+impl ValidatedBusinessCycle {
+    pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
+        validate_business(state, self.plan.business)?;
+        let economy = state
+            .economy
+            .get_business_economy(self.plan.business)
+            .ok_or(BusinessEconomyError::MissingBusinessEconomy(
+                self.plan.business,
+            ))?;
+        if economy.version() != self.plan.expected_economy_version {
+            return Err(BusinessEconomyError::StaleEconomy {
+                business: self.plan.business,
+                expected: self.plan.expected_economy_version,
+                found: economy.version(),
+            });
+        }
+        if economy.status() != BusinessOperatingStatus::Active {
+            return Err(BusinessEconomyError::EconomyNotActive(self.plan.business));
+        }
+        if state.now() != self.plan.occurred_at {
+            return Err(BusinessEconomyError::StaleCycleTime {
+                expected: self.plan.occurred_at,
+                found: state.now(),
+            });
+        }
+        validate_accounts(
+            state,
+            self.plan.business,
+            self.plan.operating_account,
+            self.plan.settlement_account,
+            Some(self.plan.business),
+        )?;
+        let transaction = match self.ledger {
+            Some(ledger) => Some(ledger.commit(state)?),
+            None => None,
+        };
+        let information = self
+            .information
+            .map(|information| information.commit(state));
+        let cycle = state.ids.next_business_cycle();
+        state.economy.apply_cycle(
+            BusinessCycleRecord {
+                id: cycle,
+                business: self.plan.business,
+                occurred_at: self.plan.occurred_at,
+                gross_revenue: self.plan.gross_revenue,
+                operating_cost: self.plan.operating_cost,
+                net_cash: self.plan.net_cash,
+                variance_basis_points: self.plan.variance_basis_points,
+                attention: self.plan.attention,
+                transaction,
+                information,
+            },
+            self.plan.next_cycle_at,
+        );
+        Ok(cycle)
+    }
+}
+
+pub fn validate_business_cycle_plan(
+    state: &AppState,
+    plan: BusinessCyclePlan,
+) -> Result<ValidatedBusinessCycle, BusinessEconomyError> {
+    let business = validate_business(state, plan.business)?;
+    let economy = state
+        .economy
+        .get_business_economy(plan.business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(plan.business))?;
+    if economy.version() != plan.expected_economy_version {
+        return Err(BusinessEconomyError::StaleEconomy {
+            business: plan.business,
+            expected: plan.expected_economy_version,
+            found: economy.version(),
+        });
+    }
+    if economy.status() != BusinessOperatingStatus::Active {
+        return Err(BusinessEconomyError::EconomyNotActive(plan.business));
+    }
+    if state.now() != plan.occurred_at {
+        return Err(BusinessEconomyError::StaleCycleTime {
+            expected: plan.occurred_at,
+            found: state.now(),
+        });
+    }
+    validate_accounts(
+        state,
+        plan.business,
+        plan.operating_account,
+        plan.settlement_account,
+        Some(plan.business),
+    )?;
+    let ledger = if plan.net_cash == Money::ZERO {
+        None
+    } else {
+        Some(validate_record_transaction(
+            state,
+            LedgerTransactionDraft {
+                occurred_at: plan.occurred_at,
+                memo: format!(
+                    "Routine legitimate business settlement for {}",
+                    plan.business
+                ),
+                postings: vec![
+                    LedgerPosting {
+                        account: plan.operating_account,
+                        amount: plan.net_cash,
+                    },
+                    LedgerPosting {
+                        account: plan.settlement_account,
+                        amount: Money::from_cents(
+                            plan.net_cash
+                                .cents()
+                                .checked_neg()
+                                .ok_or(BusinessEconomyError::ArithmeticOverflow(plan.business))?,
+                        ),
+                    },
+                ],
+                authorization: None,
+            },
+        )?)
+    };
+    let information = match (plan.attention, accounting_holder(business.owner())) {
+        (AttentionClass::Notable, Some(holder)) => Some(validate_record_information(
+            state,
+            InformationDraft {
+                holder,
+                source_kind: InformationSourceKind::Accountant,
+                source_entity: None,
+                subject: EntityRef::Business(plan.business),
+                observed_at: plan.occurred_at,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: format!(
+                    "Business cycle reported gross {} cents, operating cost {} cents, net cash {} cents, with variance {} basis points.",
+                    plan.gross_revenue.cents(),
+                    plan.operating_cost.cents(),
+                    plan.net_cash.cents(),
+                    plan.variance_basis_points,
+                ),
+            },
+        )?),
+        (AttentionClass::Routine, _)
+        | (AttentionClass::Notable, None) => None,
+        (AttentionClass::Exception | AttentionClass::Crisis, _) => {
+            unreachable!("business cycles only produce routine or notable attention")
+        }
+    };
+    Ok(ValidatedBusinessCycle {
+        plan,
+        ledger,
+        information,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusinessEconomyStatusChange {
+    Suspend,
+    Resume,
+    Close,
+}
+
+pub struct ValidatedBusinessEconomyStatusChange {
+    business: BusinessId,
+    expected_version: u32,
+    change: BusinessEconomyStatusChange,
+    cycle_duration: Option<SimDuration>,
+}
+
+impl ValidatedBusinessEconomyStatusChange {
+    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
+        if state.world.get_business(self.business).is_none() {
+            return Err(BusinessEconomyError::MissingBusiness(self.business));
+        }
+        let economy = state
+            .economy
+            .get_business_economy(self.business)
+            .ok_or(BusinessEconomyError::MissingBusinessEconomy(self.business))?;
+        if economy.version() != self.expected_version {
+            return Err(BusinessEconomyError::StaleEconomy {
+                business: self.business,
+                expected: self.expected_version,
+                found: economy.version(),
+            });
+        }
+        if self.change == BusinessEconomyStatusChange::Resume {
+            validate_business(state, self.business)?;
+            validate_accounts(
+                state,
+                self.business,
+                economy.operating_account(),
+                economy.settlement_account(),
+                Some(self.business),
+            )?;
+        }
+        let status = match self.change {
+            BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
+            BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
+            BusinessEconomyStatusChange::Close => BusinessOperatingStatus::Closed,
+        };
+        let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
+        state
+            .economy
+            .set_status(self.business, status, next_cycle_at);
+        Ok(())
+    }
+}
+
+pub fn validate_suspend_business_economy(
+    state: &AppState,
+    business: BusinessId,
+) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    match economy.status() {
+        BusinessOperatingStatus::Active => {}
+        BusinessOperatingStatus::Suspended => {
+            return Err(BusinessEconomyError::EconomyNotActive(business))
+        }
+        BusinessOperatingStatus::Closed => {
+            return Err(BusinessEconomyError::EconomyClosed(business))
+        }
+    }
+    Ok(ValidatedBusinessEconomyStatusChange {
+        business,
+        expected_version: economy.version(),
+        change: BusinessEconomyStatusChange::Suspend,
+        cycle_duration: None,
+    })
+}
+
+pub fn validate_resume_business_economy(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
+    let business_record = validate_business(state, business)?;
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    match economy.status() {
+        BusinessOperatingStatus::Active => {
+            return Err(BusinessEconomyError::EconomyNotSuspended(business))
+        }
+        BusinessOperatingStatus::Suspended => {}
+        BusinessOperatingStatus::Closed => {
+            return Err(BusinessEconomyError::EconomyClosed(business))
+        }
+    }
+    validate_accounts(
+        state,
+        business,
+        economy.operating_account(),
+        economy.settlement_account(),
+        Some(business),
+    )?;
+    let cycle_duration = registry
+        .get_business(business_record.kind())
+        .economics()
+        .cycle();
+    Ok(ValidatedBusinessEconomyStatusChange {
+        business,
+        expected_version: economy.version(),
+        change: BusinessEconomyStatusChange::Resume,
+        cycle_duration: Some(cycle_duration),
+    })
+}
+
+pub fn validate_close_business_economy(
+    state: &AppState,
+    business: BusinessId,
+) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    if economy.status() == BusinessOperatingStatus::Closed {
+        return Err(BusinessEconomyError::EconomyClosed(business));
+    }
+    Ok(ValidatedBusinessEconomyStatusChange {
+        business,
+        expected_version: economy.version(),
+        change: BusinessEconomyStatusChange::Close,
+        cycle_duration: None,
+    })
+}
+
+pub(crate) fn due_active_businesses(state: &AppState) -> Vec<BusinessId> {
+    state.economy.due_at_or_before(state.now())
+}
+
+fn validate_business(
+    state: &AppState,
+    business: BusinessId,
+) -> Result<&crate::world::BusinessRecord, BusinessEconomyError> {
+    let business_record = state
+        .world
+        .get_business(business)
+        .ok_or(BusinessEconomyError::MissingBusiness(business))?;
+    if business_record.lifecycle() != Lifecycle::Active {
+        return Err(BusinessEconomyError::InactiveBusiness(business));
+    }
+    Ok(business_record)
+}
+
+fn validate_accounts(
+    state: &AppState,
+    business: BusinessId,
+    operating_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    current_business: Option<BusinessId>,
+) -> Result<(), BusinessEconomyError> {
+    let operating = state
+        .finance
+        .get_account(operating_account)
+        .ok_or(BusinessEconomyError::MissingAccount(operating_account))?;
+    let settlement = state
+        .finance
+        .get_account(settlement_account)
+        .ok_or(BusinessEconomyError::MissingAccount(settlement_account))?;
+    for account in [operating, settlement] {
+        if account.owner() != FinancialOwner::Business(business) {
+            return Err(BusinessEconomyError::AccountOwnerMismatch {
+                business,
+                account: account.id(),
+            });
+        }
+        if account.lifecycle() != AccountLifecycle::Open {
+            return Err(BusinessEconomyError::AccountNotOpen(account.id()));
+        }
+    }
+    if operating.kind() != AccountKind::LegitimateOperating {
+        return Err(BusinessEconomyError::InvalidOperatingAccountKind(
+            operating_account,
+        ));
+    }
+    if settlement.kind() != AccountKind::Settlement {
+        return Err(BusinessEconomyError::InvalidSettlementAccountKind(
+            settlement_account,
+        ));
+    }
+    if operating_account == settlement_account {
+        return Err(BusinessEconomyError::InvalidSettlementAccountKind(
+            settlement_account,
+        ));
+    }
+    if let Some(existing) = state.economy.get_by_settlement_account(settlement_account) {
+        if Some(existing.business()) != current_business {
+            return Err(BusinessEconomyError::SettlementAccountInUse {
+                account: settlement_account,
+                business: existing.business(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn accounting_holder(owner: BusinessOwner) -> Option<KnowledgeHolder> {
+    match owner {
+        BusinessOwner::Independent => None,
+        BusinessOwner::Organization(id) => Some(KnowledgeHolder::Organization(id)),
+        BusinessOwner::Character(id) => Some(KnowledgeHolder::Character(id)),
+    }
+}
+
+fn resolve_gross_before_variance(
+    business: BusinessId,
+    economics: &BusinessEconomicsDefinition,
+    profile: NeighborhoodProfile,
+) -> Result<Money, BusinessEconomyError> {
+    let wealth = weighted_rating(
+        business,
+        economics.wealth_revenue_per_point(),
+        profile.economy.wealth.value(),
+    )?;
+    let commerce = weighted_rating(
+        business,
+        economics.commerce_revenue_per_point(),
+        profile.economy.commercial_activity.value(),
+    )?;
+    economics
+        .base_gross()
+        .checked_add(wealth)
+        .and_then(|gross| gross.checked_add(commerce))
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
+}
+
+fn weighted_rating(
+    business: BusinessId,
+    per_point: Money,
+    rating: u8,
+) -> Result<Money, BusinessEconomyError> {
+    let cents = per_point
+        .cents()
+        .checked_mul(i64::from(rating))
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
+    Ok(Money::from_cents(cents))
+}
+
+fn apply_basis_point_variance(
+    business: BusinessId,
+    amount: Money,
+    basis_points: i16,
+) -> Result<Money, BusinessEconomyError> {
+    let factor = 10_000_i128 + i128::from(basis_points);
+    let adjusted = i128::from(amount.cents())
+        .checked_mul(factor)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?
+        / 10_000_i128;
+    let cents =
+        i64::try_from(adjusted).map_err(|_| BusinessEconomyError::ArithmeticOverflow(business))?;
+    Ok(Money::from_cents(cents))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::core::invariants::validate_invariants;
+    use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::core::simulation::run_tick;
+    use crate::economy::business_reporting::{
+        resolve_business_financial_summary, resolve_organization_business_financial_summary,
+    };
+    use crate::economy::BusinessEconomyDraft;
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{FinancialAccountDraft, FinancialOwner};
+    use crate::reports::organization_financial_report::validate_organization_financial_report;
+    use crate::reports::ReportKind;
+    use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        OrganizationDraft, OrganizationKind, Rating,
+    };
+    use std::collections::BTreeSet;
+
+    struct BusinessEconomyFixture {
+        state: AppState,
+        business: BusinessId,
+        organization: crate::core::id::OrganizationId,
+        operating: FinancialAccountId,
+        settlement: FinancialAccountId,
+    }
+
+    fn rating(value: u8) -> Rating {
+        Rating::try_new(value).expect("fixture rating must be valid")
+    }
+
+    fn make_business_economy_fixture() -> BusinessEconomyFixture {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB051_1932);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Legitimate Holdings".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("organization fixture should validate");
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Commercial Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(60),
+                        commercial_activity: rating(70),
+                        illicit_demand: rating(30),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(55),
+                        political_influence: rating(50),
+                        social_cohesion: rating(60),
+                        visible_violence_tolerance: rating(20),
+                    },
+                },
+            },
+        )
+        .expect("neighborhood fixture should validate");
+        let business = insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: "Market Street Grocer".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                    BusinessFunction::MeetingSpace,
+                ]),
+                neighborhood,
+                owner: BusinessOwner::Organization(organization),
+            },
+        )
+        .expect("business fixture should validate");
+        let operating = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::LegitimateOperating,
+                label: "Business operating funds".to_owned(),
+            },
+        )
+        .expect("operating account should validate");
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::Settlement,
+                label: "Business customer and supplier settlement".to_owned(),
+            },
+        )
+        .expect("settlement account should validate");
+        BusinessEconomyFixture {
+            state,
+            business,
+            organization,
+            operating,
+            settlement,
+        }
+    }
+
+    fn establish_business_economy(registry: &Registry, fixture: &mut BusinessEconomyFixture) {
+        validate_establish_business_economy(
+            registry,
+            &fixture.state,
+            BusinessEconomyDraft {
+                business: fixture.business,
+                operating_account: fixture.operating,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("business economy fixture should validate")
+        .commit(&mut fixture.state)
+        .expect("business economy fixture should commit");
+    }
+
+    #[test]
+    fn routine_business_cycle_records_causal_economics_and_balanced_settlement() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+
+        let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+            .expect("due business cycle should resolve");
+        assert_eq!(plan.gross_revenue(), Money::from_cents(20_000));
+        assert_eq!(plan.operating_cost(), Money::from_cents(10_000));
+        assert_eq!(plan.net_cash(), Money::from_cents(10_000));
+        assert_eq!(plan.attention(), AttentionClass::Routine);
+
+        let cycle = validate_business_cycle_plan(&fixture.state, plan)
+            .expect("business cycle plan should validate")
+            .commit(&mut fixture.state)
+            .expect("business cycle should commit");
+        let cycle = fixture
+            .state
+            .economy()
+            .get_cycle(cycle)
+            .expect("business cycle should persist");
+        assert!(cycle.transaction().is_some());
+        assert!(cycle.information().is_none());
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.operating)
+                .expect("operating account should exist")
+                .balance(),
+            Money::from_cents(10_000)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.settlement)
+                .expect("settlement account should exist")
+                .balance(),
+            Money::from_cents(-10_000)
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn establishment_and_resume_schedule_from_commit_time() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        let establishment = validate_establish_business_economy(
+            &registry,
+            &fixture.state,
+            BusinessEconomyDraft {
+                business: fixture.business,
+                operating_account: fixture.operating,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("business economy should validate before delayed commit");
+        fixture.state.advance_clock(SimDuration::from_minutes(60));
+        establishment
+            .commit(&mut fixture.state)
+            .expect("delayed establishment should commit");
+        let economy = fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("business economy should exist");
+        assert_eq!(economy.established_at(), SimTime::from_minutes(60));
+        assert_eq!(economy.next_cycle_at(), Some(SimTime::from_minutes(1_500)));
+
+        validate_suspend_business_economy(&fixture.state, fixture.business)
+            .expect("business economy should suspend")
+            .commit(&mut fixture.state)
+            .expect("business suspension should commit");
+        let resume = validate_resume_business_economy(&registry, &fixture.state, fixture.business)
+            .expect("business economy should validate for resume");
+        fixture.state.advance_clock(SimDuration::from_minutes(30));
+        resume
+            .commit(&mut fixture.state)
+            .expect("delayed business resume should commit");
+        let economy = fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("business economy should still exist");
+        assert_eq!(economy.next_cycle_at(), Some(SimTime::from_minutes(1_530)));
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+
+        let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
+            .expect("material business variance should resolve");
+        assert_eq!(plan.attention(), AttentionClass::Notable);
+        let cycle = validate_business_cycle_plan(&fixture.state, plan)
+            .expect("material business cycle should validate")
+            .commit(&mut fixture.state)
+            .expect("material business cycle should commit");
+        let cycle = fixture
+            .state
+            .economy()
+            .get_cycle(cycle)
+            .expect("cycle should persist");
+        let information = cycle
+            .information()
+            .expect("owned notable business cycle should create accounting information");
+        let information = fixture
+            .state
+            .intelligence()
+            .get_information(information)
+            .expect("accounting information should persist");
+        assert_eq!(
+            information.holder(),
+            KnowledgeHolder::Organization(fixture.organization)
+        );
+        assert_eq!(information.source_kind(), InformationSourceKind::Accountant);
+        assert_eq!(information.subject(), EntityRef::Business(fixture.business));
+
+        let business_summary = resolve_business_financial_summary(
+            &fixture.state,
+            fixture.business,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("business financial summary should resolve");
+        let organization_summary = resolve_organization_business_financial_summary(
+            &fixture.state,
+            fixture.organization,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("organization business summary should resolve");
+        assert_eq!(business_summary.totals, organization_summary.totals);
+        assert_eq!(business_summary.totals.notable_cycle_count, 1);
+
+        let report = validate_organization_financial_report(
+            &fixture.state,
+            fixture.organization,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("organization financial report should synthesize legitimate business history")
+        .commit(&mut fixture.state);
+        let report = fixture
+            .state
+            .reports()
+            .get_report(report)
+            .expect("organization financial report should persist");
+        assert_eq!(report.kind(), ReportKind::Financial);
+        assert_eq!(report.entries().len(), 2);
+        assert_eq!(report.entries()[0].attention, AttentionClass::Routine);
+        assert_eq!(report.entries()[1].attention, AttentionClass::Notable);
+        assert_eq!(report.entries()[1].sources.len(), 1);
+        assert!(report.entries()[1]
+            .entities
+            .contains(&EntityRef::Business(fixture.business)));
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn business_economy_is_unique_and_suspension_removes_due_work() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+
+        let duplicate = match validate_establish_business_economy(
+            &registry,
+            &fixture.state,
+            BusinessEconomyDraft {
+                business: fixture.business,
+                operating_account: fixture.operating,
+                settlement_account: fixture.settlement,
+            },
+        ) {
+            Ok(_) => panic!("one business must not have multiple operating economy records"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            duplicate,
+            BusinessEconomyError::ExistingBusinessEconomy(fixture.business)
+        );
+
+        validate_suspend_business_economy(&fixture.state, fixture.business)
+            .expect("active business economy should suspend")
+            .commit(&mut fixture.state)
+            .expect("business suspension should commit");
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        assert!(due_active_businesses(&fixture.state).is_empty());
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn save_round_trip_preserves_business_schedule_and_deterministic_tick_resolution() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_439));
+
+        let envelope = build_save(&registry, &fixture.state)
+            .expect("business economy state should build a valid save");
+        let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("save envelope should deserialize");
+        let mut restored =
+            restore_save(&registry, decoded).expect("business economy save should restore");
+
+        let original = run_tick(&registry, &mut fixture.state);
+        let continued = run_tick(&registry, &mut restored);
+        assert_eq!(original, continued);
+        assert_eq!(original.business_cycles.len(), 1);
+        let original_cycle = fixture
+            .state
+            .economy()
+            .get_cycle(original.business_cycles[0])
+            .expect("original cycle should exist");
+        let restored_cycle = restored
+            .economy()
+            .get_cycle(continued.business_cycles[0])
+            .expect("restored cycle should exist");
+        assert_eq!(
+            original_cycle.gross_revenue(),
+            restored_cycle.gross_revenue()
+        );
+        assert_eq!(original_cycle.net_cash(), restored_cycle.net_cash());
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.operating)
+                .expect("original operating account should exist")
+                .balance(),
+            restored
+                .finance()
+                .get_account(fixture.operating)
+                .expect("restored operating account should exist")
+                .balance()
+        );
+        validate_invariants(&fixture.state);
+        validate_invariants(&restored);
+    }
+}

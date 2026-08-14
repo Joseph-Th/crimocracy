@@ -7,6 +7,7 @@ use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, LedgerTransactionId, MandateId, OrganizationId,
 };
 use crate::core::time::SimTime;
+use crate::delegation::{MandateAuthority, ResponsibilityScope};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -128,6 +129,9 @@ pub struct LedgerPosting {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetUsageRecord {
     mandate: MandateId,
+    mandate_version: u32,
+    manager: CharacterId,
+    scope: ResponsibilityScope,
     funding_account: FinancialAccountId,
     period_start: SimTime,
     period_end: SimTime,
@@ -137,6 +141,15 @@ pub struct BudgetUsageRecord {
 impl BudgetUsageRecord {
     pub fn mandate(self) -> MandateId {
         self.mandate
+    }
+    pub fn mandate_version(self) -> u32 {
+        self.mandate_version
+    }
+    pub fn manager(self) -> CharacterId {
+        self.manager
+    }
+    pub fn scope(self) -> ResponsibilityScope {
+        self.scope
     }
     pub fn funding_account(self) -> FinancialAccountId {
         self.funding_account
@@ -396,18 +409,27 @@ pub struct LedgerTransactionDraft {
     pub occurred_at: SimTime,
     pub memo: String,
     pub postings: Vec<LedgerPosting>,
-    pub authorization: Option<MandateId>,
+    pub authorization: Option<MandateAuthority>,
 }
 
 pub(crate) fn build_budget_usage(
-    mandate: MandateId,
+    authorization: MandateAuthority,
+    mandate_version: u32,
     funding_account: FinancialAccountId,
     period_start: SimTime,
     period_end: SimTime,
     amount: Money,
 ) -> BudgetUsageRecord {
+    let MandateAuthority {
+        mandate,
+        manager,
+        scope,
+    } = authorization;
     BudgetUsageRecord {
         mandate,
+        mandate_version,
+        manager,
+        scope,
         funding_account,
         period_start,
         period_end,

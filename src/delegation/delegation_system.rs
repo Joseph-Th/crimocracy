@@ -1,9 +1,12 @@
 //! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
-use crate::core::id::{BusinessId, CharacterId, MandateId, NeighborhoodId, OrganizationId};
+use crate::core::id::{
+    BusinessId, CharacterId, EnterpriseId, MandateId, NeighborhoodId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::delegation::{
-    build_mandate_record, BudgetAuthority, MandateDraft, MandateStatus, ResponsibilityScope,
+    build_mandate_record, BudgetAuthority, MandateAuthority, MandateDraft, MandateStatus,
+    ResolvedMandateAuthority, ResponsibilityScope,
 };
 use crate::finance::{AccountLifecycle, FinancialOwner};
 use crate::registry::Registry;
@@ -59,6 +62,17 @@ pub enum DelegationError {
     MissingMandate(MandateId),
     #[error("mandate {0} is not active")]
     InactiveMandate(MandateId),
+    #[error("mandate {mandate} belongs to manager {expected}, not authority manager {manager}")]
+    AuthorityManagerMismatch {
+        mandate: MandateId,
+        manager: CharacterId,
+        expected: CharacterId,
+    },
+    #[error("scope {scope:?} is outside mandate {mandate}")]
+    ScopeOutsideMandate {
+        mandate: MandateId,
+        scope: ResponsibilityScope,
+    },
     #[error(
         "mandate {mandate} changed after validation; expected version {expected}, found {found}"
     )]
@@ -81,6 +95,19 @@ pub enum DelegationError {
     MissingOrganizationPolicy {
         organization: OrganizationId,
         policy: PolicyKind,
+    },
+    #[error("active enterprise {enterprise} still depends on mandate {mandate}")]
+    ActiveEnterpriseDependency {
+        mandate: MandateId,
+        enterprise: EnterpriseId,
+    },
+    #[error(
+        "active enterprise {enterprise} still depends on scope {scope:?} in mandate {mandate}"
+    )]
+    ActiveEnterpriseScopeDependency {
+        mandate: MandateId,
+        enterprise: EnterpriseId,
+        scope: ResponsibilityScope,
     },
 }
 
@@ -177,6 +204,7 @@ impl ValidatedMandateRevision {
             self.organization,
             self.expected_manager_version,
         )?;
+        validate_enterprise_scope_dependencies(state, self.mandate, &self.draft.scopes)?;
         let MandateRevisionDraft {
             scopes,
             standing_orders,
@@ -210,6 +238,7 @@ pub fn validate_revise_mandate(
         &draft.standing_orders,
         draft.budget,
     )?;
+    validate_enterprise_scope_dependencies(state, mandate, &draft.scopes)?;
     let manager = validate_manager(state, record.manager(), record.organization())?;
     Ok(ValidatedMandateRevision {
         mandate,
@@ -243,6 +272,7 @@ impl ValidatedMandateRevocation {
         if record.status() != MandateStatus::Active {
             return Err(DelegationError::InactiveMandate(self.mandate));
         }
+        validate_no_active_enterprise_dependencies(state, self.mandate)?;
         state.delegation.revoke(self.mandate);
         Ok(())
     }
@@ -259,10 +289,115 @@ pub fn validate_revoke_mandate(
     if record.status() != MandateStatus::Active {
         return Err(DelegationError::InactiveMandate(mandate));
     }
+    validate_no_active_enterprise_dependencies(state, mandate)?;
     Ok(ValidatedMandateRevocation {
         mandate,
         expected_version: record.version(),
     })
+}
+
+fn validate_no_active_enterprise_dependencies(
+    state: &AppState,
+    mandate: MandateId,
+) -> Result<(), DelegationError> {
+    if let Some(enterprise) = state.enterprises.active_for_mandate(mandate).next() {
+        return Err(DelegationError::ActiveEnterpriseDependency {
+            mandate,
+            enterprise: enterprise.id(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_enterprise_scope_dependencies(
+    state: &AppState,
+    mandate: MandateId,
+    scopes: &BTreeSet<ResponsibilityScope>,
+) -> Result<(), DelegationError> {
+    for enterprise in state.enterprises.active_for_mandate(mandate) {
+        let scope = enterprise.authority().scope;
+        if !scopes.contains(&scope) {
+            return Err(DelegationError::ActiveEnterpriseScopeDependency {
+                mandate,
+                enterprise: enterprise.id(),
+                scope,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_mandate_authority(
+    state: &AppState,
+    authority: MandateAuthority,
+) -> Result<ResolvedMandateAuthority, DelegationError> {
+    let record = state
+        .delegation
+        .get_mandate(authority.mandate)
+        .ok_or(DelegationError::MissingMandate(authority.mandate))?;
+    if record.status() != MandateStatus::Active {
+        return Err(DelegationError::InactiveMandate(authority.mandate));
+    }
+    if record.manager() != authority.manager {
+        return Err(DelegationError::AuthorityManagerMismatch {
+            mandate: authority.mandate,
+            manager: authority.manager,
+            expected: record.manager(),
+        });
+    }
+    if !record.scopes().contains(&authority.scope) {
+        return Err(DelegationError::ScopeOutsideMandate {
+            mandate: authority.mandate,
+            scope: authority.scope,
+        });
+    }
+    let manager = validate_manager(state, authority.manager, record.organization())?;
+    Ok(ResolvedMandateAuthority {
+        authority,
+        organization: record.organization(),
+        mandate_version: record.version(),
+        manager_version: manager.version(),
+    })
+}
+
+pub fn validate_mandate_authority_snapshot(
+    state: &AppState,
+    snapshot: ResolvedMandateAuthority,
+) -> Result<(), DelegationError> {
+    let authority = snapshot.authority();
+    let record = state
+        .delegation
+        .get_mandate(authority.mandate)
+        .ok_or(DelegationError::MissingMandate(authority.mandate))?;
+    if record.version() != snapshot.mandate_version() {
+        return Err(DelegationError::StaleMandate {
+            mandate: authority.mandate,
+            expected: snapshot.mandate_version(),
+            found: record.version(),
+        });
+    }
+    if record.status() != MandateStatus::Active {
+        return Err(DelegationError::InactiveMandate(authority.mandate));
+    }
+    if record.manager() != authority.manager {
+        return Err(DelegationError::AuthorityManagerMismatch {
+            mandate: authority.mandate,
+            manager: authority.manager,
+            expected: record.manager(),
+        });
+    }
+    if !record.scopes().contains(&authority.scope) {
+        return Err(DelegationError::ScopeOutsideMandate {
+            mandate: authority.mandate,
+            scope: authority.scope,
+        });
+    }
+    validate_manager_snapshot(
+        state,
+        authority.manager,
+        snapshot.organization(),
+        snapshot.manager_version(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +424,7 @@ pub fn resolve_policy_for_manager(
     let organization = manager_record
         .organization()
         .ok_or(DelegationError::ManagerUnassigned(manager))?;
+    validate_manager(state, manager, organization)?;
     if let Some(mandate) = state.delegation.active_for_manager(manager) {
         if let Some(setting) = mandate.standing_order(kind) {
             return Ok(ResolvedPolicy {
@@ -421,4 +557,173 @@ fn validate_mandate_content(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::core::invariants::validate_invariants;
+    use crate::delegation::ResponsibilityFunction;
+    use crate::world::world_system::{insert_character, insert_organization};
+    use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+
+    fn make_authority_fixture() -> (Registry, AppState, MandateAuthority) {
+        let registry = build_registry();
+        let mut state = AppState::new(67);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Authority Test Organization".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("organization fixture should validate");
+        let manager = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Authority Manager".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("manager fixture should validate");
+        let mandate = validate_assign_mandate(
+            &registry,
+            &state,
+            MandateDraft {
+                organization,
+                manager,
+                scopes: BTreeSet::from([ResponsibilityScope::Function(
+                    ResponsibilityFunction::Finance,
+                )]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect("mandate fixture should validate")
+        .commit(&mut state)
+        .expect("validated mandate should remain current");
+        (
+            registry,
+            state,
+            MandateAuthority {
+                mandate,
+                manager,
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Finance),
+            },
+        )
+    }
+
+    #[test]
+    fn resolves_authority_with_versioned_dependencies() {
+        let (_registry, state, authority) = make_authority_fixture();
+        let resolved = resolve_mandate_authority(&state, authority)
+            .expect("valid mandate authority should resolve");
+
+        assert_eq!(resolved.authority(), authority);
+        assert_eq!(
+            resolved.organization(),
+            state
+                .delegation()
+                .get_mandate(authority.mandate)
+                .expect("mandate should exist")
+                .organization()
+        );
+        assert_eq!(resolved.mandate_version(), 1);
+        assert_eq!(resolved.manager_version(), 1);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn authority_rejects_wrong_manager_and_scope() {
+        let (registry, mut state, authority) = make_authority_fixture();
+        let organization = state
+            .delegation()
+            .get_mandate(authority.mandate)
+            .expect("mandate should exist")
+            .organization();
+        let other_manager = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Other Authority Manager".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("second manager fixture should validate");
+
+        let wrong_manager = MandateAuthority {
+            manager: other_manager,
+            ..authority
+        };
+        assert_eq!(
+            resolve_mandate_authority(&state, wrong_manager)
+                .expect_err("another manager must not exercise the mandate"),
+            DelegationError::AuthorityManagerMismatch {
+                mandate: authority.mandate,
+                manager: other_manager,
+                expected: authority.manager,
+            }
+        );
+
+        let wrong_scope = MandateAuthority {
+            scope: ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+            ..authority
+        };
+        assert_eq!(
+            resolve_mandate_authority(&state, wrong_scope)
+                .expect_err("authority must remain inside the mandate scope"),
+            DelegationError::ScopeOutsideMandate {
+                mandate: authority.mandate,
+                scope: wrong_scope.scope,
+            }
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn authority_snapshot_rejects_later_mandate_revision() {
+        let (registry, mut state, authority) = make_authority_fixture();
+        let snapshot = resolve_mandate_authority(&state, authority)
+            .expect("valid authority should resolve before revision");
+        validate_revise_mandate(
+            &registry,
+            &state,
+            authority.mandate,
+            MandateRevisionDraft {
+                scopes: BTreeSet::from([
+                    ResponsibilityScope::Function(ResponsibilityFunction::Finance),
+                    ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+                ]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect("mandate revision should validate")
+        .commit(&mut state)
+        .expect("mandate revision should commit");
+
+        assert_eq!(
+            validate_mandate_authority_snapshot(&state, snapshot)
+                .expect_err("authority snapshot must become stale after mandate revision"),
+            DelegationError::StaleMandate {
+                mandate: authority.mandate,
+                expected: 1,
+                found: 2,
+            }
+        );
+        validate_invariants(&state);
+    }
 }

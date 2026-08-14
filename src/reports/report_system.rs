@@ -3,6 +3,7 @@
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{DecisionRequestId, InformationId, OrganizationId, ReportId};
 use crate::core::state::AppState;
+use crate::intelligence::KnowledgeHolder;
 use crate::reports::{ReportDraft, ReportRecord};
 use thiserror::Error;
 
@@ -16,6 +17,11 @@ pub enum ReportError {
     MissingOrganization(OrganizationId),
     #[error("information record {0} does not exist")]
     MissingInformation(InformationId),
+    #[error("information record {information} is not available to report recipient {recipient}")]
+    InformationUnavailable {
+        information: InformationId,
+        recipient: OrganizationId,
+    },
     #[error("entity {0:?} does not exist")]
     MissingEntity(EntityRef),
     #[error("decision request {0} does not exist")]
@@ -61,8 +67,19 @@ pub fn validate_record_report(
             return Err(ReportError::EmptyEntry(index));
         }
         for source in &entry.sources {
-            if state.intelligence.get_information(*source).is_none() {
-                return Err(ReportError::MissingInformation(*source));
+            let information = state
+                .intelligence
+                .get_information(*source)
+                .ok_or(ReportError::MissingInformation(*source))?;
+            let is_available = match information.holder() {
+                KnowledgeHolder::Organization(organization) => organization == draft.recipient,
+                KnowledgeHolder::Character(_) => false,
+            };
+            if !is_available {
+                return Err(ReportError::InformationUnavailable {
+                    information: *source,
+                    recipient: draft.recipient,
+                });
             }
         }
         for entity in &entry.entities {
@@ -85,4 +102,84 @@ pub fn validate_record_report(
         }
     }
     Ok(ValidatedReport { draft })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::core::attention::AttentionClass;
+    use crate::intelligence::intelligence_system::validate_record_information;
+    use crate::intelligence::{
+        InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
+    };
+    use crate::reports::{ReportEntry, ReportKind};
+    use crate::world::world_system::insert_organization;
+    use crate::world::{OrganizationDraft, OrganizationKind};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn report_cannot_cite_information_held_by_another_organization() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_F193);
+        let holder = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Information Holder".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("information holder fixture should validate");
+        let recipient = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Uninformed Recipient".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient fixture should validate");
+        let information = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(holder),
+                source_kind: InformationSourceKind::DirectObservation,
+                source_entity: None,
+                subject: EntityRef::Organization(holder),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Only the holder organization knows this fact.".to_owned(),
+            },
+        )
+        .expect("information fixture should validate")
+        .commit(&mut state);
+
+        let error = match validate_record_report(
+            &state,
+            ReportDraft {
+                recipient,
+                kind: ReportKind::ExecutiveBrief,
+                title: "Leaked intelligence".to_owned(),
+                entries: vec![ReportEntry {
+                    attention: AttentionClass::Notable,
+                    summary: "This report must not cross the knowledge boundary.".to_owned(),
+                    sources: vec![information],
+                    entities: BTreeSet::from([EntityRef::Organization(holder)]),
+                    decision: None,
+                }],
+            },
+        ) {
+            Ok(_) => panic!("report must reject information held by another organization"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ReportError::InformationUnavailable {
+                information,
+                recipient,
+            }
+        );
+    }
 }

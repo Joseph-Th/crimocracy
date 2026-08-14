@@ -43,6 +43,11 @@ pub enum WorldError {
         character: CharacterId,
         mandate: MandateId,
     },
+    #[error("character {character} still supervises direct report {direct_report}")]
+    DirectReportAssignment {
+        character: CharacterId,
+        direct_report: CharacterId,
+    },
     #[error("character {character} changed after validation; expected version {expected}, found {found}")]
     StaleCharacter {
         character: CharacterId,
@@ -101,6 +106,7 @@ pub fn insert_neighborhood(
     state.world.insert_neighborhood(NeighborhoodRecord {
         id,
         name: draft.name,
+        profile: draft.profile,
         lifecycle: Lifecycle::Active,
     });
     Ok(id)
@@ -169,6 +175,12 @@ impl ValidatedCharacterReassignment {
                 found: record.version(),
             });
         }
+        validate_reassignment_preconditions(
+            state,
+            self.character,
+            self.organization,
+            self.supervisor,
+        )?;
         state
             .world
             .reassign_character(self.character, self.organization, self.supervisor);
@@ -182,6 +194,26 @@ pub fn validate_reassign_character(
     organization: Option<OrganizationId>,
     supervisor: Option<CharacterId>,
 ) -> Result<ValidatedCharacterReassignment, WorldError> {
+    let record = state
+        .world
+        .get_character(character)
+        .ok_or(WorldError::MissingCharacter(character))?;
+    validate_reassignment_preconditions(state, character, organization, supervisor)?;
+
+    Ok(ValidatedCharacterReassignment {
+        character,
+        organization,
+        supervisor,
+        expected_version: record.version(),
+    })
+}
+
+fn validate_reassignment_preconditions(
+    state: &AppState,
+    character: CharacterId,
+    organization: Option<OrganizationId>,
+    supervisor: Option<CharacterId>,
+) -> Result<(), WorldError> {
     let record = state
         .world
         .get_character(character)
@@ -218,6 +250,12 @@ pub fn validate_reassign_character(
                 OperationStatus::Completed | OperationStatus::Aborted => {}
             }
         }
+        if let Some(direct_report) = state.world.direct_reports(character).next() {
+            return Err(WorldError::DirectReportAssignment {
+                character,
+                direct_report: direct_report.id(),
+            });
+        }
     }
 
     let mut cursor = supervisor;
@@ -230,16 +268,11 @@ pub fn validate_reassign_character(
             .get_character(current)
             .and_then(|record| record.supervisor());
     }
-
-    Ok(ValidatedCharacterReassignment {
-        character,
-        organization,
-        supervisor,
-        expected_version: record.version(),
-    })
+    Ok(())
 }
 
 pub fn insert_business(
+    registry: &Registry,
     state: &mut AppState,
     draft: BusinessDraft,
 ) -> Result<BusinessId, WorldError> {
@@ -249,6 +282,7 @@ pub fn insert_business(
     if state.world.get_neighborhood(draft.neighborhood).is_none() {
         return Err(WorldError::MissingNeighborhood(draft.neighborhood));
     }
+    registry.get_business(draft.kind);
     match draft.owner {
         BusinessOwner::Independent => {}
         BusinessOwner::Organization(id) => {
@@ -267,6 +301,8 @@ pub fn insert_business(
     state.world.insert_business(BusinessRecord {
         id,
         name: draft.name,
+        kind: draft.kind,
+        functions: draft.functions,
         neighborhood: draft.neighborhood,
         owner: draft.owner,
         lifecycle: Lifecycle::Active,
@@ -318,6 +354,8 @@ mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::invariants::validate_invariants;
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
     use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -513,6 +551,180 @@ mod tests {
                 .expect("member should exist")
                 .supervisor(),
             Some(boss)
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn reassignment_token_revalidates_new_mandate_dependency_at_commit() {
+        let registry = build_registry();
+        let mut state = AppState::new(23);
+        let first_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "First Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("first organization should validate");
+        let second_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Second Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("second organization should validate");
+        let manager =
+            make_test_character(&registry, &mut state, "Manager", first_organization, None);
+        let reassignment =
+            validate_reassign_character(&state, manager, Some(second_organization), None)
+                .expect("reassignment should initially validate");
+        let mandate = validate_assign_mandate(
+            &registry,
+            &state,
+            MandateDraft {
+                organization: first_organization,
+                manager,
+                scopes: BTreeSet::from([ResponsibilityScope::Function(
+                    ResponsibilityFunction::Personnel,
+                )]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect("mandate should validate after reassignment token creation")
+        .commit(&mut state)
+        .expect("mandate should commit");
+
+        let error = reassignment
+            .commit(&mut state)
+            .expect_err("new active mandate must invalidate the older reassignment token");
+        assert_eq!(
+            error,
+            WorldError::ActiveMandateAssignment {
+                character: manager,
+                mandate,
+            }
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_character(manager)
+                .expect("manager should exist")
+                .organization(),
+            Some(first_organization)
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn reassignment_token_revalidates_supervisor_membership_at_commit() {
+        let registry = build_registry();
+        let mut state = AppState::new(29);
+        let first_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "First Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("first organization should validate");
+        let second_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Second Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("second organization should validate");
+        let supervisor = make_test_character(
+            &registry,
+            &mut state,
+            "Future Supervisor",
+            first_organization,
+            None,
+        );
+        let member = make_test_character(&registry, &mut state, "Member", first_organization, None);
+        let member_reassignment =
+            validate_reassign_character(&state, member, Some(first_organization), Some(supervisor))
+                .expect("member reassignment should initially validate");
+        validate_reassign_character(&state, supervisor, Some(second_organization), None)
+            .expect("supervisor should be movable before gaining direct reports")
+            .commit(&mut state)
+            .expect("supervisor move should commit");
+
+        let error = member_reassignment
+            .commit(&mut state)
+            .expect_err("supervisor organization change must invalidate member token");
+        assert_eq!(
+            error,
+            WorldError::SupervisorOrganizationMismatch {
+                supervisor,
+                organization: Some(first_organization),
+            }
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_character(member)
+                .expect("member should exist")
+                .supervisor(),
+            None
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn supervisor_cannot_leave_organization_with_direct_reports() {
+        let registry = build_registry();
+        let mut state = AppState::new(31);
+        let first_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "First Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("first organization should validate");
+        let second_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Second Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("second organization should validate");
+        let supervisor = make_test_character(
+            &registry,
+            &mut state,
+            "Supervisor",
+            first_organization,
+            None,
+        );
+        let direct_report = make_test_character(
+            &registry,
+            &mut state,
+            "Direct Report",
+            first_organization,
+            Some(supervisor),
+        );
+
+        let error =
+            validate_reassign_character(&state, supervisor, Some(second_organization), None)
+                .expect_err("supervisor must reassign direct reports before leaving organization");
+        assert_eq!(
+            error,
+            WorldError::DirectReportAssignment {
+                character: supervisor,
+                direct_report,
+            }
         );
         validate_invariants(&state);
     }

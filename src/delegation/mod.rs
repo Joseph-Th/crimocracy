@@ -31,6 +31,39 @@ pub enum ResponsibilityScope {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MandateAuthority {
+    pub mandate: MandateId,
+    pub manager: CharacterId,
+    pub scope: ResponsibilityScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedMandateAuthority {
+    authority: MandateAuthority,
+    organization: OrganizationId,
+    mandate_version: u32,
+    manager_version: u32,
+}
+
+impl ResolvedMandateAuthority {
+    pub fn authority(self) -> MandateAuthority {
+        self.authority
+    }
+
+    pub fn organization(self) -> OrganizationId {
+        self.organization
+    }
+
+    pub fn mandate_version(self) -> u32 {
+        self.mandate_version
+    }
+
+    pub fn manager_version(self) -> u32 {
+        self.manager_version
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MandateStatus {
     Active,
     Revoked,

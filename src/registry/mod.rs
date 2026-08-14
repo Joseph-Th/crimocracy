@@ -1,9 +1,12 @@
 //! Immutable code-owned definitions and validated lookup tables loaded once at startup.
 
+use crate::core::time::SimDuration;
+use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
+use crate::finance::Money;
 use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
 use crate::world::{
-    CapabilityKind, PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS,
-    ALL_TRAIT_KINDS,
+    BusinessFunction, BusinessKind, CapabilityKind, PolicyKind, PolicySetting, TraitKind,
+    ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -81,12 +84,146 @@ impl OperationDefinition {
 }
 
 #[derive(Clone, Debug)]
+pub struct EnterpriseEconomicsDefinition {
+    pub(crate) cycle: SimDuration,
+    pub(crate) base_gross: Money,
+    pub(crate) base_operating_cost: Money,
+    pub(crate) demand_revenue_per_point: Money,
+    pub(crate) commerce_revenue_per_point: Money,
+    pub(crate) wealth_revenue_per_point: Money,
+    pub(crate) management_revenue_per_point: Money,
+    pub(crate) police_cost_per_point: Money,
+    pub(crate) gross_variance_basis_points: u16,
+    pub(crate) notable_variance_basis_points: u16,
+}
+
+impl EnterpriseEconomicsDefinition {
+    pub fn cycle(&self) -> SimDuration {
+        self.cycle
+    }
+    pub fn base_gross(&self) -> Money {
+        self.base_gross
+    }
+    pub fn base_operating_cost(&self) -> Money {
+        self.base_operating_cost
+    }
+    pub fn demand_revenue_per_point(&self) -> Money {
+        self.demand_revenue_per_point
+    }
+    pub fn commerce_revenue_per_point(&self) -> Money {
+        self.commerce_revenue_per_point
+    }
+    pub fn wealth_revenue_per_point(&self) -> Money {
+        self.wealth_revenue_per_point
+    }
+    pub fn management_revenue_per_point(&self) -> Money {
+        self.management_revenue_per_point
+    }
+    pub fn police_cost_per_point(&self) -> Money {
+        self.police_cost_per_point
+    }
+    pub fn gross_variance_basis_points(&self) -> u16 {
+        self.gross_variance_basis_points
+    }
+    pub fn notable_variance_basis_points(&self) -> u16 {
+        self.notable_variance_basis_points
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EnterpriseDefinition {
+    kind: EnterpriseKind,
+    display_name: &'static str,
+    economics: EnterpriseEconomicsDefinition,
+    policy: Option<PolicyKind>,
+    required_business_functions: BTreeSet<BusinessFunction>,
+}
+
+impl EnterpriseDefinition {
+    pub fn kind(&self) -> EnterpriseKind {
+        self.kind
+    }
+    pub fn display_name(&self) -> &'static str {
+        self.display_name
+    }
+    pub fn economics(&self) -> &EnterpriseEconomicsDefinition {
+        &self.economics
+    }
+    pub fn policy(&self) -> Option<PolicyKind> {
+        self.policy
+    }
+    pub fn required_business_functions(&self) -> &BTreeSet<BusinessFunction> {
+        &self.required_business_functions
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BusinessEconomicsDefinition {
+    pub(crate) cycle: SimDuration,
+    pub(crate) base_gross: Money,
+    pub(crate) base_operating_cost: Money,
+    pub(crate) wealth_revenue_per_point: Money,
+    pub(crate) commerce_revenue_per_point: Money,
+    pub(crate) gross_variance_basis_points: u16,
+    pub(crate) notable_variance_basis_points: u16,
+}
+
+impl BusinessEconomicsDefinition {
+    pub fn cycle(&self) -> SimDuration {
+        self.cycle
+    }
+    pub fn base_gross(&self) -> Money {
+        self.base_gross
+    }
+    pub fn base_operating_cost(&self) -> Money {
+        self.base_operating_cost
+    }
+    pub fn wealth_revenue_per_point(&self) -> Money {
+        self.wealth_revenue_per_point
+    }
+    pub fn commerce_revenue_per_point(&self) -> Money {
+        self.commerce_revenue_per_point
+    }
+    pub fn gross_variance_basis_points(&self) -> u16 {
+        self.gross_variance_basis_points
+    }
+    pub fn notable_variance_basis_points(&self) -> u16 {
+        self.notable_variance_basis_points
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BusinessDefinition {
+    kind: BusinessKind,
+    display_name: &'static str,
+    typical_functions: BTreeSet<BusinessFunction>,
+    economics: BusinessEconomicsDefinition,
+}
+
+impl BusinessDefinition {
+    pub fn kind(&self) -> BusinessKind {
+        self.kind
+    }
+    pub fn display_name(&self) -> &'static str {
+        self.display_name
+    }
+    pub fn typical_functions(&self) -> &BTreeSet<BusinessFunction> {
+        &self.typical_functions
+    }
+    pub fn economics(&self) -> &BusinessEconomicsDefinition {
+        &self.economics
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Registry {
     content_revision: u32,
     capabilities: BTreeMap<CapabilityKind, CapabilityDefinition>,
     traits: BTreeMap<TraitKind, TraitDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
+    enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
+    businesses: BTreeMap<BusinessKind, BusinessDefinition>,
 }
 
 impl Registry {
@@ -113,6 +250,16 @@ impl Registry {
             .get(&kind)
             .unwrap_or_else(|| panic!("missing operation definition: {kind:?}"))
     }
+    pub fn get_enterprise(&self, kind: EnterpriseKind) -> &EnterpriseDefinition {
+        self.enterprises
+            .get(&kind)
+            .unwrap_or_else(|| panic!("missing enterprise definition: {kind:?}"))
+    }
+    pub fn get_business(&self, kind: BusinessKind) -> &BusinessDefinition {
+        self.businesses
+            .get(&kind)
+            .unwrap_or_else(|| panic!("missing business definition: {kind:?}"))
+    }
     pub(crate) fn default_policies(&self) -> BTreeMap<PolicyKind, PolicySetting> {
         self.policies
             .iter()
@@ -131,6 +278,10 @@ pub(crate) enum RegistryBuildError {
     DuplicatePolicy(PolicyKind),
     #[error("duplicate operation definition: {0:?}")]
     DuplicateOperation(OperationKind),
+    #[error("duplicate enterprise definition: {0:?}")]
+    DuplicateEnterprise(EnterpriseKind),
+    #[error("duplicate business definition: {0:?}")]
+    DuplicateBusiness(BusinessKind),
     #[error("policy default kind mismatch for {0:?}")]
     PolicyDefaultMismatch(PolicyKind),
     #[error("missing capability definition: {0:?}")]
@@ -141,6 +292,26 @@ pub(crate) enum RegistryBuildError {
     MissingPolicy(PolicyKind),
     #[error("missing operation definition: {0:?}")]
     MissingOperation(OperationKind),
+    #[error("missing enterprise definition: {0:?}")]
+    MissingEnterprise(EnterpriseKind),
+    #[error("missing business definition: {0:?}")]
+    MissingBusiness(BusinessKind),
+    #[error("business {0:?} must have a positive cycle duration")]
+    InvalidBusinessCycle(BusinessKind),
+    #[error("business {0:?} contains a negative authored economic value")]
+    NegativeBusinessEconomicValue(BusinessKind),
+    #[error("business {0:?} gross variance exceeds 5000 basis points")]
+    BusinessVarianceOutOfRange(BusinessKind),
+    #[error("business {0:?} notable variance threshold exceeds its variance range")]
+    BusinessNotableVarianceOutOfRange(BusinessKind),
+    #[error("enterprise {0:?} must have a positive cycle duration")]
+    InvalidEnterpriseCycle(EnterpriseKind),
+    #[error("enterprise {0:?} contains a negative authored economic value")]
+    NegativeEnterpriseEconomicValue(EnterpriseKind),
+    #[error("enterprise {0:?} gross variance exceeds 5000 basis points")]
+    EnterpriseVarianceOutOfRange(EnterpriseKind),
+    #[error("enterprise {0:?} notable variance threshold exceeds its variance range")]
+    EnterpriseNotableVarianceOutOfRange(EnterpriseKind),
 }
 
 #[derive(Default)]
@@ -149,6 +320,8 @@ pub(crate) struct RegistryBuilder {
     traits: BTreeMap<TraitKind, TraitDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
+    enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
+    businesses: BTreeMap<BusinessKind, BusinessDefinition>,
 }
 
 impl RegistryBuilder {
@@ -232,6 +405,97 @@ impl RegistryBuilder {
         }
         Ok(())
     }
+    pub(crate) fn register_enterprise(
+        &mut self,
+        kind: EnterpriseKind,
+        display_name: &'static str,
+        economics: EnterpriseEconomicsDefinition,
+        policy: Option<PolicyKind>,
+        required_business_functions: BTreeSet<BusinessFunction>,
+    ) -> Result<(), RegistryBuildError> {
+        if economics.cycle.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidEnterpriseCycle(kind));
+        }
+        let authored_money = [
+            economics.base_gross,
+            economics.base_operating_cost,
+            economics.demand_revenue_per_point,
+            economics.commerce_revenue_per_point,
+            economics.wealth_revenue_per_point,
+            economics.management_revenue_per_point,
+            economics.police_cost_per_point,
+        ];
+        if authored_money.iter().any(|money| money.cents() < 0) {
+            return Err(RegistryBuildError::NegativeEnterpriseEconomicValue(kind));
+        }
+        if economics.gross_variance_basis_points > 5_000 {
+            return Err(RegistryBuildError::EnterpriseVarianceOutOfRange(kind));
+        }
+        if economics.notable_variance_basis_points > economics.gross_variance_basis_points {
+            return Err(RegistryBuildError::EnterpriseNotableVarianceOutOfRange(
+                kind,
+            ));
+        }
+        if self
+            .enterprises
+            .insert(
+                kind,
+                EnterpriseDefinition {
+                    kind,
+                    display_name,
+                    economics,
+                    policy,
+                    required_business_functions,
+                },
+            )
+            .is_some()
+        {
+            return Err(RegistryBuildError::DuplicateEnterprise(kind));
+        }
+        Ok(())
+    }
+    pub(crate) fn register_business(
+        &mut self,
+        kind: BusinessKind,
+        display_name: &'static str,
+        typical_functions: BTreeSet<BusinessFunction>,
+        economics: BusinessEconomicsDefinition,
+    ) -> Result<(), RegistryBuildError> {
+        if economics.cycle.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidBusinessCycle(kind));
+        }
+        let authored_money = [
+            economics.base_gross,
+            economics.base_operating_cost,
+            economics.wealth_revenue_per_point,
+            economics.commerce_revenue_per_point,
+        ];
+        if authored_money.iter().any(|money| money.cents() < 0) {
+            return Err(RegistryBuildError::NegativeBusinessEconomicValue(kind));
+        }
+        if economics.gross_variance_basis_points > 5_000 {
+            return Err(RegistryBuildError::BusinessVarianceOutOfRange(kind));
+        }
+        if economics.notable_variance_basis_points > economics.gross_variance_basis_points {
+            return Err(RegistryBuildError::BusinessNotableVarianceOutOfRange(kind));
+        }
+        if self
+            .businesses
+            .insert(
+                kind,
+                BusinessDefinition {
+                    kind,
+                    display_name,
+                    typical_functions,
+                    economics,
+                },
+            )
+            .is_some()
+        {
+            return Err(RegistryBuildError::DuplicateBusiness(kind));
+        }
+        Ok(())
+    }
     pub(crate) fn build(self, content_revision: u32) -> Result<Registry, RegistryBuildError> {
         for kind in ALL_CAPABILITY_KINDS {
             if !self.capabilities.contains_key(&kind) {
@@ -253,12 +517,24 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::MissingOperation(kind));
             }
         }
+        for kind in ALL_ENTERPRISE_KINDS {
+            if !self.enterprises.contains_key(&kind) {
+                return Err(RegistryBuildError::MissingEnterprise(kind));
+            }
+        }
+        for kind in ALL_BUSINESS_KINDS {
+            if !self.businesses.contains_key(&kind) {
+                return Err(RegistryBuildError::MissingBusiness(kind));
+            }
+        }
         Ok(Registry {
             content_revision,
             capabilities: self.capabilities,
             traits: self.traits,
             policies: self.policies,
             operations: self.operations,
+            enterprises: self.enterprises,
+            businesses: self.businesses,
         })
     }
 }

@@ -350,6 +350,7 @@ impl CharacterRecord {
 pub struct NeighborhoodRecord {
     id: NeighborhoodId,
     name: String,
+    profile: NeighborhoodProfile,
     lifecycle: Lifecycle,
 }
 
@@ -362,9 +363,65 @@ impl NeighborhoodRecord {
         &self.name
     }
 
+    pub fn profile(&self) -> NeighborhoodProfile {
+        self.profile
+    }
+
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighborhoodEconomyProfile {
+    pub wealth: Rating,
+    pub commercial_activity: Rating,
+    pub illicit_demand: Rating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighborhoodInstitutionProfile {
+    pub police_presence: Rating,
+    pub political_influence: Rating,
+    pub social_cohesion: Rating,
+    pub visible_violence_tolerance: Rating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighborhoodProfile {
+    pub economy: NeighborhoodEconomyProfile,
+    pub institutions: NeighborhoodInstitutionProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BusinessKind {
+    Retail,
+    Hospitality,
+    Automotive,
+    Transportation,
+    Warehouse,
+    ProfessionalServices,
+}
+
+pub const ALL_BUSINESS_KINDS: [BusinessKind; 6] = [
+    BusinessKind::Retail,
+    BusinessKind::Hospitality,
+    BusinessKind::Automotive,
+    BusinessKind::Transportation,
+    BusinessKind::Warehouse,
+    BusinessKind::ProfessionalServices,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BusinessFunction {
+    CashIntensive,
+    VehicleFleet,
+    Warehousing,
+    MeetingSpace,
+    CustomerAccess,
+    UnionAccess,
+    DistributionInfrastructure,
+    ProfessionalRecords,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -378,6 +435,8 @@ pub enum BusinessOwner {
 pub struct BusinessRecord {
     id: BusinessId,
     name: String,
+    kind: BusinessKind,
+    functions: BTreeSet<BusinessFunction>,
     neighborhood: NeighborhoodId,
     owner: BusinessOwner,
     lifecycle: Lifecycle,
@@ -390,6 +449,18 @@ impl BusinessRecord {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn kind(&self) -> BusinessKind {
+        self.kind
+    }
+
+    pub fn functions(&self) -> &BTreeSet<BusinessFunction> {
+        &self.functions
+    }
+
+    pub fn has_function(&self, function: BusinessFunction) -> bool {
+        self.functions.contains(&function)
     }
 
     pub fn neighborhood(&self) -> NeighborhoodId {
@@ -555,6 +626,18 @@ impl WorldState {
             .into_iter()
             .flatten()
             .filter_map(|character_id| self.characters.records.get(character_id))
+    }
+
+    pub fn businesses_in_neighborhood(
+        &self,
+        id: NeighborhoodId,
+    ) -> impl Iterator<Item = &BusinessRecord> {
+        self.businesses
+            .by_neighborhood
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| self.businesses.records.get(business_id))
     }
 
     pub(crate) fn organizations(&self) -> impl Iterator<Item = &OrganizationRecord> {
@@ -780,6 +863,7 @@ pub struct OrganizationDraft {
 
 pub struct NeighborhoodDraft {
     pub name: String,
+    pub profile: NeighborhoodProfile,
 }
 
 pub struct CharacterDraft {
@@ -794,6 +878,8 @@ pub struct CharacterDraft {
 
 pub struct BusinessDraft {
     pub name: String,
+    pub kind: BusinessKind,
+    pub functions: BTreeSet<BusinessFunction>,
     pub neighborhood: NeighborhoodId,
     pub owner: BusinessOwner,
 }

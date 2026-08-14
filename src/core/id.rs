@@ -42,6 +42,9 @@ define_id!(FinancialAccountId, "account");
 define_id!(LedgerTransactionId, "transaction");
 define_id!(DecisionRequestId, "decision");
 define_id!(MandateId, "mandate");
+define_id!(EnterpriseId, "enterprise");
+define_id!(EnterpriseCycleId, "enterprise-cycle");
+define_id!(BusinessCycleId, "business-cycle");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct IdCounters {
@@ -59,6 +62,9 @@ pub(crate) struct IdCounters {
     ledger_transaction: u32,
     decision_request: u32,
     mandate: u32,
+    enterprise: u32,
+    enterprise_cycle: u32,
+    business_cycle: u32,
 }
 
 impl IdCounters {
@@ -78,6 +84,9 @@ impl IdCounters {
             ledger_transaction: 1,
             decision_request: 1,
             mandate: 1,
+            enterprise: 1,
+            enterprise_cycle: 1,
+            business_cycle: 1,
         }
     }
 
@@ -146,5 +155,17 @@ impl IdCounters {
 
     pub(crate) fn next_mandate(&mut self) -> MandateId {
         MandateId::from_raw(Self::take(&mut self.mandate, "mandate"))
+    }
+
+    pub(crate) fn next_enterprise(&mut self) -> EnterpriseId {
+        EnterpriseId::from_raw(Self::take(&mut self.enterprise, "enterprise"))
+    }
+
+    pub(crate) fn next_enterprise_cycle(&mut self) -> EnterpriseCycleId {
+        EnterpriseCycleId::from_raw(Self::take(&mut self.enterprise_cycle, "enterprise cycle"))
+    }
+
+    pub(crate) fn next_business_cycle(&mut self) -> BusinessCycleId {
+        BusinessCycleId::from_raw(Self::take(&mut self.business_cycle, "business cycle"))
     }
 }

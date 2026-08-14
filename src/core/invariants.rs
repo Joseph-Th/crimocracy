@@ -3,16 +3,21 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    CharacterId, DecisionRequestId, InformationId, LedgerTransactionId, MandateId, OperationId,
-    OrganizationId, ReportId,
+    BusinessCycleId, BusinessId, CharacterId, DecisionRequestId, EnterpriseCycleId, EnterpriseId,
+    InformationId, LedgerTransactionId, MandateId, OperationId, OrganizationId, ReportId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::decisions::{DecisionResponse, DecisionStatus};
-use crate::delegation::{MandateStatus, ResponsibilityScope};
-use crate::finance::{AccountLifecycle, FinancialOwner};
-use crate::intelligence::KnowledgeHolder;
+use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
+use crate::economy::BusinessOperatingStatus;
+use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
+use crate::finance::{AccountKind, AccountLifecycle, FinancialOwner, Money};
+use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
 use crate::operations::{OperationConstraint, OperationContingency, OperationStatus};
-use crate::world::{BusinessOwner, Lifecycle, OrganizationKind, PolicyKind, ALL_POLICY_KINDS};
+use crate::registry::Registry;
+use crate::world::{
+    BusinessFunction, BusinessOwner, Lifecycle, OrganizationKind, PolicyKind, ALL_POLICY_KINDS,
+};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -47,10 +52,20 @@ pub enum StateValidationError {
     SupervisionCycle { character: CharacterId },
     #[error("information {information} has invalid observation/recording chronology")]
     InvalidInformationChronology { information: InformationId },
+    #[error("information {information} has invalid provenance source {source_information}")]
+    InvalidInformationProvenance {
+        information: InformationId,
+        source_information: InformationId,
+    },
     #[error("active operation {operation} belongs to an inactive organization")]
     ActiveOperationInactiveOrganization { operation: OperationId },
     #[error("active operation {operation} has an inactive or foreign leader")]
     ActiveOperationInvalidLeader { operation: OperationId },
+    #[error("active operation {operation} has inactive participant {participant}")]
+    ActiveOperationInvalidParticipant {
+        operation: OperationId,
+        participant: CharacterId,
+    },
     #[error("decision {decision} has an invalid attention class")]
     InvalidDecisionAttention { decision: DecisionRequestId },
     #[error("decision {decision} has an empty summary")]
@@ -132,6 +147,11 @@ pub enum StateValidationError {
         report: ReportId,
         information: InformationId,
     },
+    #[error("report {report} references information {information} unavailable to its recipient")]
+    ReportInformationUnavailable {
+        report: ReportId,
+        information: InformationId,
+    },
     #[error("report {report} references missing decision {decision}")]
     MissingReportDecision {
         report: ReportId,
@@ -157,6 +177,30 @@ pub enum StateValidationError {
     },
     #[error("ledger transaction {transaction} has invalid persisted budget usage")]
     InvalidBudgetUsage { transaction: LedgerTransactionId },
+    #[error("enterprise {enterprise} has invalid authority or ownership state")]
+    InvalidEnterpriseAuthority { enterprise: EnterpriseId },
+    #[error("enterprise {enterprise} has invalid location state")]
+    InvalidEnterpriseLocation { enterprise: EnterpriseId },
+    #[error("enterprise {enterprise} has invalid financial account configuration")]
+    InvalidEnterpriseAccounts { enterprise: EnterpriseId },
+    #[error("enterprise {enterprise} has invalid lifecycle scheduling state")]
+    InvalidEnterpriseSchedule { enterprise: EnterpriseId },
+    #[error("enterprise cycle {cycle} has invalid economics or ledger linkage")]
+    InvalidEnterpriseCycle { cycle: EnterpriseCycleId },
+    #[error("enterprise {enterprise} business {business} lacks required function {function:?}")]
+    EnterpriseBusinessRequirementMissing {
+        enterprise: EnterpriseId,
+        business: BusinessId,
+        function: BusinessFunction,
+    },
+    #[error("business {business} has invalid operating economy state")]
+    InvalidBusinessEconomy { business: BusinessId },
+    #[error("business {business} has invalid operating economy account configuration")]
+    InvalidBusinessEconomyAccounts { business: BusinessId },
+    #[error("business {business} has invalid operating economy scheduling state")]
+    InvalidBusinessEconomySchedule { business: BusinessId },
+    #[error("business cycle {cycle} has invalid economics or provenance")]
+    InvalidBusinessCycle { cycle: BusinessCycleId },
 }
 
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
@@ -166,7 +210,77 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_operations(state)?;
     validate_decisions(state)?;
     validate_delegation(state)?;
+    validate_business_economies(state)?;
+    validate_enterprises(state)?;
     validate_legal_reports_and_history(state)?;
+    Ok(())
+}
+
+pub fn validate_state_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for business in state.world.businesses() {
+        registry.get_business(business.kind());
+    }
+    for cycle in state.economy.cycles() {
+        let business = state
+            .world
+            .get_business(cycle.business())
+            .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        let economics = registry.get_business(business.kind()).economics();
+        let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
+        let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
+        {
+            AttentionClass::Notable
+        } else {
+            AttentionClass::Routine
+        };
+        if variance > u32::from(economics.gross_variance_basis_points())
+            || cycle.attention() != expected_attention
+        {
+            return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+        }
+    }
+    for enterprise in state.enterprises.enterprises() {
+        let definition = registry.get_enterprise(enterprise.kind());
+        let EnterpriseLocation::Business(business_id) = enterprise.location() else {
+            continue;
+        };
+        let business = state.world.get_business(business_id).ok_or(
+            StateValidationError::InvalidEnterpriseLocation {
+                enterprise: enterprise.id(),
+            },
+        )?;
+        for function in definition.required_business_functions() {
+            if !business.has_function(*function) {
+                return Err(StateValidationError::EnterpriseBusinessRequirementMissing {
+                    enterprise: enterprise.id(),
+                    business: business_id,
+                    function: *function,
+                });
+            }
+        }
+    }
+    for cycle in state.enterprises.cycles() {
+        let enterprise = state
+            .enterprises
+            .get_enterprise(cycle.enterprise())
+            .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+        let economics = registry.get_enterprise(enterprise.kind()).economics();
+        let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
+        let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
+        {
+            AttentionClass::Notable
+        } else {
+            AttentionClass::Routine
+        };
+        if variance > u32::from(economics.gross_variance_basis_points())
+            || cycle.attention() != expected_attention
+        {
+            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+        }
+    }
     Ok(())
 }
 
@@ -179,6 +293,8 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("operations", state.operations.has_consistent_indexes()),
         ("decisions", state.decisions.has_consistent_indexes()),
         ("delegation", state.delegation.has_consistent_indexes()),
+        ("economy", state.economy.has_consistent_indexes()),
+        ("enterprises", state.enterprises.has_consistent_indexes()),
         ("legal", state.legal.has_consistent_indexes()),
         ("reports", state.reports.has_consistent_indexes()),
         ("history", state.history.has_consistent_indexes()),
@@ -225,10 +341,16 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
             });
         }
         if let Some(usage) = transaction.budget_usage() {
-            if state.delegation.get_mandate(usage.mandate()).is_none() {
-                return Err(StateValidationError::MissingEntity {
+            let mandate = state.delegation.get_mandate(usage.mandate()).ok_or(
+                StateValidationError::MissingEntity {
                     context: "ledger budget mandate",
                     entity: EntityRef::Mandate(usage.mandate()),
+                },
+            )?;
+            if state.world.get_character(usage.manager()).is_none() {
+                return Err(StateValidationError::MissingEntity {
+                    context: "ledger budget manager",
+                    entity: EntityRef::Character(usage.manager()),
                 });
             }
             if state.finance.get_account(usage.funding_account()).is_none() {
@@ -244,6 +366,11 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
                 })
             });
             if usage.amount().cents() <= 0
+                || mandate.manager() != usage.manager()
+                || usage.mandate_version() == 0
+                || usage.mandate_version() > mandate.version()
+                || (usage.mandate_version() == mandate.version()
+                    && !mandate.scopes().contains(&usage.scope()))
                 || usage.period_start() >= usage.period_end()
                 || transaction.occurred_at() < usage.period_start()
                 || transaction.occurred_at() >= usage.period_end()
@@ -425,6 +552,56 @@ fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidat
                 information: information.id(),
             });
         }
+        if information.source_kind() == InformationSourceKind::InternalReport {
+            if information.derived_from().len() != 1 || information.source_entity().is_none() {
+                return Err(StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: information.id(),
+                });
+            }
+            let source = *information
+                .derived_from()
+                .iter()
+                .next()
+                .expect("validated internal report must have one provenance record");
+            let source_record = state.intelligence.get_information(source).ok_or(
+                StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: source,
+                },
+            )?;
+            if information.source_entity() != Some(source_record.holder().entity()) {
+                return Err(StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: source,
+                });
+            }
+        } else if !information.derived_from().is_empty() {
+            return Err(StateValidationError::InvalidInformationProvenance {
+                information: information.id(),
+                source_information: *information
+                    .derived_from()
+                    .iter()
+                    .next()
+                    .expect("non-empty provenance must contain a source"),
+            });
+        }
+        for source in information.derived_from() {
+            let source_record = state.intelligence.get_information(*source).ok_or(
+                StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: *source,
+                },
+            )?;
+            if *source >= information.id()
+                || source_record.recorded_at() > information.recorded_at()
+            {
+                return Err(StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: *source,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -449,11 +626,23 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 operation: operation.id(),
             });
         }
+        let requires_active_participants = match operation.status() {
+            OperationStatus::Authorized
+            | OperationStatus::InProgress
+            | OperationStatus::AwaitingDecision => true,
+            OperationStatus::Completed | OperationStatus::Aborted => false,
+        };
         for participant in operation.roles().values() {
-            if state.world.get_character(*participant).is_none() {
-                return Err(StateValidationError::MissingEntity {
+            let participant_record = state.world.get_character(*participant).ok_or(
+                StateValidationError::MissingEntity {
                     context: "operation participant",
                     entity: EntityRef::Character(*participant),
+                },
+            )?;
+            if requires_active_participants && participant_record.lifecycle() != Lifecycle::Active {
+                return Err(StateValidationError::ActiveOperationInvalidParticipant {
+                    operation: operation.id(),
+                    participant: *participant,
                 });
             }
         }
@@ -761,6 +950,442 @@ fn validate_delegation(state: &AppState) -> Result<(), StateValidationError> {
     Ok(())
 }
 
+fn validate_business_economies(state: &AppState) -> Result<(), StateValidationError> {
+    for economy in state.economy.business_economies() {
+        let business = state.world.get_business(economy.business()).ok_or(
+            StateValidationError::InvalidBusinessEconomy {
+                business: economy.business(),
+            },
+        )?;
+        let neighborhood = state
+            .world
+            .get_neighborhood(business.neighborhood())
+            .ok_or(StateValidationError::InvalidBusinessEconomy {
+                business: economy.business(),
+            })?;
+        let operating = state
+            .finance
+            .get_account(economy.operating_account())
+            .ok_or(StateValidationError::InvalidBusinessEconomyAccounts {
+                business: economy.business(),
+            })?;
+        let settlement = state
+            .finance
+            .get_account(economy.settlement_account())
+            .ok_or(StateValidationError::InvalidBusinessEconomyAccounts {
+                business: economy.business(),
+            })?;
+        if operating.owner() != FinancialOwner::Business(economy.business())
+            || settlement.owner() != FinancialOwner::Business(economy.business())
+            || operating.kind() != AccountKind::LegitimateOperating
+            || settlement.kind() != AccountKind::Settlement
+            || economy.operating_account() == economy.settlement_account()
+        {
+            return Err(StateValidationError::InvalidBusinessEconomyAccounts {
+                business: economy.business(),
+            });
+        }
+        if economy.established_at() > state.now()
+            || economy
+                .last_cycle_at()
+                .is_some_and(|last_cycle| last_cycle > state.now())
+        {
+            return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                business: economy.business(),
+            });
+        }
+        let latest_cycle_at = state
+            .economy
+            .cycles_for(economy.business())
+            .map(|cycle| cycle.occurred_at())
+            .max();
+        if latest_cycle_at != economy.last_cycle_at() {
+            return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                business: economy.business(),
+            });
+        }
+        match economy.status() {
+            BusinessOperatingStatus::Active => {
+                let next_cycle_at = economy.next_cycle_at().ok_or(
+                    StateValidationError::InvalidBusinessEconomySchedule {
+                        business: economy.business(),
+                    },
+                )?;
+                if business.lifecycle() != Lifecycle::Active
+                    || neighborhood.lifecycle() != Lifecycle::Active
+                {
+                    return Err(StateValidationError::InvalidBusinessEconomy {
+                        business: economy.business(),
+                    });
+                }
+                if operating.lifecycle() != AccountLifecycle::Open
+                    || settlement.lifecycle() != AccountLifecycle::Open
+                {
+                    return Err(StateValidationError::InvalidBusinessEconomyAccounts {
+                        business: economy.business(),
+                    });
+                }
+                if next_cycle_at <= economy.established_at()
+                    || economy
+                        .last_cycle_at()
+                        .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
+                {
+                    return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                        business: economy.business(),
+                    });
+                }
+            }
+            BusinessOperatingStatus::Suspended | BusinessOperatingStatus::Closed => {
+                if economy.next_cycle_at().is_some() {
+                    return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                        business: economy.business(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut used_transactions: BTreeSet<LedgerTransactionId> = state
+        .enterprises
+        .cycles()
+        .filter_map(|cycle| cycle.transaction())
+        .collect();
+    for cycle in state.economy.cycles() {
+        let economy = state
+            .economy
+            .get_business_economy(cycle.business())
+            .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        let business = state
+            .world
+            .get_business(cycle.business())
+            .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        if cycle.occurred_at() < economy.established_at()
+            || cycle.occurred_at() > state.now()
+            || cycle.gross_revenue().cents() < 0
+            || cycle.operating_cost().cents() < 0
+            || cycle.gross_revenue().checked_sub(cycle.operating_cost()) != Some(cycle.net_cash())
+        {
+            return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+        }
+        let expected_holder = match business.owner() {
+            BusinessOwner::Independent => None,
+            BusinessOwner::Organization(id) => Some(KnowledgeHolder::Organization(id)),
+            BusinessOwner::Character(id) => Some(KnowledgeHolder::Character(id)),
+        };
+        match (cycle.attention(), expected_holder, cycle.information()) {
+            (AttentionClass::Routine, _, None) | (AttentionClass::Notable, None, None) => {}
+            (AttentionClass::Notable, Some(holder), Some(information_id)) => {
+                let information = state
+                    .intelligence
+                    .get_information(information_id)
+                    .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+                if information.holder() != holder
+                    || information.source_kind() != InformationSourceKind::Accountant
+                    || information.source_entity().is_some()
+                    || information.subject() != EntityRef::Business(cycle.business())
+                    || information.observed_at() != cycle.occurred_at()
+                    || information.recorded_at() != cycle.occurred_at()
+                    || information.reliability() != Reliability::DirectAccess
+                    || information.specificity() != Specificity::Precise
+                {
+                    return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+                }
+            }
+            (AttentionClass::Routine, _, Some(_))
+            | (AttentionClass::Notable, None, Some(_))
+            | (AttentionClass::Notable, Some(_), None)
+            | (AttentionClass::Exception | AttentionClass::Crisis, _, _) => {
+                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })
+            }
+        }
+        match (cycle.net_cash() == Money::ZERO, cycle.transaction()) {
+            (true, None) => {}
+            (false, Some(transaction_id)) => {
+                if !used_transactions.insert(transaction_id) {
+                    return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+                }
+                let transaction = state
+                    .finance
+                    .get_transaction(transaction_id)
+                    .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+                let settlement_cents = cycle
+                    .net_cash()
+                    .cents()
+                    .checked_neg()
+                    .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+                let has_operating = transaction.postings().iter().any(|posting| {
+                    posting.account == economy.operating_account()
+                        && posting.amount == cycle.net_cash()
+                });
+                let has_settlement = transaction.postings().iter().any(|posting| {
+                    posting.account == economy.settlement_account()
+                        && posting.amount == Money::from_cents(settlement_cents)
+                });
+                if transaction.occurred_at() != cycle.occurred_at()
+                    || transaction.postings().len() != 2
+                    || !has_operating
+                    || !has_settlement
+                {
+                    return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+                }
+            }
+            (true, Some(_)) | (false, None) => {
+                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
+    for enterprise in state.enterprises.enterprises() {
+        let organization = state
+            .world
+            .get_organization(enterprise.organization())
+            .ok_or(StateValidationError::InvalidEnterpriseAuthority {
+                enterprise: enterprise.id(),
+            })?;
+        let authority = enterprise.authority();
+        let mandate = state.delegation.get_mandate(authority.mandate).ok_or(
+            StateValidationError::InvalidEnterpriseAuthority {
+                enterprise: enterprise.id(),
+            },
+        )?;
+        let manager = state.world.get_character(authority.manager).ok_or(
+            StateValidationError::InvalidEnterpriseAuthority {
+                enterprise: enterprise.id(),
+            },
+        )?;
+        if mandate.organization() != enterprise.organization()
+            || mandate.manager() != authority.manager
+            || enterprise.manager() != authority.manager
+        {
+            return Err(StateValidationError::InvalidEnterpriseAuthority {
+                enterprise: enterprise.id(),
+            });
+        }
+
+        let (neighborhood_id, location_is_active) = match enterprise.location() {
+            EnterpriseLocation::Neighborhood(id) => {
+                let neighborhood = state.world.get_neighborhood(id).ok_or(
+                    StateValidationError::InvalidEnterpriseLocation {
+                        enterprise: enterprise.id(),
+                    },
+                )?;
+                (id, neighborhood.lifecycle() == Lifecycle::Active)
+            }
+            EnterpriseLocation::Business(id) => {
+                let business = state.world.get_business(id).ok_or(
+                    StateValidationError::InvalidEnterpriseLocation {
+                        enterprise: enterprise.id(),
+                    },
+                )?;
+                let neighborhood = state
+                    .world
+                    .get_neighborhood(business.neighborhood())
+                    .ok_or(StateValidationError::InvalidEnterpriseLocation {
+                        enterprise: enterprise.id(),
+                    })?;
+                (
+                    business.neighborhood(),
+                    business.lifecycle() == Lifecycle::Active
+                        && neighborhood.lifecycle() == Lifecycle::Active,
+                )
+            }
+        };
+
+        let cash = state.finance.get_account(enterprise.cash_account()).ok_or(
+            StateValidationError::InvalidEnterpriseAccounts {
+                enterprise: enterprise.id(),
+            },
+        )?;
+        let settlement = state
+            .finance
+            .get_account(enterprise.settlement_account())
+            .ok_or(StateValidationError::InvalidEnterpriseAccounts {
+                enterprise: enterprise.id(),
+            })?;
+        let expected_owner = FinancialOwner::Organization(enterprise.organization());
+        let cash_kind_is_valid = matches!(
+            cash.kind(),
+            AccountKind::StreetCash | AccountKind::ConcealedCash
+        );
+        if cash.owner() != expected_owner
+            || settlement.owner() != expected_owner
+            || !cash_kind_is_valid
+            || settlement.kind() != AccountKind::Settlement
+            || enterprise.cash_account() == enterprise.settlement_account()
+        {
+            return Err(StateValidationError::InvalidEnterpriseAccounts {
+                enterprise: enterprise.id(),
+            });
+        }
+
+        if enterprise.established_at() > state.now()
+            || enterprise
+                .last_cycle_at()
+                .is_some_and(|last_cycle| last_cycle > state.now())
+        {
+            return Err(StateValidationError::InvalidEnterpriseSchedule {
+                enterprise: enterprise.id(),
+            });
+        }
+        let latest_cycle_at = state
+            .enterprises
+            .cycles_for(enterprise.id())
+            .map(|cycle| cycle.occurred_at())
+            .max();
+        if latest_cycle_at != enterprise.last_cycle_at() {
+            return Err(StateValidationError::InvalidEnterpriseSchedule {
+                enterprise: enterprise.id(),
+            });
+        }
+
+        match enterprise.status() {
+            EnterpriseStatus::Active => {
+                let authority_covers_location = match authority.scope {
+                    ResponsibilityScope::Function(ResponsibilityFunction::Enterprise) => true,
+                    ResponsibilityScope::Function(
+                        ResponsibilityFunction::Territory
+                        | ResponsibilityFunction::Operations
+                        | ResponsibilityFunction::Intelligence
+                        | ResponsibilityFunction::Finance
+                        | ResponsibilityFunction::Legal
+                        | ResponsibilityFunction::Political
+                        | ResponsibilityFunction::Personnel,
+                    ) => false,
+                    ResponsibilityScope::Neighborhood(id) => id == neighborhood_id,
+                    ResponsibilityScope::Business(id) => {
+                        matches!(enterprise.location(), EnterpriseLocation::Business(location_id) if location_id == id)
+                    }
+                };
+                let next_cycle_at = enterprise.next_cycle_at().ok_or(
+                    StateValidationError::InvalidEnterpriseSchedule {
+                        enterprise: enterprise.id(),
+                    },
+                )?;
+                if organization.lifecycle() != Lifecycle::Active
+                    || manager.lifecycle() != Lifecycle::Active
+                    || manager.organization() != Some(enterprise.organization())
+                    || mandate.status() != MandateStatus::Active
+                    || !mandate.scopes().contains(&authority.scope)
+                    || !authority_covers_location
+                    || !location_is_active
+                {
+                    return Err(StateValidationError::InvalidEnterpriseAuthority {
+                        enterprise: enterprise.id(),
+                    });
+                }
+                if cash.lifecycle() != AccountLifecycle::Open
+                    || settlement.lifecycle() != AccountLifecycle::Open
+                {
+                    return Err(StateValidationError::InvalidEnterpriseAccounts {
+                        enterprise: enterprise.id(),
+                    });
+                }
+                if next_cycle_at <= enterprise.established_at()
+                    || enterprise
+                        .last_cycle_at()
+                        .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
+                {
+                    return Err(StateValidationError::InvalidEnterpriseSchedule {
+                        enterprise: enterprise.id(),
+                    });
+                }
+            }
+            EnterpriseStatus::Suspended | EnterpriseStatus::Closed => {
+                if enterprise.next_cycle_at().is_some() {
+                    return Err(StateValidationError::InvalidEnterpriseSchedule {
+                        enterprise: enterprise.id(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut used_transactions = BTreeSet::new();
+    for cycle in state.enterprises.cycles() {
+        let enterprise = state
+            .enterprises
+            .get_enterprise(cycle.enterprise())
+            .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+        if cycle.occurred_at() < enterprise.established_at()
+            || cycle.occurred_at() > state.now()
+            || cycle.gross_revenue().cents() < 0
+            || cycle.operating_cost().cents() < 0
+            || cycle.gross_revenue().checked_sub(cycle.operating_cost()) != Some(cycle.net_cash())
+        {
+            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+        }
+        match cycle.attention() {
+            AttentionClass::Routine => {
+                if cycle.information().is_some() {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+            }
+            AttentionClass::Notable => {
+                let information_id = cycle
+                    .information()
+                    .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+                let information = state
+                    .intelligence
+                    .get_information(information_id)
+                    .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+                if information.holder() != KnowledgeHolder::Organization(enterprise.organization())
+                    || information.source_kind() != InformationSourceKind::AfterAction
+                    || information.source_entity()
+                        != Some(EntityRef::Character(enterprise.manager()))
+                    || information.subject() != EntityRef::Enterprise(enterprise.id())
+                    || information.observed_at() != cycle.occurred_at()
+                    || information.recorded_at() != cycle.occurred_at()
+                    || information.reliability() != Reliability::DirectAccess
+                    || information.specificity() != Specificity::Precise
+                {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+            }
+            AttentionClass::Exception | AttentionClass::Crisis => {
+                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })
+            }
+        }
+        match (cycle.net_cash() == Money::ZERO, cycle.transaction()) {
+            (true, None) => {}
+            (false, Some(transaction_id)) => {
+                if !used_transactions.insert(transaction_id) {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+                let transaction = state
+                    .finance
+                    .get_transaction(transaction_id)
+                    .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+                let settlement_cents =
+                    cycle.net_cash().cents().checked_neg().ok_or(
+                        StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() },
+                    )?;
+                let has_cash = transaction.postings().iter().any(|posting| {
+                    posting.account == enterprise.cash_account()
+                        && posting.amount == cycle.net_cash()
+                });
+                let has_settlement = transaction.postings().iter().any(|posting| {
+                    posting.account == enterprise.settlement_account()
+                        && posting.amount == Money::from_cents(settlement_cents)
+                });
+                if transaction.occurred_at() != cycle.occurred_at()
+                    || transaction.postings().len() != 2
+                    || !has_cash
+                    || !has_settlement
+                {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+            }
+            (true, Some(_)) | (false, None) => {
+                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValidationError> {
     for investigation in state.legal.investigations() {
         if state
@@ -830,8 +1455,20 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
         }
         for entry in report.entries() {
             for information in &entry.sources {
-                if state.intelligence.get_information(*information).is_none() {
-                    return Err(StateValidationError::MissingReportInformation {
+                let information_record = state.intelligence.get_information(*information).ok_or(
+                    StateValidationError::MissingReportInformation {
+                        report: report.id(),
+                        information: *information,
+                    },
+                )?;
+                let is_available = match information_record.holder() {
+                    KnowledgeHolder::Organization(organization) => {
+                        organization == report.recipient()
+                    }
+                    KnowledgeHolder::Character(_) => false,
+                };
+                if !is_available {
+                    return Err(StateValidationError::ReportInformationUnavailable {
                         report: report.id(),
                         information: *information,
                     });
@@ -894,9 +1531,19 @@ pub fn validate_invariants(state: &AppState) {
     state.operations.debug_validate_indexes();
     state.decisions.debug_validate_indexes();
     state.delegation.debug_validate_indexes();
+    state.economy.debug_validate_indexes();
+    state.enterprises.debug_validate_indexes();
     state.legal.debug_validate_indexes();
     state.reports.debug_validate_indexes();
     state.history.debug_validate_indexes();
+    debug_assert!(
+        validate_business_economies(state).is_ok(),
+        "Business Economy Runtime Validity: business schedules, accounts, cycles, or provenance are inconsistent"
+    );
+    debug_assert!(
+        validate_enterprises(state).is_ok(),
+        "Enterprise Runtime Validity: enterprise authority, schedules, accounts, or cycle history are inconsistent"
+    );
 
     if let Some(player) = state.player_organization() {
         let organization = state
@@ -939,10 +1586,17 @@ pub fn validate_invariants(state: &AppState) {
             "Lifecycle Validity: ledger transaction occurs in the future"
         );
         if let Some(usage) = transaction.budget_usage() {
-            debug_assert!(
-                state.delegation.get_mandate(usage.mandate()).is_some(),
-                "Record Reference Validity: ledger budget mandate does not exist"
-            );
+            let mandate = state
+                .delegation
+                .get_mandate(usage.mandate())
+                .expect("Record Reference Validity: ledger budget mandate does not exist");
+            debug_assert!(state.world.get_character(usage.manager()).is_some());
+            debug_assert_eq!(mandate.manager(), usage.manager());
+            debug_assert!(usage.mandate_version() > 0);
+            debug_assert!(usage.mandate_version() <= mandate.version());
+            if usage.mandate_version() == mandate.version() {
+                debug_assert!(mandate.scopes().contains(&usage.scope()));
+            }
             debug_assert!(
                 state.finance.get_account(usage.funding_account()).is_some(),
                 "Record Reference Validity: ledger budget funding account does not exist"
@@ -1079,6 +1733,45 @@ pub fn validate_invariants(state: &AppState) {
             information.observed_at() <= information.recorded_at(),
             "Lifecycle Validity: information was recorded before it was observed"
         );
+        if information.source_kind() == InformationSourceKind::InternalReport {
+            debug_assert!(
+                information.derived_from().len() == 1 && information.source_entity().is_some(),
+                "Knowledge Provenance: internal report must have exactly one source and a source entity"
+            );
+            let source = *information
+                .derived_from()
+                .iter()
+                .next()
+                .expect("internal report must have one provenance record");
+            let source_record = state
+                .intelligence
+                .get_information(source)
+                .expect("Knowledge Provenance: internal report source information is missing");
+            debug_assert_eq!(
+                information.source_entity(),
+                Some(source_record.holder().entity()),
+                "Knowledge Provenance: internal report source entity disagrees with source holder"
+            );
+        } else {
+            debug_assert!(
+                information.derived_from().is_empty(),
+                "Knowledge Provenance: original information must not contain derived lineage"
+            );
+        }
+        for source in information.derived_from() {
+            let source_record = state
+                .intelligence
+                .get_information(*source)
+                .expect("Knowledge Provenance: derived information references missing source");
+            debug_assert!(
+                *source < information.id(),
+                "Knowledge Provenance: information lineage must point to an earlier record"
+            );
+            debug_assert!(
+                source_record.recorded_at() <= information.recorded_at(),
+                "Knowledge Provenance: derived information predates its source record"
+            );
+        }
     }
 
     for operation in state.operations.operations() {
@@ -1090,11 +1783,24 @@ pub fn validate_invariants(state: &AppState) {
             .world
             .get_character(operation.leader())
             .expect("Record Reference Validity: operation leader does not exist");
+        let requires_active_participants = match operation.status() {
+            OperationStatus::Authorized
+            | OperationStatus::InProgress
+            | OperationStatus::AwaitingDecision => true,
+            OperationStatus::Completed | OperationStatus::Aborted => false,
+        };
         for participant in operation.roles().values() {
-            debug_assert!(
-                state.world.get_character(*participant).is_some(),
-                "Record Reference Validity: operation participant does not exist"
-            );
+            let participant_record = state
+                .world
+                .get_character(*participant)
+                .expect("Record Reference Validity: operation participant does not exist");
+            if requires_active_participants {
+                debug_assert_eq!(
+                    participant_record.lifecycle(),
+                    Lifecycle::Active,
+                    "Lifecycle Validity: active operation has inactive participant"
+                );
+            }
         }
         for entity in operation.objective().referenced_entities() {
             debug_assert!(
@@ -1370,10 +2076,21 @@ pub fn validate_invariants(state: &AppState) {
         );
         for entry in report.entries() {
             for source in &entry.sources {
-                debug_assert!(
-                    state.intelligence.get_information(*source).is_some(),
-                    "Record Reference Validity: report source information does not exist"
-                );
+                let information = state
+                    .intelligence
+                    .get_information(*source)
+                    .expect("Record Reference Validity: report source information does not exist");
+                match information.holder() {
+                    KnowledgeHolder::Organization(organization) => debug_assert_eq!(
+                        organization,
+                        report.recipient(),
+                        "Knowledge Boundary: report cites information held by another organization"
+                    ),
+                    KnowledgeHolder::Character(_) => debug_assert!(
+                        false,
+                        "Knowledge Boundary: persisted organization reports must cite organization-held information"
+                    ),
+                }
             }
             for entity in &entry.entities {
                 debug_assert!(
