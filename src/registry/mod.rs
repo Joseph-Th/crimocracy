@@ -3,6 +3,8 @@
 use crate::core::time::SimDuration;
 use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
 use crate::finance::Money;
+use crate::intelligence::InformationTopic;
+use crate::legal::EvidenceKind;
 use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
 use crate::world::{
     BusinessFunction, BusinessKind, CapabilityKind, PolicyKind, PolicySetting, TraitKind,
@@ -66,6 +68,116 @@ pub struct OperationDefinition {
     display_name: &'static str,
     supported_approaches: BTreeSet<OperationApproach>,
     required_roles: BTreeSet<RoleKind>,
+    execution: OperationExecutionDefinition,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationExecutionDefinition {
+    pub(crate) difficulty: OperationDifficultyDefinition,
+    pub(crate) intelligence: OperationIntelligenceDefinition,
+    pub(crate) exposure: OperationExposureDefinition,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationDifficultyDefinition {
+    pub(crate) duration: SimDuration,
+    pub(crate) base_difficulty: u8,
+    pub(crate) role_capabilities: BTreeMap<RoleKind, CapabilityKind>,
+    pub(crate) approach_difficulty_adjustments: BTreeMap<OperationApproach, i8>,
+    pub(crate) police_pressure_weight: u8,
+    pub(crate) variance_limit: u8,
+    pub(crate) achieved_margin: i16,
+    pub(crate) partial_margin: i16,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationIntelligenceDefinition {
+    pub(crate) relevant_topics: BTreeSet<InformationTopic>,
+    pub(crate) max_difficulty_reduction: u8,
+    pub(crate) max_useful_age: SimDuration,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationExposureDefinition {
+    pub(crate) base_exposure: u8,
+    pub(crate) approach_adjustments: BTreeMap<OperationApproach, i8>,
+    pub(crate) police_observation_weight: u8,
+    pub(crate) stealth_mitigation_weight: u8,
+    pub(crate) intelligence_mitigation_weight: u8,
+    pub(crate) variance_limit: u8,
+    pub(crate) trace_threshold: i16,
+    pub(crate) witnessed_threshold: i16,
+    pub(crate) identifying_threshold: i16,
+    pub(crate) evidence_kind: EvidenceKind,
+}
+
+impl OperationExecutionDefinition {
+    pub fn duration(&self) -> SimDuration {
+        self.difficulty.duration
+    }
+    pub fn base_difficulty(&self) -> u8 {
+        self.difficulty.base_difficulty
+    }
+    pub fn capability_for_role(&self, role: RoleKind) -> Option<CapabilityKind> {
+        self.difficulty.role_capabilities.get(&role).copied()
+    }
+    pub fn approach_difficulty_adjustment(&self, approach: OperationApproach) -> Option<i8> {
+        self.difficulty
+            .approach_difficulty_adjustments
+            .get(&approach)
+            .copied()
+    }
+    pub fn police_pressure_weight(&self) -> u8 {
+        self.difficulty.police_pressure_weight
+    }
+    pub fn variance_limit(&self) -> u8 {
+        self.difficulty.variance_limit
+    }
+    pub fn achieved_margin(&self) -> i16 {
+        self.difficulty.achieved_margin
+    }
+    pub fn partial_margin(&self) -> i16 {
+        self.difficulty.partial_margin
+    }
+    pub fn relevant_intelligence_topics(&self) -> &BTreeSet<InformationTopic> {
+        &self.intelligence.relevant_topics
+    }
+    pub fn max_intelligence_difficulty_reduction(&self) -> u8 {
+        self.intelligence.max_difficulty_reduction
+    }
+    pub fn max_intelligence_age(&self) -> SimDuration {
+        self.intelligence.max_useful_age
+    }
+    pub fn base_exposure(&self) -> u8 {
+        self.exposure.base_exposure
+    }
+    pub fn exposure_approach_adjustment(&self, approach: OperationApproach) -> Option<i8> {
+        self.exposure.approach_adjustments.get(&approach).copied()
+    }
+    pub fn police_observation_weight(&self) -> u8 {
+        self.exposure.police_observation_weight
+    }
+    pub fn stealth_mitigation_weight(&self) -> u8 {
+        self.exposure.stealth_mitigation_weight
+    }
+    pub fn intelligence_mitigation_weight(&self) -> u8 {
+        self.exposure.intelligence_mitigation_weight
+    }
+    pub fn exposure_variance_limit(&self) -> u8 {
+        self.exposure.variance_limit
+    }
+    pub fn trace_exposure_threshold(&self) -> i16 {
+        self.exposure.trace_threshold
+    }
+    pub fn witnessed_exposure_threshold(&self) -> i16 {
+        self.exposure.witnessed_threshold
+    }
+    pub fn identifying_exposure_threshold(&self) -> i16 {
+        self.exposure.identifying_threshold
+    }
+    pub fn exposure_evidence_kind(&self) -> EvidenceKind {
+        self.exposure.evidence_kind
+    }
 }
 
 impl OperationDefinition {
@@ -80,6 +192,9 @@ impl OperationDefinition {
     }
     pub fn required_roles(&self) -> &BTreeSet<RoleKind> {
         &self.required_roles
+    }
+    pub fn execution(&self) -> &OperationExecutionDefinition {
+        &self.execution
     }
 }
 
@@ -292,6 +407,47 @@ pub(crate) enum RegistryBuildError {
     MissingPolicy(PolicyKind),
     #[error("missing operation definition: {0:?}")]
     MissingOperation(OperationKind),
+    #[error("operation {0:?} must have a positive execution duration")]
+    InvalidOperationDuration(OperationKind),
+    #[error("operation {0:?} base difficulty must be in 0..=100")]
+    InvalidOperationDifficulty(OperationKind),
+    #[error("operation {0:?} police pressure weight must be in 0..=100")]
+    InvalidOperationPoliceWeight(OperationKind),
+    #[error("operation {0:?} variance limit must be in 0..=50")]
+    InvalidOperationVariance(OperationKind),
+    #[error("operation {0:?} outcome margins are ordered incorrectly")]
+    InvalidOperationOutcomeMargins(OperationKind),
+    #[error("operation {0:?} must define at least one relevant intelligence topic")]
+    MissingOperationIntelligenceTopics(OperationKind),
+    #[error("operation {0:?} intelligence difficulty reduction must be in 0..=50")]
+    InvalidOperationIntelligenceReduction(OperationKind),
+    #[error("operation {0:?} intelligence maximum age must be positive")]
+    InvalidOperationIntelligenceAge(OperationKind),
+    #[error("operation {0:?} exposure base and weights must be in 0..=100")]
+    InvalidOperationExposureWeight(OperationKind),
+    #[error("operation {0:?} exposure variance must be in 0..=50")]
+    InvalidOperationExposureVariance(OperationKind),
+    #[error("operation {0:?} exposure thresholds are ordered incorrectly")]
+    InvalidOperationExposureThresholds(OperationKind),
+    #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
+    MissingOperationRoleCapability {
+        operation: OperationKind,
+        role: RoleKind,
+    },
+    #[error(
+        "operation {operation:?} has no difficulty adjustment for supported approach {approach:?}"
+    )]
+    MissingOperationApproachAdjustment {
+        operation: OperationKind,
+        approach: OperationApproach,
+    },
+    #[error(
+        "operation {operation:?} has no exposure adjustment for supported approach {approach:?}"
+    )]
+    MissingOperationExposureApproachAdjustment {
+        operation: OperationKind,
+        approach: OperationApproach,
+    },
     #[error("missing enterprise definition: {0:?}")]
     MissingEnterprise(EnterpriseKind),
     #[error("missing business definition: {0:?}")]
@@ -387,7 +543,81 @@ impl RegistryBuilder {
         display_name: &'static str,
         supported_approaches: BTreeSet<OperationApproach>,
         required_roles: BTreeSet<RoleKind>,
+        execution: OperationExecutionDefinition,
     ) -> Result<(), RegistryBuildError> {
+        if execution.difficulty.duration.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidOperationDuration(kind));
+        }
+        if execution.difficulty.base_difficulty > 100 {
+            return Err(RegistryBuildError::InvalidOperationDifficulty(kind));
+        }
+        if execution.difficulty.police_pressure_weight > 100 {
+            return Err(RegistryBuildError::InvalidOperationPoliceWeight(kind));
+        }
+        if execution.difficulty.variance_limit > 50 {
+            return Err(RegistryBuildError::InvalidOperationVariance(kind));
+        }
+        if execution.difficulty.partial_margin >= execution.difficulty.achieved_margin {
+            return Err(RegistryBuildError::InvalidOperationOutcomeMargins(kind));
+        }
+        if execution.intelligence.relevant_topics.is_empty() {
+            return Err(RegistryBuildError::MissingOperationIntelligenceTopics(kind));
+        }
+        if execution.intelligence.max_difficulty_reduction > 50 {
+            return Err(RegistryBuildError::InvalidOperationIntelligenceReduction(
+                kind,
+            ));
+        }
+        if execution.intelligence.max_useful_age.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidOperationIntelligenceAge(kind));
+        }
+        if execution.exposure.base_exposure > 100
+            || execution.exposure.police_observation_weight > 100
+            || execution.exposure.stealth_mitigation_weight > 100
+            || execution.exposure.intelligence_mitigation_weight > 100
+        {
+            return Err(RegistryBuildError::InvalidOperationExposureWeight(kind));
+        }
+        if execution.exposure.variance_limit > 50 {
+            return Err(RegistryBuildError::InvalidOperationExposureVariance(kind));
+        }
+        if execution.exposure.trace_threshold >= execution.exposure.witnessed_threshold
+            || execution.exposure.witnessed_threshold >= execution.exposure.identifying_threshold
+        {
+            return Err(RegistryBuildError::InvalidOperationExposureThresholds(kind));
+        }
+        for role in &required_roles {
+            if !execution.difficulty.role_capabilities.contains_key(role) {
+                return Err(RegistryBuildError::MissingOperationRoleCapability {
+                    operation: kind,
+                    role: *role,
+                });
+            }
+        }
+        for approach in &supported_approaches {
+            if !execution
+                .difficulty
+                .approach_difficulty_adjustments
+                .contains_key(approach)
+            {
+                return Err(RegistryBuildError::MissingOperationApproachAdjustment {
+                    operation: kind,
+                    approach: *approach,
+                });
+            }
+            if !execution
+                .exposure
+                .approach_adjustments
+                .contains_key(approach)
+            {
+                return Err(
+                    RegistryBuildError::MissingOperationExposureApproachAdjustment {
+                        operation: kind,
+                        approach: *approach,
+                    },
+                );
+            }
+        }
         if self
             .operations
             .insert(
@@ -397,6 +627,7 @@ impl RegistryBuilder {
                     display_name,
                     supported_approaches,
                     required_roles,
+                    execution,
                 },
             )
             .is_some()

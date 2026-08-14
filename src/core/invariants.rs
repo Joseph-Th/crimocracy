@@ -12,8 +12,19 @@ use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilitySco
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, AccountLifecycle, FinancialOwner, Money};
-use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
-use crate::operations::{OperationConstraint, OperationContingency, OperationStatus};
+use crate::history::HistoryEventKind;
+use crate::intelligence::{
+    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+};
+use crate::legal::{EvidenceReliability, EvidenceStrength};
+use crate::operations::operation_execution::{
+    calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
+    classify_exposure_level, classify_objective_outcome,
+};
+use crate::operations::operation_system::is_information_subject_relevant;
+use crate::operations::{
+    OperationConstraint, OperationContingency, OperationExposureLevel, OperationStatus,
+};
 use crate::registry::Registry;
 use crate::world::{
     BusinessFunction, BusinessOwner, Lifecycle, OrganizationKind, PolicyKind, ALL_POLICY_KINDS,
@@ -66,6 +77,18 @@ pub enum StateValidationError {
         operation: OperationId,
         participant: CharacterId,
     },
+    #[error("operation {operation} has invalid execution lifecycle state")]
+    InvalidOperationRuntime { operation: OperationId },
+    #[error("completed operation {operation} has an invalid after-action information link")]
+    InvalidOperationAfterAction { operation: OperationId },
+    #[error("completed operation {operation} has an invalid campaign-history link")]
+    InvalidOperationHistory { operation: OperationId },
+    #[error("operation {operation} is incompatible with its authored definition")]
+    InvalidOperationDefinition { operation: OperationId },
+    #[error("operation {operation} has invalid persisted exposure or legal consequences")]
+    InvalidOperationExposure { operation: OperationId },
+    #[error("organization {organization} has invalid legal jurisdiction state")]
+    InvalidLegalJurisdiction { organization: OrganizationId },
     #[error("decision {decision} has an invalid attention class")]
     InvalidDecisionAttention { decision: DecisionRequestId },
     #[error("decision {decision} has an empty summary")]
@@ -220,6 +243,95 @@ pub fn validate_state_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
+    for operation in state.operations.operations() {
+        let definition = registry.get_operation(operation.kind());
+        let execution = definition.execution();
+        if !definition
+            .supported_approaches()
+            .contains(&operation.approach())
+            || definition
+                .required_roles()
+                .iter()
+                .any(|role| !operation.roles().contains_key(role))
+            || operation
+                .roles()
+                .keys()
+                .any(|role| execution.capability_for_role(*role).is_none())
+            || operation.intelligence().iter().any(|information| {
+                state
+                    .intelligence
+                    .get_information(*information)
+                    .is_none_or(|record| {
+                        !execution
+                            .relevant_intelligence_topics()
+                            .contains(&record.topic())
+                    })
+            })
+        {
+            return Err(StateValidationError::InvalidOperationDefinition {
+                operation: operation.id(),
+            });
+        }
+        if let Some(resolution) = operation.resolution() {
+            let factors = resolution.factors();
+            let expected_margin = calculate_execution_margin(execution, factors);
+            let expected_outcome = classify_objective_outcome(execution, expected_margin);
+            let (expected_intelligence_quality, expected_intelligence_adjustment) =
+                calculate_intelligence_factors(registry, state, operation.id());
+            if factors.variance().unsigned_abs() > execution.variance_limit()
+                || factors.time_pressure() > 30
+                || factors.approach_adjustment()
+                    != execution
+                        .approach_difficulty_adjustment(operation.approach())
+                        .expect("validated operation approach must have an execution adjustment")
+                || factors.intelligence_quality() != expected_intelligence_quality
+                || factors.intelligence_adjustment() != expected_intelligence_adjustment
+                || resolution.execution_margin() != expected_margin
+                || resolution.objective_outcome() != expected_outcome
+            {
+                return Err(StateValidationError::InvalidOperationDefinition {
+                    operation: operation.id(),
+                });
+            }
+
+            let exposure = resolution.exposure();
+            let exposure_factors = exposure.factors();
+            let expected_intelligence_mitigation =
+                u16::from(factors.intelligence_quality().value())
+                    .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
+                    / 100;
+            let expected_exposure_score = calculate_exposure_score(execution, exposure_factors);
+            let expected_exposure_level =
+                classify_exposure_level(execution, expected_exposure_score);
+            if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
+                || exposure_factors.approach_adjustment()
+                    != execution
+                        .exposure_approach_adjustment(operation.approach())
+                        .expect("validated operation approach must have an exposure adjustment")
+                || exposure_factors.intelligence_mitigation()
+                    != u8::try_from(expected_intelligence_mitigation)
+                        .expect("bounded exposure intelligence mitigation must fit u8")
+                || exposure.score() != expected_exposure_score
+                || exposure.level() != expected_exposure_level
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+            if let Some(evidence_id) = exposure.evidence().iter().next() {
+                let evidence = state.legal.get_evidence(*evidence_id).ok_or(
+                    StateValidationError::InvalidOperationExposure {
+                        operation: operation.id(),
+                    },
+                )?;
+                if evidence.kind() != execution.exposure_evidence_kind() {
+                    return Err(StateValidationError::InvalidOperationExposure {
+                        operation: operation.id(),
+                    });
+                }
+            }
+        }
+    }
     for business in state.world.businesses() {
         registry.get_business(business.kind());
     }
@@ -570,7 +682,14 @@ fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidat
                     source_information: source,
                 },
             )?;
-            if information.source_entity() != Some(source_record.holder().entity()) {
+            if information.source_entity() != Some(source_record.holder().entity())
+                || information.topic() != source_record.topic()
+                || information.subject() != source_record.subject()
+                || information.observed_at() != source_record.observed_at()
+                || information.reliability() != source_record.reliability()
+                || information.specificity() != source_record.specificity()
+                || information.summary() != source_record.summary()
+            {
                 return Err(StateValidationError::InvalidInformationProvenance {
                     information: information.id(),
                     source_information: source,
@@ -621,11 +740,6 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 entity: EntityRef::Character(operation.leader()),
             },
         )?;
-        if leader.organization() != Some(operation.responsible_organization()) {
-            return Err(StateValidationError::ActiveOperationInvalidLeader {
-                operation: operation.id(),
-            });
-        }
         let requires_active_participants = match operation.status() {
             OperationStatus::Authorized
             | OperationStatus::InProgress
@@ -643,6 +757,21 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 return Err(StateValidationError::ActiveOperationInvalidParticipant {
                     operation: operation.id(),
                     participant: *participant,
+                });
+            }
+        }
+        for information in operation.intelligence() {
+            let record = state.intelligence.get_information(*information).ok_or(
+                StateValidationError::InvalidOperationDefinition {
+                    operation: operation.id(),
+                },
+            )?;
+            if record.holder()
+                != KnowledgeHolder::Organization(operation.responsible_organization())
+                || !is_information_subject_relevant(state, operation.objective(), record.subject())
+            {
+                return Err(StateValidationError::InvalidOperationDefinition {
+                    operation: operation.id(),
                 });
             }
         }
@@ -702,8 +831,270 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                         operation: operation.id(),
                     });
                 }
+                if leader.organization() != Some(operation.responsible_organization()) {
+                    return Err(StateValidationError::ActiveOperationInvalidLeader {
+                        operation: operation.id(),
+                    });
+                }
             }
             OperationStatus::Completed | OperationStatus::Aborted => {}
+        }
+        match operation.status() {
+            OperationStatus::Authorized => {
+                if operation.started_at().is_some()
+                    || operation.resolution_due_at().is_some()
+                    || operation.awaiting_decision_since().is_some()
+                    || operation.resolution().is_some()
+                {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
+            }
+            OperationStatus::InProgress => {
+                let (Some(started_at), Some(due_at)) =
+                    (operation.started_at(), operation.resolution_due_at())
+                else {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                };
+                if started_at > due_at
+                    || started_at > state.now()
+                    || operation.awaiting_decision_since().is_some()
+                    || operation.resolution().is_some()
+                {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
+            }
+            OperationStatus::AwaitingDecision => {
+                let (Some(started_at), Some(due_at), Some(paused_at)) = (
+                    operation.started_at(),
+                    operation.resolution_due_at(),
+                    operation.awaiting_decision_since(),
+                ) else {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                };
+                if started_at > due_at
+                    || started_at > paused_at
+                    || paused_at > state.now()
+                    || operation.resolution().is_some()
+                {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
+            }
+            OperationStatus::Completed => {
+                let (Some(started_at), Some(due_at), Some(resolution)) = (
+                    operation.started_at(),
+                    operation.resolution_due_at(),
+                    operation.resolution(),
+                ) else {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                };
+                if started_at > due_at
+                    || resolution.resolved_at() < due_at
+                    || resolution.resolved_at() > state.now()
+                    || operation.awaiting_decision_since().is_some()
+                {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
+                let valid_information = state
+                    .intelligence
+                    .get_information(resolution.after_action_information())
+                    .is_some_and(|information| {
+                        information.holder()
+                            == KnowledgeHolder::Organization(operation.responsible_organization())
+                            && information.source_kind() == InformationSourceKind::AfterAction
+                            && information.topic() == InformationTopic::OperationalOutcome
+                            && information.source_entity()
+                                == Some(EntityRef::Character(operation.leader()))
+                            && information.subject() == EntityRef::Operation(operation.id())
+                            && information.observed_at() == resolution.resolved_at()
+                    });
+                if !valid_information {
+                    return Err(StateValidationError::InvalidOperationAfterAction {
+                        operation: operation.id(),
+                    });
+                }
+                let valid_history = state
+                    .history
+                    .get_event(resolution.history_event())
+                    .is_some_and(|event| {
+                        event.kind() == HistoryEventKind::Operation
+                            && event.occurred_at() == resolution.resolved_at()
+                            && event
+                                .entities()
+                                .contains(&EntityRef::Operation(operation.id()))
+                            && event.entities().contains(&EntityRef::Organization(
+                                operation.responsible_organization(),
+                            ))
+                            && event
+                                .entities()
+                                .contains(&EntityRef::Character(operation.leader()))
+                    });
+                if !valid_history {
+                    return Err(StateValidationError::InvalidOperationHistory {
+                        operation: operation.id(),
+                    });
+                }
+                validate_operation_exposure_links(state, operation, resolution)?;
+            }
+            OperationStatus::Aborted => {
+                let execution_times_match =
+                    operation.started_at().is_some() == operation.resolution_due_at().is_some();
+                if !execution_times_match
+                    || operation.awaiting_decision_since().is_some()
+                    || operation.resolution().is_some()
+                {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_exposure_links(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Result<(), StateValidationError> {
+    let exposure = resolution.exposure();
+    if let Some(neighborhood) = exposure.neighborhood() {
+        if state.world.get_neighborhood(neighborhood).is_none() {
+            return Err(StateValidationError::InvalidOperationExposure {
+                operation: operation.id(),
+            });
+        }
+    }
+    let participants: BTreeSet<_> = std::iter::once(operation.leader())
+        .chain(operation.roles().values().copied())
+        .collect();
+    match exposure.level() {
+        OperationExposureLevel::Identifying => {
+            if !exposure
+                .identified_character()
+                .is_some_and(|character| participants.contains(&character))
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+        }
+        OperationExposureLevel::None
+        | OperationExposureLevel::Trace
+        | OperationExposureLevel::Witnessed => {
+            if exposure.identified_character().is_some() {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+        }
+    }
+
+    match exposure.investigation() {
+        None => {
+            if !exposure.evidence().is_empty() {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+        }
+        Some(investigation_id) => {
+            if exposure.level() == OperationExposureLevel::None
+                || exposure.neighborhood().is_none()
+                || exposure.evidence().len() != 1
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+            let investigation = state.legal.get_investigation(investigation_id).ok_or(
+                StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                },
+            )?;
+            let owner = state.world.get_organization(investigation.owner()).ok_or(
+                StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                },
+            )?;
+            if !matches!(
+                owner.kind(),
+                OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+            ) || investigation.opened_at() != resolution.resolved_at()
+                || !investigation
+                    .subjects()
+                    .contains(&EntityRef::Operation(operation.id()))
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
+            if let Some(character) = exposure.identified_character() {
+                if !investigation
+                    .subjects()
+                    .contains(&EntityRef::Character(character))
+                {
+                    return Err(StateValidationError::InvalidOperationExposure {
+                        operation: operation.id(),
+                    });
+                }
+            }
+            let evidence_id = *exposure
+                .evidence()
+                .iter()
+                .next()
+                .expect("validated operation exposure contains one evidence record");
+            let evidence = state.legal.get_evidence(evidence_id).ok_or(
+                StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                },
+            )?;
+            let expected_subject = exposure
+                .identified_character()
+                .map(EntityRef::Character)
+                .unwrap_or(EntityRef::Operation(operation.id()));
+            let expected_strength = match exposure.level() {
+                OperationExposureLevel::None => {
+                    unreachable!("non-exposure cannot have legal evidence")
+                }
+                OperationExposureLevel::Trace => EvidenceStrength::Weak,
+                OperationExposureLevel::Witnessed => EvidenceStrength::Corroborating,
+                OperationExposureLevel::Identifying => EvidenceStrength::Strong,
+            };
+            let expected_reliability = match exposure.level() {
+                OperationExposureLevel::None => {
+                    unreachable!("non-exposure cannot have legal evidence")
+                }
+                OperationExposureLevel::Trace => EvidenceReliability::Questionable,
+                OperationExposureLevel::Witnessed => EvidenceReliability::Credible,
+                OperationExposureLevel::Identifying => EvidenceReliability::HighlyReliable,
+            };
+            if evidence.investigation() != investigation_id
+                || evidence.custodian() != investigation.owner()
+                || evidence.subject() != expected_subject
+                || evidence.origin() != Some(EntityRef::Operation(operation.id()))
+                || evidence.strength() != expected_strength
+                || evidence.reliability() != expected_reliability
+                || evidence.discovered_at() != resolution.resolved_at()
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
+            }
         }
     }
     Ok(())
@@ -1387,12 +1778,40 @@ fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
 }
 
 fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValidationError> {
-    for investigation in state.legal.investigations() {
-        if state
+    for jurisdiction in state.legal.jurisdictions() {
+        let organization = state
             .world
-            .get_organization(investigation.owner())
-            .is_none()
+            .get_organization(jurisdiction.organization())
+            .ok_or(StateValidationError::InvalidLegalJurisdiction {
+                organization: jurisdiction.organization(),
+            })?;
+        if !matches!(
+            organization.kind(),
+            OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+        ) || jurisdiction.neighborhoods().is_empty()
+            || jurisdiction.version() == 0
+            || jurisdiction
+                .neighborhoods()
+                .iter()
+                .any(|neighborhood| state.world.get_neighborhood(*neighborhood).is_none())
         {
+            return Err(StateValidationError::InvalidLegalJurisdiction {
+                organization: jurisdiction.organization(),
+            });
+        }
+    }
+
+    for investigation in state.legal.investigations() {
+        let owner = state.world.get_organization(investigation.owner()).ok_or(
+            StateValidationError::MissingEntity {
+                context: "investigation owner",
+                entity: EntityRef::Organization(investigation.owner()),
+            },
+        )?;
+        if !matches!(
+            owner.kind(),
+            OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+        ) {
             return Err(StateValidationError::MissingEntity {
                 context: "investigation owner",
                 entity: EntityRef::Organization(investigation.owner()),
@@ -1414,17 +1833,16 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
     }
 
     for evidence in state.legal.all_evidence() {
-        if state
+        let investigation = state
             .legal
             .get_investigation(evidence.investigation())
-            .is_none()
-        {
-            return Err(StateValidationError::MissingEntity {
+            .ok_or(StateValidationError::MissingEntity {
                 context: "evidence investigation",
                 entity: EntityRef::Investigation(evidence.investigation()),
-            });
-        }
-        if state.world.get_organization(evidence.custodian()).is_none() {
+            })?;
+        if state.world.get_organization(evidence.custodian()).is_none()
+            || evidence.custodian() != investigation.owner()
+        {
             return Err(StateValidationError::MissingEntity {
                 context: "evidence custodian",
                 entity: EntityRef::Organization(evidence.custodian()),
@@ -1435,6 +1853,14 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                 context: "evidence subject",
                 entity: evidence.subject(),
             });
+        }
+        if let Some(origin) = evidence.origin() {
+            if !is_entity_present(state, origin) {
+                return Err(StateValidationError::MissingEntity {
+                    context: "evidence origin",
+                    entity: origin,
+                });
+            }
         }
         if evidence.discovered_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
@@ -1543,6 +1969,10 @@ pub fn validate_invariants(state: &AppState) {
     debug_assert!(
         validate_enterprises(state).is_ok(),
         "Enterprise Runtime Validity: enterprise authority, schedules, accounts, or cycle history are inconsistent"
+    );
+    debug_assert!(
+        validate_operations(state).is_ok(),
+        "Operation Runtime Validity: operation lifecycle, schedules, after-action knowledge, or history are inconsistent"
     );
 
     if let Some(player) = state.player_organization() {
@@ -1752,6 +2182,36 @@ pub fn validate_invariants(state: &AppState) {
                 Some(source_record.holder().entity()),
                 "Knowledge Provenance: internal report source entity disagrees with source holder"
             );
+            debug_assert_eq!(
+                information.topic(),
+                source_record.topic(),
+                "Knowledge Provenance: internal report topic disagrees with source information"
+            );
+            debug_assert_eq!(
+                information.subject(),
+                source_record.subject(),
+                "Knowledge Provenance: internal report subject disagrees with source information"
+            );
+            debug_assert_eq!(
+                information.observed_at(),
+                source_record.observed_at(),
+                "Knowledge Provenance: internal report observation time disagrees with source information"
+            );
+            debug_assert_eq!(
+                information.reliability(),
+                source_record.reliability(),
+                "Knowledge Provenance: internal report reliability disagrees with source information"
+            );
+            debug_assert_eq!(
+                information.specificity(),
+                source_record.specificity(),
+                "Knowledge Provenance: internal report specificity disagrees with source information"
+            );
+            debug_assert_eq!(
+                information.summary(),
+                source_record.summary(),
+                "Knowledge Provenance: internal report summary disagrees with source information"
+            );
         } else {
             debug_assert!(
                 information.derived_from().is_empty(),
@@ -1847,6 +2307,11 @@ pub fn validate_invariants(state: &AppState) {
                     leader.lifecycle(),
                     Lifecycle::Active,
                     "Lifecycle Validity: active operation has inactive leader"
+                );
+                debug_assert_eq!(
+                    leader.organization(),
+                    Some(operation.responsible_organization()),
+                    "Ownership Exclusivity: active operation leader belongs to another organization"
                 );
             }
             OperationStatus::Completed | OperationStatus::Aborted => {}
@@ -2051,6 +2516,29 @@ pub fn validate_invariants(state: &AppState) {
             );
         }
     }
+    for jurisdiction in state.legal.jurisdictions() {
+        let organization = state
+            .world
+            .get_organization(jurisdiction.organization())
+            .expect("Record Reference Validity: jurisdiction authority does not exist");
+        debug_assert!(
+            matches!(
+                organization.kind(),
+                OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+            ),
+            "Ownership Exclusivity: legal jurisdiction belongs to non-legal organization"
+        );
+        debug_assert!(
+            !jurisdiction.neighborhoods().is_empty() && jurisdiction.version() > 0,
+            "Lifecycle Validity: legal jurisdiction is empty or unversioned"
+        );
+        for neighborhood in jurisdiction.neighborhoods() {
+            debug_assert!(
+                state.world.get_neighborhood(*neighborhood).is_some(),
+                "Record Reference Validity: legal jurisdiction neighborhood does not exist"
+            );
+        }
+    }
     for evidence in state.legal.all_evidence() {
         debug_assert!(
             state
@@ -2067,6 +2555,12 @@ pub fn validate_invariants(state: &AppState) {
             is_entity_present(state, evidence.subject()),
             "Record Reference Validity: evidence subject does not exist"
         );
+        if let Some(origin) = evidence.origin() {
+            debug_assert!(
+                is_entity_present(state, origin),
+                "Record Reference Validity: evidence origin does not exist"
+            );
+        }
     }
 
     for report in state.reports.reports() {

@@ -125,7 +125,7 @@ impl ValidatedDecisionRequest {
             }));
         state
             .operations
-            .transition(operation_id, OperationStatus::AwaitingDecision);
+            .set_awaiting_decision(operation_id, state.now());
         Ok(DecisionRequestOutcome {
             decision: id,
             requests_pause,
@@ -256,9 +256,15 @@ impl ValidatedDecisionResolution {
             self.decision,
             build_resolution(self.response, state.now(), self.resolver),
         );
-        state
-            .operations
-            .transition(self.operation, self.next_operation_status);
+        match self.next_operation_status {
+            OperationStatus::InProgress => state.operations.resume(self.operation, state.now()),
+            OperationStatus::Aborted => state.operations.abort(self.operation),
+            OperationStatus::Authorized
+            | OperationStatus::AwaitingDecision
+            | OperationStatus::Completed => {
+                unreachable!("decision resolution only resumes or aborts operations")
+            }
+        }
         Ok(())
     }
 }

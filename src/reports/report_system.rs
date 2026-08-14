@@ -145,6 +145,7 @@ mod tests {
             InformationDraft {
                 holder: KnowledgeHolder::Organization(holder),
                 source_kind: InformationSourceKind::DirectObservation,
+                topic: crate::intelligence::InformationTopic::General,
                 source_entity: None,
                 subject: EntityRef::Organization(holder),
                 observed_at: state.now(),

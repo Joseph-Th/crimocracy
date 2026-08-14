@@ -10,6 +10,10 @@ use crate::economy::business_economy_system::{
 use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, due_active_enterprises, validate_enterprise_cycle_plan,
 };
+use crate::operations::operation_execution::{
+    decide_operation_resolution, due_in_progress_operations, validate_operation_resolution_plan,
+    OperationResolutionRandomness,
+};
 use crate::operations::operation_system::{
     apply_transition, due_authorized_operations, OperationTransition,
 };
@@ -21,6 +25,7 @@ use thiserror::Error;
 pub struct TickOutcome {
     pub now: SimTime,
     pub started_operations: Vec<OperationId>,
+    pub resolved_operations: Vec<OperationId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
 }
@@ -31,8 +36,33 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     state.advance_clock(SimDuration::ONE_MINUTE);
     let started_operations = due_authorized_operations(state);
     for operation in &started_operations {
-        apply_transition(state, *operation, OperationTransition::Begin)
+        apply_transition(registry, state, *operation, OperationTransition::Begin)
             .expect("due authorized operation must support the begin transition");
+    }
+    let due_operations = due_in_progress_operations(state);
+    let mut resolved_operations = Vec::with_capacity(due_operations.len());
+    for operation in due_operations {
+        let kind = state
+            .operations()
+            .get_operation(operation)
+            .expect("due operation must still exist")
+            .kind();
+        let execution = registry.get_operation(kind).execution();
+        let execution_variance = decide_operation_variance(state, execution.variance_limit());
+        let exposure_variance =
+            decide_operation_variance(state, execution.exposure_variance_limit());
+        let plan = decide_operation_resolution(
+            registry,
+            state,
+            operation,
+            OperationResolutionRandomness::new(execution_variance, exposure_variance),
+        )
+        .expect("due in-progress operation must resolve a valid plan");
+        let resolved = validate_operation_resolution_plan(registry, state, plan)
+            .expect("fresh operation resolution plan must validate")
+            .commit(state)
+            .expect("validated operation resolution must commit atomically");
+        resolved_operations.push(resolved);
     }
     let due_businesses = due_active_businesses(state);
     let mut business_cycles = Vec::with_capacity(due_businesses.len());
@@ -80,9 +110,21 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     TickOutcome {
         now: state.now(),
         started_operations,
+        resolved_operations,
         business_cycles,
         enterprise_cycles,
     }
+}
+
+fn decide_operation_variance(state: &mut AppState, limit: u8) -> i8 {
+    let width = usize::from(limit)
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .expect("operation variance choice range overflowed usize");
+    let draw = decide_index(state, width).expect("operation variance range is never empty");
+    let signed =
+        i16::try_from(draw).expect("operation variance draw must fit i16") - i16::from(limit);
+    i8::try_from(signed).expect("authored operation variance limit must fit i8")
 }
 
 fn decide_basis_point_variance(state: &mut AppState, limit: u16) -> i16 {

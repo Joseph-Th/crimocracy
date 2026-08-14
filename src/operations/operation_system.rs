@@ -1,8 +1,9 @@
 //! Operation validation and lifecycle execution; sibling records contain no resolution logic.
 
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{CharacterId, OperationId, OrganizationId};
+use crate::core::id::{CharacterId, InformationId, OperationId, OrganizationId};
 use crate::core::state::AppState;
+use crate::intelligence::KnowledgeHolder;
 use crate::operations::{
     OperationCommand, OperationDraft, OperationIdentity, OperationRecord, OperationRuntime,
     OperationStatus, RoleKind,
@@ -15,7 +16,6 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationTransition {
     Begin,
-    Complete,
     Abort,
 }
 
@@ -29,6 +29,15 @@ pub enum OperationError {
     MissingCharacter(CharacterId),
     #[error("entity {0:?} does not exist")]
     MissingEntity(EntityRef),
+    #[error("information record {0} does not exist")]
+    MissingInformation(InformationId),
+    #[error("information {information} is not held by responsible organization {organization}")]
+    InformationUnavailable {
+        information: InformationId,
+        organization: OrganizationId,
+    },
+    #[error("information {0} is not relevant to this operation plan")]
+    IrrelevantInformation(InformationId),
     #[error(
         "character {leader} is not an active member of responsible organization {organization}"
     )]
@@ -131,6 +140,7 @@ impl ValidatedOperation {
             objective,
             approach,
             roles,
+            intelligence,
             constraints,
             contingencies,
             scheduled_for,
@@ -144,12 +154,17 @@ impl ValidatedOperation {
                 objective,
                 approach,
                 roles,
+                intelligence,
                 constraints,
                 contingencies,
                 scheduled_for,
             },
             runtime: OperationRuntime {
                 status: OperationStatus::Authorized,
+                started_at: None,
+                resolution_due_at: None,
+                awaiting_decision_since: None,
+                resolution: None,
                 version: 1,
             },
         });
@@ -212,6 +227,26 @@ pub fn validate_authorize_operation(
         }
         expected_participant_versions.insert(*participant, record.version());
     }
+    for information in &draft.intelligence {
+        let record = state
+            .intelligence
+            .get_information(*information)
+            .ok_or(OperationError::MissingInformation(*information))?;
+        if record.holder() != KnowledgeHolder::Organization(draft.responsible_organization) {
+            return Err(OperationError::InformationUnavailable {
+                information: *information,
+                organization: draft.responsible_organization,
+            });
+        }
+        if !definition
+            .execution()
+            .relevant_intelligence_topics()
+            .contains(&record.topic())
+            || !is_information_subject_relevant(state, &draft.objective, record.subject())
+        {
+            return Err(OperationError::IrrelevantInformation(*information));
+        }
+    }
     for entity in draft.objective.referenced_entities() {
         if !is_entity_present(state, entity) {
             return Err(OperationError::MissingEntity(entity));
@@ -253,16 +288,42 @@ pub fn validate_authorize_operation(
     })
 }
 
+pub(crate) fn is_information_subject_relevant(
+    state: &AppState,
+    objective: &crate::operations::OperationObjective,
+    subject: EntityRef,
+) -> bool {
+    let referenced = objective.referenced_entities();
+    if referenced.contains(&subject) {
+        return true;
+    }
+    let EntityRef::Neighborhood(subject_neighborhood) = subject else {
+        return false;
+    };
+    referenced.into_iter().any(|entity| match entity {
+        EntityRef::Business(business) => state
+            .world
+            .get_business(business)
+            .is_some_and(|record| record.neighborhood() == subject_neighborhood),
+        EntityRef::Neighborhood(neighborhood) => neighborhood == subject_neighborhood,
+        EntityRef::Organization(_)
+        | EntityRef::Character(_)
+        | EntityRef::Operation(_)
+        | EntityRef::Investigation(_)
+        | EntityRef::Evidence(_)
+        | EntityRef::FinancialAccount(_)
+        | EntityRef::DecisionRequest(_)
+        | EntityRef::Mandate(_)
+        | EntityRef::Enterprise(_) => false,
+    })
+}
+
 pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
-    state
-        .operations
-        .operations_with_status(OperationStatus::Authorized)
-        .filter(|operation| operation.scheduled_for() <= state.now())
-        .map(|operation| operation.id())
-        .collect()
+    state.operations.due_authorized_at_or_before(state.now())
 }
 
 pub fn apply_transition(
+    registry: &Registry,
     state: &mut AppState,
     operation: OperationId,
     transition: OperationTransition,
@@ -275,26 +336,36 @@ pub fn apply_transition(
     if transition == OperationTransition::Begin && state.now() < record.scheduled_for() {
         return Err(OperationError::StartBeforeScheduled(operation));
     }
-    let next = match (status, transition) {
-        (OperationStatus::Authorized, OperationTransition::Begin) => OperationStatus::InProgress,
-        (OperationStatus::Authorized, OperationTransition::Abort) => OperationStatus::Aborted,
-        (OperationStatus::InProgress, OperationTransition::Complete) => OperationStatus::Completed,
-        (OperationStatus::InProgress, OperationTransition::Abort) => OperationStatus::Aborted,
-        (OperationStatus::Authorized, OperationTransition::Complete)
-        | (OperationStatus::InProgress, OperationTransition::Begin)
+    match (status, transition) {
+        (OperationStatus::Authorized, OperationTransition::Begin) => {
+            let duration = registry.get_operation(record.kind()).execution().duration();
+            let mut resolution_due_at = state.now() + duration;
+            for constraint in record.constraints() {
+                if let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint
+                {
+                    if *deadline < resolution_due_at {
+                        resolution_due_at = *deadline;
+                    }
+                }
+            }
+            state
+                .operations
+                .begin(operation, state.now(), resolution_due_at);
+        }
+        (OperationStatus::Authorized, OperationTransition::Abort)
+        | (OperationStatus::InProgress, OperationTransition::Abort) => {
+            state.operations.abort(operation);
+        }
+        (OperationStatus::InProgress, OperationTransition::Begin)
         | (OperationStatus::AwaitingDecision, OperationTransition::Begin)
-        | (OperationStatus::AwaitingDecision, OperationTransition::Complete)
         | (OperationStatus::AwaitingDecision, OperationTransition::Abort)
         | (OperationStatus::Completed, OperationTransition::Begin)
-        | (OperationStatus::Completed, OperationTransition::Complete)
         | (OperationStatus::Completed, OperationTransition::Abort)
         | (OperationStatus::Aborted, OperationTransition::Begin)
-        | (OperationStatus::Aborted, OperationTransition::Complete)
         | (OperationStatus::Aborted, OperationTransition::Abort) => {
             return Err(OperationError::InvalidTransition { status, transition });
         }
-    };
-    state.operations.transition(operation, next);
+    }
     Ok(())
 }
 
@@ -305,6 +376,11 @@ mod tests {
     use crate::core::entity::EntityRef;
     use crate::core::invariants::validate_invariants;
     use crate::core::time::SimTime;
+    use crate::intelligence::intelligence_system::validate_record_information;
+    use crate::intelligence::{
+        InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+        Specificity,
+    };
     use crate::operations::{
         OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
     };
@@ -409,6 +485,7 @@ mod tests {
             objective: OperationObjective::Frighten { target },
             approach: OperationApproach::Intimidating,
             roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
             scheduled_for: SimTime::ZERO,
@@ -427,22 +504,22 @@ mod tests {
         .commit(&mut state)
         .expect("validated operation should remain current");
 
-        apply_transition(&mut state, operation, OperationTransition::Begin)
+        apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
             .expect("authorized operation should begin");
-        apply_transition(&mut state, operation, OperationTransition::Complete)
-            .expect("in-progress operation should complete");
+        apply_transition(&registry, &mut state, operation, OperationTransition::Abort)
+            .expect("in-progress operation should abort");
         let before = state
             .operations
             .get_operation(operation)
             .expect("operation should exist")
             .version();
 
-        let error = apply_transition(&mut state, operation, OperationTransition::Abort)
+        let error = apply_transition(&registry, &mut state, operation, OperationTransition::Abort)
             .expect_err("terminal operation must reject further transitions");
         assert_eq!(
             error,
             OperationError::InvalidTransition {
-                status: OperationStatus::Completed,
+                status: OperationStatus::Aborted,
                 transition: OperationTransition::Abort,
             }
         );
@@ -450,7 +527,7 @@ mod tests {
             .operations
             .get_operation(operation)
             .expect("operation should still exist");
-        assert_eq!(record.status(), OperationStatus::Completed);
+        assert_eq!(record.status(), OperationStatus::Aborted);
         assert_eq!(record.version(), before);
         validate_invariants(&state);
     }
@@ -492,7 +569,7 @@ mod tests {
             .expect("operation should exist")
             .version();
 
-        let error = apply_transition(&mut state, operation, OperationTransition::Begin)
+        let error = apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
             .expect_err("operation must not begin early");
         assert_eq!(error, OperationError::StartBeforeScheduled(operation));
         let record = state
@@ -560,6 +637,71 @@ mod tests {
             OperationError::AuthorizationExpired {
                 scheduled_for: 2,
                 now: 3,
+            }
+        );
+        assert_eq!(
+            state
+                .operations()
+                .operations_for_organization(organization)
+                .count(),
+            0
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_intelligence_must_be_owned_and_relevant() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let irrelevant = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::TargetSecurity,
+                source_entity: None,
+                subject: target,
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Detailed security information that does not answer an intimidation planning need."
+                    .to_owned(),
+            },
+        )
+        .expect("irrelevant information fixture should still be valid information")
+        .commit(&mut state);
+        let unavailable = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(leader),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::Personnel,
+                source_entity: None,
+                subject: target,
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "The leader knows the target's personnel pattern personally.".to_owned(),
+            },
+        )
+        .expect("character information fixture should validate")
+        .commit(&mut state);
+
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.intelligence = BTreeSet::from([irrelevant]);
+        let error = validate_authorize_operation(&registry, &state, draft)
+            .expect_err("authored operation should reject an irrelevant intelligence topic");
+        assert_eq!(error, OperationError::IrrelevantInformation(irrelevant));
+
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.intelligence = BTreeSet::from([unavailable]);
+        let error = validate_authorize_operation(&registry, &state, draft).expect_err(
+            "operation plan should reject intelligence not yet reported to the organization",
+        );
+        assert_eq!(
+            error,
+            OperationError::InformationUnavailable {
+                information: unavailable,
+                organization,
             }
         );
         assert_eq!(

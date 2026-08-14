@@ -389,6 +389,7 @@ pub fn validate_business_cycle_plan(
             InformationDraft {
                 holder,
                 source_kind: InformationSourceKind::Accountant,
+                topic: crate::intelligence::InformationTopic::FinancialPerformance,
                 source_entity: None,
                 subject: EntityRef::Business(plan.business),
                 observed_at: plan.occurred_at,

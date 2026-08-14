@@ -1,10 +1,15 @@
-//! Semantic operation plans and lifecycle state; `operation_system` validates and commits all changes.
+//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
 
+pub(crate) mod operation_execution;
 pub mod operation_system;
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, OperationId, OrganizationId};
+use crate::core::id::{
+    CharacterId, EvidenceId, HistoryEventId, InformationId, InvestigationId, NeighborhoodId,
+    OperationId, OrganizationId,
+};
 use crate::core::time::SimTime;
+use crate::world::Rating;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -149,6 +154,180 @@ pub enum OperationStatus {
     Aborted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationObjectiveOutcome {
+    Achieved,
+    Partial,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationExposureLevel {
+    None,
+    Trace,
+    Witnessed,
+    Identifying,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationExposureFactors {
+    stealth_average: Rating,
+    target_police_presence: Option<Rating>,
+    approach_adjustment: i8,
+    intelligence_mitigation: u8,
+    variance: i8,
+}
+
+impl OperationExposureFactors {
+    pub fn stealth_average(self) -> Rating {
+        self.stealth_average
+    }
+
+    pub fn target_police_presence(self) -> Option<Rating> {
+        self.target_police_presence
+    }
+
+    pub fn approach_adjustment(self) -> i8 {
+        self.approach_adjustment
+    }
+
+    pub fn intelligence_mitigation(self) -> u8 {
+        self.intelligence_mitigation
+    }
+
+    pub fn variance(self) -> i8 {
+        self.variance
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperationExposureRecord {
+    level: OperationExposureLevel,
+    score: i16,
+    factors: OperationExposureFactors,
+    neighborhood: Option<NeighborhoodId>,
+    identified_character: Option<CharacterId>,
+    investigation: Option<InvestigationId>,
+    evidence: BTreeSet<EvidenceId>,
+}
+
+impl OperationExposureRecord {
+    pub fn level(&self) -> OperationExposureLevel {
+        self.level
+    }
+
+    pub fn score(&self) -> i16 {
+        self.score
+    }
+
+    pub fn factors(&self) -> OperationExposureFactors {
+        self.factors
+    }
+
+    pub fn neighborhood(&self) -> Option<NeighborhoodId> {
+        self.neighborhood
+    }
+
+    pub fn identified_character(&self) -> Option<CharacterId> {
+        self.identified_character
+    }
+
+    pub fn investigation(&self) -> Option<InvestigationId> {
+        self.investigation
+    }
+
+    pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
+        &self.evidence
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationResolutionFactors {
+    role_capability_average: Rating,
+    leader_management: Option<Rating>,
+    intelligence_quality: Rating,
+    intelligence_adjustment: i8,
+    target_police_presence: Option<Rating>,
+    approach_adjustment: i8,
+    time_pressure: u8,
+    variance: i8,
+}
+
+impl OperationResolutionFactors {
+    pub fn role_capability_average(self) -> Rating {
+        self.role_capability_average
+    }
+
+    pub fn leader_management(self) -> Option<Rating> {
+        self.leader_management
+    }
+
+    pub fn intelligence_quality(self) -> Rating {
+        self.intelligence_quality
+    }
+
+    pub fn intelligence_adjustment(self) -> i8 {
+        self.intelligence_adjustment
+    }
+
+    pub fn target_police_presence(self) -> Option<Rating> {
+        self.target_police_presence
+    }
+
+    pub fn approach_adjustment(self) -> i8 {
+        self.approach_adjustment
+    }
+
+    pub fn time_pressure(self) -> u8 {
+        self.time_pressure
+    }
+
+    pub fn variance(self) -> i8 {
+        self.variance
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperationResolutionRecord {
+    resolved_at: SimTime,
+    objective_outcome: OperationObjectiveOutcome,
+    execution_margin: i16,
+    factors: OperationResolutionFactors,
+    exposure: OperationExposureRecord,
+    after_action_information: InformationId,
+    history_event: HistoryEventId,
+}
+
+impl OperationResolutionRecord {
+    pub fn resolved_at(&self) -> SimTime {
+        self.resolved_at
+    }
+
+    pub fn objective_outcome(&self) -> OperationObjectiveOutcome {
+        self.objective_outcome
+    }
+
+    pub fn execution_margin(&self) -> i16 {
+        self.execution_margin
+    }
+
+    pub fn factors(&self) -> OperationResolutionFactors {
+        self.factors
+    }
+
+    pub fn exposure(&self) -> &OperationExposureRecord {
+        &self.exposure
+    }
+
+    pub fn after_action_information(&self) -> InformationId {
+        self.after_action_information
+    }
+
+    pub fn history_event(&self) -> HistoryEventId {
+        self.history_event
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OperationIdentity {
     id: OperationId,
@@ -163,6 +342,7 @@ struct OperationCommand {
     objective: OperationObjective,
     approach: OperationApproach,
     roles: BTreeMap<RoleKind, CharacterId>,
+    intelligence: BTreeSet<InformationId>,
     constraints: Vec<OperationConstraint>,
     contingencies: Vec<OperationContingency>,
     scheduled_for: SimTime,
@@ -171,6 +351,10 @@ struct OperationCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OperationRuntime {
     status: OperationStatus,
+    started_at: Option<SimTime>,
+    resolution_due_at: Option<SimTime>,
+    awaiting_decision_since: Option<SimTime>,
+    resolution: Option<OperationResolutionRecord>,
     version: u32,
 }
 
@@ -214,6 +398,10 @@ impl OperationRecord {
         &self.command.roles
     }
 
+    pub fn intelligence(&self) -> &BTreeSet<InformationId> {
+        &self.command.intelligence
+    }
+
     pub fn constraints(&self) -> &[OperationConstraint] {
         &self.command.constraints
     }
@@ -230,6 +418,22 @@ impl OperationRecord {
         self.runtime.status
     }
 
+    pub fn started_at(&self) -> Option<SimTime> {
+        self.runtime.started_at
+    }
+
+    pub fn resolution_due_at(&self) -> Option<SimTime> {
+        self.runtime.resolution_due_at
+    }
+
+    pub fn awaiting_decision_since(&self) -> Option<SimTime> {
+        self.runtime.awaiting_decision_since
+    }
+
+    pub fn resolution(&self) -> Option<&OperationResolutionRecord> {
+        self.runtime.resolution.as_ref()
+    }
+
     pub fn version(&self) -> u32 {
         self.runtime.version
     }
@@ -240,6 +444,8 @@ pub struct OperationState {
     records: BTreeMap<OperationId, OperationRecord>,
     by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
     by_status: BTreeMap<OperationStatus, BTreeSet<OperationId>>,
+    authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
+    in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
 }
 
 impl OperationState {
@@ -277,14 +483,37 @@ impl OperationState {
         self.records.values()
     }
 
+    pub(crate) fn due_authorized_at_or_before(&self, now: SimTime) -> Vec<OperationId> {
+        self.authorized_by_start
+            .range(..=now)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
+    }
+
+    pub(crate) fn due_in_progress_at_or_before(&self, now: SimTime) -> Vec<OperationId> {
+        self.in_progress_by_resolution_due
+            .range(..=now)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
+    }
+
     pub(crate) fn insert(&mut self, record: OperationRecord) {
         let id = record.id();
+        debug_assert_eq!(
+            record.status(),
+            OperationStatus::Authorized,
+            "new operations must enter state as authorized"
+        );
         self.by_organization
             .entry(record.responsible_organization())
             .or_default()
             .insert(id);
         self.by_status
             .entry(record.status())
+            .or_default()
+            .insert(id);
+        self.authorized_by_start
+            .entry(record.scheduled_for())
             .or_default()
             .insert(id);
         let previous = self.records.insert(id, record);
@@ -294,18 +523,188 @@ impl OperationState {
         );
     }
 
-    pub(crate) fn transition(&mut self, id: OperationId, next: OperationStatus) {
+    pub(crate) fn begin(
+        &mut self,
+        id: OperationId,
+        started_at: SimTime,
+        resolution_due_at: SimTime,
+    ) {
         let record = self
             .records
+            .get(&id)
+            .expect("validated operation disappeared before begin commit");
+        assert_eq!(
+            record.status(),
+            OperationStatus::Authorized,
+            "only authorized operations may begin"
+        );
+        let scheduled_for = record.scheduled_for();
+        Self::remove_schedule_index(&mut self.authorized_by_start, scheduled_for, id);
+        {
+            let record = self
+                .records
+                .get_mut(&id)
+                .expect("validated operation disappeared before begin commit");
+            record.runtime.started_at = Some(started_at);
+            record.runtime.resolution_due_at = Some(resolution_due_at);
+            record.runtime.awaiting_decision_since = None;
+        }
+        self.change_status(id, OperationStatus::InProgress);
+        self.in_progress_by_resolution_due
+            .entry(resolution_due_at)
+            .or_default()
+            .insert(id);
+    }
+
+    pub(crate) fn set_awaiting_decision(&mut self, id: OperationId, paused_at: SimTime) {
+        let record = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before decision wait commit");
+        assert_eq!(
+            record.status(),
+            OperationStatus::InProgress,
+            "only in-progress operations may await a decision"
+        );
+        let due_at = record
+            .resolution_due_at()
+            .expect("in-progress operation must have a resolution due time");
+        Self::remove_schedule_index(&mut self.in_progress_by_resolution_due, due_at, id);
+        self.records
             .get_mut(&id)
-            .expect("validated operation disappeared before transition commit");
-        let previous = record.runtime.status;
+            .expect("validated operation disappeared before decision wait commit")
+            .runtime
+            .awaiting_decision_since = Some(paused_at);
+        self.change_status(id, OperationStatus::AwaitingDecision);
+    }
+
+    pub(crate) fn resume(&mut self, id: OperationId, resumed_at: SimTime) {
+        let (due_at, paused_at) = {
+            let record = self
+                .records
+                .get(&id)
+                .expect("validated operation disappeared before resume commit");
+            assert_eq!(
+                record.status(),
+                OperationStatus::AwaitingDecision,
+                "only decision-blocked operations may resume"
+            );
+            (
+                record
+                    .resolution_due_at()
+                    .expect("awaiting operation must retain its resolution due time"),
+                record
+                    .awaiting_decision_since()
+                    .expect("awaiting operation must retain its pause time"),
+            )
+        };
+        let paused_minutes = resumed_at
+            .as_minutes()
+            .checked_sub(paused_at.as_minutes())
+            .expect("operation cannot resume before its decision pause began");
+        let shifted_due_at = SimTime::from_minutes(
+            due_at
+                .as_minutes()
+                .checked_add(paused_minutes)
+                .expect("operation resolution time overflowed u64 minutes"),
+        );
+        {
+            let record = self
+                .records
+                .get_mut(&id)
+                .expect("validated operation disappeared before resume commit");
+            record.runtime.resolution_due_at = Some(shifted_due_at);
+            record.runtime.awaiting_decision_since = None;
+        }
+        self.change_status(id, OperationStatus::InProgress);
+        self.in_progress_by_resolution_due
+            .entry(shifted_due_at)
+            .or_default()
+            .insert(id);
+    }
+
+    pub(crate) fn abort(&mut self, id: OperationId) {
+        let (status, scheduled_for, due_at) = {
+            let record = self
+                .records
+                .get(&id)
+                .expect("validated operation disappeared before abort commit");
+            (
+                record.status(),
+                record.scheduled_for(),
+                record.resolution_due_at(),
+            )
+        };
+        assert!(
+            matches!(
+                status,
+                OperationStatus::Authorized
+                    | OperationStatus::InProgress
+                    | OperationStatus::AwaitingDecision
+            ),
+            "only active operations may abort"
+        );
+        match status {
+            OperationStatus::Authorized => {
+                Self::remove_schedule_index(&mut self.authorized_by_start, scheduled_for, id);
+            }
+            OperationStatus::InProgress => {
+                let due_at = due_at.expect("in-progress operation must have a resolution due time");
+                Self::remove_schedule_index(&mut self.in_progress_by_resolution_due, due_at, id);
+            }
+            OperationStatus::AwaitingDecision
+            | OperationStatus::Completed
+            | OperationStatus::Aborted => {}
+        }
+        self.records
+            .get_mut(&id)
+            .expect("validated operation disappeared before abort commit")
+            .runtime
+            .awaiting_decision_since = None;
+        self.change_status(id, OperationStatus::Aborted);
+    }
+
+    pub(crate) fn complete(&mut self, id: OperationId, resolution: OperationResolutionRecord) {
+        let record = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before completion commit");
+        assert_eq!(
+            record.status(),
+            OperationStatus::InProgress,
+            "only in-progress operations may complete"
+        );
+        let due_at = record
+            .resolution_due_at()
+            .expect("in-progress operation must have a resolution due time");
+        Self::remove_schedule_index(&mut self.in_progress_by_resolution_due, due_at, id);
+        {
+            let record = self
+                .records
+                .get_mut(&id)
+                .expect("validated operation disappeared before completion commit");
+            record.runtime.resolution = Some(resolution);
+            record.runtime.awaiting_decision_since = None;
+        }
+        self.change_status(id, OperationStatus::Completed);
+    }
+
+    fn change_status(&mut self, id: OperationId, next: OperationStatus) {
+        let previous = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before status commit")
+            .status();
         if let Some(ids) = self.by_status.get_mut(&previous) {
             ids.remove(&id);
             if ids.is_empty() {
                 self.by_status.remove(&previous);
             }
         }
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated operation disappeared before status commit");
         record.runtime.status = next;
         record.runtime.version = record
             .runtime
@@ -313,6 +712,19 @@ impl OperationState {
             .checked_add(1)
             .expect("operation version counter exhausted");
         self.by_status.entry(next).or_default().insert(id);
+    }
+
+    fn remove_schedule_index(
+        index: &mut BTreeMap<SimTime, BTreeSet<OperationId>>,
+        time: SimTime,
+        id: OperationId,
+    ) {
+        if let Some(ids) = index.get_mut(&time) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                index.remove(&time);
+            }
+        }
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
@@ -329,6 +741,21 @@ impl OperationState {
                 .get(&record.status())
                 .is_some_and(|ids| ids.contains(&record.id()))
             {
+                return false;
+            }
+            let authorized_indexed = self
+                .authorized_by_start
+                .get(&record.scheduled_for())
+                .is_some_and(|ids| ids.contains(&record.id()));
+            if authorized_indexed != (record.status() == OperationStatus::Authorized) {
+                return false;
+            }
+            let resolution_indexed = record.resolution_due_at().is_some_and(|due_at| {
+                self.in_progress_by_resolution_due
+                    .get(&due_at)
+                    .is_some_and(|ids| ids.contains(&record.id()))
+            });
+            if resolution_indexed != (record.status() == OperationStatus::InProgress) {
                 return false;
             }
         }
@@ -350,6 +777,26 @@ impl OperationState {
                     .get(id)
                     .is_some_and(|record| record.status() == *status)
                 {
+                    return false;
+                }
+            }
+        }
+        for (time, ids) in &self.authorized_by_start {
+            for id in ids {
+                if !self.records.get(id).is_some_and(|record| {
+                    record.status() == OperationStatus::Authorized
+                        && record.scheduled_for() == *time
+                }) {
+                    return false;
+                }
+            }
+        }
+        for (time, ids) in &self.in_progress_by_resolution_due {
+            for id in ids {
+                if !self.records.get(id).is_some_and(|record| {
+                    record.status() == OperationStatus::InProgress
+                        && record.resolution_due_at() == Some(*time)
+                }) {
                     return false;
                 }
             }
@@ -389,6 +836,24 @@ impl OperationState {
                 );
             }
         }
+        for record in self.records.values() {
+            debug_assert_eq!(
+                self.authorized_by_start
+                    .get(&record.scheduled_for())
+                    .is_some_and(|ids| ids.contains(&record.id())),
+                record.status() == OperationStatus::Authorized,
+                "Derived Data Consistency: operation authorization schedule disagrees with lifecycle"
+            );
+            debug_assert_eq!(
+                record.resolution_due_at().is_some_and(|due_at| {
+                    self.in_progress_by_resolution_due
+                        .get(&due_at)
+                        .is_some_and(|ids| ids.contains(&record.id()))
+                }),
+                record.status() == OperationStatus::InProgress,
+                "Derived Data Consistency: operation resolution schedule disagrees with lifecycle"
+            );
+        }
     }
 }
 
@@ -401,6 +866,7 @@ pub struct OperationDraft {
     pub objective: OperationObjective,
     pub approach: OperationApproach,
     pub roles: BTreeMap<RoleKind, CharacterId>,
+    pub intelligence: BTreeSet<InformationId>,
     pub constraints: Vec<OperationConstraint>,
     pub contingencies: Vec<OperationContingency>,
     pub scheduled_for: SimTime,

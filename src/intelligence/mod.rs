@@ -38,6 +38,21 @@ pub enum InformationSourceKind {
     InternalReport,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum InformationTopic {
+    General,
+    TargetSecurity,
+    Personnel,
+    Schedule,
+    PoliceActivity,
+    Route,
+    FinancialPerformance,
+    Relationship,
+    LegalActivity,
+    MarketAccess,
+    OperationalOutcome,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reliability {
     Unknown,
@@ -60,6 +75,7 @@ pub struct InformationRecord {
     id: InformationId,
     holder: KnowledgeHolder,
     source_kind: InformationSourceKind,
+    topic: InformationTopic,
     source_entity: Option<EntityRef>,
     subject: EntityRef,
     observed_at: SimTime,
@@ -79,6 +95,9 @@ impl InformationRecord {
     }
     pub fn source_kind(&self) -> InformationSourceKind {
         self.source_kind
+    }
+    pub fn topic(&self) -> InformationTopic {
+        self.topic
     }
     pub fn source_entity(&self) -> Option<EntityRef> {
         self.source_entity
@@ -110,6 +129,7 @@ impl InformationRecord {
 pub struct IntelligenceState {
     records: BTreeMap<InformationId, InformationRecord>,
     by_holder: BTreeMap<KnowledgeHolder, BTreeSet<InformationId>>,
+    by_holder_topic: BTreeMap<(KnowledgeHolder, InformationTopic), BTreeSet<InformationId>>,
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
 }
@@ -127,6 +147,17 @@ impl IntelligenceState {
     ) -> impl Iterator<Item = &InformationRecord> {
         self.by_holder
             .get(&holder)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.records.get(id))
+    }
+    pub fn information_for_holder_by_topic(
+        &self,
+        holder: KnowledgeHolder,
+        topic: InformationTopic,
+    ) -> impl Iterator<Item = &InformationRecord> {
+        self.by_holder_topic
+            .get(&(holder, topic))
             .into_iter()
             .flatten()
             .filter_map(|id| self.records.get(id))
@@ -160,6 +191,10 @@ impl IntelligenceState {
             .entry(record.holder())
             .or_default()
             .insert(id);
+        self.by_holder_topic
+            .entry((record.holder(), record.topic()))
+            .or_default()
+            .insert(id);
         self.by_subject
             .entry(record.subject())
             .or_default()
@@ -186,6 +221,13 @@ impl IntelligenceState {
                 return false;
             }
             if !self
+                .by_holder_topic
+                .get(&(record.holder(), record.topic()))
+                .is_some_and(|ids| ids.contains(&record.id()))
+            {
+                return false;
+            }
+            if !self
                 .by_subject
                 .get(&record.subject())
                 .is_some_and(|ids| ids.contains(&record.id()))
@@ -197,6 +239,17 @@ impl IntelligenceState {
                     .derived_by_source
                     .get(source)
                     .is_some_and(|ids| ids.contains(&record.id()))
+                {
+                    return false;
+                }
+            }
+        }
+        for ((holder, topic), ids) in &self.by_holder_topic {
+            for id in ids {
+                if !self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| record.holder() == *holder && record.topic() == *topic)
                 {
                     return false;
                 }
@@ -253,6 +306,12 @@ impl IntelligenceState {
                 "Index Completeness: information holder index is missing a record"
             );
             debug_assert!(
+                self.by_holder_topic
+                    .get(&(record.holder(), record.topic()))
+                    .is_some_and(|ids| ids.contains(&record.id())),
+                "Index Completeness: information holder/topic index is missing a record"
+            );
+            debug_assert!(
                 self.by_subject
                     .get(&record.subject())
                     .is_some_and(|ids| ids.contains(&record.id())),
@@ -273,6 +332,7 @@ impl IntelligenceState {
 pub struct InformationDraft {
     pub holder: KnowledgeHolder,
     pub source_kind: InformationSourceKind,
+    pub topic: InformationTopic,
     pub source_entity: Option<EntityRef>,
     pub subject: EntityRef,
     pub observed_at: SimTime,

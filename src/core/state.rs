@@ -19,7 +19,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 10;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 11;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -219,12 +219,12 @@ mod tests {
         Reliability, Specificity,
     };
     use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::jurisdiction_system::validate_set_jurisdiction;
     use crate::legal::{
         Admissibility, EvidenceDraft, EvidenceKind, EvidenceStrength, InvestigationDraft,
+        JurisdictionDraft,
     };
-    use crate::operations::operation_system::{
-        apply_transition, validate_authorize_operation, OperationTransition,
-    };
+    use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{
         OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
         OperationKind, OperationObjective, RoleKind,
@@ -314,6 +314,17 @@ mod tests {
             },
         )
         .expect("neighborhood fixture should validate");
+        validate_set_jurisdiction(
+            &state,
+            JurisdictionDraft {
+                organization: police,
+                neighborhoods: BTreeSet::from([south_ward]),
+                case_intake_priority: rating(80),
+            },
+        )
+        .expect("precinct jurisdiction fixture should validate")
+        .commit(&mut state)
+        .expect("precinct jurisdiction fixture should commit");
 
         let boss = insert_character(
             &registry,
@@ -499,6 +510,7 @@ mod tests {
             InformationDraft {
                 holder: KnowledgeHolder::Character(lieutenant),
                 source_kind: InformationSourceKind::PoliceContact,
+                topic: crate::intelligence::InformationTopic::PoliceActivity,
                 source_entity: Some(EntityRef::Character(detective)),
                 subject: EntityRef::Character(associate),
                 observed_at: state.now(),
@@ -529,21 +541,25 @@ mod tests {
             },
         )
         .expect("investigation fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("validated investigation fixture should commit");
         validate_add_evidence(
             &state,
             EvidenceDraft {
                 investigation,
                 custodian: police,
                 subject: EntityRef::Character(associate),
+                origin: None,
                 kind: EvidenceKind::WitnessTestimony,
                 strength: EvidenceStrength::Strong,
+                reliability: crate::legal::EvidenceReliability::Credible,
                 admissibility: Admissibility::Admissible,
                 discovered_at: state.now(),
             },
         )
         .expect("evidence fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("validated evidence fixture should commit");
 
         let operation = validate_authorize_operation(
             &registry,
@@ -561,6 +577,7 @@ mod tests {
                     (RoleKind::Coordinator, lieutenant),
                     (RoleKind::EntrySpecialist, associate),
                 ]),
+                intelligence: BTreeSet::new(),
                 constraints: vec![OperationConstraint::AvoidCasualties],
                 contingencies: vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
                 scheduled_for: SimTime::from_minutes(10),
@@ -799,8 +816,6 @@ mod tests {
                     .commit(&mut state)
                     .expect("validated resolution should remain current");
                 }
-                13 => apply_transition(&mut state, operation, OperationTransition::Complete)
-                    .expect("in-progress operation should complete"),
                 20 => {
                     validate_record_transaction(
                         &state,
@@ -838,6 +853,47 @@ mod tests {
         assert_eq!(budget.remaining, Money::from_cents(200_000));
         assert_eq!(state.economy().cycles().count(), 3);
         assert_eq!(state.enterprises().cycles_for(enterprise).count(), 3);
+        let operation_resolution = state
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .expect("soak operation should have resolved causally");
+        assert_eq!(
+            operation_resolution.exposure().neighborhood(),
+            Some(enterprise_neighborhood)
+        );
+        let operation_investigation = operation_resolution
+            .exposure()
+            .investigation()
+            .expect("soak operation exposure should route into the precinct jurisdiction");
+        let investigation_owner = state
+            .legal()
+            .get_investigation(operation_investigation)
+            .expect("soak operation investigation should persist")
+            .owner();
+        assert!(matches!(
+            state
+                .world()
+                .get_organization(investigation_owner)
+                .expect("operation investigation owner should exist")
+                .kind(),
+            OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+        ));
+        let operation_evidence = operation_resolution
+            .exposure()
+            .evidence()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(operation_evidence.len(), 1);
+        assert_eq!(
+            state
+                .legal()
+                .get_evidence(operation_evidence[0])
+                .expect("soak operation evidence should persist")
+                .origin(),
+            Some(EntityRef::Operation(operation))
+        );
         let enterprise_net = state
             .enterprises()
             .cycles_for(enterprise)

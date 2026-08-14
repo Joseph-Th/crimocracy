@@ -3,18 +3,24 @@
 use crate::core::time::SimDuration;
 use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
-use crate::operations::{OperationKind, RoleKind, ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS};
+use crate::intelligence::InformationTopic;
+use crate::legal::EvidenceKind;
+use crate::operations::{
+    OperationApproach, OperationKind, RoleKind, ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS,
+};
 use crate::registry::{
-    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, Registry, RegistryBuilder,
+    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, OperationDifficultyDefinition,
+    OperationExecutionDefinition, OperationExposureDefinition, OperationIntelligenceDefinition,
+    Registry, RegistryBuilder,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, ForcePolicy,
     LegalSupportPolicy, PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS,
     ALL_TRAIT_KINDS,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 3;
+pub const CURRENT_CONTENT_REVISION: u32 = 4;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -31,8 +37,15 @@ pub fn build_registry() -> Registry {
     register_policies(&mut builder);
     for kind in ALL_OPERATION_KINDS {
         let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
+        let roles = required_roles(kind);
         builder
-            .register_operation(kind, operation_name(kind), approaches, required_roles(kind))
+            .register_operation(
+                kind,
+                operation_name(kind),
+                approaches,
+                roles.clone(),
+                operation_execution(kind),
+            )
             .unwrap_or_else(|error| panic!("invalid operation registry: {error}"));
     }
     register_enterprises(&mut builder);
@@ -316,4 +329,202 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::RivalInfiltration => &[RoleKind::Coordinator],
     };
     roles.iter().copied().collect()
+}
+
+fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
+    let (duration_minutes, base_difficulty, police_pressure_weight, base_exposure) = match kind {
+        OperationKind::Burglary => (45, 52, 45, 38),
+        OperationKind::Robbery => (25, 55, 55, 58),
+        OperationKind::Hijacking => (35, 50, 45, 48),
+        OperationKind::Smuggling => (90, 48, 35, 35),
+        OperationKind::Intimidation => (20, 42, 25, 42),
+        OperationKind::Kidnapping => (60, 65, 55, 62),
+        OperationKind::Surveillance => (120, 40, 20, 24),
+        OperationKind::Sabotage => (50, 55, 40, 44),
+        OperationKind::Bribery => (30, 45, 20, 28),
+        OperationKind::WitnessPressure => (30, 50, 35, 48),
+        OperationKind::DocumentTheft => (30, 50, 40, 36),
+        OperationKind::GamblingEvent => (180, 38, 30, 45),
+        OperationKind::CovertTransfer => (45, 42, 30, 30),
+        OperationKind::Extraction => (60, 58, 50, 52),
+        OperationKind::RivalInfiltration => (180, 68, 25, 26),
+    };
+    let role_capabilities = BTreeMap::from([
+        (
+            RoleKind::Driver,
+            capability_for_operation_role(RoleKind::Driver),
+        ),
+        (
+            RoleKind::Lookout,
+            capability_for_operation_role(RoleKind::Lookout),
+        ),
+        (
+            RoleKind::EntrySpecialist,
+            capability_for_operation_role(RoleKind::EntrySpecialist),
+        ),
+        (
+            RoleKind::SafeSpecialist,
+            capability_for_operation_role(RoleKind::SafeSpecialist),
+        ),
+        (
+            RoleKind::Muscle,
+            capability_for_operation_role(RoleKind::Muscle),
+        ),
+        (
+            RoleKind::InsideContact,
+            capability_for_operation_role(RoleKind::InsideContact),
+        ),
+        (
+            RoleKind::Coordinator,
+            capability_for_operation_role(RoleKind::Coordinator),
+        ),
+        (
+            RoleKind::Surveillance,
+            capability_for_operation_role(RoleKind::Surveillance),
+        ),
+        (
+            RoleKind::Negotiator,
+            capability_for_operation_role(RoleKind::Negotiator),
+        ),
+    ]);
+    let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
+        .into_iter()
+        .map(|approach| {
+            let adjustment = match approach {
+                OperationApproach::Covert => -5,
+                OperationApproach::Deceptive => -2,
+                OperationApproach::Intimidating => 3,
+                OperationApproach::Violent => 6,
+                OperationApproach::InsideAssistance => -8,
+                OperationApproach::Opportunistic => 4,
+            };
+            (approach, adjustment)
+        })
+        .collect();
+    let exposure_approach_adjustments = ALL_OPERATION_APPROACHES
+        .into_iter()
+        .map(|approach| {
+            let adjustment = match approach {
+                OperationApproach::Covert => -12,
+                OperationApproach::Deceptive => -5,
+                OperationApproach::Intimidating => 10,
+                OperationApproach::Violent => 18,
+                OperationApproach::InsideAssistance => -10,
+                OperationApproach::Opportunistic => 6,
+            };
+            (approach, adjustment)
+        })
+        .collect();
+    OperationExecutionDefinition {
+        difficulty: OperationDifficultyDefinition {
+            duration: SimDuration::from_minutes(duration_minutes),
+            base_difficulty,
+            role_capabilities,
+            approach_difficulty_adjustments,
+            police_pressure_weight,
+            variance_limit: 12,
+            achieved_margin: 5,
+            partial_margin: -12,
+        },
+        intelligence: OperationIntelligenceDefinition {
+            relevant_topics: relevant_operation_intelligence(kind),
+            max_difficulty_reduction: 14,
+            max_useful_age: SimDuration::from_minutes(10_080),
+        },
+        exposure: OperationExposureDefinition {
+            base_exposure,
+            approach_adjustments: exposure_approach_adjustments,
+            police_observation_weight: 35,
+            stealth_mitigation_weight: 45,
+            intelligence_mitigation_weight: 20,
+            variance_limit: 12,
+            trace_threshold: 20,
+            witnessed_threshold: 45,
+            identifying_threshold: 65,
+            evidence_kind: operation_exposure_evidence_kind(kind),
+        },
+    }
+}
+
+fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
+    match kind {
+        OperationKind::Burglary | OperationKind::DocumentTheft | OperationKind::Sabotage => {
+            EvidenceKind::Fingerprint
+        }
+        OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::CovertTransfer
+        | OperationKind::Extraction => EvidenceKind::VehicleDescription,
+        OperationKind::Intimidation
+        | OperationKind::Kidnapping
+        | OperationKind::WitnessPressure => EvidenceKind::WitnessTestimony,
+        OperationKind::Surveillance | OperationKind::RivalInfiltration => {
+            EvidenceKind::Surveillance
+        }
+        OperationKind::Bribery => EvidenceKind::CommunicationRecord,
+        OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
+    }
+}
+
+fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationTopic> {
+    let topics: &[InformationTopic] = match kind {
+        OperationKind::Burglary | OperationKind::DocumentTheft | OperationKind::Sabotage => &[
+            InformationTopic::TargetSecurity,
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
+            InformationTopic::Route,
+        ],
+        OperationKind::Robbery => &[
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
+            InformationTopic::Route,
+        ],
+        OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::CovertTransfer
+        | OperationKind::Extraction => &[
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
+            InformationTopic::Route,
+            InformationTopic::Personnel,
+        ],
+        OperationKind::Intimidation
+        | OperationKind::Kidnapping
+        | OperationKind::WitnessPressure
+        | OperationKind::Bribery
+        | OperationKind::RivalInfiltration => &[
+            InformationTopic::Personnel,
+            InformationTopic::Relationship,
+            InformationTopic::PoliceActivity,
+        ],
+        OperationKind::Surveillance => &[
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::Route,
+            InformationTopic::PoliceActivity,
+        ],
+        OperationKind::GamblingEvent => &[
+            InformationTopic::PoliceActivity,
+            InformationTopic::Personnel,
+            InformationTopic::MarketAccess,
+        ],
+    };
+    topics.iter().copied().collect()
+}
+
+fn capability_for_operation_role(role: RoleKind) -> CapabilityKind {
+    match role {
+        RoleKind::Driver => CapabilityKind::Driving,
+        RoleKind::Lookout => CapabilityKind::Surveillance,
+        RoleKind::EntrySpecialist => CapabilityKind::Burglary,
+        RoleKind::SafeSpecialist => CapabilityKind::Burglary,
+        RoleKind::Muscle => CapabilityKind::Violence,
+        RoleKind::InsideContact => CapabilityKind::SocialAccess,
+        RoleKind::Coordinator => CapabilityKind::Management,
+        RoleKind::Surveillance => CapabilityKind::Surveillance,
+        RoleKind::Negotiator => CapabilityKind::Negotiation,
+    }
 }

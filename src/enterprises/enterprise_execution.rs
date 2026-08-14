@@ -429,6 +429,7 @@ pub fn validate_enterprise_cycle_plan(
             InformationDraft {
                 holder: KnowledgeHolder::Organization(record.organization()),
                 source_kind: InformationSourceKind::AfterAction,
+                topic: crate::intelligence::InformationTopic::FinancialPerformance,
                 source_entity: Some(EntityRef::Character(record.manager())),
                 subject: EntityRef::Enterprise(record.id()),
                 observed_at: plan.occurred_at,

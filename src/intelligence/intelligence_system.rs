@@ -58,6 +58,7 @@ impl ValidatedInformation {
         let InformationDraft {
             holder,
             source_kind,
+            topic,
             source_entity,
             subject,
             observed_at,
@@ -71,6 +72,7 @@ impl ValidatedInformation {
             id,
             holder,
             source_kind,
+            topic,
             source_entity,
             subject,
             observed_at,
@@ -210,6 +212,7 @@ fn build_transfer_draft(
     InformationDraft {
         holder: recipient,
         source_kind: InformationSourceKind::InternalReport,
+        topic: source.topic(),
         source_entity: Some(source.holder().entity()),
         subject: source.subject(),
         observed_at: source.observed_at(),
@@ -354,6 +357,7 @@ mod tests {
             InformationDraft {
                 holder: KnowledgeHolder::Character(character),
                 source_kind: InformationSourceKind::DirectObservation,
+                topic: crate::intelligence::InformationTopic::TargetSecurity,
                 source_entity: None,
                 subject: EntityRef::Organization(organization),
                 observed_at: state.now(),
@@ -422,6 +426,10 @@ mod tests {
             InformationSourceKind::InternalReport
         );
         assert_eq!(
+            transferred_record.topic(),
+            crate::intelligence::InformationTopic::TargetSecurity
+        );
+        assert_eq!(
             transferred_record.source_entity(),
             Some(EntityRef::Character(character))
         );
@@ -430,6 +438,17 @@ mod tests {
             state
                 .intelligence()
                 .information_derived_from(source)
+                .map(InformationRecord::id)
+                .collect::<Vec<_>>(),
+            vec![transferred]
+        );
+        assert_eq!(
+            state
+                .intelligence()
+                .information_for_holder_by_topic(
+                    KnowledgeHolder::Organization(organization),
+                    crate::intelligence::InformationTopic::TargetSecurity,
+                )
                 .map(InformationRecord::id)
                 .collect::<Vec<_>>(),
             vec![transferred]
@@ -562,6 +581,7 @@ mod tests {
             InformationDraft {
                 holder: KnowledgeHolder::Organization(organization),
                 source_kind: InformationSourceKind::InternalReport,
+                topic: crate::intelligence::InformationTopic::General,
                 source_entity: Some(EntityRef::Character(character)),
                 subject: EntityRef::Organization(organization),
                 observed_at: state.now(),
