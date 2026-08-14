@@ -10,9 +10,9 @@ use crate::operations::{
 };
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
-    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, InvestigationWorkDefinitionSpec,
-    OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
-    OperationIntelligenceDefinition, RecruitmentDefinitionSpec,
+    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, ExecutiveBriefDefinitionSpec,
+    InvestigationWorkDefinitionSpec, OperationDifficultyDefinition, OperationExecutionDefinition,
+    OperationExposureDefinition, OperationIntelligenceDefinition, RecruitmentDefinitionSpec,
     RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
     RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
     RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
@@ -25,7 +25,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 6;
+pub const CURRENT_CONTENT_REVISION: u32 = 7;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -62,9 +62,20 @@ pub fn build_registry() -> Registry {
     register_investigation_work(&mut builder);
     register_enterprises(&mut builder);
     register_businesses(&mut builder);
+    register_executive_brief(&mut builder);
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
+}
+
+fn register_executive_brief(builder: &mut RegistryBuilder) {
+    builder
+        .register_executive_brief(ExecutiveBriefDefinitionSpec {
+            cadence: SimDuration::from_minutes(1_440),
+            minimum_source_attention: crate::core::attention::AttentionClass::Notable,
+            max_source_entries: 8,
+        })
+        .unwrap_or_else(|error| panic!("invalid executive brief registry: {error}"));
 }
 
 fn register_recruitment(builder: &mut RegistryBuilder) {

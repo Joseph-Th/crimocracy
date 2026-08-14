@@ -1,6 +1,7 @@
-//! Persisted player-facing reports; `report_system` validates source and entity links before insertion.
+//! Persisted player-facing reports; specialized synthesis modules build artifacts that `report_system` validates before insertion.
 
 pub mod enterprise_financial_report;
+pub mod executive_brief;
 pub mod organization_financial_report;
 pub mod report_system;
 
@@ -22,6 +23,7 @@ pub enum ReportKind {
     Accounting,
     Informant,
     AfterAction,
+    Opportunity,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +85,38 @@ impl ReportState {
             .into_iter()
             .flatten()
             .filter_map(|id| self.records.get(id))
+    }
+    pub fn reports_for_after(
+        &self,
+        recipient: OrganizationId,
+        after: Option<ReportId>,
+    ) -> impl Iterator<Item = &ReportRecord> {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let lower = after.map_or(Unbounded, Excluded);
+        self.by_recipient
+            .get(&recipient)
+            .into_iter()
+            .flat_map(move |ids| ids.range((lower, Unbounded)))
+            .filter_map(|id| self.records.get(id))
+    }
+    pub fn latest_for_kind(
+        &self,
+        recipient: OrganizationId,
+        kind: ReportKind,
+    ) -> Option<&ReportRecord> {
+        self.by_recipient.get(&recipient).and_then(|ids| {
+            ids.iter()
+                .rev()
+                .filter_map(|id| self.records.get(id))
+                .find(|report| report.kind() == kind)
+        })
+    }
+    pub(crate) fn latest_for_recipient(&self, recipient: OrganizationId) -> Option<&ReportRecord> {
+        self.by_recipient
+            .get(&recipient)
+            .and_then(|ids| ids.last())
+            .and_then(|id| self.records.get(id))
     }
     pub(crate) fn reports(&self) -> impl Iterator<Item = &ReportRecord> {
         self.records.values()

@@ -5,8 +5,8 @@ pub mod operation_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, EvidenceId, HistoryEventId, InformationId, InvestigationId, NeighborhoodId,
-    OperationId, OrganizationId,
+    CharacterId, DecisionRequestId, EvidenceId, HistoryEventId, InformationId, InvestigationId,
+    NeighborhoodId, OperationId, OrganizationId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::world::Rating;
@@ -155,6 +155,66 @@ pub enum OperationStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationAbortPhase {
+    BeforeStart,
+    InProgress,
+    AwaitingDecision,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationAbortCause {
+    AuthorityOrder,
+    Decision(DecisionRequestId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationAbortArtifacts {
+    information: InformationId,
+    report: ReportId,
+    history_event: HistoryEventId,
+}
+
+impl OperationAbortArtifacts {
+    pub fn information(self) -> InformationId {
+        self.information
+    }
+
+    pub fn report(self) -> ReportId {
+        self.report
+    }
+
+    pub fn history_event(self) -> HistoryEventId {
+        self.history_event
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationAbortRecord {
+    aborted_at: SimTime,
+    phase: OperationAbortPhase,
+    cause: OperationAbortCause,
+    artifacts: Option<OperationAbortArtifacts>,
+}
+
+impl OperationAbortRecord {
+    pub fn aborted_at(self) -> SimTime {
+        self.aborted_at
+    }
+
+    pub fn phase(self) -> OperationAbortPhase {
+        self.phase
+    }
+
+    pub fn cause(self) -> OperationAbortCause {
+        self.cause
+    }
+
+    pub fn artifacts(self) -> Option<OperationAbortArtifacts> {
+        self.artifacts
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationObjectiveOutcome {
     Achieved,
     Partial,
@@ -295,6 +355,7 @@ pub struct OperationResolutionRecord {
     factors: OperationResolutionFactors,
     exposure: OperationExposureRecord,
     after_action_information: InformationId,
+    after_action_report: ReportId,
     history_event: HistoryEventId,
 }
 
@@ -321,6 +382,10 @@ impl OperationResolutionRecord {
 
     pub fn after_action_information(&self) -> InformationId {
         self.after_action_information
+    }
+
+    pub fn after_action_report(&self) -> ReportId {
+        self.after_action_report
     }
 
     pub fn history_event(&self) -> HistoryEventId {
@@ -355,6 +420,7 @@ struct OperationRuntime {
     resolution_due_at: Option<SimTime>,
     awaiting_decision_since: Option<SimTime>,
     resolution: Option<OperationResolutionRecord>,
+    abort: Option<OperationAbortRecord>,
     version: u32,
 }
 
@@ -432,6 +498,10 @@ impl OperationRecord {
 
     pub fn resolution(&self) -> Option<&OperationResolutionRecord> {
         self.runtime.resolution.as_ref()
+    }
+
+    pub fn abort_record(&self) -> Option<OperationAbortRecord> {
+        self.runtime.abort
     }
 
     pub fn version(&self) -> u32 {
@@ -623,7 +693,7 @@ impl OperationState {
             .insert(id);
     }
 
-    pub(crate) fn abort(&mut self, id: OperationId) {
+    pub(crate) fn abort(&mut self, id: OperationId, abort: OperationAbortRecord) {
         let (status, scheduled_for, due_at) = {
             let record = self
                 .records
@@ -661,6 +731,11 @@ impl OperationState {
             .expect("validated operation disappeared before abort commit")
             .runtime
             .awaiting_decision_since = None;
+        self.records
+            .get_mut(&id)
+            .expect("validated operation disappeared before abort commit")
+            .runtime
+            .abort = Some(abort);
         self.change_status(id, OperationStatus::Aborted);
     }
 
@@ -673,6 +748,10 @@ impl OperationState {
             record.status(),
             OperationStatus::InProgress,
             "only in-progress operations may complete"
+        );
+        assert!(
+            record.abort_record().is_none(),
+            "completed operations cannot retain an abort record"
         );
         let due_at = record
             .resolution_due_at()

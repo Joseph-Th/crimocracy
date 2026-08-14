@@ -12,6 +12,7 @@ use crate::history::HistoryState;
 use crate::intelligence::IntelligenceState;
 use crate::legal::LegalState;
 use crate::operations::OperationState;
+use crate::opportunities::OpportunityState;
 use crate::recruitment::RecruitmentState;
 use crate::reports::ReportState;
 use crate::social::SocialState;
@@ -20,7 +21,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 16;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 21;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -54,6 +55,7 @@ pub struct AppState {
     pub(crate) social: SocialState,
     pub(crate) intelligence: IntelligenceState,
     pub(crate) operations: OperationState,
+    pub(crate) opportunities: OpportunityState,
     pub(crate) recruitment: RecruitmentState,
     pub(crate) legal: LegalState,
     pub(crate) reports: ReportState,
@@ -81,6 +83,7 @@ impl AppState {
             social: SocialState::new(),
             intelligence: IntelligenceState::new(),
             operations: OperationState::new(),
+            opportunities: OpportunityState::new(),
             recruitment: RecruitmentState::new(),
             legal: LegalState::new(),
             reports: ReportState::new(),
@@ -130,6 +133,10 @@ impl AppState {
 
     pub fn operations(&self) -> &OperationState {
         &self.operations
+    }
+
+    pub fn opportunities(&self) -> &OpportunityState {
+        &self.opportunities
     }
 
     pub fn recruitment(&self) -> &RecruitmentState {
@@ -835,6 +842,7 @@ mod tests {
                         .player_organization()
                         .expect("fixture should have player organization");
                     validate_resolve_decision(
+                        &registry,
                         &state,
                         decision,
                         recipient,
@@ -1159,12 +1167,22 @@ mod tests {
         let recipient = state
             .player_organization()
             .expect("fixture should have player organization");
-        let current =
-            validate_resolve_decision(&state, decision, recipient, DecisionResponse::Continue)
-                .expect("first resolution should validate");
-        let stale =
-            validate_resolve_decision(&state, decision, recipient, DecisionResponse::Continue)
-                .expect("second resolution should validate against the same snapshot");
+        let current = validate_resolve_decision(
+            &registry,
+            &state,
+            decision,
+            recipient,
+            DecisionResponse::Continue,
+        )
+        .expect("first resolution should validate");
+        let stale = validate_resolve_decision(
+            &registry,
+            &state,
+            decision,
+            recipient,
+            DecisionResponse::Continue,
+        )
+        .expect("second resolution should validate against the same snapshot");
 
         current
             .commit(&mut state)
@@ -1424,6 +1442,7 @@ mod tests {
         );
 
         validate_resolve_decision(
+            &registry,
             &restored,
             request.decision,
             recipient,

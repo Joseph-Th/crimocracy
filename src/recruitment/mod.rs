@@ -3,7 +3,8 @@
 pub mod recruitment_system;
 
 use crate::core::id::{
-    CharacterId, HistoryEventId, InformationId, MandateId, OrganizationId, RecruitmentAttemptId,
+    CharacterId, DecisionRequestId, HistoryEventId, InformationId, MandateId, OrganizationId,
+    RecruitmentAttemptId,
 };
 use crate::core::time::SimTime;
 use crate::delegation::ResponsibilityScope;
@@ -68,6 +69,16 @@ pub enum RecruitmentPolicySource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecruitmentAuthority {
     ExecutiveApproval,
+    ApprovedDecision {
+        decision: DecisionRequestId,
+        mandate: MandateId,
+        manager: CharacterId,
+        scope: ResponsibilityScope,
+        mandate_version: u32,
+        manager_version: u32,
+        policy: ApprovalPolicy,
+        policy_source: RecruitmentPolicySource,
+    },
     Delegated {
         mandate: MandateId,
         manager: CharacterId,
@@ -239,6 +250,7 @@ pub struct RecruitmentState {
     by_target_organization: BTreeMap<OrganizationId, BTreeSet<RecruitmentAttemptId>>,
     by_candidate_organization:
         BTreeMap<(CharacterId, OrganizationId), BTreeSet<RecruitmentAttemptId>>,
+    by_approval_decision: BTreeMap<DecisionRequestId, RecruitmentAttemptId>,
 }
 
 impl RecruitmentState {
@@ -306,6 +318,15 @@ impl RecruitmentState {
             .and_then(|id| self.records.get(id))
     }
 
+    pub fn attempt_for_approval_decision(
+        &self,
+        decision: DecisionRequestId,
+    ) -> Option<&RecruitmentAttemptRecord> {
+        self.by_approval_decision
+            .get(&decision)
+            .and_then(|id| self.records.get(id))
+    }
+
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
         self.records.values()
     }
@@ -328,6 +349,16 @@ impl RecruitmentState {
             .entry((record.candidate(), record.target_organization()))
             .or_default()
             .insert(id);
+        match record.authority() {
+            RecruitmentAuthority::ApprovedDecision { decision, .. } => {
+                let previous = self.by_approval_decision.insert(decision, id);
+                debug_assert!(
+                    previous.is_none(),
+                    "Index Uniqueness: approval decision already has a recruitment attempt"
+                );
+            }
+            RecruitmentAuthority::ExecutiveApproval | RecruitmentAuthority::Delegated { .. } => {}
+        }
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -356,6 +387,15 @@ impl RecruitmentState {
                     .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
+            }
+            match record.authority() {
+                RecruitmentAuthority::ApprovedDecision { decision, .. } => {
+                    if self.by_approval_decision.get(&decision) != Some(&id) {
+                        return false;
+                    }
+                }
+                RecruitmentAuthority::ExecutiveApproval
+                | RecruitmentAuthority::Delegated { .. } => {}
             }
         }
         for (candidate, ids) in &self.by_candidate {
@@ -400,6 +440,19 @@ impl RecruitmentState {
                 }
             }
         }
+        for (decision, id) in &self.by_approval_decision {
+            if !self.records.get(id).is_some_and(|record| {
+                matches!(
+                    record.authority(),
+                    RecruitmentAuthority::ApprovedDecision {
+                        decision: record_decision,
+                        ..
+                    } if record_decision == *decision
+                )
+            }) {
+                return false;
+            }
+        }
         true
     }
 
@@ -433,6 +486,13 @@ impl RecruitmentState {
                     .is_some_and(|ids| ids.contains(&record.id())),
                 "Index Completeness: recruitment candidate-organization index is missing an attempt"
             );
+            if let RecruitmentAuthority::ApprovedDecision { decision, .. } = record.authority() {
+                debug_assert_eq!(
+                    self.by_approval_decision.get(&decision),
+                    Some(&record.id()),
+                    "Index Completeness: recruitment approval index is missing an attempt"
+                );
+            }
         }
     }
 }

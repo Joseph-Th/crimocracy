@@ -1,16 +1,27 @@
 //! Operation validation and lifecycle execution; sibling records contain no resolution logic.
 
+use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{CharacterId, InformationId, OperationId, OrganizationId};
+use crate::core::id::{CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId};
 use crate::core::state::AppState;
-use crate::intelligence::KnowledgeHolder;
+use crate::core::time::SimTime;
+use crate::history::history_system::{validate_record_event, ValidatedHistoryEvent};
+use crate::history::{HistoryEventDraft, HistoryEventKind};
+use crate::intelligence::intelligence_system::{validate_record_information, ValidatedInformation};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crate::operations::{
+    OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationCommand, OperationDraft, OperationIdentity, OperationRecord, OperationRuntime,
     OperationStatus, RoleKind,
 };
 use crate::registry::Registry;
+use crate::reports::report_system::{validate_record_report, ValidatedReport};
+use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::Lifecycle;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +89,30 @@ pub enum OperationError {
         status: OperationStatus,
         transition: OperationTransition,
     },
+    #[error(
+        "operation {operation} changed after abort validation; expected version {expected}, found {found}"
+    )]
+    StaleAbortOperation {
+        operation: OperationId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
+        "operation {operation} abort was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleAbortTime {
+        operation: OperationId,
+        expected: SimTime,
+        found: SimTime,
+    },
+    #[error("operation {operation} cannot use abort cause {cause:?} from status {status:?}")]
+    InvalidAbortCause {
+        operation: OperationId,
+        status: OperationStatus,
+        cause: OperationAbortCause,
+    },
+    #[error("operation {operation} abort artifacts could not be validated against current state")]
+    InvalidAbortArtifacts { operation: OperationId },
 }
 
 #[derive(Debug)]
@@ -165,6 +200,7 @@ impl ValidatedOperation {
                 resolution_due_at: None,
                 awaiting_decision_since: None,
                 resolution: None,
+                abort: None,
                 version: 1,
             },
         });
@@ -354,7 +390,7 @@ pub fn apply_transition(
         }
         (OperationStatus::Authorized, OperationTransition::Abort)
         | (OperationStatus::InProgress, OperationTransition::Abort) => {
-            state.operations.abort(operation);
+            return validate_authority_abort_operation(state, operation)?.commit(state);
         }
         (OperationStatus::InProgress, OperationTransition::Begin)
         | (OperationStatus::AwaitingDecision, OperationTransition::Begin)
@@ -369,12 +405,242 @@ pub fn apply_transition(
     Ok(())
 }
 
+pub struct ValidatedOperationAbort {
+    operation: OperationId,
+    expected_operation_version: u32,
+    expected_status: OperationStatus,
+    aborted_at: SimTime,
+    phase: OperationAbortPhase,
+    cause: OperationAbortCause,
+    information: Option<ValidatedInformation>,
+    report: Option<ValidatedReport>,
+    history: Option<ValidatedHistoryEvent>,
+}
+
+impl ValidatedOperationAbort {
+    pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
+        let record = state
+            .operations
+            .get_operation(self.operation)
+            .ok_or(OperationError::MissingOperation(self.operation))?;
+        if record.version() != self.expected_operation_version {
+            return Err(OperationError::StaleAbortOperation {
+                operation: self.operation,
+                expected: self.expected_operation_version,
+                found: record.version(),
+            });
+        }
+        if record.status() != self.expected_status {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
+        }
+        if state.now() != self.aborted_at {
+            return Err(OperationError::StaleAbortTime {
+                operation: self.operation,
+                expected: self.aborted_at,
+                found: state.now(),
+            });
+        }
+        if let OperationAbortCause::Decision(decision) = self.cause {
+            if state.decisions.pending_for_operation(self.operation) != Some(decision) {
+                return Err(OperationError::InvalidAbortCause {
+                    operation: self.operation,
+                    status: record.status(),
+                    cause: self.cause,
+                });
+            }
+        }
+
+        let artifacts = match (self.information, self.report, self.history) {
+            (None, None, None) => None,
+            (Some(information), Some(report), Some(history)) => {
+                let information = information.commit(state);
+                let history_event = history.commit(state);
+                let report = report.commit(state);
+                Some(OperationAbortArtifacts {
+                    information,
+                    report,
+                    history_event,
+                })
+            }
+            (None, Some(_), _) | (None, _, Some(_)) | (Some(_), None, _) | (Some(_), _, None) => {
+                unreachable!("validated operation abort artifacts are all present or all absent")
+            }
+        };
+        state.operations.abort(
+            self.operation,
+            OperationAbortRecord {
+                aborted_at: self.aborted_at,
+                phase: self.phase,
+                cause: self.cause,
+                artifacts,
+            },
+        );
+        Ok(())
+    }
+}
+
+pub fn validate_authority_abort_operation(
+    state: &AppState,
+    operation: OperationId,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    validate_operation_abort(state, operation, OperationAbortCause::AuthorityOrder)
+}
+
+pub(crate) fn validate_decision_abort_operation(
+    state: &AppState,
+    operation: OperationId,
+    decision: DecisionRequestId,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    validate_operation_abort(state, operation, OperationAbortCause::Decision(decision))
+}
+
+fn validate_operation_abort(
+    state: &AppState,
+    operation: OperationId,
+    cause: OperationAbortCause,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(OperationError::MissingOperation(operation))?;
+    let phase = match (record.status(), cause) {
+        (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
+            OperationAbortPhase::BeforeStart
+        }
+        (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
+            OperationAbortPhase::InProgress
+        }
+        (OperationStatus::AwaitingDecision, OperationAbortCause::Decision(decision))
+            if state.decisions.pending_for_operation(operation) == Some(decision) =>
+        {
+            OperationAbortPhase::AwaitingDecision
+        }
+        (status, cause) => {
+            return Err(OperationError::InvalidAbortCause {
+                operation,
+                status,
+                cause,
+            });
+        }
+    };
+
+    let (information, report, history) = match phase {
+        OperationAbortPhase::BeforeStart => (None, None, None),
+        OperationAbortPhase::InProgress | OperationAbortPhase::AwaitingDecision => {
+            let summary = build_abort_summary(state, record, cause)?;
+            let entities = abort_entities(record, cause);
+            let information = validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Organization(record.responsible_organization()),
+                    source_kind: InformationSourceKind::AfterAction,
+                    topic: InformationTopic::OperationalOutcome,
+                    source_entity: Some(EntityRef::Character(record.leader())),
+                    subject: EntityRef::Operation(operation),
+                    observed_at: state.now(),
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: summary.clone(),
+                },
+            )
+            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+            let report = validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: record.responsible_organization(),
+                    kind: ReportKind::AfterAction,
+                    title: format!("{} after-action report", record.title()),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Notable,
+                        summary: summary.clone(),
+                        sources: Vec::new(),
+                        entities: entities.clone(),
+                        decision: None,
+                    }],
+                },
+            )
+            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+            let history = validate_record_event(
+                state,
+                HistoryEventDraft {
+                    occurred_at: state.now(),
+                    kind: HistoryEventKind::Operation,
+                    summary,
+                    entities,
+                },
+            )
+            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+            (Some(information), Some(report), Some(history))
+        }
+    };
+
+    Ok(ValidatedOperationAbort {
+        operation,
+        expected_operation_version: record.version(),
+        expected_status: record.status(),
+        aborted_at: state.now(),
+        phase,
+        cause,
+        information,
+        report,
+        history,
+    })
+}
+
+fn build_abort_summary(
+    state: &AppState,
+    operation: &OperationRecord,
+    cause: OperationAbortCause,
+) -> Result<String, OperationError> {
+    match cause {
+        OperationAbortCause::AuthorityOrder => Ok(format!(
+            "{} was aborted by leadership after execution began. Objective resolution was not completed.",
+            operation.title()
+        )),
+        OperationAbortCause::Decision(decision) => {
+            let decision = state
+                .decisions
+                .get_decision(decision)
+                .ok_or(OperationError::InvalidAbortArtifacts {
+                    operation: operation.id(),
+                })?;
+            Ok(format!(
+                "{} was aborted after leadership reviewed an execution exception: {} Objective resolution was not completed.",
+                operation.title(),
+                decision.summary()
+            ))
+        }
+    }
+}
+
+fn abort_entities(record: &OperationRecord, cause: OperationAbortCause) -> BTreeSet<EntityRef> {
+    let mut entities = BTreeSet::from([
+        EntityRef::Operation(record.id()),
+        EntityRef::Organization(record.responsible_organization()),
+        EntityRef::Character(record.leader()),
+    ]);
+    entities.extend(record.objective().referenced_entities());
+    entities.extend(record.roles().values().copied().map(EntityRef::Character));
+    match cause {
+        OperationAbortCause::AuthorityOrder => {}
+        OperationAbortCause::Decision(decision) => {
+            entities.insert(EntityRef::DecisionRequest(decision));
+        }
+    }
+    entities
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::entity::EntityRef;
-    use crate::core::invariants::validate_invariants;
+    use crate::core::invariants::{validate_invariants, validate_state};
+    use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::time::SimTime;
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{
@@ -529,6 +795,160 @@ mod tests {
             .expect("operation should still exist");
         assert_eq!(record.status(), OperationStatus::Aborted);
         assert_eq!(record.version(), before);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn pre_start_cancellation_records_cause_without_fabricating_execution_artifacts() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.scheduled_for = SimTime::from_minutes(30);
+        let operation = validate_authorize_operation(&registry, &state, draft)
+            .expect("future operation should validate")
+            .commit(&mut state)
+            .expect("future operation should commit");
+
+        validate_authority_abort_operation(&state, operation)
+            .expect("authorized operation should accept a leadership cancellation")
+            .commit(&mut state)
+            .expect("validated pre-start cancellation should commit");
+
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("cancelled operation should persist");
+        let abort = record
+            .abort_record()
+            .expect("cancelled operation should persist its abort record");
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        assert_eq!(abort.aborted_at(), SimTime::ZERO);
+        assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
+        assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
+        assert!(abort.artifacts().is_none());
+        assert!(record.started_at().is_none());
+        assert!(record.resolution_due_at().is_none());
+        assert_eq!(state.reports().reports_for(organization).count(), 0);
+        validate_state(&state).expect("pre-start cancellation should be structurally valid");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn in_progress_authority_abort_records_causal_artifacts_and_survives_save_round_trip() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("operation fixture should validate")
+        .commit(&mut state)
+        .expect("operation fixture should commit");
+        apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+            .expect("operation should begin");
+        state.advance_clock(crate::core::time::SimDuration::from_minutes(5));
+
+        validate_authority_abort_operation(&state, operation)
+            .expect("in-progress operation should accept a leadership abort")
+            .commit(&mut state)
+            .expect("validated in-progress abort should commit");
+
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("aborted operation should persist");
+        let abort = record
+            .abort_record()
+            .expect("started abort should persist its provenance");
+        assert_eq!(abort.aborted_at(), SimTime::from_minutes(5));
+        assert_eq!(abort.phase(), OperationAbortPhase::InProgress);
+        assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
+        assert!(record.resolution().is_none());
+        let artifacts = abort
+            .artifacts()
+            .expect("started abort should produce after-action artifacts");
+        let information = state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("abort information should persist");
+        assert_eq!(
+            information.holder(),
+            KnowledgeHolder::Organization(organization)
+        );
+        assert_eq!(information.topic(), InformationTopic::OperationalOutcome);
+        assert_eq!(information.subject(), EntityRef::Operation(operation));
+        assert!(information.summary().contains("aborted by leadership"));
+        let report = state
+            .reports()
+            .get_report(artifacts.report())
+            .expect("abort report should persist");
+        assert_eq!(report.kind(), ReportKind::AfterAction);
+        assert_eq!(report.recipient(), organization);
+        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.entries()[0].summary, information.summary());
+        let history = state
+            .history()
+            .get_event(artifacts.history_event())
+            .expect("abort history should persist");
+        assert_eq!(history.summary(), information.summary());
+
+        let envelope = build_save(&registry, &state).expect("aborted operation should save");
+        let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("save envelope should deserialize");
+        let restored = restore_save(&registry, decoded).expect("aborted operation should restore");
+        let restored_abort = restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.abort_record())
+            .expect("restored abort provenance should persist");
+        assert_eq!(restored_abort, abort);
+        validate_state(&restored).expect("restored abort state should validate");
+        validate_invariants(&restored);
+    }
+
+    #[test]
+    fn abort_token_rejects_time_staleness_without_partial_mutation() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("operation fixture should validate")
+        .commit(&mut state)
+        .expect("operation fixture should commit");
+        apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+            .expect("operation should begin");
+        let abort = validate_authority_abort_operation(&state, operation)
+            .expect("fresh abort should validate");
+        state.advance_clock(crate::core::time::SimDuration::ONE_MINUTE);
+
+        let error = abort
+            .commit(&mut state)
+            .expect_err("abort token must expire when simulation time advances");
+        assert_eq!(
+            error,
+            OperationError::StaleAbortTime {
+                operation,
+                expected: SimTime::ZERO,
+                found: SimTime::from_minutes(1),
+            }
+        );
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("stale abort must leave operation present");
+        assert_eq!(record.status(), OperationStatus::InProgress);
+        assert!(record.abort_record().is_none());
+        assert_eq!(state.reports().reports_for(organization).count(), 0);
+        assert_eq!(
+            state
+                .history()
+                .events_for(EntityRef::Operation(operation))
+                .count(),
+            0
+        );
+        validate_state(&state).expect("stale abort rejection must leave valid state");
         validate_invariants(&state);
     }
 

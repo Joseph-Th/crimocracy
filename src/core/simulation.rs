@@ -1,6 +1,8 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
 
-use crate::core::id::{BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId};
+use crate::core::id::{
+    BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId, OpportunityId, ReportId,
+};
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -21,7 +23,11 @@ use crate::operations::operation_execution::{
 use crate::operations::operation_system::{
     apply_transition, due_authorized_operations, OperationTransition,
 };
+use crate::opportunities::opportunity_system::expire_due_opportunities;
 use crate::registry::Registry;
+use crate::reports::executive_brief::{
+    decide_executive_brief, is_executive_brief_due, validate_executive_brief_plan,
+};
 use rand_core::RngCore;
 use thiserror::Error;
 
@@ -33,12 +39,17 @@ pub struct TickOutcome {
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
+    pub expired_opportunities: Vec<OpportunityId>,
+    pub executive_brief: Option<ReportId>,
 }
 
 pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Simulation speed is an adapter concern. The canonical pipeline always advances one minute,
     // so normal/fast/very-fast modes call the exact same deterministic path more often.
     state.advance_clock(SimDuration::ONE_MINUTE);
+    // Opportunity expiry runs before other due work so its durable lifecycle report is available
+    // to every same-minute consumer, including the executive brief synthesized at the end.
+    let expired_opportunities = expire_due_opportunities(registry, state);
     let started_operations = due_authorized_operations(state);
     for operation in &started_operations {
         apply_transition(registry, state, *operation, OperationTransition::Begin)
@@ -135,6 +146,18 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated enterprise cycle must commit atomically");
         enterprise_cycles.push(cycle);
     }
+    // Executive synthesis runs last so a due brief sees every report and decision created by
+    // operational, investigative, and financial work that resolved in the same simulation minute.
+    let executive_brief = state.player_organization().and_then(|recipient| {
+        is_executive_brief_due(registry, state.now()).then(|| {
+            let plan = decide_executive_brief(registry, state, recipient)
+                .expect("due player executive brief must produce a valid synthesis plan");
+            validate_executive_brief_plan(state, plan)
+                .expect("fresh executive brief plan must validate")
+                .commit(state)
+                .expect("validated executive brief must commit atomically")
+        })
+    });
     validate_invariants(state);
     TickOutcome {
         now: state.now(),
@@ -143,6 +166,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         resolved_investigation_work,
         business_cycles,
         enterprise_cycles,
+        expired_opportunities,
+        executive_brief,
     }
 }
 

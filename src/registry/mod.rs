@@ -1,5 +1,6 @@
 //! Immutable code-owned definitions and validated lookup tables loaded once at startup.
 
+use crate::core::attention::AttentionClass;
 use crate::core::time::SimDuration;
 use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
 use crate::finance::Money;
@@ -570,6 +571,34 @@ impl BusinessDefinition {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutiveBriefDefinitionSpec {
+    pub cadence: SimDuration,
+    pub minimum_source_attention: AttentionClass,
+    pub max_source_entries: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutiveBriefDefinition {
+    cadence: SimDuration,
+    minimum_source_attention: AttentionClass,
+    max_source_entries: u16,
+}
+
+impl ExecutiveBriefDefinition {
+    pub fn cadence(self) -> SimDuration {
+        self.cadence
+    }
+
+    pub fn minimum_source_attention(self) -> AttentionClass {
+        self.minimum_source_attention
+    }
+
+    pub fn max_source_entries(self) -> u16 {
+        self.max_source_entries
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Registry {
     content_revision: u32,
@@ -582,6 +611,7 @@ pub struct Registry {
     investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
+    executive_brief: ExecutiveBriefDefinition,
 }
 
 impl Registry {
@@ -633,6 +663,9 @@ impl Registry {
         self.businesses
             .get(&kind)
             .unwrap_or_else(|| panic!("missing business definition: {kind:?}"))
+    }
+    pub fn executive_brief(&self) -> ExecutiveBriefDefinition {
+        self.executive_brief
     }
     pub(crate) fn default_policies(&self) -> BTreeMap<PolicyKind, PolicySetting> {
         self.policies
@@ -747,6 +780,16 @@ pub(crate) enum RegistryBuildError {
     MissingEnterprise(EnterpriseKind),
     #[error("missing business definition: {0:?}")]
     MissingBusiness(BusinessKind),
+    #[error("duplicate executive brief definition")]
+    DuplicateExecutiveBrief,
+    #[error("missing executive brief definition")]
+    MissingExecutiveBrief,
+    #[error("executive brief cadence must be positive")]
+    InvalidExecutiveBriefCadence,
+    #[error("executive brief must suppress routine source entries")]
+    InvalidExecutiveBriefAttention,
+    #[error("executive brief detailed source-entry limit must be in 1..=100")]
+    InvalidExecutiveBriefEntryLimit,
     #[error("business {0:?} must have a positive cycle duration")]
     InvalidBusinessCycle(BusinessKind),
     #[error("business {0:?} contains a negative authored economic value")]
@@ -776,6 +819,7 @@ pub(crate) struct RegistryBuilder {
     investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
+    executive_brief: Option<ExecutiveBriefDefinition>,
 }
 
 impl RegistryBuilder {
@@ -794,6 +838,29 @@ impl RegistryBuilder {
         {
             return Err(RegistryBuildError::DuplicateCapability(kind));
         }
+        Ok(())
+    }
+    pub(crate) fn register_executive_brief(
+        &mut self,
+        spec: ExecutiveBriefDefinitionSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.executive_brief.is_some() {
+            return Err(RegistryBuildError::DuplicateExecutiveBrief);
+        }
+        if spec.cadence.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidExecutiveBriefCadence);
+        }
+        if spec.minimum_source_attention == AttentionClass::Routine {
+            return Err(RegistryBuildError::InvalidExecutiveBriefAttention);
+        }
+        if !(1..=100).contains(&spec.max_source_entries) {
+            return Err(RegistryBuildError::InvalidExecutiveBriefEntryLimit);
+        }
+        self.executive_brief = Some(ExecutiveBriefDefinition {
+            cadence: spec.cadence,
+            minimum_source_attention: spec.minimum_source_attention,
+            max_source_entries: spec.max_source_entries,
+        });
         Ok(())
     }
     pub(crate) fn register_recruitment(
@@ -1293,6 +1360,9 @@ impl RegistryBuilder {
         let recruitment = self
             .recruitment
             .ok_or(RegistryBuildError::MissingRecruitment)?;
+        let executive_brief = self
+            .executive_brief
+            .ok_or(RegistryBuildError::MissingExecutiveBrief)?;
         Ok(Registry {
             content_revision,
             capabilities: self.capabilities,
@@ -1304,6 +1374,7 @@ impl RegistryBuilder {
             investigation_work: self.investigation_work,
             enterprises: self.enterprises,
             businesses: self.businesses,
+            executive_brief,
         })
     }
 }
@@ -1409,6 +1480,55 @@ mod tests {
             .any(|rule| rule.trait_kind == TraitKind::EasilyFrightened
                 && rule.approach == Some(RecruitmentApproach::Protection)
                 && rule.adjustment > 0));
+    }
+
+    #[test]
+    fn authored_executive_brief_definition_is_bounded_and_queryable() {
+        let definition = build_registry().executive_brief();
+        assert_eq!(definition.cadence(), SimDuration::from_minutes(1_440));
+        assert_eq!(
+            definition.minimum_source_attention(),
+            AttentionClass::Notable
+        );
+        assert_eq!(definition.max_source_entries(), 8);
+    }
+
+    #[test]
+    fn executive_brief_definition_rejects_invalid_cadence_attention_and_entry_limit() {
+        let valid = ExecutiveBriefDefinitionSpec {
+            cadence: SimDuration::from_minutes(1_440),
+            minimum_source_attention: AttentionClass::Notable,
+            max_source_entries: 8,
+        };
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_executive_brief(ExecutiveBriefDefinitionSpec {
+                cadence: SimDuration::from_minutes(0),
+                ..valid
+            }),
+            Err(RegistryBuildError::InvalidExecutiveBriefCadence)
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_executive_brief(ExecutiveBriefDefinitionSpec {
+                minimum_source_attention: AttentionClass::Routine,
+                ..valid
+            }),
+            Err(RegistryBuildError::InvalidExecutiveBriefAttention)
+        ));
+
+        for max_source_entries in [0, 101] {
+            let mut builder = RegistryBuilder::default();
+            assert!(matches!(
+                builder.register_executive_brief(ExecutiveBriefDefinitionSpec {
+                    max_source_entries,
+                    ..valid
+                }),
+                Err(RegistryBuildError::InvalidExecutiveBriefEntryLimit)
+            ));
+        }
     }
 
     #[test]

@@ -5,11 +5,11 @@ use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
     BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, DecisionRequestId, EnterpriseCycleId,
     EnterpriseId, InformantDisclosureId, InformantId, InformationId, InvestigationId,
-    InvestigationWorkId, LedgerTransactionId, MandateId, OperationId, OrganizationId,
-    RecruitmentAttemptId, ReportId, WitnessStatementId,
+    InvestigationWorkId, LedgerTransactionId, MandateId, OperationId, OpportunityId,
+    OrganizationId, RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
-use crate::decisions::{DecisionResponse, DecisionStatus};
+use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
@@ -34,14 +34,17 @@ use crate::operations::operation_execution::{
 };
 use crate::operations::operation_system::is_information_subject_relevant;
 use crate::operations::{
-    OperationConstraint, OperationContingency, OperationExposureLevel, OperationStatus,
+    OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
+    OperationExposureLevel, OperationStatus,
 };
+use crate::opportunities::OpportunityResolution;
 use crate::recruitment::recruitment_system::{
     calculate_recruitment_factors_from_context, calculate_recruitment_margin,
     classify_recruitment_outcome, select_perceived_legal_pressure_at, RecruitmentFactorContext,
 };
 use crate::recruitment::{RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource};
 use crate::registry::Registry;
+use crate::reports::ReportKind;
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, OrganizationKind,
     PolicyKind, ALL_POLICY_KINDS,
@@ -98,12 +101,20 @@ pub enum StateValidationError {
     InvalidOperationRuntime { operation: OperationId },
     #[error("completed operation {operation} has an invalid after-action information link")]
     InvalidOperationAfterAction { operation: OperationId },
+    #[error("completed operation {operation} has an invalid after-action report link")]
+    InvalidOperationAfterActionReport { operation: OperationId },
+    #[error(
+        "aborted operation {operation} has invalid abort provenance or after-action artifacts"
+    )]
+    InvalidOperationAbort { operation: OperationId },
     #[error("completed operation {operation} has an invalid campaign-history link")]
     InvalidOperationHistory { operation: OperationId },
     #[error("operation {operation} is incompatible with its authored definition")]
     InvalidOperationDefinition { operation: OperationId },
     #[error("operation {operation} has invalid persisted exposure or legal consequences")]
     InvalidOperationExposure { operation: OperationId },
+    #[error("opportunity {opportunity} has invalid persisted provenance or lifecycle state")]
+    InvalidOpportunity { opportunity: OpportunityId },
     #[error("organization {organization} has invalid legal jurisdiction state")]
     InvalidLegalJurisdiction { organization: OrganizationId },
     #[error("investigation {investigation} has invalid investigator staffing")]
@@ -130,6 +141,8 @@ pub enum StateValidationError {
     EmptyDecisionSummary { decision: DecisionRequestId },
     #[error("decision {decision} has no available responses")]
     DecisionHasNoResponses { decision: DecisionRequestId },
+    #[error("decision {decision} has invalid persisted context state")]
+    InvalidDecisionContext { decision: DecisionRequestId },
     #[error("decision {decision} requester {requester} is not operation {operation}'s leader")]
     DecisionRequesterMismatch {
         decision: DecisionRequestId,
@@ -267,6 +280,7 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_social_and_intelligence(state)?;
     validate_recruitment(state)?;
     validate_operations(state)?;
+    validate_opportunities(state)?;
     validate_decisions(state)?;
     validate_delegation(state)?;
     validate_business_economies(state)?;
@@ -365,6 +379,36 @@ pub fn validate_state_against_registry(
                         operation: operation.id(),
                     });
                 }
+            }
+        }
+    }
+    for opportunity in state.opportunities.opportunities() {
+        let context = opportunity.context().operation();
+        let definition = registry.get_operation(context.operation_kind());
+        let report = state.reports.get_report(opportunity.report()).ok_or(
+            StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            },
+        )?;
+        if report.title() != format!("{} opportunity", definition.display_name()) {
+            return Err(StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            });
+        }
+        if let Some(OpportunityResolution::Expired {
+            report: expiry_report,
+            ..
+        }) = opportunity.resolution()
+        {
+            let report = state.reports.get_report(expiry_report).ok_or(
+                StateValidationError::InvalidOpportunity {
+                    opportunity: opportunity.id(),
+                },
+            )?;
+            if report.title() != format!("{} opportunity expired", definition.display_name()) {
+                return Err(StateValidationError::InvalidOpportunity {
+                    opportunity: opportunity.id(),
+                });
             }
         }
     }
@@ -498,6 +542,10 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("intelligence", state.intelligence.has_consistent_indexes()),
         ("recruitment", state.recruitment.has_consistent_indexes()),
         ("operations", state.operations.has_consistent_indexes()),
+        (
+            "opportunities",
+            state.opportunities.has_consistent_indexes(),
+        ),
         ("decisions", state.decisions.has_consistent_indexes()),
         ("delegation", state.delegation.has_consistent_indexes()),
         ("economy", state.economy.has_consistent_indexes()),
@@ -911,6 +959,99 @@ fn validate_recruitment(state: &AppState) -> Result<(), StateValidationError> {
 
         match attempt.authority() {
             RecruitmentAuthority::ExecutiveApproval => {}
+            RecruitmentAuthority::ApprovedDecision {
+                decision,
+                mandate,
+                manager,
+                scope,
+                mandate_version,
+                manager_version,
+                policy,
+                policy_source,
+            } => {
+                let mandate_record = state.delegation.get_mandate(mandate).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                let decision_record = state.decisions.get_decision(decision).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                let approval_context = match decision_record.context() {
+                    DecisionContext::RecruitmentApproval(context) => context,
+                    DecisionContext::OperationException { .. } => {
+                        return Err(StateValidationError::InvalidRecruitmentAttempt {
+                            attempt: attempt.id(),
+                        });
+                    }
+                };
+                let approval_resolution = decision_record.resolution().ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if manager != attempt.recruiter()
+                    || mandate_record.manager() != manager
+                    || mandate_record.organization() != attempt.target_organization()
+                    || scope
+                        != crate::delegation::ResponsibilityScope::Function(
+                            crate::delegation::ResponsibilityFunction::Personnel,
+                        )
+                    || mandate_version == 0
+                    || mandate_version > mandate_record.version()
+                    || manager_version == 0
+                    || manager_version > recruiter.version()
+                    || policy != ApprovalPolicy::RequireApproval
+                    || decision_record.status() != DecisionStatus::Resolved
+                    || decision_record.requester() != attempt.recruiter()
+                    || decision_record.recipient() != attempt.target_organization()
+                    || approval_resolution.response() != DecisionResponse::Approve
+                    || approval_resolution.resolved_at() != attempt.occurred_at()
+                    || approval_context.target_organization() != attempt.target_organization()
+                    || approval_context.recruiter() != attempt.recruiter()
+                    || approval_context.candidate() != attempt.candidate()
+                    || approval_context.approach() != attempt.approach()
+                    || approval_context.authority().authority().mandate != mandate
+                    || approval_context.authority().authority().manager != manager
+                    || approval_context.authority().authority().scope != scope
+                    || approval_context.authority().mandate_version() != mandate_version
+                    || approval_context.authority().manager_version() != manager_version
+                    || approval_context.authority().policy_source() != policy_source
+                    || state
+                        .recruitment
+                        .attempt_for_approval_decision(decision)
+                        .map(|record| record.id())
+                        != Some(attempt.id())
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                if mandate_version == mandate_record.version()
+                    && !mandate_record.scopes().contains(
+                        &crate::delegation::ResponsibilityScope::Function(
+                            crate::delegation::ResponsibilityFunction::Personnel,
+                        ),
+                    )
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                let valid_policy_source = match policy_source {
+                    RecruitmentPolicySource::Organization(organization) => {
+                        organization == attempt.target_organization()
+                    }
+                    RecruitmentPolicySource::Mandate(source_mandate) => source_mandate == mandate,
+                };
+                if !valid_policy_source {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+            }
             RecruitmentAuthority::Delegated {
                 mandate,
                 manager,
@@ -1141,6 +1282,9 @@ fn validate_recruitment_against_registry(
 }
 
 fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
+    let mut operation_after_action_information = BTreeSet::new();
+    let mut operation_after_action_reports = BTreeSet::new();
+    let mut operation_history_events = BTreeSet::new();
     for operation in state.operations.operations() {
         let organization = state
             .world
@@ -1260,6 +1404,7 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     || operation.resolution_due_at().is_some()
                     || operation.awaiting_decision_since().is_some()
                     || operation.resolution().is_some()
+                    || operation.abort_record().is_some()
                 {
                     return Err(StateValidationError::InvalidOperationRuntime {
                         operation: operation.id(),
@@ -1278,6 +1423,7 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     || started_at > state.now()
                     || operation.awaiting_decision_since().is_some()
                     || operation.resolution().is_some()
+                    || operation.abort_record().is_some()
                 {
                     return Err(StateValidationError::InvalidOperationRuntime {
                         operation: operation.id(),
@@ -1298,6 +1444,7 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     || started_at > paused_at
                     || paused_at > state.now()
                     || operation.resolution().is_some()
+                    || operation.abort_record().is_some()
                 {
                     return Err(StateValidationError::InvalidOperationRuntime {
                         operation: operation.id(),
@@ -1318,26 +1465,61 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     || resolution.resolved_at() < due_at
                     || resolution.resolved_at() > state.now()
                     || operation.awaiting_decision_since().is_some()
+                    || operation.abort_record().is_some()
                 {
                     return Err(StateValidationError::InvalidOperationRuntime {
                         operation: operation.id(),
                     });
                 }
-                let valid_information = state
+                let information = state
                     .intelligence
                     .get_information(resolution.after_action_information())
-                    .is_some_and(|information| {
-                        information.holder()
-                            == KnowledgeHolder::Organization(operation.responsible_organization())
-                            && information.source_kind() == InformationSourceKind::AfterAction
-                            && information.topic() == InformationTopic::OperationalOutcome
-                            && information.source_entity()
-                                == Some(EntityRef::Character(operation.leader()))
-                            && information.subject() == EntityRef::Operation(operation.id())
-                            && information.observed_at() == resolution.resolved_at()
-                    });
-                if !valid_information {
+                    .ok_or(StateValidationError::InvalidOperationAfterAction {
+                        operation: operation.id(),
+                    })?;
+                if !operation_after_action_information.insert(resolution.after_action_information())
+                    || information.holder()
+                        != KnowledgeHolder::Organization(operation.responsible_organization())
+                    || information.source_kind() != InformationSourceKind::AfterAction
+                    || information.topic() != InformationTopic::OperationalOutcome
+                    || information.source_entity() != Some(EntityRef::Character(operation.leader()))
+                    || information.subject() != EntityRef::Operation(operation.id())
+                    || information.observed_at() != resolution.resolved_at()
+                {
                     return Err(StateValidationError::InvalidOperationAfterAction {
+                        operation: operation.id(),
+                    });
+                }
+                let report = state
+                    .reports
+                    .get_report(resolution.after_action_report())
+                    .ok_or(StateValidationError::InvalidOperationAfterActionReport {
+                        operation: operation.id(),
+                    })?;
+                let report_entry = report.entries().first();
+                if !operation_after_action_reports.insert(report.id())
+                    || report.recipient() != operation.responsible_organization()
+                    || report.kind() != ReportKind::AfterAction
+                    || report.title() != format!("{} after-action report", operation.title())
+                    || report.generated_at() != resolution.resolved_at()
+                    || report.entries().len() != 1
+                    || !report_entry.is_some_and(|entry| {
+                        entry.attention == AttentionClass::Notable
+                            && entry.summary == information.summary()
+                            && entry.sources.is_empty()
+                            && entry.decision.is_none()
+                            && entry
+                                .entities
+                                .contains(&EntityRef::Operation(operation.id()))
+                            && entry.entities.contains(&EntityRef::Organization(
+                                operation.responsible_organization(),
+                            ))
+                            && entry
+                                .entities
+                                .contains(&EntityRef::Character(operation.leader()))
+                    })
+                {
+                    return Err(StateValidationError::InvalidOperationAfterActionReport {
                         operation: operation.id(),
                     });
                 }
@@ -1345,7 +1527,8 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     .history
                     .get_event(resolution.history_event())
                     .is_some_and(|event| {
-                        event.kind() == HistoryEventKind::Operation
+                        operation_history_events.insert(event.id())
+                            && event.kind() == HistoryEventKind::Operation
                             && event.occurred_at() == resolution.resolved_at()
                             && event
                                 .entities()
@@ -1365,14 +1548,411 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 validate_operation_exposure_links(state, operation, resolution)?;
             }
             OperationStatus::Aborted => {
-                let execution_times_match =
-                    operation.started_at().is_some() == operation.resolution_due_at().is_some();
-                if !execution_times_match
-                    || operation.awaiting_decision_since().is_some()
-                    || operation.resolution().is_some()
+                if operation.awaiting_decision_since().is_some() || operation.resolution().is_some()
                 {
                     return Err(StateValidationError::InvalidOperationRuntime {
                         operation: operation.id(),
+                    });
+                }
+                let abort = operation.abort_record().ok_or(
+                    StateValidationError::InvalidOperationAbort {
+                        operation: operation.id(),
+                    },
+                )?;
+                validate_operation_abort_links(
+                    state,
+                    operation,
+                    abort,
+                    &mut operation_after_action_information,
+                    &mut operation_after_action_reports,
+                    &mut operation_history_events,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_abort_links(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    abort: crate::operations::OperationAbortRecord,
+    operation_after_action_information: &mut BTreeSet<InformationId>,
+    operation_after_action_reports: &mut BTreeSet<ReportId>,
+    operation_history_events: &mut BTreeSet<crate::core::id::HistoryEventId>,
+) -> Result<(), StateValidationError> {
+    if abort.aborted_at() > state.now() {
+        return Err(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        });
+    }
+
+    match (abort.phase(), abort.cause(), abort.artifacts()) {
+        (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder, None) => {
+            if operation.started_at().is_some() || operation.resolution_due_at().is_some() {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            return Ok(());
+        }
+        (OperationAbortPhase::InProgress, OperationAbortCause::AuthorityOrder, Some(artifacts)) => {
+            let (Some(started_at), Some(due_at)) =
+                (operation.started_at(), operation.resolution_due_at())
+            else {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            };
+            if started_at > due_at || abort.aborted_at() < started_at {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
+        (
+            OperationAbortPhase::AwaitingDecision,
+            OperationAbortCause::Decision(decision_id),
+            Some(artifacts),
+        ) => {
+            let (Some(started_at), Some(due_at)) =
+                (operation.started_at(), operation.resolution_due_at())
+            else {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            };
+            let decision = state.decisions.get_decision(decision_id).ok_or(
+                StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                },
+            )?;
+            let decision_matches = matches!(
+                decision.context(),
+                DecisionContext::OperationException {
+                    operation: decision_operation,
+                    reason: _,
+                } if decision_operation == operation.id()
+            );
+            let resolution =
+                decision
+                    .resolution()
+                    .ok_or(StateValidationError::InvalidOperationAbort {
+                        operation: operation.id(),
+                    })?;
+            if started_at > due_at
+                || abort.aborted_at() < started_at
+                || !decision_matches
+                || decision.status() != DecisionStatus::Resolved
+                || decision.recipient() != operation.responsible_organization()
+                || decision.requester() != operation.leader()
+                || resolution.response() != DecisionResponse::Abort
+                || resolution.resolved_at() != abort.aborted_at()
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
+        (OperationAbortPhase::BeforeStart, _, Some(_))
+        | (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_), None)
+        | (OperationAbortPhase::InProgress, _, None)
+        | (OperationAbortPhase::InProgress, OperationAbortCause::Decision(_), Some(_))
+        | (OperationAbortPhase::AwaitingDecision, _, None)
+        | (OperationAbortPhase::AwaitingDecision, OperationAbortCause::AuthorityOrder, Some(_)) => {
+            return Err(StateValidationError::InvalidOperationAbort {
+                operation: operation.id(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_abort_artifacts(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    abort: crate::operations::OperationAbortRecord,
+    artifacts: crate::operations::OperationAbortArtifacts,
+    operation_after_action_information: &mut BTreeSet<InformationId>,
+    operation_after_action_reports: &mut BTreeSet<ReportId>,
+    operation_history_events: &mut BTreeSet<crate::core::id::HistoryEventId>,
+) -> Result<(), StateValidationError> {
+    let information = state
+        .intelligence
+        .get_information(artifacts.information())
+        .ok_or(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        })?;
+    if !operation_after_action_information.insert(information.id())
+        || information.holder()
+            != KnowledgeHolder::Organization(operation.responsible_organization())
+        || information.source_kind() != InformationSourceKind::AfterAction
+        || information.topic() != InformationTopic::OperationalOutcome
+        || information.source_entity() != Some(EntityRef::Character(operation.leader()))
+        || information.subject() != EntityRef::Operation(operation.id())
+        || information.observed_at() != abort.aborted_at()
+        || information.recorded_at() != abort.aborted_at()
+    {
+        return Err(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        });
+    }
+
+    let report = state.reports.get_report(artifacts.report()).ok_or(
+        StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        },
+    )?;
+    let report_entry = report.entries().first();
+    if !operation_after_action_reports.insert(report.id())
+        || report.recipient() != operation.responsible_organization()
+        || report.kind() != ReportKind::AfterAction
+        || report.title() != format!("{} after-action report", operation.title())
+        || report.generated_at() != abort.aborted_at()
+        || report.entries().len() != 1
+        || !report_entry.is_some_and(|entry| {
+            entry.attention == AttentionClass::Notable
+                && entry.summary == information.summary()
+                && entry.sources.is_empty()
+                && entry.decision.is_none()
+                && entry
+                    .entities
+                    .contains(&EntityRef::Operation(operation.id()))
+                && entry.entities.contains(&EntityRef::Organization(
+                    operation.responsible_organization(),
+                ))
+                && entry
+                    .entities
+                    .contains(&EntityRef::Character(operation.leader()))
+                && match abort.cause() {
+                    OperationAbortCause::AuthorityOrder => true,
+                    OperationAbortCause::Decision(decision) => entry
+                        .entities
+                        .contains(&EntityRef::DecisionRequest(decision)),
+                }
+        })
+    {
+        return Err(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        });
+    }
+
+    let history = state.history.get_event(artifacts.history_event()).ok_or(
+        StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        },
+    )?;
+    if !operation_history_events.insert(history.id())
+        || history.kind() != HistoryEventKind::Operation
+        || history.occurred_at() != abort.aborted_at()
+        || history.summary() != information.summary()
+        || !history
+            .entities()
+            .contains(&EntityRef::Operation(operation.id()))
+        || !history.entities().contains(&EntityRef::Organization(
+            operation.responsible_organization(),
+        ))
+        || !history
+            .entities()
+            .contains(&EntityRef::Character(operation.leader()))
+        || match abort.cause() {
+            OperationAbortCause::AuthorityOrder => false,
+            OperationAbortCause::Decision(decision) => !history
+                .entities()
+                .contains(&EntityRef::DecisionRequest(decision)),
+        }
+    {
+        return Err(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_opportunities(state: &AppState) -> Result<(), StateValidationError> {
+    for opportunity in state.opportunities.opportunities() {
+        let organization = state
+            .world
+            .get_organization(opportunity.organization())
+            .ok_or(StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            })?;
+        let context = opportunity.context().operation();
+        if organization.kind() != OrganizationKind::Criminal
+            || context.targets().is_empty()
+            || opportunity.source_information().is_empty()
+            || opportunity.summary().trim().is_empty()
+            || opportunity.discovered_at() > state.now()
+            || opportunity.version() == 0
+            || opportunity
+                .valid_until()
+                .is_some_and(|valid_until| valid_until <= opportunity.discovered_at())
+        {
+            return Err(StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            });
+        }
+
+        let mut covered_targets = BTreeSet::new();
+        for target in context.targets() {
+            if !is_entity_present(state, *target) {
+                return Err(StateValidationError::InvalidOpportunity {
+                    opportunity: opportunity.id(),
+                });
+            }
+        }
+        for source in opportunity.source_information() {
+            let information = state.intelligence.get_information(*source).ok_or(
+                StateValidationError::InvalidOpportunity {
+                    opportunity: opportunity.id(),
+                },
+            )?;
+            if information.holder() != KnowledgeHolder::Organization(opportunity.organization())
+                || information.recorded_at() > opportunity.discovered_at()
+                || !context.targets().contains(&information.subject())
+            {
+                return Err(StateValidationError::InvalidOpportunity {
+                    opportunity: opportunity.id(),
+                });
+            }
+            covered_targets.insert(information.subject());
+        }
+        if covered_targets != *context.targets() {
+            return Err(StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            });
+        }
+
+        let report = state.reports.get_report(opportunity.report()).ok_or(
+            StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            },
+        )?;
+        let mut expected_entities = context.targets().clone();
+        expected_entities.insert(EntityRef::Organization(opportunity.organization()));
+        let expected_sources: Vec<_> = opportunity.source_information().iter().copied().collect();
+        if report.recipient() != opportunity.organization()
+            || report.kind() != ReportKind::Opportunity
+            || report.generated_at() != opportunity.discovered_at()
+            || report.entries().len() != 1
+            || !report.entries().first().is_some_and(|entry| {
+                entry.attention == AttentionClass::Notable
+                    && entry.summary == opportunity.summary()
+                    && entry.sources == expected_sources
+                    && entry.entities == expected_entities
+                    && entry.decision.is_none()
+            })
+        {
+            return Err(StateValidationError::InvalidOpportunity {
+                opportunity: opportunity.id(),
+            });
+        }
+
+        match opportunity.resolution() {
+            None => {
+                if opportunity.version() != 1
+                    || opportunity
+                        .valid_until()
+                        .is_some_and(|valid_until| valid_until <= state.now())
+                {
+                    return Err(StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
+                    });
+                }
+            }
+            Some(OpportunityResolution::Dismissed { at }) => {
+                if opportunity.version() != 2
+                    || at < opportunity.discovered_at()
+                    || at > state.now()
+                    || opportunity
+                        .valid_until()
+                        .is_some_and(|valid_until| at >= valid_until)
+                {
+                    return Err(StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
+                    });
+                }
+            }
+            Some(OpportunityResolution::Expired { at, report }) => {
+                let expiry_report = state.reports.get_report(report).ok_or(
+                    StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
+                    },
+                )?;
+                if opportunity.version() != 2
+                    || opportunity.valid_until() != Some(at)
+                    || at > state.now()
+                    || expiry_report.recipient() != opportunity.organization()
+                    || expiry_report.kind() != ReportKind::Opportunity
+                    || expiry_report.generated_at() < at
+                    || expiry_report.generated_at() > state.now()
+                    || expiry_report.entries().len() != 1
+                    || !expiry_report.entries().first().is_some_and(|entry| {
+                        entry.attention == AttentionClass::Notable
+                            && entry.summary
+                                == format!("Opportunity expired: {}", opportunity.summary())
+                            && entry.sources == expected_sources
+                            && entry.entities == expected_entities
+                            && entry.decision.is_none()
+                    })
+                    || state
+                        .opportunities
+                        .opportunity_for_report(report)
+                        .map(|record| record.id())
+                        != Some(opportunity.id())
+                {
+                    return Err(StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
+                    });
+                }
+            }
+            Some(OpportunityResolution::Converted { at, operation }) => {
+                let operation = state.operations.get_operation(operation).ok_or(
+                    StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
+                    },
+                )?;
+                let operation_targets: BTreeSet<_> = operation
+                    .objective()
+                    .referenced_entities()
+                    .into_iter()
+                    .collect();
+                if opportunity.version() != 2
+                    || at < opportunity.discovered_at()
+                    || at > state.now()
+                    || at > operation.scheduled_for()
+                    || opportunity
+                        .valid_until()
+                        .is_some_and(|valid_until| at >= valid_until)
+                    || operation.responsible_organization() != opportunity.organization()
+                    || operation.kind() != context.operation_kind()
+                    || operation_targets != *context.targets()
+                    || state
+                        .opportunities
+                        .opportunity_for_operation(operation.id())
+                        .map(|record| record.id())
+                        != Some(opportunity.id())
+                {
+                    return Err(StateValidationError::InvalidOpportunity {
+                        opportunity: opportunity.id(),
                     });
                 }
             }
@@ -1553,86 +2133,39 @@ fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
             });
         }
 
-        let operation_id = decision.context().operation();
-        let operation = state.operations.get_operation(operation_id).ok_or(
-            StateValidationError::MissingEntity {
-                context: "decision operation",
-                entity: EntityRef::Operation(operation_id),
-            },
-        )?;
-        if operation.leader() != decision.requester() {
-            return Err(StateValidationError::DecisionRequesterMismatch {
-                decision: decision.id(),
-                requester: decision.requester(),
-                operation: operation_id,
-            });
-        }
-        if operation.responsible_organization() != decision.recipient() {
-            return Err(StateValidationError::DecisionRecipientMismatch {
-                decision: decision.id(),
-                recipient: decision.recipient(),
-                operation: operation_id,
-            });
+        if decision.status() == DecisionStatus::Resolved {
+            let resolution = decision
+                .resolution()
+                .expect("resolved decision must contain a resolution");
+            if resolution.resolved_at() < decision.requested_at()
+                || resolution.resolved_at() > state.now()
+            {
+                return Err(StateValidationError::InvalidDecisionChronology {
+                    decision: decision.id(),
+                });
+            }
+            if resolution.resolved_by() != decision.recipient() {
+                return Err(StateValidationError::DecisionResolverMismatch {
+                    decision: decision.id(),
+                    resolver: resolution.resolved_by(),
+                    recipient: decision.recipient(),
+                });
+            }
+            if !decision.options().contains(&resolution.response()) {
+                return Err(StateValidationError::DecisionResponseNotOffered {
+                    decision: decision.id(),
+                    response: resolution.response(),
+                });
+            }
         }
 
-        match decision.status() {
-            DecisionStatus::Pending => {
-                if operation.status() != OperationStatus::AwaitingDecision {
-                    return Err(StateValidationError::PendingDecisionOperationMismatch {
-                        decision: decision.id(),
-                        operation: operation_id,
-                        status: operation.status(),
-                    });
-                }
-                if state.decisions.pending_for_operation(operation_id) != Some(decision.id()) {
-                    return Err(StateValidationError::IndexInconsistency {
-                        subsystem: "decisions",
-                    });
-                }
-            }
-            DecisionStatus::Resolved => {
-                let resolution = decision
-                    .resolution()
-                    .expect("resolved decision must contain a resolution");
-                if resolution.resolved_at() < decision.requested_at()
-                    || resolution.resolved_at() > state.now()
-                {
-                    return Err(StateValidationError::InvalidDecisionChronology {
-                        decision: decision.id(),
-                    });
-                }
-                if resolution.resolved_by() != decision.recipient() {
-                    return Err(StateValidationError::DecisionResolverMismatch {
-                        decision: decision.id(),
-                        resolver: resolution.resolved_by(),
-                        recipient: decision.recipient(),
-                    });
-                }
-                if !decision.options().contains(&resolution.response()) {
-                    return Err(StateValidationError::DecisionResponseNotOffered {
-                        decision: decision.id(),
-                        response: resolution.response(),
-                    });
-                }
-                match resolution.response() {
-                    DecisionResponse::Continue => {
-                        if operation.status() == OperationStatus::AwaitingDecision {
-                            return Err(StateValidationError::PendingDecisionOperationMismatch {
-                                decision: decision.id(),
-                                operation: operation_id,
-                                status: operation.status(),
-                            });
-                        }
-                    }
-                    DecisionResponse::Abort => {
-                        if operation.status() != OperationStatus::Aborted {
-                            return Err(StateValidationError::AbortDecisionOperationMismatch {
-                                decision: decision.id(),
-                                operation: operation_id,
-                            });
-                        }
-                    }
-                }
+        match decision.context() {
+            DecisionContext::OperationException {
+                operation,
+                reason: _,
+            } => validate_operation_decision(state, decision, operation)?,
+            DecisionContext::RecruitmentApproval(context) => {
+                validate_recruitment_approval_decision(state, decision, context)?
             }
         }
     }
@@ -1649,6 +2182,209 @@ fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
             return Err(StateValidationError::AwaitingOperationMissingDecision {
                 operation: operation.id(),
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_decision(
+    state: &AppState,
+    decision: &crate::decisions::DecisionRequestRecord,
+    operation_id: OperationId,
+) -> Result<(), StateValidationError> {
+    let operation = state.operations.get_operation(operation_id).ok_or(
+        StateValidationError::MissingEntity {
+            context: "decision operation",
+            entity: EntityRef::Operation(operation_id),
+        },
+    )?;
+    if decision.options().len() != 2
+        || !decision.options().contains(&DecisionResponse::Continue)
+        || !decision.options().contains(&DecisionResponse::Abort)
+    {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
+    }
+    if operation.leader() != decision.requester() {
+        return Err(StateValidationError::DecisionRequesterMismatch {
+            decision: decision.id(),
+            requester: decision.requester(),
+            operation: operation_id,
+        });
+    }
+    if operation.responsible_organization() != decision.recipient() {
+        return Err(StateValidationError::DecisionRecipientMismatch {
+            decision: decision.id(),
+            recipient: decision.recipient(),
+            operation: operation_id,
+        });
+    }
+
+    match decision.status() {
+        DecisionStatus::Pending => {
+            if operation.status() != OperationStatus::AwaitingDecision {
+                return Err(StateValidationError::PendingDecisionOperationMismatch {
+                    decision: decision.id(),
+                    operation: operation_id,
+                    status: operation.status(),
+                });
+            }
+            if state.decisions.pending_for_operation(operation_id) != Some(decision.id()) {
+                return Err(StateValidationError::IndexInconsistency {
+                    subsystem: "decisions",
+                });
+            }
+        }
+        DecisionStatus::Resolved => {
+            let resolution = decision
+                .resolution()
+                .expect("resolved decision must contain a resolution");
+            match resolution.response() {
+                DecisionResponse::Continue => {
+                    if operation.status() == OperationStatus::AwaitingDecision {
+                        return Err(StateValidationError::PendingDecisionOperationMismatch {
+                            decision: decision.id(),
+                            operation: operation_id,
+                            status: operation.status(),
+                        });
+                    }
+                }
+                DecisionResponse::Abort => {
+                    let abort = operation.abort_record();
+                    if operation.status() != OperationStatus::Aborted
+                        || !abort.is_some_and(|abort| {
+                            abort.cause() == OperationAbortCause::Decision(decision.id())
+                                && abort.phase() == OperationAbortPhase::AwaitingDecision
+                                && abort.aborted_at() == resolution.resolved_at()
+                        })
+                    {
+                        return Err(StateValidationError::AbortDecisionOperationMismatch {
+                            decision: decision.id(),
+                            operation: operation_id,
+                        });
+                    }
+                }
+                DecisionResponse::Approve | DecisionResponse::Reject => {
+                    return Err(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_recruitment_approval_decision(
+    state: &AppState,
+    decision: &crate::decisions::DecisionRequestRecord,
+    context: crate::decisions::RecruitmentApprovalContext,
+) -> Result<(), StateValidationError> {
+    if decision.options().len() != 2
+        || !decision.options().contains(&DecisionResponse::Approve)
+        || !decision.options().contains(&DecisionResponse::Reject)
+        || decision.requester() != context.recruiter()
+        || decision.recipient() != context.target_organization()
+    {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
+    }
+    let organization = state
+        .world
+        .get_organization(context.target_organization())
+        .ok_or(StateValidationError::MissingEntity {
+            context: "recruitment approval organization",
+            entity: EntityRef::Organization(context.target_organization()),
+        })?;
+    let recruiter = state.world.get_character(context.recruiter()).ok_or(
+        StateValidationError::MissingEntity {
+            context: "recruitment approval recruiter",
+            entity: EntityRef::Character(context.recruiter()),
+        },
+    )?;
+    if state.world.get_character(context.candidate()).is_none() {
+        return Err(StateValidationError::MissingEntity {
+            context: "recruitment approval candidate",
+            entity: EntityRef::Character(context.candidate()),
+        });
+    }
+    let authority = context.authority();
+    let mandate_authority = authority.authority();
+    let mandate = state
+        .delegation
+        .get_mandate(mandate_authority.mandate)
+        .ok_or(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        })?;
+    let valid_policy_source = match authority.policy_source() {
+        RecruitmentPolicySource::Organization(source) => source == context.target_organization(),
+        RecruitmentPolicySource::Mandate(source) => source == mandate_authority.mandate,
+    };
+    if organization.kind() != OrganizationKind::Criminal
+        || mandate_authority.manager != context.recruiter()
+        || mandate_authority.scope
+            != ResponsibilityScope::Function(ResponsibilityFunction::Personnel)
+        || mandate.manager() != context.recruiter()
+        || mandate.organization() != context.target_organization()
+        || authority.mandate_version() == 0
+        || authority.mandate_version() > mandate.version()
+        || authority.manager_version() == 0
+        || authority.manager_version() > recruiter.version()
+        || !valid_policy_source
+    {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
+    }
+
+    let linked_attempt = state
+        .recruitment
+        .attempt_for_approval_decision(decision.id());
+    match decision.status() {
+        DecisionStatus::Pending => {
+            if state.decisions.pending_for_recruitment_approval(
+                context.target_organization(),
+                context.recruiter(),
+                context.candidate(),
+            ) != Some(decision.id())
+                || linked_attempt.is_some()
+            {
+                return Err(StateValidationError::InvalidDecisionContext {
+                    decision: decision.id(),
+                });
+            }
+        }
+        DecisionStatus::Resolved => {
+            let resolution = decision
+                .resolution()
+                .expect("resolved decision must contain a resolution");
+            match resolution.response() {
+                DecisionResponse::Approve => {
+                    let attempt =
+                        linked_attempt.ok_or(StateValidationError::InvalidDecisionContext {
+                            decision: decision.id(),
+                        })?;
+                    if attempt.occurred_at() != resolution.resolved_at() {
+                        return Err(StateValidationError::InvalidDecisionContext {
+                            decision: decision.id(),
+                        });
+                    }
+                }
+                DecisionResponse::Reject => {
+                    if linked_attempt.is_some() {
+                        return Err(StateValidationError::InvalidDecisionContext {
+                            decision: decision.id(),
+                        });
+                    }
+                }
+                DecisionResponse::Continue | DecisionResponse::Abort => {
+                    return Err(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -2800,6 +3536,7 @@ pub fn validate_invariants(state: &AppState) {
     state.intelligence.debug_validate_indexes();
     state.recruitment.debug_validate_indexes();
     state.operations.debug_validate_indexes();
+    state.opportunities.debug_validate_indexes();
     state.decisions.debug_validate_indexes();
     state.delegation.debug_validate_indexes();
     state.economy.debug_validate_indexes();
@@ -2818,6 +3555,10 @@ pub fn validate_invariants(state: &AppState) {
     debug_assert!(
         validate_operations(state).is_ok(),
         "Operation Runtime Validity: operation lifecycle, schedules, after-action knowledge, or history are inconsistent"
+    );
+    debug_assert!(
+        validate_opportunities(state).is_ok(),
+        "Opportunity Runtime Validity: provenance, expiry schedules, reports, or converted operation links are inconsistent"
     );
     debug_assert!(
         validate_recruitment(state).is_ok(),
@@ -3171,97 +3912,10 @@ pub fn validate_invariants(state: &AppState) {
         }
     }
 
-    for decision in state.decisions.decisions() {
-        debug_assert!(
-            state.world.get_organization(decision.recipient()).is_some(),
-            "Record Reference Validity: decision recipient does not exist"
-        );
-        debug_assert!(
-            state.world.get_character(decision.requester()).is_some(),
-            "Record Reference Validity: decision requester does not exist"
-        );
-        debug_assert!(
-            !decision.summary().trim().is_empty(),
-            "Lifecycle Validity: decision summary is empty"
-        );
-        debug_assert!(
-            !decision.options().is_empty(),
-            "Lifecycle Validity: decision has no available responses"
-        );
-        match decision.attention() {
-            AttentionClass::Exception | AttentionClass::Crisis => {}
-            AttentionClass::Routine | AttentionClass::Notable => debug_assert!(
-                false,
-                "Lifecycle Validity: pending authority decision has non-interrupting attention"
-            ),
-        }
-        debug_assert!(
-            decision.requested_at() <= state.now(),
-            "Lifecycle Validity: decision request occurs in the future"
-        );
-
-        let operation_id = decision.context().operation();
-        let operation = state
-            .operations
-            .get_operation(operation_id)
-            .expect("Record Reference Validity: decision operation does not exist");
-        debug_assert_eq!(
-            operation.leader(),
-            decision.requester(),
-            "Ownership Exclusivity: decision requester is not operation leader"
-        );
-        debug_assert_eq!(
-            operation.responsible_organization(),
-            decision.recipient(),
-            "Ownership Exclusivity: decision recipient does not own operation"
-        );
-
-        match decision.status() {
-            DecisionStatus::Pending => {
-                debug_assert_eq!(
-                    operation.status(),
-                    OperationStatus::AwaitingDecision,
-                    "Lifecycle Validity: pending decision operation is not awaiting input"
-                );
-                debug_assert_eq!(
-                    state.decisions.pending_for_operation(operation_id),
-                    Some(decision.id()),
-                    "Index Completeness: pending operation decision index is missing decision"
-                );
-            }
-            DecisionStatus::Resolved => {
-                let resolution = decision
-                    .resolution()
-                    .expect("Lifecycle Validity: resolved decision has no resolution");
-                debug_assert!(
-                    resolution.resolved_at() >= decision.requested_at()
-                        && resolution.resolved_at() <= state.now(),
-                    "Lifecycle Validity: decision resolution chronology is invalid"
-                );
-                debug_assert_eq!(
-                    resolution.resolved_by(),
-                    decision.recipient(),
-                    "Ownership Exclusivity: decision was resolved by a foreign organization"
-                );
-                debug_assert!(
-                    decision.options().contains(&resolution.response()),
-                    "Lifecycle Validity: decision resolution was not an offered response"
-                );
-                match resolution.response() {
-                    DecisionResponse::Continue => debug_assert_ne!(
-                        operation.status(),
-                        OperationStatus::AwaitingDecision,
-                        "Lifecycle Validity: resolved continue decision left operation awaiting input"
-                    ),
-                    DecisionResponse::Abort => debug_assert_eq!(
-                        operation.status(),
-                        OperationStatus::Aborted,
-                        "Lifecycle Validity: resolved abort decision did not abort operation"
-                    ),
-                }
-            }
-        }
-    }
+    debug_assert!(
+        validate_decisions(state).is_ok(),
+        "Lifecycle Validity: decision subsystem failed release-safe validation"
+    );
 
     for operation in state
         .operations

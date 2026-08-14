@@ -1,7 +1,9 @@
 //! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, InformationId, OrganizationId, RecruitmentAttemptId};
+use crate::core::id::{
+    CharacterId, DecisionRequestId, InformationId, OrganizationId, RecruitmentAttemptId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::{
@@ -128,6 +130,11 @@ pub enum RecruitmentError {
         manager: CharacterId,
         policy: ApprovalPolicy,
     },
+    #[error("manager {manager} cannot use an approval decision under policy {policy:?}")]
+    IndependentRecruitmentApprovalNotRequired {
+        manager: CharacterId,
+        policy: ApprovalPolicy,
+    },
     #[error("independent recruitment policy changed after validation")]
     StaleRecruitmentPolicy,
     #[error(transparent)]
@@ -141,9 +148,10 @@ pub enum RecruitmentError {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DelegatedRecruitmentGuard {
+struct MandateRecruitmentGuard {
     authority: ResolvedMandateAuthority,
     policy: ResolvedPolicy,
+    required_policy: ApprovalPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +159,26 @@ pub(crate) struct RecruitmentPlan {
     draft: RecruitmentDraft,
     context: RecruitmentPlanContext,
     dependencies: RecruitmentPlanDependencies,
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedRecruitmentProposal {
+    plan: RecruitmentPlan,
+}
+
+impl ValidatedRecruitmentProposal {
+    pub(crate) fn revalidate_state(&self, state: &AppState) -> Result<(), RecruitmentError> {
+        validate_plan_state_snapshot(state, &self.plan)?;
+        if self.plan.context.outcome == RecruitmentOutcome::Accepted {
+            validate_reassign_character(
+                state,
+                self.plan.draft.candidate,
+                Some(self.plan.draft.target_organization),
+                Some(self.plan.draft.recruiter),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +190,25 @@ struct RecruitmentPlanContext {
     margin: i16,
     outcome: RecruitmentOutcome,
     pressure_information: Option<InformationId>,
+}
+
+pub(crate) fn validate_recruitment_proposal(
+    registry: &Registry,
+    state: &AppState,
+    draft: RecruitmentDraft,
+) -> Result<ValidatedRecruitmentProposal, RecruitmentError> {
+    let plan = decide_recruitment_attempt(registry, state, draft)?;
+    validate_plan_state_snapshot(state, &plan)?;
+    validate_plan_definition(registry.recruitment(), state, &plan)?;
+    if plan.context.outcome == RecruitmentOutcome::Accepted {
+        validate_reassign_character(
+            state,
+            plan.draft.candidate,
+            Some(plan.draft.target_organization),
+            Some(plan.draft.recruiter),
+        )?;
+    }
+    Ok(ValidatedRecruitmentProposal { plan })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -348,9 +395,74 @@ pub fn validate_delegated_recruitment_attempt(
         state,
         decide_recruitment_attempt(registry, state, draft)?,
         persisted_authority,
-        Some(DelegatedRecruitmentGuard {
+        Some(MandateRecruitmentGuard {
             authority: resolved_authority,
             policy,
+            required_policy: ApprovalPolicy::Delegated,
+        }),
+    )
+}
+
+pub(crate) fn validate_approved_recruitment_attempt(
+    registry: &Registry,
+    state: &AppState,
+    decision: DecisionRequestId,
+    authority: MandateAuthority,
+    draft: RecruitmentDraft,
+) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
+    if authority.manager != draft.recruiter {
+        return Err(RecruitmentError::DelegatedRecruiterMismatch {
+            recruiter: draft.recruiter,
+            manager: authority.manager,
+        });
+    }
+    if authority.scope != ResponsibilityScope::Function(ResponsibilityFunction::Personnel) {
+        return Err(
+            RecruitmentError::DelegatedRecruitmentRequiresPersonnelScope {
+                scope: authority.scope,
+            },
+        );
+    }
+    let resolved_authority = resolve_mandate_authority(state, authority)?;
+    if resolved_authority.organization() != draft.target_organization {
+        return Err(RecruitmentError::DelegatedOrganizationMismatch {
+            authority_organization: resolved_authority.organization(),
+            target_organization: draft.target_organization,
+        });
+    }
+    let policy =
+        resolve_policy_for_manager(state, authority.manager, PolicyKind::IndependentRecruitment)?;
+    let approval = match policy.setting {
+        PolicySetting::IndependentRecruitment(approval) => approval,
+        _ => unreachable!("policy kind resolution returned the wrong policy variant"),
+    };
+    if approval != ApprovalPolicy::RequireApproval {
+        return Err(
+            RecruitmentError::IndependentRecruitmentApprovalNotRequired {
+                manager: authority.manager,
+                policy: approval,
+            },
+        );
+    }
+    let persisted_authority = RecruitmentAuthority::ApprovedDecision {
+        decision,
+        mandate: authority.mandate,
+        manager: authority.manager,
+        scope: authority.scope,
+        mandate_version: resolved_authority.mandate_version(),
+        manager_version: resolved_authority.manager_version(),
+        policy: approval,
+        policy_source: recruitment_policy_source(policy.source),
+    };
+    validate_recruitment_plan_with_authority(
+        registry,
+        state,
+        decide_recruitment_attempt(registry, state, draft)?,
+        persisted_authority,
+        Some(MandateRecruitmentGuard {
+            authority: resolved_authority,
+            policy,
+            required_policy: ApprovalPolicy::RequireApproval,
         }),
     )
 }
@@ -360,7 +472,7 @@ fn validate_recruitment_plan_with_authority(
     state: &AppState,
     plan: RecruitmentPlan,
     authority: RecruitmentAuthority,
-    delegated_guard: Option<DelegatedRecruitmentGuard>,
+    delegated_guard: Option<MandateRecruitmentGuard>,
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
     validate_plan_state_snapshot(state, &plan)?;
     validate_plan_definition(registry.recruitment(), state, &plan)?;
@@ -460,7 +572,7 @@ fn validate_recruitment_plan_with_authority(
 pub struct ValidatedRecruitmentAttempt {
     plan: RecruitmentPlan,
     authority: RecruitmentAuthority,
-    delegated_guard: Option<DelegatedRecruitmentGuard>,
+    delegated_guard: Option<MandateRecruitmentGuard>,
     reassignment: Option<ValidatedCharacterReassignment>,
     history: Option<ValidatedHistoryEvent>,
     outcome_information: ValidatedInformation,
@@ -478,10 +590,9 @@ impl ValidatedRecruitmentAttempt {
             if current_policy != guard.policy {
                 return Err(RecruitmentError::StaleRecruitmentPolicy);
             }
-            if !matches!(
-                current_policy.setting,
-                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated)
-            ) {
+            if current_policy.setting
+                != PolicySetting::IndependentRecruitment(guard.required_policy)
+            {
                 return Err(RecruitmentError::StaleRecruitmentPolicy);
             }
         }
@@ -1086,6 +1197,12 @@ mod tests {
     use crate::build_registry;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::decisions::decision_system::{
+        validate_request_recruitment_approval, validate_resolve_decision, DecisionError,
+    };
+    use crate::decisions::{
+        DecisionContext, DecisionResponse, DecisionStatus, RecruitmentApprovalRequestDraft,
+    };
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
     use crate::intelligence::intelligence_system::validate_record_information;
@@ -1338,6 +1455,290 @@ mod tests {
             0
         );
         validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn approval_required_recruitment_executes_only_after_approval() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+        let request = validate_request_recruitment_approval(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentApprovalRequestDraft {
+                authority: personnel_authority(&fixture, mandate),
+                target_organization: fixture.target,
+                recruiter: fixture.recruiter,
+                candidate: fixture.candidate,
+                approach: RecruitmentApproach::Protection,
+                attention: crate::core::attention::AttentionClass::Exception,
+                summary: "Personnel manager requests authority to recruit a rival associate."
+                    .to_owned(),
+            },
+        )
+        .expect("approval-required recruitment proposal should validate")
+        .commit(&mut fixture.state)
+        .expect("approval request should commit");
+
+        assert_eq!(
+            fixture.state.decisions().pending_for_recruitment_approval(
+                fixture.target,
+                fixture.recruiter,
+                fixture.candidate,
+            ),
+            Some(request.decision)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .recruitment()
+                .attempts_for_candidate(fixture.candidate)
+                .count(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_character(fixture.candidate)
+                .expect("candidate should exist before approval")
+                .organization(),
+            Some(fixture.source)
+        );
+
+        let resolution = validate_resolve_decision(
+            &fixture.registry,
+            &fixture.state,
+            request.decision,
+            fixture.target,
+            DecisionResponse::Approve,
+        )
+        .expect("fresh personnel approval should validate")
+        .commit(&mut fixture.state)
+        .expect("approved personnel action should commit atomically");
+        let attempt = resolution
+            .recruitment_attempt
+            .expect("approval should execute one recruitment attempt");
+        let record = fixture
+            .state
+            .recruitment()
+            .get_attempt(attempt)
+            .expect("approved recruitment attempt should persist");
+        assert_eq!(record.outcome(), RecruitmentOutcome::Accepted);
+        assert_eq!(
+            record.authority(),
+            RecruitmentAuthority::ApprovedDecision {
+                decision: request.decision,
+                mandate,
+                manager: fixture.recruiter,
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+                mandate_version: 1,
+                manager_version: 1,
+                policy: ApprovalPolicy::RequireApproval,
+                policy_source: RecruitmentPolicySource::Organization(fixture.target),
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .recruitment()
+                .attempt_for_approval_decision(request.decision)
+                .map(|record| record.id()),
+            Some(attempt)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_character(fixture.candidate)
+                .expect("accepted candidate should persist")
+                .organization(),
+            Some(fixture.target)
+        );
+        let decision = fixture
+            .state
+            .decisions()
+            .get_decision(request.decision)
+            .expect("approval decision should persist historically");
+        assert_eq!(decision.status(), DecisionStatus::Resolved);
+        assert_eq!(
+            decision
+                .resolution()
+                .expect("resolved approval should persist resolution")
+                .response(),
+            DecisionResponse::Approve
+        );
+        validate_state(&fixture.state).expect("approved recruitment state should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn rejected_recruitment_approval_records_no_attempt() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+        let request = validate_request_recruitment_approval(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentApprovalRequestDraft {
+                authority: personnel_authority(&fixture, mandate),
+                target_organization: fixture.target,
+                recruiter: fixture.recruiter,
+                candidate: fixture.candidate,
+                approach: RecruitmentApproach::Protection,
+                attention: crate::core::attention::AttentionClass::Exception,
+                summary: "Personnel manager requests authority to approach a rival associate."
+                    .to_owned(),
+            },
+        )
+        .expect("approval request should validate")
+        .commit(&mut fixture.state)
+        .expect("approval request should commit");
+        let resolution = validate_resolve_decision(
+            &fixture.registry,
+            &fixture.state,
+            request.decision,
+            fixture.target,
+            DecisionResponse::Reject,
+        )
+        .expect("rejection should validate even though no recruitment executes")
+        .commit(&mut fixture.state)
+        .expect("rejection should commit");
+
+        assert_eq!(resolution.recruitment_attempt, None);
+        assert!(fixture
+            .state
+            .recruitment()
+            .attempt_for_approval_decision(request.decision)
+            .is_none());
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_character(fixture.candidate)
+                .expect("rejected candidate should remain in world")
+                .organization(),
+            Some(fixture.source)
+        );
+        validate_state(&fixture.state).expect("rejected approval state should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+        let request = validate_request_recruitment_approval(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentApprovalRequestDraft {
+                authority: personnel_authority(&fixture, mandate),
+                target_organization: fixture.target,
+                recruiter: fixture.recruiter,
+                candidate: fixture.candidate,
+                approach: RecruitmentApproach::Protection,
+                attention: crate::core::attention::AttentionClass::Exception,
+                summary: "Personnel manager requests approval before making an approach."
+                    .to_owned(),
+            },
+        )
+        .expect("approval request should validate")
+        .commit(&mut fixture.state)
+        .expect("approval request should commit");
+
+        set_policy(
+            &registry,
+            &mut fixture.state,
+            fixture.target,
+            PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+        )
+        .expect("organization should be able to delegate recruitment later");
+        let error = match validate_resolve_decision(
+            &fixture.registry,
+            &fixture.state,
+            request.decision,
+            fixture.target,
+            DecisionResponse::Approve,
+        ) {
+            Ok(_) => panic!("stale approval must not execute under changed authority"),
+            Err(error) => error,
+        };
+        assert_eq!(error, DecisionError::StaleRecruitmentApprovalAuthority);
+        assert!(fixture
+            .state
+            .recruitment()
+            .attempt_for_approval_decision(request.decision)
+            .is_none());
+
+        validate_resolve_decision(
+            &fixture.registry,
+            &fixture.state,
+            request.decision,
+            fixture.target,
+            DecisionResponse::Reject,
+        )
+        .expect("stale request should remain dismissible")
+        .commit(&mut fixture.state)
+        .expect("stale request rejection should commit");
+        validate_state(&fixture.state).expect("dismissed stale approval state should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn save_round_trip_preserves_pending_recruitment_approval() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+        let request = validate_request_recruitment_approval(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentApprovalRequestDraft {
+                authority: personnel_authority(&fixture, mandate),
+                target_organization: fixture.target,
+                recruiter: fixture.recruiter,
+                candidate: fixture.candidate,
+                approach: RecruitmentApproach::Protection,
+                attention: crate::core::attention::AttentionClass::Exception,
+                summary: "Personnel manager requests approval for a recruitment approach."
+                    .to_owned(),
+            },
+        )
+        .expect("approval request should validate")
+        .commit(&mut fixture.state)
+        .expect("approval request should commit");
+
+        let envelope = build_save(&registry, &fixture.state).expect("pending approval should save");
+        let bytes = bincode::serialize(&envelope).expect("save should serialize");
+        let decoded: SaveEnvelope = bincode::deserialize(&bytes).expect("save should deserialize");
+        let mut restored = restore_save(&registry, decoded).expect("save should restore");
+        let restored_decision = restored
+            .decisions()
+            .get_decision(request.decision)
+            .expect("pending approval should survive save/load");
+        assert_eq!(restored_decision.status(), DecisionStatus::Pending);
+        match restored_decision.context() {
+            DecisionContext::RecruitmentApproval(context) => {
+                assert_eq!(context.candidate(), fixture.candidate);
+                assert_eq!(context.recruiter(), fixture.recruiter);
+            }
+            DecisionContext::OperationException { .. } => {
+                panic!("restored personnel approval changed context")
+            }
+        }
+        let resolution = validate_resolve_decision(
+            &registry,
+            &restored,
+            request.decision,
+            fixture.target,
+            DecisionResponse::Approve,
+        )
+        .expect("restored approval should remain executable")
+        .commit(&mut restored)
+        .expect("restored approval should commit");
+        assert!(resolution.recruitment_attempt.is_some());
+        validate_state(&restored).expect("restored approved recruitment state should validate");
+        validate_invariants(&restored);
     }
 
     #[test]

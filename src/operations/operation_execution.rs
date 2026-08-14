@@ -1,5 +1,6 @@
 //! Deterministic operation resolution planning and atomic persistence of causal outcomes.
 
+use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, NeighborhoodId, OperationId};
 use crate::core::state::AppState;
@@ -27,6 +28,8 @@ use crate::operations::{
     OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
+use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, QualitativeBand, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -77,6 +80,8 @@ pub(crate) enum OperationResolutionError {
     History(#[from] HistoryError),
     #[error(transparent)]
     Investigation(#[from] InvestigationError),
+    #[error(transparent)]
+    Report(#[from] ReportError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +237,7 @@ pub(crate) struct ValidatedOperationResolution {
     incident_authority: Option<IncidentAuthoritySnapshot>,
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
+    report: ValidatedReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,6 +299,7 @@ impl ValidatedOperationResolution {
         };
         let after_action_information = self.information.commit(state);
         let history_event = self.history.commit(state);
+        let after_action_report = self.report.commit(state);
         state.operations.complete(
             self.plan.operation,
             OperationResolutionRecord {
@@ -302,6 +309,7 @@ impl ValidatedOperationResolution {
                 factors: self.plan.factors,
                 exposure,
                 after_action_information,
+                after_action_report,
                 history_event,
             },
         );
@@ -346,6 +354,21 @@ pub(crate) fn validate_operation_resolution_plan(
             entities: plan.history_entities.clone(),
         },
     )?;
+    let report = validate_record_report(
+        state,
+        ReportDraft {
+            recipient: record.responsible_organization(),
+            kind: ReportKind::AfterAction,
+            title: format!("{} after-action report", record.title()),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: plan.summary.clone(),
+                sources: Vec::new(),
+                entities: plan.history_entities.clone(),
+                decision: None,
+            }],
+        },
+    )?;
     let (incident, incident_authority) =
         validate_exposure_incident(registry, state, record, &plan.exposure, plan.resolved_at)?;
     Ok(ValidatedOperationResolution {
@@ -354,6 +377,7 @@ pub(crate) fn validate_operation_resolution_plan(
         incident_authority,
         information,
         history,
+        report,
     })
 }
 
@@ -978,12 +1002,12 @@ mod tests {
     use crate::legal::JurisdictionDraft;
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{
-        OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
-        RoleKind,
+        OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
+        OperationDraft, OperationKind, OperationObjective, RoleKind,
     };
     use crate::world::world_system::{
-        insert_business, insert_character, insert_neighborhood, insert_organization,
-        validate_reassign_character,
+        designate_player_organization, insert_business, insert_character, insert_neighborhood,
+        insert_organization, validate_reassign_character,
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
@@ -1310,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_operation_resolves_into_persisted_after_action_and_history() {
+    fn scheduled_operation_resolves_into_persisted_after_action_report_information_and_history() {
         let (registry, mut state, organization, operation) = make_operation_fixture();
         for minute in 1..=20_u64 {
             let outcome = run_tick(&registry, &mut state);
@@ -1346,6 +1370,21 @@ mod tests {
         );
         assert_eq!(information.subject(), EntityRef::Operation(operation));
         assert!(information.summary().contains("Assigned-role competence"));
+        let report = state
+            .reports()
+            .get_report(resolution.after_action_report())
+            .expect("operation resolution should create an after-action report");
+        assert_eq!(report.kind(), ReportKind::AfterAction);
+        assert_eq!(report.recipient(), organization);
+        assert_eq!(report.generated_at(), resolution.resolved_at());
+        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.entries()[0].attention, AttentionClass::Notable);
+        assert_eq!(report.entries()[0].summary, information.summary());
+        assert!(report.entries()[0].sources.is_empty());
+        assert!(report.entries()[0].decision.is_none());
+        assert!(report.entries()[0]
+            .entities
+            .contains(&EntityRef::Operation(operation)));
         let history = state
             .history()
             .get_event(resolution.history_event())
@@ -1405,6 +1444,7 @@ mod tests {
             assert!(outcome.resolved_operations.is_empty());
         }
         validate_resolve_decision(
+            &registry,
             &state,
             decision.decision,
             organization,
@@ -1429,6 +1469,105 @@ mod tests {
         assert_eq!(outcome.now, SimTime::from_minutes(31));
         assert_eq!(outcome.resolved_operations, vec![operation]);
         validate_state(&state).expect("resumed operation state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn authority_exception_abort_persists_decision_provenance_and_after_action_artifacts() {
+        let (registry, mut state, organization, operation) = make_operation_fixture();
+        for _ in 0..5 {
+            run_tick(&registry, &mut state);
+        }
+        let leader = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should exist")
+            .leader();
+        let decision_summary =
+            "Alarm hardware differs from the intelligence and exceeds standing authority.";
+        let decision = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: leader,
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::UnexpectedCondition,
+                },
+                attention: AttentionClass::Exception,
+                summary: decision_summary.to_owned(),
+            },
+        )
+        .expect("operation exception should validate")
+        .commit(&mut state)
+        .expect("operation exception should commit");
+
+        let outcome = validate_resolve_decision(
+            &registry,
+            &state,
+            decision.decision,
+            organization,
+            DecisionResponse::Abort,
+        )
+        .expect("abort response should validate")
+        .commit(&mut state)
+        .expect("abort response should atomically terminate the operation");
+        assert!(outcome.recruitment_attempt.is_none());
+
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("aborted operation should persist");
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        assert!(record.resolution().is_none());
+        let abort = record
+            .abort_record()
+            .expect("decision abort should persist abort provenance");
+        assert_eq!(abort.aborted_at(), SimTime::from_minutes(5));
+        assert_eq!(abort.phase(), OperationAbortPhase::AwaitingDecision);
+        assert_eq!(
+            abort.cause(),
+            OperationAbortCause::Decision(decision.decision)
+        );
+        let decision_record = state
+            .decisions()
+            .get_decision(decision.decision)
+            .expect("resolved decision should persist");
+        let resolution = decision_record
+            .resolution()
+            .expect("abort decision should be resolved");
+        assert_eq!(resolution.response(), DecisionResponse::Abort);
+        assert_eq!(resolution.resolved_at(), abort.aborted_at());
+
+        let artifacts = abort
+            .artifacts()
+            .expect("abort after execution began should create after-action artifacts");
+        let information = state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("abort information should persist");
+        assert!(information.summary().contains(decision_summary));
+        let report = state
+            .reports()
+            .get_report(artifacts.report())
+            .expect("abort report should persist");
+        assert_eq!(report.entries()[0].summary, information.summary());
+        assert!(report.entries()[0]
+            .entities
+            .contains(&EntityRef::DecisionRequest(decision.decision)));
+        let history = state
+            .history()
+            .get_event(artifacts.history_event())
+            .expect("abort history should persist");
+        assert_eq!(history.summary(), information.summary());
+        assert!(history
+            .entities()
+            .contains(&EntityRef::DecisionRequest(decision.decision)));
+
+        for _ in 0..30 {
+            let tick = run_tick(&registry, &mut state);
+            assert!(!tick.resolved_operations.contains(&operation));
+        }
+        validate_state(&state).expect("decision-aborted operation state should validate");
         validate_invariants(&state);
     }
 
@@ -1489,8 +1628,71 @@ mod tests {
             original_resolution.exposure().factors(),
             restored_resolution.exposure().factors()
         );
+        assert_eq!(
+            original_resolution.after_action_report(),
+            restored_resolution.after_action_report()
+        );
+        let original_report = original
+            .reports()
+            .get_report(original_resolution.after_action_report())
+            .expect("original after-action report should persist");
+        let restored_report = restored
+            .reports()
+            .get_report(restored_resolution.after_action_report())
+            .expect("restored after-action report should persist");
+        assert_eq!(original_report.title(), restored_report.title());
+        assert_eq!(
+            original_report.entries()[0].summary,
+            restored_report.entries()[0].summary
+        );
         validate_state(&restored).expect("deterministically restored resolution should validate");
         validate_invariants(&restored);
+    }
+
+    #[test]
+    fn same_minute_operation_after_action_is_included_in_due_executive_brief() {
+        let (registry, mut state, organization, operation) = make_operation_fixture();
+        designate_player_organization(&mut state, organization)
+            .expect("operation organization should be eligible as the player organization");
+
+        state.advance_clock(SimDuration::from_minutes(1_419));
+        let start_tick = run_tick(&registry, &mut state);
+        assert_eq!(start_tick.now, SimTime::from_minutes(1_420));
+        assert_eq!(start_tick.started_operations, vec![operation]);
+        assert!(start_tick.executive_brief.is_none());
+        for _ in 0..19 {
+            let tick = run_tick(&registry, &mut state);
+            assert!(tick.resolved_operations.is_empty());
+            assert!(tick.executive_brief.is_none());
+        }
+
+        let boundary_tick = run_tick(&registry, &mut state);
+        assert_eq!(boundary_tick.now, SimTime::from_minutes(1_440));
+        assert_eq!(boundary_tick.resolved_operations, vec![operation]);
+        let executive_brief = boundary_tick
+            .executive_brief
+            .expect("daily boundary should synthesize an executive brief");
+        let resolution = state
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .expect("operation should resolve at the daily boundary");
+        assert!(resolution.after_action_report() < executive_brief);
+        let after_action = state
+            .reports()
+            .get_report(resolution.after_action_report())
+            .expect("same-minute after-action report should persist");
+        let executive = state
+            .reports()
+            .get_report(executive_brief)
+            .expect("same-minute executive brief should persist");
+        assert!(executive.entries().iter().any(|entry| {
+            entry.attention == AttentionClass::Notable
+                && entry.summary == after_action.entries()[0].summary
+                && entry.entities.contains(&EntityRef::Operation(operation))
+        }));
+        validate_state(&state).expect("same-minute synthesis state should validate");
+        validate_invariants(&state);
     }
 
     #[test]
