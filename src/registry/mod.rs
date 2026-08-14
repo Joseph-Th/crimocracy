@@ -4,7 +4,7 @@ use crate::core::time::SimDuration;
 use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
 use crate::finance::Money;
 use crate::intelligence::InformationTopic;
-use crate::legal::EvidenceKind;
+use crate::legal::{EvidenceKind, InvestigationWorkKind, ALL_INVESTIGATION_WORK_KINDS};
 use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
 use crate::world::{
     BusinessFunction, BusinessKind, CapabilityKind, PolicyKind, PolicySetting, TraitKind,
@@ -17,6 +17,62 @@ use thiserror::Error;
 pub struct CapabilityDefinition {
     kind: CapabilityKind,
     display_name: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct InvestigationWorkDefinition {
+    kind: InvestigationWorkKind,
+    display_name: &'static str,
+    pub(crate) duration: SimDuration,
+    pub(crate) base_difficulty: u8,
+    pub(crate) additional_source_difficulty: u8,
+    pub(crate) source_support_weight: u8,
+    pub(crate) variance_limit: u8,
+    pub(crate) connected_margin: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InvestigationWorkDefinitionSpec {
+    pub duration: SimDuration,
+    pub base_difficulty: u8,
+    pub additional_source_difficulty: u8,
+    pub source_support_weight: u8,
+    pub variance_limit: u8,
+    pub connected_margin: i16,
+}
+
+impl InvestigationWorkDefinition {
+    pub fn kind(&self) -> InvestigationWorkKind {
+        self.kind
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        self.display_name
+    }
+
+    pub fn duration(&self) -> SimDuration {
+        self.duration
+    }
+
+    pub fn base_difficulty(&self) -> u8 {
+        self.base_difficulty
+    }
+
+    pub fn additional_source_difficulty(&self) -> u8 {
+        self.additional_source_difficulty
+    }
+
+    pub fn source_support_weight(&self) -> u8 {
+        self.source_support_weight
+    }
+
+    pub fn variance_limit(&self) -> u8 {
+        self.variance_limit
+    }
+
+    pub fn connected_margin(&self) -> i16 {
+        self.connected_margin
+    }
 }
 
 impl CapabilityDefinition {
@@ -337,6 +393,7 @@ pub struct Registry {
     traits: BTreeMap<TraitKind, TraitDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
+    investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
 }
@@ -364,6 +421,14 @@ impl Registry {
         self.operations
             .get(&kind)
             .unwrap_or_else(|| panic!("missing operation definition: {kind:?}"))
+    }
+    pub fn get_investigation_work(
+        &self,
+        kind: InvestigationWorkKind,
+    ) -> &InvestigationWorkDefinition {
+        self.investigation_work
+            .get(&kind)
+            .unwrap_or_else(|| panic!("missing investigation work definition: {kind:?}"))
     }
     pub fn get_enterprise(&self, kind: EnterpriseKind) -> &EnterpriseDefinition {
         self.enterprises
@@ -407,6 +472,18 @@ pub(crate) enum RegistryBuildError {
     MissingPolicy(PolicyKind),
     #[error("missing operation definition: {0:?}")]
     MissingOperation(OperationKind),
+    #[error("duplicate investigation work definition: {0:?}")]
+    DuplicateInvestigationWork(InvestigationWorkKind),
+    #[error("missing investigation work definition: {0:?}")]
+    MissingInvestigationWork(InvestigationWorkKind),
+    #[error("investigation work {0:?} must have a positive duration")]
+    InvalidInvestigationWorkDuration(InvestigationWorkKind),
+    #[error("investigation work {0:?} difficulty values must be in 0..=100")]
+    InvalidInvestigationWorkDifficulty(InvestigationWorkKind),
+    #[error("investigation work {0:?} source-support weight must be in 0..=100")]
+    InvalidInvestigationWorkSupportWeight(InvestigationWorkKind),
+    #[error("investigation work {0:?} variance must be in 0..=50")]
+    InvalidInvestigationWorkVariance(InvestigationWorkKind),
     #[error("operation {0:?} must have a positive execution duration")]
     InvalidOperationDuration(OperationKind),
     #[error("operation {0:?} base difficulty must be in 0..=100")]
@@ -476,6 +553,7 @@ pub(crate) struct RegistryBuilder {
     traits: BTreeMap<TraitKind, TraitDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
+    investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
 }
@@ -495,6 +573,47 @@ impl RegistryBuilder {
             .is_some()
         {
             return Err(RegistryBuildError::DuplicateCapability(kind));
+        }
+        Ok(())
+    }
+    pub(crate) fn register_investigation_work(
+        &mut self,
+        kind: InvestigationWorkKind,
+        display_name: &'static str,
+        spec: InvestigationWorkDefinitionSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if spec.duration.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidInvestigationWorkDuration(kind));
+        }
+        if spec.base_difficulty > 100 || spec.additional_source_difficulty > 100 {
+            return Err(RegistryBuildError::InvalidInvestigationWorkDifficulty(kind));
+        }
+        if spec.source_support_weight > 100 {
+            return Err(RegistryBuildError::InvalidInvestigationWorkSupportWeight(
+                kind,
+            ));
+        }
+        if spec.variance_limit > 50 {
+            return Err(RegistryBuildError::InvalidInvestigationWorkVariance(kind));
+        }
+        if self
+            .investigation_work
+            .insert(
+                kind,
+                InvestigationWorkDefinition {
+                    kind,
+                    display_name,
+                    duration: spec.duration,
+                    base_difficulty: spec.base_difficulty,
+                    additional_source_difficulty: spec.additional_source_difficulty,
+                    source_support_weight: spec.source_support_weight,
+                    variance_limit: spec.variance_limit,
+                    connected_margin: spec.connected_margin,
+                },
+            )
+            .is_some()
+        {
+            return Err(RegistryBuildError::DuplicateInvestigationWork(kind));
         }
         Ok(())
     }
@@ -748,6 +867,11 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::MissingOperation(kind));
             }
         }
+        for kind in ALL_INVESTIGATION_WORK_KINDS {
+            if !self.investigation_work.contains_key(&kind) {
+                return Err(RegistryBuildError::MissingInvestigationWork(kind));
+            }
+        }
         for kind in ALL_ENTERPRISE_KINDS {
             if !self.enterprises.contains_key(&kind) {
                 return Err(RegistryBuildError::MissingEnterprise(kind));
@@ -764,6 +888,7 @@ impl RegistryBuilder {
             traits: self.traits,
             policies: self.policies,
             operations: self.operations,
+            investigation_work: self.investigation_work,
             enterprises: self.enterprises,
             businesses: self.businesses,
         })

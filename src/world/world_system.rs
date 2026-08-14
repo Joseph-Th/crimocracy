@@ -1,7 +1,8 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    BusinessId, CharacterId, MandateId, NeighborhoodId, OperationId, OrganizationId,
+    BusinessId, CharacterId, InvestigationId, MandateId, NeighborhoodId, OperationId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::operations::OperationStatus;
@@ -42,6 +43,11 @@ pub enum WorldError {
     ActiveMandateAssignment {
         character: CharacterId,
         mandate: MandateId,
+    },
+    #[error("character {character} is assigned to active investigation {investigation}")]
+    ActiveInvestigationAssignment {
+        character: CharacterId,
+        investigation: InvestigationId,
     },
     #[error("character {character} still supervises direct report {direct_report}")]
     DirectReportAssignment {
@@ -228,6 +234,12 @@ fn validate_reassignment_preconditions(
             return Err(WorldError::ActiveMandateAssignment {
                 character,
                 mandate: mandate.id(),
+            });
+        }
+        if let Some(investigation) = state.legal.active_investigation_for_investigator(character) {
+            return Err(WorldError::ActiveInvestigationAssignment {
+                character,
+                investigation: investigation.id(),
             });
         }
         for operation in state.operations.operations() {

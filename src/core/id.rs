@@ -35,6 +35,9 @@ define_id!(BusinessId, "business");
 define_id!(OperationId, "operation");
 define_id!(InformationId, "information");
 define_id!(InvestigationId, "investigation");
+define_id!(InvestigationWorkId, "investigation-work");
+define_id!(CaseWitnessId, "case-witness");
+define_id!(WitnessStatementId, "witness-statement");
 define_id!(EvidenceId, "evidence");
 define_id!(ReportId, "report");
 define_id!(HistoryEventId, "history");
@@ -55,6 +58,9 @@ pub(crate) struct IdCounters {
     operation: u32,
     information: u32,
     investigation: u32,
+    investigation_work: u32,
+    case_witness: u32,
+    witness_statement: u32,
     evidence: u32,
     report: u32,
     history_event: u32,
@@ -77,6 +83,9 @@ impl IdCounters {
             operation: 1,
             information: 1,
             investigation: 1,
+            investigation_work: 1,
+            case_witness: 1,
+            witness_statement: 1,
             evidence: 1,
             report: 1,
             history_event: 1,
@@ -124,6 +133,21 @@ impl IdCounters {
 
     pub(crate) fn next_investigation(&mut self) -> InvestigationId {
         InvestigationId::from_raw(Self::take(&mut self.investigation, "investigation"))
+    }
+
+    pub(crate) fn next_investigation_work(&mut self) -> InvestigationWorkId {
+        InvestigationWorkId::from_raw(Self::take(
+            &mut self.investigation_work,
+            "investigation work",
+        ))
+    }
+
+    pub(crate) fn next_case_witness(&mut self) -> CaseWitnessId {
+        CaseWitnessId::from_raw(Self::take(&mut self.case_witness, "case witness"))
+    }
+
+    pub(crate) fn next_witness_statement(&mut self) -> WitnessStatementId {
+        WitnessStatementId::from_raw(Self::take(&mut self.witness_statement, "witness statement"))
     }
 
     pub(crate) fn next_evidence(&mut self) -> EvidenceId {

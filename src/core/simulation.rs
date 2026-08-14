@@ -1,6 +1,6 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
 
-use crate::core::id::{BusinessCycleId, EnterpriseCycleId, OperationId};
+use crate::core::id::{BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId};
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -9,6 +9,10 @@ use crate::economy::business_economy_system::{
 };
 use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, due_active_enterprises, validate_enterprise_cycle_plan,
+};
+use crate::legal::investigation_work_execution::{
+    decide_investigation_work_resolution, due_scheduled_investigation_work,
+    validate_investigation_work_resolution_plan, InvestigationWorkRandomness,
 };
 use crate::operations::operation_execution::{
     decide_operation_resolution, due_in_progress_operations, validate_operation_resolution_plan,
@@ -26,6 +30,7 @@ pub struct TickOutcome {
     pub now: SimTime,
     pub started_operations: Vec<OperationId>,
     pub resolved_operations: Vec<OperationId>,
+    pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
 }
@@ -48,9 +53,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("due operation must still exist")
             .kind();
         let execution = registry.get_operation(kind).execution();
-        let execution_variance = decide_operation_variance(state, execution.variance_limit());
-        let exposure_variance =
-            decide_operation_variance(state, execution.exposure_variance_limit());
+        let execution_variance = decide_signed_variance(state, execution.variance_limit());
+        let exposure_variance = decide_signed_variance(state, execution.exposure_variance_limit());
         let plan = decide_operation_resolution(
             registry,
             state,
@@ -63,6 +67,31 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .commit(state)
             .expect("validated operation resolution must commit atomically");
         resolved_operations.push(resolved);
+    }
+    // Detective work resolves after operation consequences so legal state created by an operation
+    // is visible to later institutional work in the same minute without bypassing evidence ownership.
+    let due_investigation_work = due_scheduled_investigation_work(state);
+    let mut resolved_investigation_work = Vec::with_capacity(due_investigation_work.len());
+    for work in due_investigation_work {
+        let kind = state
+            .legal()
+            .get_investigation_work(work)
+            .expect("due investigation work must still exist")
+            .kind();
+        let variance_limit = registry.get_investigation_work(kind).variance_limit();
+        let variance = decide_signed_variance(state, variance_limit);
+        let plan = decide_investigation_work_resolution(
+            registry,
+            state,
+            work,
+            InvestigationWorkRandomness::new(variance),
+        )
+        .expect("due investigation work must resolve a valid plan");
+        let resolved = validate_investigation_work_resolution_plan(registry, state, plan)
+            .expect("fresh investigation work resolution plan must validate")
+            .commit(state)
+            .expect("validated investigation work must commit atomically");
+        resolved_investigation_work.push(resolved);
     }
     let due_businesses = due_active_businesses(state);
     let mut business_cycles = Vec::with_capacity(due_businesses.len());
@@ -111,20 +140,21 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         now: state.now(),
         started_operations,
         resolved_operations,
+        resolved_investigation_work,
         business_cycles,
         enterprise_cycles,
     }
 }
 
-fn decide_operation_variance(state: &mut AppState, limit: u8) -> i8 {
+fn decide_signed_variance(state: &mut AppState, limit: u8) -> i8 {
     let width = usize::from(limit)
         .checked_mul(2)
         .and_then(|value| value.checked_add(1))
-        .expect("operation variance choice range overflowed usize");
-    let draw = decide_index(state, width).expect("operation variance range is never empty");
+        .expect("signed variance choice range overflowed usize");
+    let draw = decide_index(state, width).expect("signed variance range is never empty");
     let signed =
         i16::try_from(draw).expect("operation variance draw must fit i16") - i16::from(limit);
-    i8::try_from(signed).expect("authored operation variance limit must fit i8")
+    i8::try_from(signed).expect("authored signed variance limit must fit i8")
 }
 
 fn decide_basis_point_variance(state: &mut AppState, limit: u16) -> i16 {

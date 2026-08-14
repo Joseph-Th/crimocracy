@@ -3,8 +3,9 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    BusinessCycleId, BusinessId, CharacterId, DecisionRequestId, EnterpriseCycleId, EnterpriseId,
-    InformationId, LedgerTransactionId, MandateId, OperationId, OrganizationId, ReportId,
+    BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, DecisionRequestId, EnterpriseCycleId,
+    EnterpriseId, InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId,
+    MandateId, OperationId, OrganizationId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::decisions::{DecisionResponse, DecisionStatus};
@@ -16,7 +17,15 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::legal::{EvidenceReliability, EvidenceStrength};
+use crate::legal::investigation_work_execution::{
+    calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
+    minimum_source_reliability, source_evidence_forms_simple_path,
+};
+use crate::legal::witness_system::{witness_reliability, witness_strength};
+use crate::legal::{
+    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InvestigationStatus,
+    InvestigationWorkOutcome, InvestigationWorkStatus, WitnessCooperation,
+};
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
     classify_exposure_level, classify_objective_outcome,
@@ -27,7 +36,8 @@ use crate::operations::{
 };
 use crate::registry::Registry;
 use crate::world::{
-    BusinessFunction, BusinessOwner, Lifecycle, OrganizationKind, PolicyKind, ALL_POLICY_KINDS,
+    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, OrganizationKind, PolicyKind,
+    ALL_POLICY_KINDS,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -89,6 +99,18 @@ pub enum StateValidationError {
     InvalidOperationExposure { operation: OperationId },
     #[error("organization {organization} has invalid legal jurisdiction state")]
     InvalidLegalJurisdiction { organization: OrganizationId },
+    #[error("investigation {investigation} has invalid investigator staffing")]
+    InvalidInvestigationStaffing { investigation: InvestigationId },
+    #[error("investigation work {work} has invalid persisted state")]
+    InvalidInvestigationWork { work: InvestigationWorkId },
+    #[error("evidence {evidence} has invalid derived provenance")]
+    InvalidEvidenceProvenance {
+        evidence: crate::core::id::EvidenceId,
+    },
+    #[error("case witness {witness} has invalid persisted state")]
+    InvalidCaseWitness { witness: CaseWitnessId },
+    #[error("witness statement {statement} has invalid persisted state")]
+    InvalidWitnessStatement { statement: WitnessStatementId },
     #[error("decision {decision} has an invalid attention class")]
     InvalidDecisionAttention { decision: DecisionRequestId },
     #[error("decision {decision} has an empty summary")]
@@ -328,6 +350,63 @@ pub fn validate_state_against_registry(
                     return Err(StateValidationError::InvalidOperationExposure {
                         operation: operation.id(),
                     });
+                }
+            }
+        }
+    }
+    for work in state.legal.investigation_work() {
+        let definition = registry.get_investigation_work(work.kind());
+        if work.due_at() != work.scheduled_at() + definition.duration() {
+            return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+        }
+        let Some(resolution) = work.resolution() else {
+            continue;
+        };
+        let factors = resolution.factors();
+        let (expected_factors, expected_margin) =
+            calculate_work_factors_and_margin(definition, state, work, factors.variance())
+                .map_err(|_| StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+        if factors != expected_factors
+            || factors.variance().unsigned_abs() > definition.variance_limit()
+            || resolution.margin() != expected_margin
+        {
+            return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+        }
+        match resolution.outcome() {
+            InvestigationWorkOutcome::Connected => {
+                if expected_margin < definition.connected_margin()
+                    || resolution.superseded_by().is_some()
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+                let evidence = state
+                    .legal
+                    .get_evidence(resolution.derived_evidence().ok_or(
+                        StateValidationError::InvalidInvestigationWork { work: work.id() },
+                    )?)
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                let expected_reliability =
+                    minimum_source_reliability(state, work).map_err(|_| {
+                        StateValidationError::InvalidInvestigationWork { work: work.id() }
+                    })?;
+                if evidence.strength() != derive_pattern_strength(factors.source_support())
+                    || evidence.reliability() != expected_reliability
+                    || evidence.admissibility() != derive_pattern_admissibility(state, work)
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+            }
+            InvestigationWorkOutcome::Inconclusive => {
+                if expected_margin >= definition.connected_margin()
+                    || resolution.superseded_by().is_some()
+                    || resolution.derived_evidence().is_some()
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+            }
+            InvestigationWorkOutcome::Superseded => {
+                if resolution.superseded_by().is_none() || resolution.derived_evidence().is_some() {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
             }
         }
@@ -1822,6 +1901,39 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                 context: "investigation",
             });
         }
+        match investigation.status() {
+            InvestigationStatus::Active
+            | InvestigationStatus::Suspended
+            | InvestigationStatus::Closed
+            | InvestigationStatus::Referred => {}
+        }
+        if investigation.version() == 0
+            || investigation
+                .lead_investigator()
+                .is_some_and(|lead| !investigation.assigned_investigators().contains(&lead))
+        {
+            return Err(StateValidationError::InvalidInvestigationStaffing {
+                investigation: investigation.id(),
+            });
+        }
+        for investigator in investigation.assigned_investigators() {
+            let character = state.world.get_character(*investigator).ok_or(
+                StateValidationError::InvalidInvestigationStaffing {
+                    investigation: investigation.id(),
+                },
+            )?;
+            if investigation.status() == InvestigationStatus::Active
+                && (character.lifecycle() != Lifecycle::Active
+                    || character.organization() != Some(investigation.owner())
+                    || character
+                        .capability(CapabilityKind::Investigation)
+                        .is_none())
+            {
+                return Err(StateValidationError::InvalidInvestigationStaffing {
+                    investigation: investigation.id(),
+                });
+            }
+        }
         for subject in investigation.subjects() {
             if !is_entity_present(state, *subject) {
                 return Err(StateValidationError::MissingEntity {
@@ -1829,6 +1941,207 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                     entity: *subject,
                 });
             }
+        }
+    }
+
+    let mut derived_evidence_from_work = BTreeSet::new();
+    for work in state.legal.investigation_work() {
+        let investigation = state
+            .legal
+            .get_investigation(work.investigation())
+            .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+        let investigator = state
+            .world
+            .get_character(work.investigator())
+            .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+        if work.focus().from() >= work.focus().to()
+            || !is_entity_present(state, work.focus().from())
+            || !is_entity_present(state, work.focus().to())
+            || work.scheduled_at() > state.now()
+            || work.due_at() <= work.scheduled_at()
+            || !source_evidence_forms_simple_path(state, work)
+            || work.source_evidence().iter().any(|source| {
+                state.legal.get_evidence(*source).is_none_or(|evidence| {
+                    evidence.investigation() != work.investigation()
+                        || evidence.discovered_at() > work.scheduled_at()
+                })
+            })
+        {
+            return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+        }
+        match work.status() {
+            InvestigationWorkStatus::Scheduled => {
+                if work.version() != 1
+                    || work.resolution().is_some()
+                    || investigation.status() != InvestigationStatus::Active
+                    || investigation
+                        .investigator_role(work.investigator())
+                        .is_none()
+                    || investigator.lifecycle() != Lifecycle::Active
+                    || investigator.organization() != Some(investigation.owner())
+                    || investigator
+                        .capability(CapabilityKind::Investigation)
+                        .is_none()
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+            }
+            InvestigationWorkStatus::Completed => {
+                let resolution = work
+                    .resolution()
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                if work.version() != 2
+                    || resolution.resolved_at() < work.due_at()
+                    || resolution.resolved_at() > state.now()
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+                match resolution.outcome() {
+                    InvestigationWorkOutcome::Connected => {
+                        if resolution.superseded_by().is_some() {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                        let derived_id = resolution.derived_evidence().ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        if !derived_evidence_from_work.insert(derived_id) {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                        let derived = state.legal.get_evidence(derived_id).ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        if derived.investigation() != work.investigation()
+                            || derived.custodian() != investigation.owner()
+                            || derived.kind() != EvidenceKind::PatternLink
+                            || derived.origin() != Some(work.focus().from())
+                            || derived.subject() != work.focus().to()
+                            || derived.discovered_at() != resolution.resolved_at()
+                            || derived.derived_from() != work.source_evidence()
+                            || work
+                                .source_evidence()
+                                .iter()
+                                .any(|source| *source >= derived_id)
+                        {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                    }
+                    InvestigationWorkOutcome::Inconclusive => {
+                        if resolution.superseded_by().is_some()
+                            || resolution.derived_evidence().is_some()
+                        {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                    }
+                    InvestigationWorkOutcome::Superseded => {
+                        if resolution.derived_evidence().is_some() {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                        let superseding_id = resolution.superseded_by().ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        let superseding = state.legal.get_evidence(superseding_id).ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        let direct = superseding.origin().is_some_and(|origin| {
+                            (origin == work.focus().from()
+                                && superseding.subject() == work.focus().to())
+                                || (origin == work.focus().to()
+                                    && superseding.subject() == work.focus().from())
+                        });
+                        if superseding.investigation() != work.investigation()
+                            || superseding.discovered_at() > resolution.resolved_at()
+                            || !direct
+                        {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for witness in state.legal.case_witnesses() {
+        let investigation = state
+            .legal
+            .get_investigation(witness.investigation())
+            .ok_or(StateValidationError::InvalidCaseWitness {
+                witness: witness.id(),
+            })?;
+        if state.world.get_character(witness.witness()).is_none()
+            || witness.registered_at() < investigation.opened_at()
+            || witness.registered_at() > state.now()
+            || witness.version() == 0
+        {
+            return Err(StateValidationError::InvalidCaseWitness {
+                witness: witness.id(),
+            });
+        }
+        match witness.cooperation() {
+            WitnessCooperation::Hostile
+            | WitnessCooperation::Reluctant
+            | WitnessCooperation::Cooperative => {}
+        }
+    }
+
+    let mut named_witness_evidence = BTreeSet::new();
+    for statement in state.legal.witness_statements() {
+        let case_witness = state
+            .legal
+            .get_case_witness(statement.case_witness())
+            .ok_or(StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            })?;
+        let investigation = state
+            .legal
+            .get_investigation(case_witness.investigation())
+            .ok_or(StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            })?;
+        if statement.summary().trim().is_empty()
+            || statement.recorded_at() < case_witness.registered_at()
+            || statement.recorded_at() > state.now()
+            || !is_entity_present(state, statement.subject())
+            || statement
+                .origin()
+                .is_some_and(|origin| !is_entity_present(state, origin))
+            || !named_witness_evidence.insert(statement.evidence())
+        {
+            return Err(StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            });
+        }
+        let evidence = state.legal.get_evidence(statement.evidence()).ok_or(
+            StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            },
+        )?;
+        if evidence.investigation() != case_witness.investigation()
+            || evidence.custodian() != investigation.owner()
+            || evidence.subject() != statement.subject()
+            || evidence.origin() != statement.origin()
+            || evidence.source() != Some(EntityRef::Character(case_witness.witness()))
+            || evidence.kind() != EvidenceKind::WitnessTestimony
+            || evidence.strength() != witness_strength(statement.confidence())
+            || evidence.reliability() != witness_reliability(statement.confidence())
+            || evidence.admissibility() != Admissibility::Unknown
+            || evidence.discovered_at() != statement.recorded_at()
+            || !evidence.derived_from().is_empty()
+        {
+            return Err(StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            });
         }
     }
 
@@ -1862,10 +2175,74 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                 });
             }
         }
+        if let Some(source) = evidence.source() {
+            if !is_entity_present(state, source) {
+                return Err(StateValidationError::MissingEntity {
+                    context: "evidence source",
+                    entity: source,
+                });
+            }
+            if evidence.kind() != EvidenceKind::WitnessTestimony
+                || !matches!(source, EntityRef::Character(_))
+                || !named_witness_evidence.contains(&evidence.id())
+            {
+                return Err(StateValidationError::InvalidEvidenceProvenance {
+                    evidence: evidence.id(),
+                });
+            }
+        } else if named_witness_evidence.contains(&evidence.id()) {
+            return Err(StateValidationError::InvalidEvidenceProvenance {
+                evidence: evidence.id(),
+            });
+        }
         if evidence.discovered_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
                 context: "evidence",
             });
+        }
+        match evidence.kind() {
+            EvidenceKind::PatternLink => {
+                if evidence.source().is_some()
+                    || evidence.derived_from().len() < 2
+                    || !derived_evidence_from_work.contains(&evidence.id())
+                {
+                    return Err(StateValidationError::InvalidEvidenceProvenance {
+                        evidence: evidence.id(),
+                    });
+                }
+            }
+            EvidenceKind::WitnessTestimony
+            | EvidenceKind::VehicleDescription
+            | EvidenceKind::Fingerprint
+            | EvidenceKind::RecoveredProperty
+            | EvidenceKind::FinancialRecord
+            | EvidenceKind::InformantStatement
+            | EvidenceKind::Surveillance
+            | EvidenceKind::CommunicationRecord
+            | EvidenceKind::KnownAssociation
+            | EvidenceKind::Document
+            | EvidenceKind::Ballistics => {
+                if !evidence.derived_from().is_empty() {
+                    return Err(StateValidationError::InvalidEvidenceProvenance {
+                        evidence: evidence.id(),
+                    });
+                }
+            }
+        }
+        for source_id in evidence.derived_from() {
+            let source = state.legal.get_evidence(*source_id).ok_or(
+                StateValidationError::InvalidEvidenceProvenance {
+                    evidence: evidence.id(),
+                },
+            )?;
+            if *source_id >= evidence.id()
+                || source.investigation() != evidence.investigation()
+                || source.discovered_at() > evidence.discovered_at()
+            {
+                return Err(StateValidationError::InvalidEvidenceProvenance {
+                    evidence: evidence.id(),
+                });
+            }
         }
     }
 
@@ -1973,6 +2350,10 @@ pub fn validate_invariants(state: &AppState) {
     debug_assert!(
         validate_operations(state).is_ok(),
         "Operation Runtime Validity: operation lifecycle, schedules, after-action knowledge, or history are inconsistent"
+    );
+    debug_assert!(
+        validate_legal_reports_and_history(state).is_ok(),
+        "Legal Runtime Validity: jurisdiction, staffing, investigative work, evidence provenance, reports, or history are inconsistent"
     );
 
     if let Some(player) = state.player_organization() {
@@ -2514,6 +2895,40 @@ pub fn validate_invariants(state: &AppState) {
                 is_entity_present(state, *subject),
                 "Record Reference Validity: investigation subject does not exist"
             );
+        }
+        debug_assert!(
+            investigation.version() > 0,
+            "Lifecycle Validity: investigation is unversioned"
+        );
+        if let Some(lead) = investigation.lead_investigator() {
+            debug_assert!(
+                investigation.assigned_investigators().contains(&lead),
+                "Derived Data Consistency: investigation lead is not assigned to the case"
+            );
+        }
+        for investigator in investigation.assigned_investigators() {
+            let character = state
+                .world
+                .get_character(*investigator)
+                .expect("Record Reference Validity: assigned investigator does not exist");
+            if investigation.status() == InvestigationStatus::Active {
+                debug_assert_eq!(
+                    character.lifecycle(),
+                    Lifecycle::Active,
+                    "Lifecycle Validity: active investigation has inactive investigator"
+                );
+                debug_assert_eq!(
+                    character.organization(),
+                    Some(investigation.owner()),
+                    "Ownership Exclusivity: active investigation has foreign investigator"
+                );
+                debug_assert!(
+                    character
+                        .capability(CapabilityKind::Investigation)
+                        .is_some(),
+                    "Lifecycle Validity: active investigation has unqualified investigator"
+                );
+            }
         }
     }
     for jurisdiction in state.legal.jurisdictions() {

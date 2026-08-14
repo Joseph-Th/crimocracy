@@ -4,14 +4,14 @@ use crate::core::time::SimDuration;
 use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
 use crate::intelligence::InformationTopic;
-use crate::legal::EvidenceKind;
+use crate::legal::{EvidenceKind, InvestigationWorkKind};
 use crate::operations::{
     OperationApproach, OperationKind, RoleKind, ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS,
 };
 use crate::registry::{
-    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, OperationDifficultyDefinition,
-    OperationExecutionDefinition, OperationExposureDefinition, OperationIntelligenceDefinition,
-    Registry, RegistryBuilder,
+    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, InvestigationWorkDefinitionSpec,
+    OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
+    OperationIntelligenceDefinition, Registry, RegistryBuilder,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, ForcePolicy,
@@ -20,7 +20,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 4;
+pub const CURRENT_CONTENT_REVISION: u32 = 5;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -48,11 +48,29 @@ pub fn build_registry() -> Registry {
             )
             .unwrap_or_else(|error| panic!("invalid operation registry: {error}"));
     }
+    register_investigation_work(&mut builder);
     register_enterprises(&mut builder);
     register_businesses(&mut builder);
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
+}
+
+fn register_investigation_work(builder: &mut RegistryBuilder) {
+    builder
+        .register_investigation_work(
+            InvestigationWorkKind::PatternAnalysis,
+            "Pattern analysis",
+            InvestigationWorkDefinitionSpec {
+                duration: SimDuration::from_minutes(360),
+                base_difficulty: 55,
+                additional_source_difficulty: 8,
+                source_support_weight: 30,
+                variance_limit: 12,
+                connected_margin: 0,
+            },
+        )
+        .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
 }
 
 fn register_businesses(builder: &mut RegistryBuilder) {
