@@ -1,6 +1,7 @@
 //! Specific investigations, staffing, and evidence graphs; sibling systems own case transactions and derived graph queries.
 
 pub mod case_graph;
+pub mod informant_system;
 pub mod investigation_system;
 pub mod investigation_work_execution;
 pub mod jurisdiction_system;
@@ -8,8 +9,8 @@ pub mod witness_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CaseWitnessId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, NeighborhoodId,
-    OrganizationId, WitnessStatementId,
+    CaseWitnessId, CharacterId, EvidenceId, InformantDisclosureId, InformantId, InformationId,
+    InvestigationId, InvestigationWorkId, NeighborhoodId, OrganizationId, WitnessStatementId,
 };
 use crate::core::time::SimTime;
 use crate::world::Rating;
@@ -371,6 +372,89 @@ pub struct WitnessStatementDraft {
     pub summary: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InformantStatus {
+    Active,
+    Terminated,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InformantRecord {
+    id: InformantId,
+    character: CharacterId,
+    handler: OrganizationId,
+    status: InformantStatus,
+    established_at: SimTime,
+    terminated_at: Option<SimTime>,
+    version: u32,
+}
+
+impl InformantRecord {
+    pub fn id(&self) -> InformantId {
+        self.id
+    }
+
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn handler(&self) -> OrganizationId {
+        self.handler
+    }
+
+    pub fn status(&self) -> InformantStatus {
+        self.status
+    }
+
+    pub fn established_at(&self) -> SimTime {
+        self.established_at
+    }
+
+    pub fn terminated_at(&self) -> Option<SimTime> {
+        self.terminated_at
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InformantDisclosureRecord {
+    id: InformantDisclosureId,
+    informant: InformantId,
+    investigation: InvestigationId,
+    source_information: InformationId,
+    evidence: EvidenceId,
+    disclosed_at: SimTime,
+}
+
+impl InformantDisclosureRecord {
+    pub fn id(&self) -> InformantDisclosureId {
+        self.id
+    }
+
+    pub fn informant(&self) -> InformantId {
+        self.informant
+    }
+
+    pub fn investigation(&self) -> InvestigationId {
+        self.investigation
+    }
+
+    pub fn source_information(&self) -> InformationId {
+        self.source_information
+    }
+
+    pub fn evidence(&self) -> EvidenceId {
+        self.evidence
+    }
+
+    pub fn disclosed_at(&self) -> SimTime {
+        self.disclosed_at
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InvestigationRecord {
     id: InvestigationId,
@@ -548,6 +632,18 @@ struct WitnessIndexes {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct InformantIndexes {
+    active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
+    by_character: BTreeMap<CharacterId, BTreeSet<InformantId>>,
+    by_handler: BTreeMap<OrganizationId, BTreeSet<InformantId>>,
+    disclosures_by_informant: BTreeMap<InformantId, BTreeSet<InformantDisclosureId>>,
+    disclosure_by_evidence: BTreeMap<EvidenceId, InformantDisclosureId>,
+    disclosures_by_information: BTreeMap<InformationId, BTreeSet<InformantDisclosureId>>,
+    disclosure_by_case_information:
+        BTreeMap<(InvestigationId, InformationId), InformantDisclosureId>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct InvestigationWorkIndexes {
     work_by_investigation: BTreeMap<InvestigationId, BTreeSet<InvestigationWorkId>>,
     work_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationWorkId>>,
@@ -572,6 +668,7 @@ struct LegalIndexes {
     investigations: InvestigationIndexes,
     evidence: EvidenceIndexes,
     witnesses: WitnessIndexes,
+    informants: InformantIndexes,
     work: InvestigationWorkIndexes,
     jurisdictions: JurisdictionIndexes,
 }
@@ -582,6 +679,8 @@ pub struct LegalState {
     investigation_work: BTreeMap<InvestigationWorkId, InvestigationWorkRecord>,
     case_witnesses: BTreeMap<CaseWitnessId, CaseWitnessRecord>,
     witness_statements: BTreeMap<WitnessStatementId, WitnessStatementRecord>,
+    informants: BTreeMap<InformantId, InformantRecord>,
+    informant_disclosures: BTreeMap<InformantDisclosureId, InformantDisclosureRecord>,
     evidence: BTreeMap<EvidenceId, EvidenceRecord>,
     jurisdictions: BTreeMap<OrganizationId, JurisdictionRecord>,
     indexes: LegalIndexes,
@@ -608,6 +707,95 @@ impl LegalState {
     }
     pub fn get_witness_statement(&self, id: WitnessStatementId) -> Option<&WitnessStatementRecord> {
         self.witness_statements.get(&id)
+    }
+    pub fn get_informant(&self, id: InformantId) -> Option<&InformantRecord> {
+        self.informants.get(&id)
+    }
+    pub fn get_informant_disclosure(
+        &self,
+        id: InformantDisclosureId,
+    ) -> Option<&InformantDisclosureRecord> {
+        self.informant_disclosures.get(&id)
+    }
+    pub fn active_informant_for(
+        &self,
+        character: CharacterId,
+        handler: OrganizationId,
+    ) -> Option<&InformantRecord> {
+        self.indexes
+            .informants
+            .active_by_character_handler
+            .get(&(character, handler))
+            .and_then(|id| self.informants.get(id))
+    }
+    pub fn informants_for_character(
+        &self,
+        character: CharacterId,
+    ) -> impl Iterator<Item = &InformantRecord> {
+        self.indexes
+            .informants
+            .by_character
+            .get(&character)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.informants.get(id))
+    }
+    pub fn informants_for_handler(
+        &self,
+        handler: OrganizationId,
+    ) -> impl Iterator<Item = &InformantRecord> {
+        self.indexes
+            .informants
+            .by_handler
+            .get(&handler)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.informants.get(id))
+    }
+    pub fn disclosures_for_informant(
+        &self,
+        informant: InformantId,
+    ) -> impl Iterator<Item = &InformantDisclosureRecord> {
+        self.indexes
+            .informants
+            .disclosures_by_informant
+            .get(&informant)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.informant_disclosures.get(id))
+    }
+    pub fn informant_disclosure_for_evidence(
+        &self,
+        evidence: EvidenceId,
+    ) -> Option<&InformantDisclosureRecord> {
+        self.indexes
+            .informants
+            .disclosure_by_evidence
+            .get(&evidence)
+            .and_then(|id| self.informant_disclosures.get(id))
+    }
+    pub fn informant_disclosures_from_information(
+        &self,
+        information: InformationId,
+    ) -> impl Iterator<Item = &InformantDisclosureRecord> {
+        self.indexes
+            .informants
+            .disclosures_by_information
+            .get(&information)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.informant_disclosures.get(id))
+    }
+    pub(crate) fn informant_disclosure_for_case_information(
+        &self,
+        investigation: InvestigationId,
+        information: InformationId,
+    ) -> Option<&InformantDisclosureRecord> {
+        self.indexes
+            .informants
+            .disclosure_by_case_information
+            .get(&(investigation, information))
+            .and_then(|id| self.informant_disclosures.get(id))
     }
     pub fn get_jurisdiction(&self, organization: OrganizationId) -> Option<&JurisdictionRecord> {
         self.jurisdictions.get(&organization)
@@ -808,6 +996,12 @@ impl LegalState {
     pub(crate) fn witness_statements(&self) -> impl Iterator<Item = &WitnessStatementRecord> {
         self.witness_statements.values()
     }
+    pub(crate) fn informants(&self) -> impl Iterator<Item = &InformantRecord> {
+        self.informants.values()
+    }
+    pub(crate) fn informant_disclosures(&self) -> impl Iterator<Item = &InformantDisclosureRecord> {
+        self.informant_disclosures.values()
+    }
     pub(crate) fn all_evidence(&self) -> impl Iterator<Item = &EvidenceRecord> {
         self.evidence.values()
     }
@@ -833,6 +1027,122 @@ impl LegalState {
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate investigation ID inserted"
+        );
+    }
+    pub(crate) fn insert_informant(&mut self, record: InformantRecord) {
+        let id = record.id();
+        let key = (record.character(), record.handler());
+        debug_assert_eq!(
+            record.status(),
+            InformantStatus::Active,
+            "Lifecycle Validity: new informant relationships must be active"
+        );
+        let previous_active = self
+            .indexes
+            .informants
+            .active_by_character_handler
+            .insert(key, id);
+        debug_assert!(
+            previous_active.is_none(),
+            "Ownership Exclusivity: duplicate active informant relationship inserted"
+        );
+        self.indexes
+            .informants
+            .by_character
+            .entry(record.character())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .informants
+            .by_handler
+            .entry(record.handler())
+            .or_default()
+            .insert(id);
+        let previous = self.informants.insert(id, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate informant ID inserted"
+        );
+    }
+    pub(crate) fn terminate_informant(&mut self, id: InformantId, terminated_at: SimTime) {
+        let (character, handler) = {
+            let record = self
+                .informants
+                .get_mut(&id)
+                .expect("validated informant disappeared before termination commit");
+            record.status = InformantStatus::Terminated;
+            record.terminated_at = Some(terminated_at);
+            record.version = record
+                .version
+                .checked_add(1)
+                .expect("informant version counter exhausted");
+            (record.character(), record.handler())
+        };
+        let removed = self
+            .indexes
+            .informants
+            .active_by_character_handler
+            .remove(&(character, handler));
+        debug_assert_eq!(
+            removed,
+            Some(id),
+            "Derived Data Consistency: active informant index changed before termination"
+        );
+    }
+    pub(crate) fn insert_informant_disclosure(
+        &mut self,
+        evidence: EvidenceRecord,
+        disclosure: InformantDisclosureRecord,
+    ) {
+        debug_assert_eq!(
+            evidence.id(),
+            disclosure.evidence(),
+            "Record Reference Validity: informant disclosure evidence ID mismatch"
+        );
+        debug_assert_eq!(
+            evidence.investigation(),
+            disclosure.investigation(),
+            "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
+        );
+        self.insert_evidence(evidence);
+        let id = disclosure.id();
+        self.indexes
+            .informants
+            .disclosures_by_informant
+            .entry(disclosure.informant())
+            .or_default()
+            .insert(id);
+        let previous_evidence = self
+            .indexes
+            .informants
+            .disclosure_by_evidence
+            .insert(disclosure.evidence(), id);
+        debug_assert!(
+            previous_evidence.is_none(),
+            "Ownership Exclusivity: evidence is linked to multiple informant disclosures"
+        );
+        self.indexes
+            .informants
+            .disclosures_by_information
+            .entry(disclosure.source_information())
+            .or_default()
+            .insert(id);
+        let previous_case_information = self
+            .indexes
+            .informants
+            .disclosure_by_case_information
+            .insert(
+                (disclosure.investigation(), disclosure.source_information()),
+                id,
+            );
+        debug_assert!(
+            previous_case_information.is_none(),
+            "Ownership Exclusivity: source information was disclosed twice into one investigation"
+        );
+        let previous = self.informant_disclosures.insert(id, disclosure);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate informant disclosure ID inserted"
         );
     }
     pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord) {
@@ -1241,6 +1551,135 @@ impl LegalState {
                 {
                     return false;
                 }
+            }
+        }
+        for informant in self.informants.values() {
+            let id = informant.id();
+            if !self
+                .indexes
+                .informants
+                .by_character
+                .get(&informant.character())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .informants
+                    .by_handler
+                    .get(&informant.handler())
+                    .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
+            let active_index = self
+                .indexes
+                .informants
+                .active_by_character_handler
+                .get(&(informant.character(), informant.handler()));
+            match informant.status() {
+                InformantStatus::Active if active_index != Some(&id) => return false,
+                InformantStatus::Terminated if active_index == Some(&id) => return false,
+                InformantStatus::Active | InformantStatus::Terminated => {}
+            }
+        }
+        for (key, id) in &self.indexes.informants.active_by_character_handler {
+            if !self.informants.get(id).is_some_and(|record| {
+                record.status() == InformantStatus::Active
+                    && (record.character(), record.handler()) == *key
+            }) {
+                return false;
+            }
+        }
+        for (character, ids) in &self.indexes.informants.by_character {
+            for id in ids {
+                if !self
+                    .informants
+                    .get(id)
+                    .is_some_and(|record| record.character() == *character)
+                {
+                    return false;
+                }
+            }
+        }
+        for (handler, ids) in &self.indexes.informants.by_handler {
+            for id in ids {
+                if !self
+                    .informants
+                    .get(id)
+                    .is_some_and(|record| record.handler() == *handler)
+                {
+                    return false;
+                }
+            }
+        }
+        for disclosure in self.informant_disclosures.values() {
+            if !self.informants.contains_key(&disclosure.informant())
+                || !self.evidence.contains_key(&disclosure.evidence())
+                || !self
+                    .indexes
+                    .informants
+                    .disclosures_by_informant
+                    .get(&disclosure.informant())
+                    .is_some_and(|ids| ids.contains(&disclosure.id()))
+                || self
+                    .indexes
+                    .informants
+                    .disclosure_by_evidence
+                    .get(&disclosure.evidence())
+                    != Some(&disclosure.id())
+                || !self
+                    .indexes
+                    .informants
+                    .disclosures_by_information
+                    .get(&disclosure.source_information())
+                    .is_some_and(|ids| ids.contains(&disclosure.id()))
+                || self
+                    .indexes
+                    .informants
+                    .disclosure_by_case_information
+                    .get(&(disclosure.investigation(), disclosure.source_information()))
+                    != Some(&disclosure.id())
+            {
+                return false;
+            }
+        }
+        for (informant, ids) in &self.indexes.informants.disclosures_by_informant {
+            for id in ids {
+                if !self
+                    .informant_disclosures
+                    .get(id)
+                    .is_some_and(|record| record.informant() == *informant)
+                {
+                    return false;
+                }
+            }
+        }
+        for (evidence, disclosure) in &self.indexes.informants.disclosure_by_evidence {
+            if !self
+                .informant_disclosures
+                .get(disclosure)
+                .is_some_and(|record| record.evidence() == *evidence)
+            {
+                return false;
+            }
+        }
+        for (information, ids) in &self.indexes.informants.disclosures_by_information {
+            for id in ids {
+                if !self
+                    .informant_disclosures
+                    .get(id)
+                    .is_some_and(|record| record.source_information() == *information)
+                {
+                    return false;
+                }
+            }
+        }
+        for (key, disclosure) in &self.indexes.informants.disclosure_by_case_information {
+            if !self
+                .informant_disclosures
+                .get(disclosure)
+                .is_some_and(|record| (record.investigation(), record.source_information()) == *key)
+            {
+                return false;
             }
         }
         for (source, ids) in &self.indexes.evidence.evidence_by_source {
@@ -1777,6 +2216,59 @@ impl LegalState {
                 "Index Completeness: witness statement evidence index is missing statement"
             );
         }
+        for informant in self.informants.values() {
+            debug_assert!(
+                self.indexes
+                    .informants
+                    .by_character
+                    .get(&informant.character())
+                    .is_some_and(|ids| ids.contains(&informant.id())),
+                "Index Completeness: character informant index is missing a relationship"
+            );
+            debug_assert!(
+                self.indexes
+                    .informants
+                    .by_handler
+                    .get(&informant.handler())
+                    .is_some_and(|ids| ids.contains(&informant.id())),
+                "Index Completeness: handler informant index is missing a relationship"
+            );
+            let active = self
+                .indexes
+                .informants
+                .active_by_character_handler
+                .get(&(informant.character(), informant.handler()));
+            match informant.status() {
+                InformantStatus::Active => debug_assert_eq!(active, Some(&informant.id())),
+                InformantStatus::Terminated => debug_assert_ne!(active, Some(&informant.id())),
+            }
+        }
+        for disclosure in self.informant_disclosures.values() {
+            debug_assert!(
+                self.indexes
+                    .informants
+                    .disclosures_by_informant
+                    .get(&disclosure.informant())
+                    .is_some_and(|ids| ids.contains(&disclosure.id())),
+                "Index Completeness: informant disclosure index is missing a disclosure"
+            );
+            debug_assert_eq!(
+                self.indexes
+                    .informants
+                    .disclosure_by_evidence
+                    .get(&disclosure.evidence()),
+                Some(&disclosure.id()),
+                "Index Completeness: informant evidence index is missing a disclosure"
+            );
+            debug_assert_eq!(
+                self.indexes
+                    .informants
+                    .disclosure_by_case_information
+                    .get(&(disclosure.investigation(), disclosure.source_information())),
+                Some(&disclosure.id()),
+                "Index Completeness: informant case-information index is missing a disclosure"
+            );
+        }
         for jurisdiction in self.jurisdictions.values() {
             for neighborhood in jurisdiction.neighborhoods() {
                 debug_assert!(
@@ -1803,6 +2295,19 @@ pub struct InvestigationDraft {
     pub owner: OrganizationId,
     pub title: String,
     pub subjects: BTreeSet<EntityRef>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InformantDraft {
+    pub character: CharacterId,
+    pub handler: OrganizationId,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InformantDisclosureDraft {
+    pub informant: InformantId,
+    pub investigation: InvestigationId,
+    pub source_information: InformationId,
 }
 
 #[derive(Clone, Debug)]

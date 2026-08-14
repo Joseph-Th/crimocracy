@@ -38,6 +38,8 @@ define_id!(InvestigationId, "investigation");
 define_id!(InvestigationWorkId, "investigation-work");
 define_id!(CaseWitnessId, "case-witness");
 define_id!(WitnessStatementId, "witness-statement");
+define_id!(InformantId, "informant");
+define_id!(InformantDisclosureId, "informant-disclosure");
 define_id!(EvidenceId, "evidence");
 define_id!(ReportId, "report");
 define_id!(HistoryEventId, "history");
@@ -45,6 +47,7 @@ define_id!(FinancialAccountId, "account");
 define_id!(LedgerTransactionId, "transaction");
 define_id!(DecisionRequestId, "decision");
 define_id!(MandateId, "mandate");
+define_id!(RecruitmentAttemptId, "recruitment");
 define_id!(EnterpriseId, "enterprise");
 define_id!(EnterpriseCycleId, "enterprise-cycle");
 define_id!(BusinessCycleId, "business-cycle");
@@ -61,6 +64,8 @@ pub(crate) struct IdCounters {
     investigation_work: u32,
     case_witness: u32,
     witness_statement: u32,
+    informant: u32,
+    informant_disclosure: u32,
     evidence: u32,
     report: u32,
     history_event: u32,
@@ -68,6 +73,7 @@ pub(crate) struct IdCounters {
     ledger_transaction: u32,
     decision_request: u32,
     mandate: u32,
+    recruitment_attempt: u32,
     enterprise: u32,
     enterprise_cycle: u32,
     business_cycle: u32,
@@ -86,6 +92,8 @@ impl IdCounters {
             investigation_work: 1,
             case_witness: 1,
             witness_statement: 1,
+            informant: 1,
+            informant_disclosure: 1,
             evidence: 1,
             report: 1,
             history_event: 1,
@@ -93,6 +101,7 @@ impl IdCounters {
             ledger_transaction: 1,
             decision_request: 1,
             mandate: 1,
+            recruitment_attempt: 1,
             enterprise: 1,
             enterprise_cycle: 1,
             business_cycle: 1,
@@ -150,6 +159,17 @@ impl IdCounters {
         WitnessStatementId::from_raw(Self::take(&mut self.witness_statement, "witness statement"))
     }
 
+    pub(crate) fn next_informant(&mut self) -> InformantId {
+        InformantId::from_raw(Self::take(&mut self.informant, "informant"))
+    }
+
+    pub(crate) fn next_informant_disclosure(&mut self) -> InformantDisclosureId {
+        InformantDisclosureId::from_raw(Self::take(
+            &mut self.informant_disclosure,
+            "informant disclosure",
+        ))
+    }
+
     pub(crate) fn next_evidence(&mut self) -> EvidenceId {
         EvidenceId::from_raw(Self::take(&mut self.evidence, "evidence"))
     }
@@ -179,6 +199,13 @@ impl IdCounters {
 
     pub(crate) fn next_mandate(&mut self) -> MandateId {
         MandateId::from_raw(Self::take(&mut self.mandate, "mandate"))
+    }
+
+    pub(crate) fn next_recruitment_attempt(&mut self) -> RecruitmentAttemptId {
+        RecruitmentAttemptId::from_raw(Self::take(
+            &mut self.recruitment_attempt,
+            "recruitment attempt",
+        ))
     }
 
     pub(crate) fn next_enterprise(&mut self) -> EnterpriseId {

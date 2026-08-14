@@ -12,6 +12,7 @@ use crate::history::HistoryState;
 use crate::intelligence::IntelligenceState;
 use crate::legal::LegalState;
 use crate::operations::OperationState;
+use crate::recruitment::RecruitmentState;
 use crate::reports::ReportState;
 use crate::social::SocialState;
 use crate::world::WorldState;
@@ -19,7 +20,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 14;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -53,6 +54,7 @@ pub struct AppState {
     pub(crate) social: SocialState,
     pub(crate) intelligence: IntelligenceState,
     pub(crate) operations: OperationState,
+    pub(crate) recruitment: RecruitmentState,
     pub(crate) legal: LegalState,
     pub(crate) reports: ReportState,
     pub(crate) history: HistoryState,
@@ -79,6 +81,7 @@ impl AppState {
             social: SocialState::new(),
             intelligence: IntelligenceState::new(),
             operations: OperationState::new(),
+            recruitment: RecruitmentState::new(),
             legal: LegalState::new(),
             reports: ReportState::new(),
             history: HistoryState::new(),
@@ -127,6 +130,10 @@ impl AppState {
 
     pub fn operations(&self) -> &OperationState {
         &self.operations
+    }
+
+    pub fn recruitment(&self) -> &RecruitmentState {
+        &self.recruitment
     }
 
     pub fn legal(&self) -> &LegalState {
@@ -229,6 +236,8 @@ mod tests {
         OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
         OperationKind, OperationObjective, RoleKind,
     };
+    use crate::recruitment::recruitment_system::validate_recruitment_attempt;
+    use crate::recruitment::{RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome};
     use crate::reports::organization_financial_report::validate_organization_financial_report;
     use crate::reports::report_system::validate_record_report;
     use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -240,9 +249,9 @@ mod tests {
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
-        CapabilityKind, CharacterDraft, ForcePolicy, NeighborhoodDraft, NeighborhoodEconomyProfile,
-        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
-        PolicyKind, PolicySetting, Rating, TraitKind,
+        CapabilityKind, CharacterDraft, DriveKind, ForcePolicy, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        OrganizationDraft, OrganizationKind, PolicyKind, PolicySetting, Rating, TraitKind,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -373,7 +382,7 @@ mod tests {
                     (CapabilityKind::Stealth, rating(69)),
                 ]),
                 traits: BTreeSet::from([TraitKind::EasilyFrightened]),
-                drives: BTreeMap::new(),
+                drives: BTreeMap::from([(DriveKind::Safety, rating(90))]),
             },
         )
         .expect("associate fixture should validate");
@@ -531,6 +540,24 @@ mod tests {
         .expect("member information should transfer into organization knowledge")
         .commit(&mut state)
         .expect("validated organization information transfer should commit");
+        validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(associate),
+                source_kind: InformationSourceKind::PoliceContact,
+                topic: crate::intelligence::InformationTopic::PoliceActivity,
+                source_entity: Some(EntityRef::Character(detective)),
+                subject: EntityRef::Character(associate),
+                observed_at: state.now(),
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary:
+                    "Frank Dello knows detectives are asking questions specifically about him."
+                        .to_owned(),
+            },
+        )
+        .expect("associate legal-pressure knowledge should validate")
+        .commit(&mut state);
 
         let investigation = validate_open_investigation(
             &state,
@@ -746,6 +773,7 @@ mod tests {
         .expect("delegated routine enterprise should commit");
 
         let mut pending_decision = None;
+        let mut rival_recruitment = None;
         for minute in 1..=5_000_u64 {
             let outcome = run_tick(&registry, &mut state);
             assert_eq!(outcome.now.as_minutes(), minute);
@@ -839,6 +867,53 @@ mod tests {
                     .commit(&mut state)
                     .expect("validated delegated expense should remain current");
                 }
+                60 => {
+                    let candidate = *state
+                        .operations()
+                        .get_operation(operation)
+                        .expect("operation should persist through recruitment")
+                        .roles()
+                        .get(&RoleKind::EntrySpecialist)
+                        .expect("fixture should have a recruitable entry specialist");
+                    let recruiter = state
+                        .social()
+                        .relationships_from(candidate)
+                        .find_map(|relationship| {
+                            let contact = state.world().get_character(relationship.to())?;
+                            (contact.organization() != Some(player_organization))
+                                .then_some(contact.id())
+                        })
+                        .expect("fixture should expose a relational rival recruiter");
+                    let target_organization = state
+                        .world()
+                        .get_character(recruiter)
+                        .and_then(|character| character.organization())
+                        .expect("rival recruiter should belong to an organization");
+                    let attempt = validate_recruitment_attempt(
+                        &registry,
+                        &state,
+                        RecruitmentDraft {
+                            target_organization,
+                            recruiter,
+                            candidate,
+                            approach: RecruitmentApproach::Protection,
+                        },
+                    )
+                    .expect(
+                        "rival protection recruitment should validate after operation completion",
+                    )
+                    .commit(&mut state)
+                    .expect("rival recruitment should commit through the canonical personnel path");
+                    assert_eq!(
+                        state
+                            .recruitment()
+                            .get_attempt(attempt)
+                            .expect("rival recruitment should persist")
+                            .outcome(),
+                        RecruitmentOutcome::Accepted
+                    );
+                    rival_recruitment = Some((attempt, candidate, target_organization));
+                }
                 1_440 | 2_880 | 4_320 => {
                     assert_eq!(outcome.business_cycles.len(), 1);
                     assert_eq!(outcome.enterprise_cycles.len(), 1);
@@ -853,6 +928,23 @@ mod tests {
         assert_eq!(budget.remaining, Money::from_cents(200_000));
         assert_eq!(state.economy().cycles().count(), 3);
         assert_eq!(state.enterprises().cycles_for(enterprise).count(), 3);
+        let (recruitment_attempt, recruited_candidate, rival_organization) = rival_recruitment
+            .expect("soak should exercise rival recruitment under known legal pressure");
+        let recruitment = state
+            .recruitment()
+            .get_attempt(recruitment_attempt)
+            .expect("soak recruitment should persist");
+        assert_eq!(recruitment.outcome(), RecruitmentOutcome::Accepted);
+        assert!(recruitment.pressure_information().is_some());
+        assert!(recruitment.factors().perceived_legal_pressure() > 0);
+        assert_eq!(
+            state
+                .world()
+                .get_character(recruited_candidate)
+                .expect("recruited candidate should persist")
+                .organization(),
+            Some(rival_organization)
+        );
         let operation_resolution = state
             .operations()
             .get_operation(operation)

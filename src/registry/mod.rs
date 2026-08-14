@@ -3,12 +3,14 @@
 use crate::core::time::SimDuration;
 use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
 use crate::finance::Money;
-use crate::intelligence::InformationTopic;
+use crate::intelligence::{InformationTopic, Reliability, Specificity};
 use crate::legal::{EvidenceKind, InvestigationWorkKind, ALL_INVESTIGATION_WORK_KINDS};
 use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
+use crate::recruitment::{RecruitmentApproach, ALL_RECRUITMENT_APPROACHES};
 use crate::world::{
-    BusinessFunction, BusinessKind, CapabilityKind, PolicyKind, PolicySetting, TraitKind,
-    ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
+    BusinessFunction, BusinessKind, CapabilityKind, DriveKind, PolicyKind, PolicySetting,
+    TraitKind, ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS,
+    ALL_TRAIT_KINDS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -17,6 +19,173 @@ use thiserror::Error;
 pub struct CapabilityDefinition {
     kind: CapabilityKind,
     display_name: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentRelationshipSupportDefinition {
+    pub trust_weight: u8,
+    pub respect_weight: u8,
+    pub affection_weight: u8,
+    pub debt_weight: u8,
+    pub divisor: u8,
+    pub fear_penalty_weight: u8,
+    pub fear_penalty_divisor: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentIncumbentRelationshipDefinition {
+    pub trust_weight: u8,
+    pub respect_weight: u8,
+    pub affection_weight: u8,
+    pub dependence_weight: u8,
+    pub divisor: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentRelationshipDefinition {
+    pub recruiter_support: RecruitmentRelationshipSupportDefinition,
+    pub incumbent_attachment: RecruitmentIncumbentRelationshipDefinition,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentInformationQualityDefinition {
+    pub unknown_reliability: u8,
+    pub unreliable_reliability: u8,
+    pub mixed_reliability: u8,
+    pub generally_reliable: u8,
+    pub direct_access: u8,
+    pub vague_specificity: u8,
+    pub general_specificity: u8,
+    pub specific_specificity: u8,
+    pub precise_specificity: u8,
+}
+
+impl RecruitmentInformationQualityDefinition {
+    pub fn reliability_score(self, reliability: Reliability) -> u8 {
+        match reliability {
+            Reliability::Unknown => self.unknown_reliability,
+            Reliability::Unreliable => self.unreliable_reliability,
+            Reliability::Mixed => self.mixed_reliability,
+            Reliability::GenerallyReliable => self.generally_reliable,
+            Reliability::DirectAccess => self.direct_access,
+        }
+    }
+
+    pub fn specificity_score(self, specificity: Specificity) -> u8 {
+        match specificity {
+            Specificity::Vague => self.vague_specificity,
+            Specificity::General => self.general_specificity,
+            Specificity::Specific => self.specific_specificity,
+            Specificity::Precise => self.precise_specificity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentWeightsDefinition {
+    pub recruiter_influence: u8,
+    pub drive_alignment: u8,
+    pub relationship_support: u8,
+    pub incumbent_resentment: u8,
+    pub perceived_legal_pressure: u8,
+    pub incumbent_attachment: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentTimingDefinition {
+    pub cooldown: SimDuration,
+    pub perceived_legal_pressure_max_age: SimDuration,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentScoringDefinition {
+    pub base_willingness: i16,
+    pub acceptance_score: i16,
+    pub existing_membership_resistance: u8,
+    pub charismatic_recruiter_bonus: u8,
+    pub weights: RecruitmentWeightsDefinition,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecruitmentTraitRuleDefinition {
+    pub trait_kind: TraitKind,
+    pub approach: Option<RecruitmentApproach>,
+    pub minimum_incumbent_resentment: Option<u8>,
+    pub adjustment: i16,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecruitmentDefinitionSpec {
+    pub timing: RecruitmentTimingDefinition,
+    pub scoring: RecruitmentScoringDefinition,
+    pub recruiter_capabilities: BTreeSet<CapabilityKind>,
+    pub relationships: RecruitmentRelationshipDefinition,
+    pub information_quality: RecruitmentInformationQualityDefinition,
+    pub approach_drives: BTreeMap<RecruitmentApproach, BTreeSet<DriveKind>>,
+    pub trait_rules: Vec<RecruitmentTraitRuleDefinition>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecruitmentDefinition {
+    timing: RecruitmentTimingDefinition,
+    scoring: RecruitmentScoringDefinition,
+    recruiter_capabilities: BTreeSet<CapabilityKind>,
+    relationships: RecruitmentRelationshipDefinition,
+    information_quality: RecruitmentInformationQualityDefinition,
+    approach_drives: BTreeMap<RecruitmentApproach, BTreeSet<DriveKind>>,
+    trait_rules: Vec<RecruitmentTraitRuleDefinition>,
+}
+
+impl RecruitmentDefinition {
+    pub fn cooldown(&self) -> SimDuration {
+        self.timing.cooldown
+    }
+
+    pub fn base_willingness(&self) -> i16 {
+        self.scoring.base_willingness
+    }
+
+    pub fn acceptance_score(&self) -> i16 {
+        self.scoring.acceptance_score
+    }
+
+    pub fn existing_membership_resistance(&self) -> u8 {
+        self.scoring.existing_membership_resistance
+    }
+
+    pub fn perceived_legal_pressure_max_age(&self) -> SimDuration {
+        self.timing.perceived_legal_pressure_max_age
+    }
+
+    pub fn weights(&self) -> RecruitmentWeightsDefinition {
+        self.scoring.weights
+    }
+
+    pub fn recruiter_capabilities(&self) -> &BTreeSet<CapabilityKind> {
+        &self.recruiter_capabilities
+    }
+
+    pub fn charismatic_recruiter_bonus(&self) -> u8 {
+        self.scoring.charismatic_recruiter_bonus
+    }
+
+    pub fn relationships(&self) -> RecruitmentRelationshipDefinition {
+        self.relationships
+    }
+
+    pub fn information_quality(&self) -> RecruitmentInformationQualityDefinition {
+        self.information_quality
+    }
+
+    pub fn drives_for_approach(&self, approach: RecruitmentApproach) -> &BTreeSet<DriveKind> {
+        self.approach_drives
+            .get(&approach)
+            .unwrap_or_else(|| panic!("missing recruitment drive definition: {approach:?}"))
+    }
+
+    pub fn trait_rules(&self) -> &[RecruitmentTraitRuleDefinition] {
+        &self.trait_rules
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +261,21 @@ pub struct TraitDefinition {
 
 impl TraitDefinition {
     pub fn kind(&self) -> TraitKind {
+        self.kind
+    }
+    pub fn display_name(&self) -> &'static str {
+        self.display_name
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DriveDefinition {
+    kind: DriveKind,
+    display_name: &'static str,
+}
+
+impl DriveDefinition {
+    pub fn kind(&self) -> DriveKind {
         self.kind
     }
     pub fn display_name(&self) -> &'static str {
@@ -391,6 +575,8 @@ pub struct Registry {
     content_revision: u32,
     capabilities: BTreeMap<CapabilityKind, CapabilityDefinition>,
     traits: BTreeMap<TraitKind, TraitDefinition>,
+    drives: BTreeMap<DriveKind, DriveDefinition>,
+    recruitment: RecruitmentDefinition,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
     investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
@@ -402,6 +588,9 @@ impl Registry {
     pub fn content_revision(&self) -> u32 {
         self.content_revision
     }
+    pub fn recruitment(&self) -> &RecruitmentDefinition {
+        &self.recruitment
+    }
     pub fn get_capability(&self, kind: CapabilityKind) -> &CapabilityDefinition {
         self.capabilities
             .get(&kind)
@@ -411,6 +600,11 @@ impl Registry {
         self.traits
             .get(&kind)
             .unwrap_or_else(|| panic!("missing trait definition: {kind:?}"))
+    }
+    pub fn get_drive(&self, kind: DriveKind) -> &DriveDefinition {
+        self.drives
+            .get(&kind)
+            .unwrap_or_else(|| panic!("missing drive definition: {kind:?}"))
     }
     pub fn get_policy(&self, kind: PolicyKind) -> &PolicyDefinition {
         self.policies
@@ -454,6 +648,10 @@ pub(crate) enum RegistryBuildError {
     DuplicateCapability(CapabilityKind),
     #[error("duplicate trait definition: {0:?}")]
     DuplicateTrait(TraitKind),
+    #[error("duplicate drive definition: {0:?}")]
+    DuplicateDrive(DriveKind),
+    #[error("duplicate recruitment definition")]
+    DuplicateRecruitment,
     #[error("duplicate policy definition: {0:?}")]
     DuplicatePolicy(PolicyKind),
     #[error("duplicate operation definition: {0:?}")]
@@ -468,6 +666,26 @@ pub(crate) enum RegistryBuildError {
     MissingCapability(CapabilityKind),
     #[error("missing trait definition: {0:?}")]
     MissingTrait(TraitKind),
+    #[error("missing drive definition: {0:?}")]
+    MissingDrive(DriveKind),
+    #[error("missing recruitment definition")]
+    MissingRecruitment,
+    #[error("recruitment cooldown and legal-pressure age must be positive")]
+    InvalidRecruitmentDuration,
+    #[error("recruitment weights and membership resistance must be in 0..=100")]
+    InvalidRecruitmentWeight,
+    #[error("recruitment relationship weighting is invalid")]
+    InvalidRecruitmentRelationshipWeights,
+    #[error("recruitment information quality scores must be in 0..=100")]
+    InvalidRecruitmentInformationQuality,
+    #[error("recruitment must define at least one recruiter capability")]
+    MissingRecruitmentCapabilities,
+    #[error("recruitment approach {0:?} must define at least one motivating drive")]
+    MissingRecruitmentApproachDrives(RecruitmentApproach),
+    #[error("recruitment trait rule for {0:?} is outside supported bounds")]
+    InvalidRecruitmentTraitRule(TraitKind),
+    #[error("combined recruitment trait adjustments exceed supported arithmetic bounds")]
+    InvalidRecruitmentTraitAdjustmentTotal,
     #[error("missing policy definition: {0:?}")]
     MissingPolicy(PolicyKind),
     #[error("missing operation definition: {0:?}")]
@@ -551,6 +769,8 @@ pub(crate) enum RegistryBuildError {
 pub(crate) struct RegistryBuilder {
     capabilities: BTreeMap<CapabilityKind, CapabilityDefinition>,
     traits: BTreeMap<TraitKind, TraitDefinition>,
+    drives: BTreeMap<DriveKind, DriveDefinition>,
+    recruitment: Option<RecruitmentDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
     investigation_work: BTreeMap<InvestigationWorkKind, InvestigationWorkDefinition>,
@@ -573,6 +793,189 @@ impl RegistryBuilder {
             .is_some()
         {
             return Err(RegistryBuildError::DuplicateCapability(kind));
+        }
+        Ok(())
+    }
+    pub(crate) fn register_recruitment(
+        &mut self,
+        spec: RecruitmentDefinitionSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.recruitment.is_some() {
+            return Err(RegistryBuildError::DuplicateRecruitment);
+        }
+        let RecruitmentDefinitionSpec {
+            timing,
+            scoring,
+            recruiter_capabilities,
+            relationships,
+            information_quality,
+            approach_drives,
+            trait_rules,
+        } = spec;
+        let RecruitmentTimingDefinition {
+            cooldown,
+            perceived_legal_pressure_max_age,
+        } = timing;
+        let RecruitmentScoringDefinition {
+            base_willingness,
+            acceptance_score,
+            existing_membership_resistance,
+            charismatic_recruiter_bonus,
+            weights,
+        } = scoring;
+        let RecruitmentRelationshipDefinition {
+            recruiter_support,
+            incumbent_attachment,
+        } = relationships;
+        let RecruitmentRelationshipSupportDefinition {
+            trust_weight: support_trust_weight,
+            respect_weight: support_respect_weight,
+            affection_weight: support_affection_weight,
+            debt_weight: support_debt_weight,
+            divisor: support_divisor,
+            fear_penalty_weight,
+            fear_penalty_divisor,
+        } = recruiter_support;
+        let RecruitmentIncumbentRelationshipDefinition {
+            trust_weight: attachment_trust_weight,
+            respect_weight: attachment_respect_weight,
+            affection_weight: attachment_affection_weight,
+            dependence_weight: attachment_dependence_weight,
+            divisor: attachment_divisor,
+        } = incumbent_attachment;
+        if cooldown.as_minutes() == 0 || perceived_legal_pressure_max_age.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidRecruitmentDuration);
+        }
+        if [
+            weights.recruiter_influence,
+            weights.drive_alignment,
+            weights.relationship_support,
+            weights.incumbent_resentment,
+            weights.perceived_legal_pressure,
+            weights.incumbent_attachment,
+            existing_membership_resistance,
+            charismatic_recruiter_bonus,
+        ]
+        .into_iter()
+        .any(|value| value > 100)
+        {
+            return Err(RegistryBuildError::InvalidRecruitmentWeight);
+        }
+        if recruiter_capabilities.is_empty() {
+            return Err(RegistryBuildError::MissingRecruitmentCapabilities);
+        }
+        let support_weight_total = u16::from(support_trust_weight)
+            + u16::from(support_respect_weight)
+            + u16::from(support_affection_weight)
+            + u16::from(support_debt_weight);
+        let attachment_weight_total = u16::from(attachment_trust_weight)
+            + u16::from(attachment_respect_weight)
+            + u16::from(attachment_affection_weight)
+            + u16::from(attachment_dependence_weight);
+        if support_divisor == 0
+            || fear_penalty_divisor == 0
+            || attachment_divisor == 0
+            || support_weight_total == 0
+            || attachment_weight_total == 0
+            || support_weight_total.saturating_mul(100) / u16::from(support_divisor) > 100
+            || attachment_weight_total.saturating_mul(100) / u16::from(attachment_divisor) > 100
+            || u16::from(fear_penalty_weight).saturating_mul(100) / u16::from(fear_penalty_divisor)
+                > 100
+        {
+            return Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights);
+        }
+        if [
+            information_quality.unknown_reliability,
+            information_quality.unreliable_reliability,
+            information_quality.mixed_reliability,
+            information_quality.generally_reliable,
+            information_quality.direct_access,
+            information_quality.vague_specificity,
+            information_quality.general_specificity,
+            information_quality.specific_specificity,
+            information_quality.precise_specificity,
+        ]
+        .into_iter()
+        .any(|score| score > 100)
+        {
+            return Err(RegistryBuildError::InvalidRecruitmentInformationQuality);
+        }
+        for approach in ALL_RECRUITMENT_APPROACHES {
+            if approach_drives
+                .get(&approach)
+                .is_none_or(BTreeSet::is_empty)
+            {
+                return Err(RegistryBuildError::MissingRecruitmentApproachDrives(
+                    approach,
+                ));
+            }
+        }
+        let mut maximum_absolute_trait_adjustment = 0_i32;
+        for rule in &trait_rules {
+            if rule
+                .minimum_incumbent_resentment
+                .is_some_and(|minimum| minimum > 100)
+                || !(-50..=50).contains(&rule.adjustment)
+            {
+                return Err(RegistryBuildError::InvalidRecruitmentTraitRule(
+                    rule.trait_kind,
+                ));
+            }
+            maximum_absolute_trait_adjustment = maximum_absolute_trait_adjustment
+                .checked_add(i32::from(rule.adjustment).abs())
+                .ok_or(RegistryBuildError::InvalidRecruitmentTraitAdjustmentTotal)?;
+        }
+        if maximum_absolute_trait_adjustment > i32::from(i16::MAX) {
+            return Err(RegistryBuildError::InvalidRecruitmentTraitAdjustmentTotal);
+        }
+        self.recruitment = Some(RecruitmentDefinition {
+            timing: RecruitmentTimingDefinition {
+                cooldown,
+                perceived_legal_pressure_max_age,
+            },
+            scoring: RecruitmentScoringDefinition {
+                base_willingness,
+                acceptance_score,
+                existing_membership_resistance,
+                charismatic_recruiter_bonus,
+                weights,
+            },
+            recruiter_capabilities,
+            relationships: RecruitmentRelationshipDefinition {
+                recruiter_support: RecruitmentRelationshipSupportDefinition {
+                    trust_weight: support_trust_weight,
+                    respect_weight: support_respect_weight,
+                    affection_weight: support_affection_weight,
+                    debt_weight: support_debt_weight,
+                    divisor: support_divisor,
+                    fear_penalty_weight,
+                    fear_penalty_divisor,
+                },
+                incumbent_attachment: RecruitmentIncumbentRelationshipDefinition {
+                    trust_weight: attachment_trust_weight,
+                    respect_weight: attachment_respect_weight,
+                    affection_weight: attachment_affection_weight,
+                    dependence_weight: attachment_dependence_weight,
+                    divisor: attachment_divisor,
+                },
+            },
+            information_quality,
+            approach_drives,
+            trait_rules,
+        });
+        Ok(())
+    }
+    pub(crate) fn register_drive(
+        &mut self,
+        kind: DriveKind,
+        display_name: &'static str,
+    ) -> Result<(), RegistryBuildError> {
+        if self
+            .drives
+            .insert(kind, DriveDefinition { kind, display_name })
+            .is_some()
+        {
+            return Err(RegistryBuildError::DuplicateDrive(kind));
         }
         Ok(())
     }
@@ -857,6 +1260,11 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::MissingTrait(kind));
             }
         }
+        for kind in ALL_DRIVE_KINDS {
+            if !self.drives.contains_key(&kind) {
+                return Err(RegistryBuildError::MissingDrive(kind));
+            }
+        }
         for kind in ALL_POLICY_KINDS {
             if !self.policies.contains_key(&kind) {
                 return Err(RegistryBuildError::MissingPolicy(kind));
@@ -882,15 +1290,166 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::MissingBusiness(kind));
             }
         }
+        let recruitment = self
+            .recruitment
+            .ok_or(RegistryBuildError::MissingRecruitment)?;
         Ok(Registry {
             content_revision,
             capabilities: self.capabilities,
             traits: self.traits,
+            drives: self.drives,
+            recruitment,
             policies: self.policies,
             operations: self.operations,
             investigation_work: self.investigation_work,
             enterprises: self.enterprises,
             businesses: self.businesses,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+
+    fn recruitment_spec() -> RecruitmentDefinitionSpec {
+        RecruitmentDefinitionSpec {
+            timing: RecruitmentTimingDefinition {
+                cooldown: SimDuration::from_minutes(60),
+                perceived_legal_pressure_max_age: SimDuration::from_minutes(1_440),
+            },
+            scoring: RecruitmentScoringDefinition {
+                base_willingness: 10,
+                acceptance_score: 40,
+                existing_membership_resistance: 10,
+                charismatic_recruiter_bonus: 5,
+                weights: RecruitmentWeightsDefinition {
+                    recruiter_influence: 25,
+                    drive_alignment: 25,
+                    relationship_support: 25,
+                    incumbent_resentment: 10,
+                    perceived_legal_pressure: 10,
+                    incumbent_attachment: 25,
+                },
+            },
+            recruiter_capabilities: BTreeSet::from([CapabilityKind::Negotiation]),
+            relationships: RecruitmentRelationshipDefinition {
+                recruiter_support: RecruitmentRelationshipSupportDefinition {
+                    trust_weight: 1,
+                    respect_weight: 1,
+                    affection_weight: 1,
+                    debt_weight: 1,
+                    divisor: 4,
+                    fear_penalty_weight: 1,
+                    fear_penalty_divisor: 2,
+                },
+                incumbent_attachment: RecruitmentIncumbentRelationshipDefinition {
+                    trust_weight: 1,
+                    respect_weight: 1,
+                    affection_weight: 1,
+                    dependence_weight: 1,
+                    divisor: 4,
+                },
+            },
+            information_quality: RecruitmentInformationQualityDefinition {
+                unknown_reliability: 20,
+                unreliable_reliability: 10,
+                mixed_reliability: 40,
+                generally_reliable: 70,
+                direct_access: 100,
+                vague_specificity: 25,
+                general_specificity: 50,
+                specific_specificity: 75,
+                precise_specificity: 100,
+            },
+            approach_drives: BTreeMap::from([
+                (
+                    RecruitmentApproach::FinancialOpportunity,
+                    BTreeSet::from([DriveKind::Money]),
+                ),
+                (
+                    RecruitmentApproach::Advancement,
+                    BTreeSet::from([DriveKind::Status]),
+                ),
+                (
+                    RecruitmentApproach::Protection,
+                    BTreeSet::from([DriveKind::Safety]),
+                ),
+                (
+                    RecruitmentApproach::PersonalAppeal,
+                    BTreeSet::from([DriveKind::Respect]),
+                ),
+            ]),
+            trait_rules: vec![RecruitmentTraitRuleDefinition {
+                trait_kind: TraitKind::Ambitious,
+                approach: Some(RecruitmentApproach::Advancement),
+                minimum_incumbent_resentment: None,
+                adjustment: 5,
+            }],
+        }
+    }
+
+    #[test]
+    fn authored_recruitment_definition_is_complete_and_queryable() {
+        let registry = build_registry();
+        let definition = registry.recruitment();
+        assert_eq!(definition.cooldown(), SimDuration::from_minutes(10_080));
+        assert_eq!(
+            definition.recruiter_capabilities(),
+            &BTreeSet::from([CapabilityKind::Negotiation, CapabilityKind::SocialAccess])
+        );
+        assert_eq!(
+            definition.drives_for_approach(RecruitmentApproach::Protection),
+            &BTreeSet::from([DriveKind::Safety, DriveKind::FamilySecurity])
+        );
+        assert!(definition
+            .trait_rules()
+            .iter()
+            .any(|rule| rule.trait_kind == TraitKind::EasilyFrightened
+                && rule.approach == Some(RecruitmentApproach::Protection)
+                && rule.adjustment > 0));
+    }
+
+    #[test]
+    fn recruitment_definition_rejects_zero_duration_and_incomplete_drive_mapping() {
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.timing.cooldown = SimDuration::from_minutes(0);
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::InvalidRecruitmentDuration)
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.approach_drives
+            .remove(&RecruitmentApproach::Protection);
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::MissingRecruitmentApproachDrives(
+                RecruitmentApproach::Protection
+            ))
+        ));
+    }
+
+    #[test]
+    fn recruitment_definition_rejects_unsafe_relationship_math() {
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.relationships.recruiter_support.divisor = 0;
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights)
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.relationships.recruiter_support.trust_weight = 5;
+        spec.relationships.recruiter_support.divisor = 1;
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights)
+        ));
     }
 }

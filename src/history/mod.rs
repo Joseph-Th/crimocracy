@@ -19,6 +19,7 @@ pub enum HistoryEventKind {
     Investigation,
     Violence,
     Promotion,
+    Recruitment,
     Other,
 }
 

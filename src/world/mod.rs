@@ -103,6 +103,18 @@ pub enum DriveKind {
     IdeologicalCause,
 }
 
+pub const ALL_DRIVE_KINDS: [DriveKind; 9] = [
+    DriveKind::Money,
+    DriveKind::Status,
+    DriveKind::Safety,
+    DriveKind::Respect,
+    DriveKind::Revenge,
+    DriveKind::FamilySecurity,
+    DriveKind::PoliticalAdvancement,
+    DriveKind::Independence,
+    DriveKind::IdeologicalCause,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Rating(u8);
 

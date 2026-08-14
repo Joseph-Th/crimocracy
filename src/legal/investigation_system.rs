@@ -81,6 +81,10 @@ pub enum InvestigationError {
     NoIncidentEvidence,
     #[error("pattern-link evidence must be produced by canonical investigation work")]
     PatternLinkRequiresInvestigationWork,
+    #[error(
+        "informant-statement evidence must be produced by the canonical informant disclosure path"
+    )]
+    InformantStatementRequiresDisclosure,
     #[error("transition {transition:?} is invalid from investigation status {status:?}")]
     InvalidInvestigationTransition {
         status: InvestigationStatus,
@@ -544,6 +548,9 @@ fn validate_evidence_draft(
     if draft.kind == crate::legal::EvidenceKind::PatternLink {
         return Err(InvestigationError::PatternLinkRequiresInvestigationWork);
     }
+    if draft.kind == crate::legal::EvidenceKind::InformantStatement {
+        return Err(InvestigationError::InformantStatementRequiresDisclosure);
+    }
     let investigation = state.legal.get_investigation(draft.investigation).ok_or(
         InvestigationError::MissingInvestigation(draft.investigation),
     )?;
@@ -782,7 +789,7 @@ mod tests {
                 custodian: police,
                 subject: EntityRef::Organization(criminal),
                 origin: None,
-                kind: EvidenceKind::InformantStatement,
+                kind: EvidenceKind::Surveillance,
                 strength: EvidenceStrength::Weak,
                 reliability: EvidenceReliability::Questionable,
                 admissibility: Admissibility::Unknown,
@@ -1328,7 +1335,7 @@ mod tests {
                 custodian: police,
                 subject: EntityRef::Organization(criminal),
                 origin: None,
-                kind: EvidenceKind::InformantStatement,
+                kind: EvidenceKind::Surveillance,
                 strength: EvidenceStrength::Weak,
                 reliability: EvidenceReliability::Questionable,
                 admissibility: Admissibility::Unknown,

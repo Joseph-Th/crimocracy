@@ -11,6 +11,7 @@ pub mod history;
 pub mod intelligence;
 pub mod legal;
 pub mod operations;
+pub mod recruitment;
 pub mod registry;
 pub mod reports;
 pub mod social;

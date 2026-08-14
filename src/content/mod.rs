@@ -8,19 +8,24 @@ use crate::legal::{EvidenceKind, InvestigationWorkKind};
 use crate::operations::{
     OperationApproach, OperationKind, RoleKind, ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS,
 };
+use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, InvestigationWorkDefinitionSpec,
     OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
-    OperationIntelligenceDefinition, Registry, RegistryBuilder,
+    OperationIntelligenceDefinition, RecruitmentDefinitionSpec,
+    RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
+    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
+    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
+    RecruitmentWeightsDefinition, Registry, RegistryBuilder,
 };
 use crate::world::{
-    ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, ForcePolicy,
-    LegalSupportPolicy, PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS,
-    ALL_TRAIT_KINDS,
+    ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, DriveKind,
+    ForcePolicy, LegalSupportPolicy, PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS,
+    ALL_DRIVE_KINDS, ALL_TRAIT_KINDS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 5;
+pub const CURRENT_CONTENT_REVISION: u32 = 6;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -34,6 +39,12 @@ pub fn build_registry() -> Registry {
             .register_trait(kind, trait_name(kind))
             .unwrap_or_else(|error| panic!("invalid trait registry: {error}"));
     }
+    for kind in ALL_DRIVE_KINDS {
+        builder
+            .register_drive(kind, drive_name(kind))
+            .unwrap_or_else(|error| panic!("invalid drive registry: {error}"));
+    }
+    register_recruitment(&mut builder);
     register_policies(&mut builder);
     for kind in ALL_OPERATION_KINDS {
         let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
@@ -54,6 +65,162 @@ pub fn build_registry() -> Registry {
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
+}
+
+fn register_recruitment(builder: &mut RegistryBuilder) {
+    builder
+        .register_recruitment(RecruitmentDefinitionSpec {
+            timing: RecruitmentTimingDefinition {
+                cooldown: SimDuration::from_minutes(10_080),
+                perceived_legal_pressure_max_age: SimDuration::from_minutes(20_160),
+            },
+            scoring: RecruitmentScoringDefinition {
+                base_willingness: 20,
+                acceptance_score: 45,
+                existing_membership_resistance: 15,
+                charismatic_recruiter_bonus: 10,
+                weights: RecruitmentWeightsDefinition {
+                    recruiter_influence: 30,
+                    drive_alignment: 25,
+                    relationship_support: 25,
+                    incumbent_resentment: 15,
+                    perceived_legal_pressure: 15,
+                    incumbent_attachment: 25,
+                },
+            },
+            recruiter_capabilities: BTreeSet::from([
+                CapabilityKind::Negotiation,
+                CapabilityKind::SocialAccess,
+            ]),
+            relationships: RecruitmentRelationshipDefinition {
+                recruiter_support: RecruitmentRelationshipSupportDefinition {
+                    trust_weight: 2,
+                    respect_weight: 1,
+                    affection_weight: 1,
+                    debt_weight: 1,
+                    divisor: 5,
+                    fear_penalty_weight: 1,
+                    fear_penalty_divisor: 3,
+                },
+                incumbent_attachment: RecruitmentIncumbentRelationshipDefinition {
+                    trust_weight: 1,
+                    respect_weight: 1,
+                    affection_weight: 1,
+                    dependence_weight: 1,
+                    divisor: 4,
+                },
+            },
+            information_quality: RecruitmentInformationQualityDefinition {
+                unknown_reliability: 20,
+                unreliable_reliability: 10,
+                mixed_reliability: 40,
+                generally_reliable: 70,
+                direct_access: 100,
+                vague_specificity: 25,
+                general_specificity: 50,
+                specific_specificity: 75,
+                precise_specificity: 100,
+            },
+            approach_drives: BTreeMap::from([
+                (
+                    RecruitmentApproach::FinancialOpportunity,
+                    BTreeSet::from([DriveKind::Money]),
+                ),
+                (
+                    RecruitmentApproach::Advancement,
+                    BTreeSet::from([DriveKind::Status, DriveKind::Independence]),
+                ),
+                (
+                    RecruitmentApproach::Protection,
+                    BTreeSet::from([DriveKind::Safety, DriveKind::FamilySecurity]),
+                ),
+                (
+                    RecruitmentApproach::PersonalAppeal,
+                    BTreeSet::from([DriveKind::Respect]),
+                ),
+            ]),
+            trait_rules: vec![
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Secretive,
+                    approach: None,
+                    minimum_incumbent_resentment: None,
+                    adjustment: -8,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Cautious,
+                    approach: None,
+                    minimum_incumbent_resentment: None,
+                    adjustment: -4,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Impulsive,
+                    approach: None,
+                    minimum_incumbent_resentment: None,
+                    adjustment: 3,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Vindictive,
+                    approach: None,
+                    minimum_incumbent_resentment: Some(50),
+                    adjustment: 8,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Greedy,
+                    approach: Some(RecruitmentApproach::FinancialOpportunity),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 12,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Ambitious,
+                    approach: Some(RecruitmentApproach::FinancialOpportunity),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 3,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Ambitious,
+                    approach: Some(RecruitmentApproach::Advancement),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 12,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Proud,
+                    approach: Some(RecruitmentApproach::Advancement),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 5,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::EasilyFrightened,
+                    approach: Some(RecruitmentApproach::Protection),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 15,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Cautious,
+                    approach: Some(RecruitmentApproach::Protection),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 6,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::LoyalToFamily,
+                    approach: Some(RecruitmentApproach::Protection),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 5,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Proud,
+                    approach: Some(RecruitmentApproach::Protection),
+                    minimum_incumbent_resentment: None,
+                    adjustment: -5,
+                },
+                RecruitmentTraitRuleDefinition {
+                    trait_kind: TraitKind::Proud,
+                    approach: Some(RecruitmentApproach::PersonalAppeal),
+                    minimum_incumbent_resentment: None,
+                    adjustment: 4,
+                },
+            ],
+        })
+        .unwrap_or_else(|error| panic!("invalid recruitment registry: {error}"));
 }
 
 fn register_investigation_work(builder: &mut RegistryBuilder) {
@@ -307,6 +474,19 @@ fn trait_name(kind: TraitKind) -> &'static str {
         TraitKind::Ambitious => "Ambitious",
         TraitKind::LoyalToFamily => "Loyal to family",
         TraitKind::EasilyFrightened => "Easily frightened",
+    }
+}
+fn drive_name(kind: DriveKind) -> &'static str {
+    match kind {
+        DriveKind::Money => "Money",
+        DriveKind::Status => "Status",
+        DriveKind::Safety => "Safety",
+        DriveKind::Respect => "Respect",
+        DriveKind::Revenge => "Revenge",
+        DriveKind::FamilySecurity => "Family security",
+        DriveKind::PoliticalAdvancement => "Political advancement",
+        DriveKind::Independence => "Independence",
+        DriveKind::IdeologicalCause => "Ideological cause",
     }
 }
 fn operation_name(kind: OperationKind) -> &'static str {

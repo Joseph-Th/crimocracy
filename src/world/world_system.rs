@@ -1,7 +1,7 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    BusinessId, CharacterId, InvestigationId, MandateId, NeighborhoodId, OperationId,
+    BusinessId, CharacterId, InformantId, InvestigationId, MandateId, NeighborhoodId, OperationId,
     OrganizationId,
 };
 use crate::core::state::AppState;
@@ -48,6 +48,14 @@ pub enum WorldError {
     ActiveInvestigationAssignment {
         character: CharacterId,
         investigation: InvestigationId,
+    },
+    #[error(
+        "character {character} is active informant {informant} for target handler organization {handler}"
+    )]
+    ActiveInformantHandlerAssignment {
+        character: CharacterId,
+        handler: OrganizationId,
+        informant: InformantId,
     },
     #[error("character {character} still supervises direct report {direct_report}")]
     DirectReportAssignment {
@@ -132,6 +140,9 @@ pub fn insert_character(
     }
     for kind in &draft.traits {
         registry.get_trait(*kind);
+    }
+    for kind in draft.drives.keys() {
+        registry.get_drive(*kind);
     }
 
     let id = state.ids.next_character();
@@ -230,6 +241,15 @@ fn validate_reassignment_preconditions(
     validate_membership(state, organization, supervisor)?;
 
     if organization != record.organization() {
+        if let Some(handler) = organization {
+            if let Some(informant) = state.legal.active_informant_for(character, handler) {
+                return Err(WorldError::ActiveInformantHandlerAssignment {
+                    character,
+                    handler,
+                    informant: informant.id(),
+                });
+            }
+        }
         if let Some(mandate) = state.delegation.active_for_manager(character) {
             return Err(WorldError::ActiveMandateAssignment {
                 character,

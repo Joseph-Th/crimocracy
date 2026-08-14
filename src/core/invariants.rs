@@ -4,8 +4,9 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
     BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, DecisionRequestId, EnterpriseCycleId,
-    EnterpriseId, InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId,
-    MandateId, OperationId, OrganizationId, ReportId, WitnessStatementId,
+    EnterpriseId, InformantDisclosureId, InformantId, InformationId, InvestigationId,
+    InvestigationWorkId, LedgerTransactionId, MandateId, OperationId, OrganizationId,
+    RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::decisions::{DecisionResponse, DecisionStatus};
@@ -17,14 +18,15 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
+use crate::legal::informant_system::{informant_reliability, informant_strength};
 use crate::legal::investigation_work_execution::{
     calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
     minimum_source_reliability, source_evidence_forms_simple_path,
 };
 use crate::legal::witness_system::{witness_reliability, witness_strength};
 use crate::legal::{
-    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InvestigationStatus,
-    InvestigationWorkOutcome, InvestigationWorkStatus, WitnessCooperation,
+    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InformantStatus,
+    InvestigationStatus, InvestigationWorkOutcome, InvestigationWorkStatus, WitnessCooperation,
 };
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
@@ -34,12 +36,17 @@ use crate::operations::operation_system::is_information_subject_relevant;
 use crate::operations::{
     OperationConstraint, OperationContingency, OperationExposureLevel, OperationStatus,
 };
+use crate::recruitment::recruitment_system::{
+    calculate_recruitment_factors_from_context, calculate_recruitment_margin,
+    classify_recruitment_outcome, select_perceived_legal_pressure_at, RecruitmentFactorContext,
+};
+use crate::recruitment::{RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource};
 use crate::registry::Registry;
 use crate::world::{
-    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, OrganizationKind, PolicyKind,
-    ALL_POLICY_KINDS,
+    ApprovalPolicy, BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, OrganizationKind,
+    PolicyKind, ALL_POLICY_KINDS,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -111,6 +118,12 @@ pub enum StateValidationError {
     InvalidCaseWitness { witness: CaseWitnessId },
     #[error("witness statement {statement} has invalid persisted state")]
     InvalidWitnessStatement { statement: WitnessStatementId },
+    #[error("informant {informant} has invalid persisted state")]
+    InvalidInformant { informant: InformantId },
+    #[error("informant disclosure {disclosure} has invalid persisted provenance")]
+    InvalidInformantDisclosure { disclosure: InformantDisclosureId },
+    #[error("recruitment attempt {attempt} has invalid persisted state")]
+    InvalidRecruitmentAttempt { attempt: RecruitmentAttemptId },
     #[error("decision {decision} has an invalid attention class")]
     InvalidDecisionAttention { decision: DecisionRequestId },
     #[error("decision {decision} has an empty summary")]
@@ -252,6 +265,7 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_indexes(state)?;
     validate_world_state(state)?;
     validate_social_and_intelligence(state)?;
+    validate_recruitment(state)?;
     validate_operations(state)?;
     validate_decisions(state)?;
     validate_delegation(state)?;
@@ -472,6 +486,7 @@ pub fn validate_state_against_registry(
             return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
         }
     }
+    validate_recruitment_against_registry(registry, state)?;
     Ok(())
 }
 
@@ -481,6 +496,7 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("finance", state.finance.has_consistent_indexes()),
         ("social", state.social.has_consistent_indexes()),
         ("intelligence", state.intelligence.has_consistent_indexes()),
+        ("recruitment", state.recruitment.has_consistent_indexes()),
         ("operations", state.operations.has_consistent_indexes()),
         ("decisions", state.decisions.has_consistent_indexes()),
         ("delegation", state.delegation.has_consistent_indexes()),
@@ -797,6 +813,326 @@ fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidat
                 return Err(StateValidationError::InvalidInformationProvenance {
                     information: information.id(),
                     source_information: *source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_recruitment(state: &AppState) -> Result<(), StateValidationError> {
+    let mut previous_attempt_by_pair: BTreeMap<
+        (CharacterId, OrganizationId),
+        crate::core::time::SimTime,
+    > = BTreeMap::new();
+    let mut recruitment_history_events = BTreeSet::new();
+    let mut recruitment_outcome_information = BTreeSet::new();
+    for attempt in state.recruitment.attempts() {
+        let candidate = state.world.get_character(attempt.candidate()).ok_or(
+            StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            },
+        )?;
+        let recruiter = state.world.get_character(attempt.recruiter()).ok_or(
+            StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            },
+        )?;
+        let target = state
+            .world
+            .get_organization(attempt.target_organization())
+            .ok_or(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            })?;
+        if candidate.id() == recruiter.id()
+            || target.kind() != OrganizationKind::Criminal
+            || attempt.occurred_at() > state.now()
+            || attempt.previous_organization() == Some(attempt.target_organization())
+            || attempt
+                .previous_supervisor()
+                .is_some_and(|supervisor| state.world.get_character(supervisor).is_none())
+            || (attempt.previous_supervisor().is_some()
+                && attempt.previous_organization().is_none())
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
+        }
+        if let Some(previous_organization) = attempt.previous_organization() {
+            let previous = state.world.get_organization(previous_organization).ok_or(
+                StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                },
+            )?;
+            if previous.kind() != OrganizationKind::Criminal {
+                return Err(StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                });
+            }
+        }
+
+        let recruiter_relationship = attempt.recruiter_relationship();
+        if recruiter_relationship.from() != attempt.candidate()
+            || recruiter_relationship.to() != attempt.recruiter()
+            || recruiter_relationship.dimensions().is_none()
+            || recruiter_relationship.version().is_none()
+            || recruiter_relationship.version() == Some(0)
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
+        }
+        match (
+            attempt.previous_supervisor(),
+            attempt.incumbent_relationship(),
+        ) {
+            (None, None) => {}
+            (Some(supervisor), Some(snapshot)) => {
+                let snapshot_shape_is_valid = match (snapshot.dimensions(), snapshot.version()) {
+                    (Some(_), Some(version)) => version > 0,
+                    (None, None) => true,
+                    (Some(_), None) | (None, Some(_)) => false,
+                };
+                if snapshot.from() != attempt.candidate()
+                    || snapshot.to() != supervisor
+                    || !snapshot_shape_is_valid
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                });
+            }
+        }
+
+        match attempt.authority() {
+            RecruitmentAuthority::ExecutiveApproval => {}
+            RecruitmentAuthority::Delegated {
+                mandate,
+                manager,
+                scope,
+                mandate_version,
+                manager_version,
+                policy,
+                policy_source,
+            } => {
+                let mandate_record = state.delegation.get_mandate(mandate).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if manager != attempt.recruiter()
+                    || mandate_record.manager() != manager
+                    || mandate_record.organization() != attempt.target_organization()
+                    || scope
+                        != crate::delegation::ResponsibilityScope::Function(
+                            crate::delegation::ResponsibilityFunction::Personnel,
+                        )
+                    || mandate_version == 0
+                    || mandate_version > mandate_record.version()
+                    || manager_version == 0
+                    || manager_version > recruiter.version()
+                    || policy != ApprovalPolicy::Delegated
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                if mandate_version == mandate_record.version()
+                    && !mandate_record.scopes().contains(
+                        &crate::delegation::ResponsibilityScope::Function(
+                            crate::delegation::ResponsibilityFunction::Personnel,
+                        ),
+                    )
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                let valid_policy_source = match policy_source {
+                    RecruitmentPolicySource::Organization(organization) => {
+                        organization == attempt.target_organization()
+                    }
+                    RecruitmentPolicySource::Mandate(source_mandate) => source_mandate == mandate,
+                };
+                if !valid_policy_source {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+            }
+        }
+
+        if let Some(information_id) = attempt.pressure_information() {
+            let information = state.intelligence.get_information(information_id).ok_or(
+                StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                },
+            )?;
+            if information.holder() != KnowledgeHolder::Character(attempt.candidate())
+                || information.topic() != InformationTopic::PoliceActivity
+                || information.subject() != EntityRef::Character(attempt.candidate())
+                || information.recorded_at() > attempt.occurred_at()
+                || information.observed_at() > attempt.occurred_at()
+            {
+                return Err(StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                });
+            }
+        }
+
+        let outcome_information = state
+            .intelligence
+            .get_information(attempt.outcome_information())
+            .ok_or(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            })?;
+        if !recruitment_outcome_information.insert(attempt.outcome_information())
+            || outcome_information.holder()
+                != KnowledgeHolder::Organization(attempt.target_organization())
+            || outcome_information.source_kind() != InformationSourceKind::AfterAction
+            || outcome_information.topic() != InformationTopic::Personnel
+            || outcome_information.source_entity()
+                != Some(EntityRef::Character(attempt.recruiter()))
+            || outcome_information.subject() != EntityRef::Character(attempt.candidate())
+            || outcome_information.observed_at() != attempt.occurred_at()
+            || outcome_information.recorded_at() != attempt.occurred_at()
+            || outcome_information.reliability() != Reliability::DirectAccess
+            || outcome_information.specificity() != Specificity::Precise
+            || !outcome_information.derived_from().is_empty()
+            || outcome_information.summary().trim().is_empty()
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
+        }
+
+        let factors = attempt.factors();
+        if factors.recruiter_influence() > 100
+            || factors.drive_alignment() > 100
+            || factors.relationship_support() > 100
+            || factors.incumbent_attachment() > 100
+            || factors.incumbent_resentment() > 100
+            || factors.perceived_legal_pressure() > 100
+            || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
+        }
+
+        let pair = (attempt.candidate(), attempt.target_organization());
+        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at()) {
+            if attempt.occurred_at() < previous_time {
+                return Err(StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
+                });
+            }
+        }
+
+        match attempt.outcome() {
+            RecruitmentOutcome::Accepted => {
+                let history_id = attempt.history_event().ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if !recruitment_history_events.insert(history_id) {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                let history = state.history.get_event(history_id).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if history.kind() != HistoryEventKind::Recruitment
+                    || history.occurred_at() != attempt.occurred_at()
+                    || !history
+                        .entities()
+                        .contains(&EntityRef::Character(attempt.candidate()))
+                    || !history
+                        .entities()
+                        .contains(&EntityRef::Character(attempt.recruiter()))
+                    || !history
+                        .entities()
+                        .contains(&EntityRef::Organization(attempt.target_organization()))
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+            }
+            RecruitmentOutcome::Refused => {
+                if attempt.history_event().is_some() {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_recruitment_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let definition = registry.recruitment();
+    let mut previous_attempt_by_pair: BTreeMap<
+        (CharacterId, OrganizationId),
+        crate::core::time::SimTime,
+    > = BTreeMap::new();
+    for attempt in state.recruitment.attempts() {
+        let candidate = state.world.get_character(attempt.candidate()).ok_or(
+            StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            },
+        )?;
+        let recruiter = state.world.get_character(attempt.recruiter()).ok_or(
+            StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            },
+        )?;
+        let (expected_pressure_information, expected_legal_pressure) =
+            select_perceived_legal_pressure_at(
+                definition,
+                state,
+                attempt.candidate(),
+                attempt.occurred_at(),
+            );
+        let expected_factors =
+            calculate_recruitment_factors_from_context(RecruitmentFactorContext {
+                definition,
+                candidate,
+                recruiter,
+                approach: attempt.approach(),
+                recruiter_relationship: attempt.recruiter_relationship(),
+                incumbent_relationship: attempt.incumbent_relationship(),
+                perceived_legal_pressure: expected_legal_pressure,
+                had_previous_organization: attempt.previous_organization().is_some(),
+            });
+        if expected_factors != Some(attempt.factors())
+            || attempt.pressure_information() != expected_pressure_information
+            || attempt.margin() != calculate_recruitment_margin(definition, attempt.factors())
+            || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
+        }
+
+        let pair = (attempt.candidate(), attempt.target_organization());
+        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at()) {
+            if attempt.occurred_at() < previous_time + definition.cooldown() {
+                return Err(StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: attempt.id(),
                 });
             }
         }
@@ -2145,6 +2481,108 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
         }
     }
 
+    for informant in state.legal.informants() {
+        let character = state.world.get_character(informant.character()).ok_or(
+            StateValidationError::InvalidInformant {
+                informant: informant.id(),
+            },
+        )?;
+        let handler = state.world.get_organization(informant.handler()).ok_or(
+            StateValidationError::InvalidInformant {
+                informant: informant.id(),
+            },
+        )?;
+        if !matches!(
+            handler.kind(),
+            OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+        ) || informant.established_at() > state.now()
+            || informant.version() == 0
+        {
+            return Err(StateValidationError::InvalidInformant {
+                informant: informant.id(),
+            });
+        }
+        match informant.status() {
+            InformantStatus::Active => {
+                if informant.terminated_at().is_some()
+                    || character.lifecycle() != Lifecycle::Active
+                    || handler.lifecycle() != Lifecycle::Active
+                    || character.organization() == Some(informant.handler())
+                {
+                    return Err(StateValidationError::InvalidInformant {
+                        informant: informant.id(),
+                    });
+                }
+            }
+            InformantStatus::Terminated => {
+                let terminated_at =
+                    informant
+                        .terminated_at()
+                        .ok_or(StateValidationError::InvalidInformant {
+                            informant: informant.id(),
+                        })?;
+                if terminated_at < informant.established_at() || terminated_at > state.now() {
+                    return Err(StateValidationError::InvalidInformant {
+                        informant: informant.id(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut informant_evidence = BTreeSet::new();
+    for disclosure in state.legal.informant_disclosures() {
+        let informant = state.legal.get_informant(disclosure.informant()).ok_or(
+            StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            },
+        )?;
+        let investigation = state
+            .legal
+            .get_investigation(disclosure.investigation())
+            .ok_or(StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            })?;
+        let information = state
+            .intelligence
+            .get_information(disclosure.source_information())
+            .ok_or(StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            })?;
+        let evidence = state.legal.get_evidence(disclosure.evidence()).ok_or(
+            StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            },
+        )?;
+        let after_termination = informant
+            .terminated_at()
+            .is_some_and(|terminated_at| disclosure.disclosed_at() > terminated_at);
+        if investigation.owner() != informant.handler()
+            || information.holder() != KnowledgeHolder::Character(informant.character())
+            || information.recorded_at() > disclosure.disclosed_at()
+            || disclosure.disclosed_at() < informant.established_at()
+            || disclosure.disclosed_at() < investigation.opened_at()
+            || disclosure.disclosed_at() > state.now()
+            || after_termination
+            || !informant_evidence.insert(disclosure.evidence())
+            || evidence.investigation() != disclosure.investigation()
+            || evidence.custodian() != informant.handler()
+            || evidence.subject() != information.subject()
+            || evidence.origin().is_some()
+            || evidence.source() != Some(EntityRef::Character(informant.character()))
+            || evidence.kind() != EvidenceKind::InformantStatement
+            || evidence.strength() != informant_strength(information.specificity())
+            || evidence.reliability() != informant_reliability(information.reliability())
+            || evidence.admissibility() != Admissibility::Unknown
+            || evidence.discovered_at() != disclosure.disclosed_at()
+            || !evidence.derived_from().is_empty()
+        {
+            return Err(StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            });
+        }
+    }
+
     for evidence in state.legal.all_evidence() {
         let investigation = state
             .legal
@@ -2182,15 +2620,35 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                     entity: source,
                 });
             }
-            if evidence.kind() != EvidenceKind::WitnessTestimony
-                || !matches!(source, EntityRef::Character(_))
-                || !named_witness_evidence.contains(&evidence.id())
-            {
+            let valid_source = matches!(source, EntityRef::Character(_))
+                && match evidence.kind() {
+                    EvidenceKind::WitnessTestimony => {
+                        named_witness_evidence.contains(&evidence.id())
+                            && !informant_evidence.contains(&evidence.id())
+                    }
+                    EvidenceKind::InformantStatement => {
+                        informant_evidence.contains(&evidence.id())
+                            && !named_witness_evidence.contains(&evidence.id())
+                    }
+                    EvidenceKind::VehicleDescription
+                    | EvidenceKind::Fingerprint
+                    | EvidenceKind::RecoveredProperty
+                    | EvidenceKind::FinancialRecord
+                    | EvidenceKind::Surveillance
+                    | EvidenceKind::CommunicationRecord
+                    | EvidenceKind::KnownAssociation
+                    | EvidenceKind::Document
+                    | EvidenceKind::Ballistics
+                    | EvidenceKind::PatternLink => false,
+                };
+            if !valid_source {
                 return Err(StateValidationError::InvalidEvidenceProvenance {
                     evidence: evidence.id(),
                 });
             }
-        } else if named_witness_evidence.contains(&evidence.id()) {
+        } else if named_witness_evidence.contains(&evidence.id())
+            || informant_evidence.contains(&evidence.id())
+        {
             return Err(StateValidationError::InvalidEvidenceProvenance {
                 evidence: evidence.id(),
             });
@@ -2211,12 +2669,21 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                     });
                 }
             }
+            EvidenceKind::InformantStatement => {
+                if !informant_evidence.contains(&evidence.id())
+                    || evidence.source().is_none()
+                    || !evidence.derived_from().is_empty()
+                {
+                    return Err(StateValidationError::InvalidEvidenceProvenance {
+                        evidence: evidence.id(),
+                    });
+                }
+            }
             EvidenceKind::WitnessTestimony
             | EvidenceKind::VehicleDescription
             | EvidenceKind::Fingerprint
             | EvidenceKind::RecoveredProperty
             | EvidenceKind::FinancialRecord
-            | EvidenceKind::InformantStatement
             | EvidenceKind::Surveillance
             | EvidenceKind::CommunicationRecord
             | EvidenceKind::KnownAssociation
@@ -2331,6 +2798,7 @@ pub fn validate_invariants(state: &AppState) {
     state.finance.debug_validate_indexes();
     state.social.debug_validate_indexes();
     state.intelligence.debug_validate_indexes();
+    state.recruitment.debug_validate_indexes();
     state.operations.debug_validate_indexes();
     state.decisions.debug_validate_indexes();
     state.delegation.debug_validate_indexes();
@@ -2350,6 +2818,10 @@ pub fn validate_invariants(state: &AppState) {
     debug_assert!(
         validate_operations(state).is_ok(),
         "Operation Runtime Validity: operation lifecycle, schedules, after-action knowledge, or history are inconsistent"
+    );
+    debug_assert!(
+        validate_recruitment(state).is_ok(),
+        "Recruitment Runtime Validity: recruitment history, causal factors, cooldowns, or membership snapshots are inconsistent"
     );
     debug_assert!(
         validate_legal_reports_and_history(state).is_ok(),
@@ -2930,6 +3402,76 @@ pub fn validate_invariants(state: &AppState) {
                 );
             }
         }
+    }
+    for informant in state.legal.informants() {
+        let character = state
+            .world
+            .get_character(informant.character())
+            .expect("Record Reference Validity: informant character does not exist");
+        let handler = state
+            .world
+            .get_organization(informant.handler())
+            .expect("Record Reference Validity: informant handler does not exist");
+        debug_assert!(
+            matches!(
+                handler.kind(),
+                OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+            ),
+            "Ownership Exclusivity: informant handler is not a legal organization"
+        );
+        debug_assert!(
+            informant.established_at() <= state.now() && informant.version() > 0,
+            "Lifecycle Validity: informant relationship has invalid chronology or version"
+        );
+        match informant.status() {
+            InformantStatus::Active => {
+                debug_assert_eq!(character.lifecycle(), Lifecycle::Active);
+                debug_assert_eq!(handler.lifecycle(), Lifecycle::Active);
+                debug_assert_ne!(character.organization(), Some(informant.handler()));
+                debug_assert!(informant.terminated_at().is_none());
+            }
+            InformantStatus::Terminated => {
+                let terminated_at = informant
+                    .terminated_at()
+                    .expect("Lifecycle Validity: terminated informant is missing termination time");
+                debug_assert!(terminated_at >= informant.established_at());
+                debug_assert!(terminated_at <= state.now());
+            }
+        }
+    }
+    for disclosure in state.legal.informant_disclosures() {
+        let informant = state
+            .legal
+            .get_informant(disclosure.informant())
+            .expect("Record Reference Validity: informant disclosure has no relationship");
+        let investigation = state
+            .legal
+            .get_investigation(disclosure.investigation())
+            .expect("Record Reference Validity: informant disclosure has no investigation");
+        let information = state
+            .intelligence
+            .get_information(disclosure.source_information())
+            .expect("Record Reference Validity: informant disclosure has no source information");
+        let evidence = state
+            .legal
+            .get_evidence(disclosure.evidence())
+            .expect("Record Reference Validity: informant disclosure has no evidence");
+        debug_assert_eq!(investigation.owner(), informant.handler());
+        debug_assert_eq!(
+            information.holder(),
+            KnowledgeHolder::Character(informant.character())
+        );
+        debug_assert_eq!(evidence.kind(), EvidenceKind::InformantStatement);
+        debug_assert_eq!(
+            evidence.source(),
+            Some(EntityRef::Character(informant.character()))
+        );
+        debug_assert_eq!(evidence.subject(), information.subject());
+        debug_assert_eq!(evidence.discovered_at(), disclosure.disclosed_at());
+        debug_assert!(disclosure.disclosed_at() >= informant.established_at());
+        debug_assert!(informant
+            .terminated_at()
+            .is_none_or(|terminated_at| disclosure.disclosed_at() <= terminated_at));
     }
     for jurisdiction in state.legal.jurisdictions() {
         let organization = state

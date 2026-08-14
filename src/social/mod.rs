@@ -83,6 +83,7 @@ impl RelationshipRecord {
 pub struct SocialState {
     relationships: BTreeMap<RelationshipKey, RelationshipRecord>,
     by_subject: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
+    by_target: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
 }
 
 impl SocialState {
@@ -105,6 +106,13 @@ impl SocialState {
             .into_iter()
             .flatten()
             .filter_map(move |to| self.get_relationship(from, *to))
+    }
+    pub fn relationships_to(&self, to: CharacterId) -> impl Iterator<Item = &RelationshipRecord> {
+        self.by_target
+            .get(&to)
+            .into_iter()
+            .flatten()
+            .filter_map(move |from| self.get_relationship(*from, to))
     }
     pub(crate) fn relationships(&self) -> impl Iterator<Item = &RelationshipRecord> {
         self.relationships.values()
@@ -135,6 +143,7 @@ impl SocialState {
                     },
                 );
                 self.by_subject.entry(from).or_default().insert(to);
+                self.by_target.entry(to).or_default().insert(from);
             }
         }
     }
@@ -147,9 +156,26 @@ impl SocialState {
             {
                 return false;
             }
+            if !self
+                .by_target
+                .get(&record.to())
+                .is_some_and(|sources| sources.contains(&record.from()))
+            {
+                return false;
+            }
         }
         for (from, targets) in &self.by_subject {
             for to in targets {
+                if !self.relationships.contains_key(&RelationshipKey {
+                    from: *from,
+                    to: *to,
+                }) {
+                    return false;
+                }
+            }
+        }
+        for (to, sources) in &self.by_target {
+            for from in sources {
                 if !self.relationships.contains_key(&RelationshipKey {
                     from: *from,
                     to: *to,
@@ -172,6 +198,12 @@ impl SocialState {
                     .is_some_and(|targets| targets.contains(&record.to())),
                 "Index Completeness: relationship subject index is missing an edge"
             );
+            debug_assert!(
+                self.by_target
+                    .get(&record.to())
+                    .is_some_and(|sources| sources.contains(&record.from())),
+                "Index Completeness: relationship target index is missing an edge"
+            );
         }
         for (from, targets) in &self.by_subject {
             for to in targets {
@@ -181,6 +213,17 @@ impl SocialState {
                         to: *to
                     }),
                     "Index Completeness: relationship index points to missing edge"
+                );
+            }
+        }
+        for (to, sources) in &self.by_target {
+            for from in sources {
+                debug_assert!(
+                    self.relationships.contains_key(&RelationshipKey {
+                        from: *from,
+                        to: *to
+                    }),
+                    "Index Completeness: relationship target index points to missing edge"
                 );
             }
         }
