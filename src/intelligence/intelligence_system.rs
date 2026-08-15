@@ -131,17 +131,25 @@ impl ValidatedInformation {
         let recorded_at = state.now();
         state.intelligence.insert(InformationRecord {
             id,
-            holder,
-            source_kind,
-            topic,
-            source_entity,
-            subject,
-            observed_at,
-            recorded_at,
-            reliability,
-            specificity,
-            derived_from: self.derived_from,
-            summary,
+            source: super::InformationSource {
+                holder,
+                source_kind,
+            },
+            subject: super::InformationSubject {
+                topic,
+                source_entity,
+                subject,
+            },
+            chronology: super::InformationChronology {
+                observed_at,
+                recorded_at,
+            },
+            assessment: super::InformationAssessment {
+                reliability,
+                specificity,
+                derived_from: self.derived_from,
+                summary,
+            },
         });
         id
     }

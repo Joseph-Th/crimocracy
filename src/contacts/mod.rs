@@ -51,19 +51,34 @@ impl ContactRelationshipSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InstitutionalContactRecord {
-    id: ContactId,
+pub(super) struct ContactParties {
     sponsor: OrganizationId,
     handler: CharacterId,
     contact: CharacterId,
     institution: OrganizationId,
     kind: ContactKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ContactRelationshipBasis {
     handler_to_contact: Option<ContactRelationshipSnapshot>,
     contact_to_handler: Option<ContactRelationshipSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ContactLifecycle {
     status: ContactStatus,
     established_at: SimTime,
     terminated_at: Option<SimTime>,
     version: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstitutionalContactRecord {
+    id: ContactId,
+    parties: ContactParties,
+    relationship_basis: ContactRelationshipBasis,
+    lifecycle: ContactLifecycle,
 }
 
 impl InstitutionalContactRecord {
@@ -72,47 +87,47 @@ impl InstitutionalContactRecord {
     }
 
     pub fn sponsor(&self) -> OrganizationId {
-        self.sponsor
+        self.parties.sponsor
     }
 
     pub fn handler(&self) -> CharacterId {
-        self.handler
+        self.parties.handler
     }
 
     pub fn contact(&self) -> CharacterId {
-        self.contact
+        self.parties.contact
     }
 
     pub fn institution(&self) -> OrganizationId {
-        self.institution
+        self.parties.institution
     }
 
     pub fn kind(&self) -> ContactKind {
-        self.kind
+        self.parties.kind
     }
 
     pub fn handler_to_contact(&self) -> Option<ContactRelationshipSnapshot> {
-        self.handler_to_contact
+        self.relationship_basis.handler_to_contact
     }
 
     pub fn contact_to_handler(&self) -> Option<ContactRelationshipSnapshot> {
-        self.contact_to_handler
+        self.relationship_basis.contact_to_handler
     }
 
     pub fn status(&self) -> ContactStatus {
-        self.status
+        self.lifecycle.status
     }
 
     pub fn established_at(&self) -> SimTime {
-        self.established_at
+        self.lifecycle.established_at
     }
 
     pub fn terminated_at(&self) -> Option<SimTime> {
-        self.terminated_at
+        self.lifecycle.terminated_at
     }
 
     pub fn version(&self) -> u32 {
-        self.version
+        self.lifecycle.version
     }
 }
 
@@ -329,9 +344,10 @@ impl ContactState {
                 .contacts
                 .get_mut(&id)
                 .expect("validated contact disappeared before termination commit");
-            record.status = ContactStatus::Terminated;
-            record.terminated_at = Some(terminated_at);
-            record.version = record
+            record.lifecycle.status = ContactStatus::Terminated;
+            record.lifecycle.terminated_at = Some(terminated_at);
+            record.lifecycle.version = record
+                .lifecycle
                 .version
                 .checked_add(1)
                 .expect("contact version counter exhausted");

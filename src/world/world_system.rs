@@ -869,6 +869,24 @@ mod tests {
             SimTime::from_minutes(15),
             SimTime::from_minutes(20),
         ));
+        assert!(!state.world().business_was_owned_during(
+            business,
+            BusinessOwner::Organization(first_owner),
+            SimTime::from_minutes(15),
+            SimTime::from_minutes(20),
+        ));
+        assert!(!state.world().business_was_owned_during(
+            business,
+            BusinessOwner::Organization(second_owner),
+            SimTime::from_minutes(20),
+            SimTime::from_minutes(20),
+        ));
+        assert!(state.world().business_was_owned_during(
+            business,
+            BusinessOwner::Character(individual_owner),
+            SimTime::from_minutes(20),
+            SimTime::from_minutes(20),
+        ));
         validate_invariants(&state);
     }
 

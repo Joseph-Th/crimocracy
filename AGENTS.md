@@ -2,6 +2,40 @@
 
 Read before changing code. Current work is in STATUS.md.
 
+## Portfolio standard
+
+This repository follows [`../STANDARDS.md`](../STANDARDS.md). The applicable profiles are Universal, Stateful Application, Deterministic System, and Automated Behavior-Evaluation.
+
+`STANDARDS.md` supplies portfolio defaults; this file owns Crimocracy's repository-local coding law. `STATUS.md` owns current implemented scope and `GAME_DESIGN.md` owns product intent. Do not use design intent as proof of implementation, and do not resolve contradictions among current documentation, tests, and source by choosing the convenient version. Reconcile the owning contract when a contradiction is found.
+
+Before implementation, a cold agent must be able to identify the current scope, state/behavior owner, canonical operation, persistence or observation boundary when applicable, narrowest proving test, and completion gate. If that route is unclear, improve the owning documentation as part of the change.
+
+### Authority map
+
+- `AGENTS.md` owns repository-local architecture law, mutation/validation conventions, test conventions, and the completion gate.
+- `STATUS.md` owns implemented capability, intentionally absent scope, persistence compatibility policy, and the current architectural foundation. It is the first current-state document to read after this file.
+- `GAME_DESIGN.md` owns product and player-experience intent only. It is not evidence that a system is implemented.
+- `README.md` owns project orientation and the executable verification commands. The **Before Committing** checklist below owns the semantic completion conditions around that command gate.
+- `Cargo.toml` and `Cargo.lock` own the Rust package, dependency, and lint configuration.
+- `examples/gameplay_harness.rs` is a controlled/calibration and bounded sensitivity evidence surface. It is not an alternate source of simulation rules or evidence about human comprehension, enjoyment, or interface quality.
+- Git history is historical evidence only, not current architecture authority. This repository does not currently maintain a separate ADR set.
+
+### Cold-start route
+
+1. Inspect Git status and preserve unrelated work.
+2. Read this file, then `STATUS.md` for current implemented scope.
+3. Use the module map implied by `src/` and the owning subsystem's `//!` contract to identify the state and system owner.
+4. Trace the canonical `validate_*`/`commit`, `decide_*`/apply, or direct owner operation before reading adjacent implementations.
+5. Identify the relevant invariant, persistence effect, and read-only observation boundary.
+6. Identify the narrowest existing test that proves the behavior, then the broader validation gate.
+7. Read `GAME_DESIGN.md` only when product intent is needed; never use it as proof of current capability.
+
+### Gameplay harness evidence contract
+
+`examples/gameplay_harness.rs` uses synthetic, explicitly authored scenario fixtures and production validators/commit paths. Its RUSH, PRESS, and RECON branches are deterministic policy treatments within the same scenario seed, not a natural-play proxy. The acting policy may use only organization/player-visible information, persisted reports and outcomes, and surfaced decision requests. Hidden investigation/evidence state is read only by `[DEV AUDIT]` diagnostics after decisions and must never feed action selection.
+
+`--samples` varies the `AppState` world/simulation seed while each strategy remains deterministic; there is no separate stochastic behavior seed. The same seed is used across strategy branches for matched comparisons. Narrative event output and per-run `RunMetrics` are the raw in-process evidence from which aggregates are derived; aggregate batch output is a reproducible diagnostic summary, not a durable research archive. Missing required acting information and canonical validation rejection fail the controlled run explicitly; event absence remains an observed absence rather than being converted into a quality verdict. The harness does not produce a universal game-quality score, and insufficient scenario evidence must remain insufficient rather than being forced positive or negative. Any future persisted evaluation artifact must retain per-run seeds and raw metrics beneath its derived findings.
+
 ## Coding Design Law
 
 A deterministic, explicit, maintainable codebase in Rust.
@@ -37,7 +71,7 @@ Registry / AppState / Record / System split:
 
 **Validation.** Validate every cross-reference, permission, lifecycle state, range, ownership claim, and capacity constraint before mutation. Fallible multi-resource operations use validated tokens and commit exactly once.
 
-**Determinism.** Same seed, state, inputs, and external snapshots produce the same result. All randomness comes from `state.rng` or an explicitly injected RNG owned by the state. Sort order-dependent inputs before making choices. Stable tie-breaking is mandatory.
+**Determinism.** Immutable registry/content definitions, serialized `AppState` including every domain RNG stream, ordered explicit inputs, and any explicit external snapshots are the complete determining inputs. Authoritative simulation execution is serial and synchronous, so thread scheduling is not part of simulation semantics. All randomness comes from state-owned RNG streams or an explicitly injected RNG owned by the state. Sort order-dependent inputs before making choices. Stable tie-breaking is mandatory.
 
 **Definitions versus runtime state.** Static definitions describe what can exist. Runtime state records what does exist. Do not store mutable runtime values in registry definitions. Any generated value that must survive restart is serializable and owned by `AppState` or a record.
 

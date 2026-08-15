@@ -60,19 +60,34 @@ impl BusinessEconomyRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BusinessCycleRecord {
-    id: BusinessCycleId,
+pub(super) struct BusinessCycleContext {
     business: BusinessId,
     business_version: u32,
     owner: BusinessOwner,
     occurred_at: SimTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct BusinessCycleFinancials {
     gross_revenue: Money,
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct BusinessCycleArtifacts {
     attention: AttentionClass,
     transaction: Option<LedgerTransactionId>,
     information: Option<InformationId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BusinessCycleRecord {
+    id: BusinessCycleId,
+    context: BusinessCycleContext,
+    financials: BusinessCycleFinancials,
+    artifacts: BusinessCycleArtifacts,
 }
 
 impl BusinessCycleRecord {
@@ -80,37 +95,37 @@ impl BusinessCycleRecord {
         self.id
     }
     pub fn business(&self) -> BusinessId {
-        self.business
+        self.context.business
     }
     pub fn business_version(&self) -> u32 {
-        self.business_version
+        self.context.business_version
     }
     pub fn owner(&self) -> BusinessOwner {
-        self.owner
+        self.context.owner
     }
     pub fn occurred_at(&self) -> SimTime {
-        self.occurred_at
+        self.context.occurred_at
     }
     pub fn gross_revenue(&self) -> Money {
-        self.gross_revenue
+        self.financials.gross_revenue
     }
     pub fn operating_cost(&self) -> Money {
-        self.operating_cost
+        self.financials.operating_cost
     }
     pub fn net_cash(&self) -> Money {
-        self.net_cash
+        self.financials.net_cash
     }
     pub fn variance_basis_points(&self) -> i16 {
-        self.variance_basis_points
+        self.financials.variance_basis_points
     }
     pub fn attention(&self) -> AttentionClass {
-        self.attention
+        self.artifacts.attention
     }
     pub fn transaction(&self) -> Option<LedgerTransactionId> {
-        self.transaction
+        self.artifacts.transaction
     }
     pub fn information(&self) -> Option<InformationId> {
-        self.information
+        self.artifacts.information
     }
 }
 

@@ -132,19 +132,39 @@ impl EnterpriseRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EnterpriseCycleRecord {
-    id: EnterpriseCycleId,
+pub(super) struct EnterpriseCycleContext {
     enterprise: EnterpriseId,
     occurred_at: SimTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct EnterpriseCycleFinancials {
     gross_revenue: Money,
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct EnterpriseCycleArtifacts {
     attention: AttentionClass,
     manager_management: Option<Rating>,
     policy_setting: Option<PolicySetting>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct EnterpriseCycleProvenance {
     transaction: Option<LedgerTransactionId>,
     information: Option<InformationId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EnterpriseCycleRecord {
+    id: EnterpriseCycleId,
+    context: EnterpriseCycleContext,
+    financials: EnterpriseCycleFinancials,
+    artifacts: EnterpriseCycleArtifacts,
+    provenance: EnterpriseCycleProvenance,
 }
 
 impl EnterpriseCycleRecord {
@@ -153,47 +173,47 @@ impl EnterpriseCycleRecord {
     }
 
     pub fn enterprise(&self) -> EnterpriseId {
-        self.enterprise
+        self.context.enterprise
     }
 
     pub fn occurred_at(&self) -> SimTime {
-        self.occurred_at
+        self.context.occurred_at
     }
 
     pub fn gross_revenue(&self) -> Money {
-        self.gross_revenue
+        self.financials.gross_revenue
     }
 
     pub fn operating_cost(&self) -> Money {
-        self.operating_cost
+        self.financials.operating_cost
     }
 
     pub fn net_cash(&self) -> Money {
-        self.net_cash
+        self.financials.net_cash
     }
 
     pub fn variance_basis_points(&self) -> i16 {
-        self.variance_basis_points
+        self.financials.variance_basis_points
     }
 
     pub fn attention(&self) -> AttentionClass {
-        self.attention
+        self.artifacts.attention
     }
 
     pub fn manager_management(&self) -> Option<Rating> {
-        self.manager_management
+        self.artifacts.manager_management
     }
 
     pub fn policy_setting(&self) -> Option<PolicySetting> {
-        self.policy_setting
+        self.artifacts.policy_setting
     }
 
     pub fn transaction(&self) -> Option<LedgerTransactionId> {
-        self.transaction
+        self.provenance.transaction
     }
 
     pub fn information(&self) -> Option<InformationId> {
-        self.information
+        self.provenance.information
     }
 }
 

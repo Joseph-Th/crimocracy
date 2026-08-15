@@ -327,13 +327,15 @@ impl OpportunityState {
         debug_assert_eq!(record.status(), OpportunityStatus::Open);
         let key = OperationOpportunityKey::from_record(record);
         let valid_until = record.valid_until();
-        debug_assert_eq!(self.open_by_context.remove(&key), Some(id));
+        let removed = self.open_by_context.remove(&key);
+        debug_assert_eq!(removed, Some(id));
         if let Some(valid_until) = valid_until {
             let ids = self
                 .open_by_expiry
                 .get_mut(&valid_until)
                 .expect("open opportunity expiry index must contain scheduled record");
-            debug_assert!(ids.remove(&id));
+            let removed = ids.remove(&id);
+            debug_assert!(removed);
             if ids.is_empty() {
                 self.open_by_expiry.remove(&valid_until);
             }

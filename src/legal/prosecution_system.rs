@@ -158,20 +158,28 @@ impl ValidatedProsecutionCaseOpening {
         state.legal.insert_prosecution_case(
             ProsecutionCaseRecord {
                 id: case_id,
-                arrest: self.draft.arrest,
-                defendant: self.dependencies.defendant,
-                source_investigation: self.dependencies.source_investigation,
-                source_authority: self.dependencies.source_authority,
-                prosecutor_office: self.draft.prosecutor_office,
-                lead_prosecutor: self.draft.lead_prosecutor,
-                evidence: self.draft.evidence.clone(),
-                initial_referral: referral_id,
-                referrals: BTreeSet::from([referral_id]),
-                opened_at: self.referred_at,
-                resolved_at: None,
-                status: ProsecutionCaseStatus::Reviewing,
-                resolution_information: None,
-                resolution_report: None,
+                context: super::ProsecutionCaseContext {
+                    arrest: self.draft.arrest,
+                    defendant: self.dependencies.defendant,
+                    source_investigation: self.dependencies.source_investigation,
+                    source_authority: self.dependencies.source_authority,
+                    prosecutor_office: self.draft.prosecutor_office,
+                    lead_prosecutor: self.draft.lead_prosecutor,
+                },
+                referrals: super::ProsecutionCaseReferrals {
+                    evidence: self.draft.evidence.clone(),
+                    initial_referral: referral_id,
+                    referrals: BTreeSet::from([referral_id]),
+                },
+                lifecycle: super::ProsecutionCaseLifecycle {
+                    opened_at: self.referred_at,
+                    resolved_at: None,
+                    status: ProsecutionCaseStatus::Reviewing,
+                },
+                resolution_artifacts: super::ProsecutionCaseResolutionArtifacts {
+                    resolution_information: None,
+                    resolution_report: None,
+                },
                 version: 1,
             },
             ProsecutionReferralRecord {
@@ -198,14 +206,16 @@ pub fn validate_open_prosecution_case(
     let referred_at = state.now();
     let (information, report) = validate_referral_artifacts(
         state,
-        dependencies.defendant,
-        dependencies.source_investigation,
-        dependencies.source_authority,
-        draft.prosecutor_office,
-        draft.lead_prosecutor,
-        &draft.evidence,
-        referred_at,
-        true,
+        ReferralArtifactContext {
+            defendant: dependencies.defendant,
+            source_investigation: dependencies.source_investigation,
+            source_authority: dependencies.source_authority,
+            prosecutor_office: draft.prosecutor_office,
+            lead_prosecutor: draft.lead_prosecutor,
+            evidence: &draft.evidence,
+            referred_at,
+            initial: true,
+        },
     )?;
     Ok(ValidatedProsecutionCaseOpening {
         draft,
@@ -374,14 +384,16 @@ pub fn validate_supplement_prosecution_case(
     let referred_at = state.now();
     let (information, report) = validate_referral_artifacts(
         state,
-        case.defendant(),
-        case.source_investigation(),
-        case.source_authority(),
-        case.prosecutor_office(),
-        case.lead_prosecutor(),
-        &draft.evidence,
-        referred_at,
-        false,
+        ReferralArtifactContext {
+            defendant: case.defendant(),
+            source_investigation: case.source_investigation(),
+            source_authority: case.source_authority(),
+            prosecutor_office: case.prosecutor_office(),
+            lead_prosecutor: case.lead_prosecutor(),
+            evidence: &draft.evidence,
+            referred_at,
+            initial: false,
+        },
     )?;
     Ok(ValidatedProsecutionReferral {
         draft,
@@ -762,18 +774,31 @@ fn validate_resolution_artifacts(
     Ok((information, report))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_referral_artifacts(
-    state: &AppState,
+struct ReferralArtifactContext<'a> {
     defendant: CharacterId,
     source_investigation: InvestigationId,
     source_authority: OrganizationId,
     prosecutor_office: OrganizationId,
     lead_prosecutor: CharacterId,
-    evidence: &BTreeSet<EvidenceId>,
+    evidence: &'a BTreeSet<EvidenceId>,
     referred_at: SimTime,
     initial: bool,
+}
+
+fn validate_referral_artifacts(
+    state: &AppState,
+    context: ReferralArtifactContext<'_>,
 ) -> Result<(ValidatedInformation, ValidatedReport), ProsecutionError> {
+    let ReferralArtifactContext {
+        defendant,
+        source_investigation,
+        source_authority,
+        prosecutor_office,
+        lead_prosecutor,
+        evidence,
+        referred_at,
+        initial,
+    } = context;
     let defendant_name = state
         .world
         .get_character(defendant)

@@ -154,40 +154,55 @@ pub fn validate_establish_business_economy(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BusinessCyclePlan {
+struct BusinessCycleSnapshot {
     business: BusinessId,
     expected_business_version: u32,
     owner: BusinessOwner,
     expected_economy_version: u32,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BusinessCycleEconomics {
     gross_revenue: Money,
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
     attention: AttentionClass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BusinessCycleAccounts {
     operating_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusinessCyclePlan {
+    snapshot: BusinessCycleSnapshot,
+    economics: BusinessCycleEconomics,
+    accounts: BusinessCycleAccounts,
+}
+
 impl BusinessCyclePlan {
     pub fn business(&self) -> BusinessId {
-        self.business
+        self.snapshot.business
     }
     pub fn gross_revenue(&self) -> Money {
-        self.gross_revenue
+        self.economics.gross_revenue
     }
     pub fn operating_cost(&self) -> Money {
-        self.operating_cost
+        self.economics.operating_cost
     }
     pub fn net_cash(&self) -> Money {
-        self.net_cash
+        self.economics.net_cash
     }
     pub fn variance_basis_points(&self) -> i16 {
-        self.variance_basis_points
+        self.economics.variance_basis_points
     }
     pub fn attention(&self) -> AttentionClass {
-        self.attention
+        self.economics.attention
     }
 }
 
@@ -250,19 +265,25 @@ pub fn decide_business_cycle(
         AttentionClass::Routine
     };
     Ok(BusinessCyclePlan {
-        business,
-        expected_business_version: business_record.version(),
-        owner: business_record.owner(),
-        expected_economy_version: economy.version(),
-        occurred_at: state.now(),
-        next_cycle_at: due_at + economics.cycle(),
-        gross_revenue,
-        operating_cost,
-        net_cash,
-        variance_basis_points,
-        attention,
-        operating_account: economy.operating_account(),
-        settlement_account: economy.settlement_account(),
+        snapshot: BusinessCycleSnapshot {
+            business,
+            expected_business_version: business_record.version(),
+            owner: business_record.owner(),
+            expected_economy_version: economy.version(),
+            occurred_at: state.now(),
+            next_cycle_at: due_at + economics.cycle(),
+        },
+        economics: BusinessCycleEconomics {
+            gross_revenue,
+            operating_cost,
+            net_cash,
+            variance_basis_points,
+            attention,
+        },
+        accounts: BusinessCycleAccounts {
+            operating_account: economy.operating_account(),
+            settlement_account: economy.settlement_account(),
+        },
     })
 }
 
@@ -274,42 +295,44 @@ pub struct ValidatedBusinessCycle {
 
 impl ValidatedBusinessCycle {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
-        let business = validate_business(state, self.plan.business)?;
-        if business.version() != self.plan.expected_business_version {
+        let business = validate_business(state, self.plan.snapshot.business)?;
+        if business.version() != self.plan.snapshot.expected_business_version {
             return Err(BusinessEconomyError::StaleBusiness {
-                business: self.plan.business,
-                expected: self.plan.expected_business_version,
+                business: self.plan.snapshot.business,
+                expected: self.plan.snapshot.expected_business_version,
                 found: business.version(),
             });
         }
         let economy = state
             .economy
-            .get_business_economy(self.plan.business)
+            .get_business_economy(self.plan.snapshot.business)
             .ok_or(BusinessEconomyError::MissingBusinessEconomy(
-                self.plan.business,
+                self.plan.snapshot.business,
             ))?;
-        if economy.version() != self.plan.expected_economy_version {
+        if economy.version() != self.plan.snapshot.expected_economy_version {
             return Err(BusinessEconomyError::StaleEconomy {
-                business: self.plan.business,
-                expected: self.plan.expected_economy_version,
+                business: self.plan.snapshot.business,
+                expected: self.plan.snapshot.expected_economy_version,
                 found: economy.version(),
             });
         }
         if economy.status() != BusinessOperatingStatus::Active {
-            return Err(BusinessEconomyError::EconomyNotActive(self.plan.business));
+            return Err(BusinessEconomyError::EconomyNotActive(
+                self.plan.snapshot.business,
+            ));
         }
-        if state.now() != self.plan.occurred_at {
+        if state.now() != self.plan.snapshot.occurred_at {
             return Err(BusinessEconomyError::StaleCycleTime {
-                expected: self.plan.occurred_at,
+                expected: self.plan.snapshot.occurred_at,
                 found: state.now(),
             });
         }
         validate_accounts(
             state,
-            self.plan.business,
-            self.plan.operating_account,
-            self.plan.settlement_account,
-            Some(self.plan.business),
+            self.plan.snapshot.business,
+            self.plan.accounts.operating_account,
+            self.plan.accounts.settlement_account,
+            Some(self.plan.snapshot.business),
         )?;
         let transaction = match self.ledger {
             Some(ledger) => Some(ledger.commit(state)?),
@@ -322,19 +345,25 @@ impl ValidatedBusinessCycle {
         state.economy.apply_cycle(
             BusinessCycleRecord {
                 id: cycle,
-                business: self.plan.business,
-                business_version: self.plan.expected_business_version,
-                owner: self.plan.owner,
-                occurred_at: self.plan.occurred_at,
-                gross_revenue: self.plan.gross_revenue,
-                operating_cost: self.plan.operating_cost,
-                net_cash: self.plan.net_cash,
-                variance_basis_points: self.plan.variance_basis_points,
-                attention: self.plan.attention,
-                transaction,
-                information,
+                context: super::BusinessCycleContext {
+                    business: self.plan.snapshot.business,
+                    business_version: self.plan.snapshot.expected_business_version,
+                    owner: self.plan.snapshot.owner,
+                    occurred_at: self.plan.snapshot.occurred_at,
+                },
+                financials: super::BusinessCycleFinancials {
+                    gross_revenue: self.plan.economics.gross_revenue,
+                    operating_cost: self.plan.economics.operating_cost,
+                    net_cash: self.plan.economics.net_cash,
+                    variance_basis_points: self.plan.economics.variance_basis_points,
+                },
+                artifacts: super::BusinessCycleArtifacts {
+                    attention: self.plan.economics.attention,
+                    transaction,
+                    information,
+                },
             },
-            self.plan.next_cycle_at,
+            self.plan.snapshot.next_cycle_at,
         );
         Ok(cycle)
     }
@@ -344,64 +373,67 @@ pub fn validate_business_cycle_plan(
     state: &AppState,
     plan: BusinessCyclePlan,
 ) -> Result<ValidatedBusinessCycle, BusinessEconomyError> {
-    let business = validate_business(state, plan.business)?;
-    if business.version() != plan.expected_business_version {
+    let business = validate_business(state, plan.snapshot.business)?;
+    if business.version() != plan.snapshot.expected_business_version {
         return Err(BusinessEconomyError::StaleBusiness {
-            business: plan.business,
-            expected: plan.expected_business_version,
+            business: plan.snapshot.business,
+            expected: plan.snapshot.expected_business_version,
             found: business.version(),
         });
     }
     let economy = state
         .economy
-        .get_business_economy(plan.business)
-        .ok_or(BusinessEconomyError::MissingBusinessEconomy(plan.business))?;
-    if economy.version() != plan.expected_economy_version {
+        .get_business_economy(plan.snapshot.business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(
+            plan.snapshot.business,
+        ))?;
+    if economy.version() != plan.snapshot.expected_economy_version {
         return Err(BusinessEconomyError::StaleEconomy {
-            business: plan.business,
-            expected: plan.expected_economy_version,
+            business: plan.snapshot.business,
+            expected: plan.snapshot.expected_economy_version,
             found: economy.version(),
         });
     }
     if economy.status() != BusinessOperatingStatus::Active {
-        return Err(BusinessEconomyError::EconomyNotActive(plan.business));
+        return Err(BusinessEconomyError::EconomyNotActive(
+            plan.snapshot.business,
+        ));
     }
-    if state.now() != plan.occurred_at {
+    if state.now() != plan.snapshot.occurred_at {
         return Err(BusinessEconomyError::StaleCycleTime {
-            expected: plan.occurred_at,
+            expected: plan.snapshot.occurred_at,
             found: state.now(),
         });
     }
     validate_accounts(
         state,
-        plan.business,
-        plan.operating_account,
-        plan.settlement_account,
-        Some(plan.business),
+        plan.snapshot.business,
+        plan.accounts.operating_account,
+        plan.accounts.settlement_account,
+        Some(plan.snapshot.business),
     )?;
-    let ledger = if plan.net_cash == Money::ZERO {
+    let ledger = if plan.economics.net_cash == Money::ZERO {
         None
     } else {
         Some(validate_record_transaction(
             state,
             LedgerTransactionDraft {
-                occurred_at: plan.occurred_at,
+                occurred_at: plan.snapshot.occurred_at,
                 memo: format!(
                     "Routine legitimate business settlement for {}",
-                    plan.business
+                    plan.snapshot.business
                 ),
                 postings: vec![
                     LedgerPosting {
-                        account: plan.operating_account,
-                        amount: plan.net_cash,
+                        account: plan.accounts.operating_account,
+                        amount: plan.economics.net_cash,
                     },
                     LedgerPosting {
-                        account: plan.settlement_account,
+                        account: plan.accounts.settlement_account,
                         amount: Money::from_cents(
-                            plan.net_cash
-                                .cents()
-                                .checked_neg()
-                                .ok_or(BusinessEconomyError::ArithmeticOverflow(plan.business))?,
+                            plan.economics.net_cash.cents().checked_neg().ok_or(
+                                BusinessEconomyError::ArithmeticOverflow(plan.snapshot.business),
+                            )?,
                         ),
                     },
                 ],
@@ -409,7 +441,10 @@ pub fn validate_business_cycle_plan(
             },
         )?)
     };
-    let information = match (plan.attention, accounting_holder(plan.owner)) {
+    let information = match (
+        plan.economics.attention,
+        accounting_holder(plan.snapshot.owner),
+    ) {
         (AttentionClass::Notable, Some(holder)) => Some(validate_record_information(
             state,
             InformationDraft {
@@ -417,16 +452,16 @@ pub fn validate_business_cycle_plan(
                 source_kind: InformationSourceKind::Accountant,
                 topic: crate::intelligence::InformationTopic::FinancialPerformance,
                 source_entity: None,
-                subject: EntityRef::Business(plan.business),
-                observed_at: plan.occurred_at,
+                subject: EntityRef::Business(plan.snapshot.business),
+                observed_at: plan.snapshot.occurred_at,
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
                 summary: format!(
                     "Business cycle reported gross {} cents, operating cost {} cents, net cash {} cents, with variance {} basis points.",
-                    plan.gross_revenue.cents(),
-                    plan.operating_cost.cents(),
-                    plan.net_cash.cents(),
-                    plan.variance_basis_points,
+                    plan.economics.gross_revenue.cents(),
+                    plan.economics.operating_cost.cents(),
+                    plan.economics.net_cash.cents(),
+                    plan.economics.variance_basis_points,
                 ),
             },
         )?),

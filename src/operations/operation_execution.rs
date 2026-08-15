@@ -179,20 +179,35 @@ impl OperationExposurePlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OperationResolutionPlan {
+struct OperationResolutionSnapshot {
     operation: OperationId,
     expected_operation_version: u32,
     resolved_at: SimTime,
+    police_snapshot: TargetPoliceSnapshot,
+    police_response: Option<PoliceResponseResolutionSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OperationResolutionOutcomePlan {
     objective_outcome: OperationObjectiveOutcome,
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
     property_proceeds: Option<OperationPropertyProceedsRecord>,
-    police_snapshot: TargetPoliceSnapshot,
-    police_response: Option<PoliceResponseResolutionSnapshot>,
     surveillance: Option<SurveillanceIntelligencePlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OperationResolutionNarrative {
     summary: String,
     history_entities: BTreeSet<EntityRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OperationResolutionPlan {
+    snapshot: OperationResolutionSnapshot,
+    outcome: OperationResolutionOutcomePlan,
+    narrative: OperationResolutionNarrative,
 }
 
 pub(crate) fn decide_operation_resolution(
@@ -327,19 +342,25 @@ pub(crate) fn decide_operation_resolution(
     }
 
     Ok(OperationResolutionPlan {
-        operation,
-        expected_operation_version: record.version(),
-        resolved_at: state.now(),
-        objective_outcome,
-        execution_margin,
-        factors,
-        exposure,
-        property_proceeds,
-        police_snapshot,
-        police_response,
-        surveillance,
-        summary,
-        history_entities,
+        snapshot: OperationResolutionSnapshot {
+            operation,
+            expected_operation_version: record.version(),
+            resolved_at: state.now(),
+            police_snapshot,
+            police_response,
+        },
+        outcome: OperationResolutionOutcomePlan {
+            objective_outcome,
+            execution_margin,
+            factors,
+            exposure,
+            property_proceeds,
+            surveillance,
+        },
+        narrative: OperationResolutionNarrative {
+            summary,
+            history_entities,
+        },
     })
 }
 
@@ -402,11 +423,11 @@ impl ValidatedOperationResolution {
             .map(|outcome| outcome.evidence.into_iter().collect())
             .unwrap_or_default();
         let exposure = OperationExposureRecord {
-            level: self.plan.exposure.level,
-            score: self.plan.exposure.score,
-            factors: self.plan.exposure.factors,
-            neighborhood: self.plan.exposure.neighborhood,
-            identified_character: self.plan.exposure.identified_character,
+            level: self.plan.outcome.exposure.level,
+            score: self.plan.outcome.exposure.score,
+            factors: self.plan.outcome.exposure.factors,
+            neighborhood: self.plan.outcome.exposure.neighborhood,
+            identified_character: self.plan.outcome.exposure.identified_character,
             investigation,
             evidence,
         };
@@ -419,21 +440,21 @@ impl ValidatedOperationResolution {
         let history_event = self.history.commit(state);
         let after_action_report = self.report.commit(state);
         state.operations.complete(
-            self.plan.operation,
+            self.plan.snapshot.operation,
             OperationResolutionRecord {
-                resolved_at: self.plan.resolved_at,
-                objective_outcome: self.plan.objective_outcome,
-                execution_margin: self.plan.execution_margin,
-                factors: self.plan.factors,
+                resolved_at: self.plan.snapshot.resolved_at,
+                objective_outcome: self.plan.outcome.objective_outcome,
+                execution_margin: self.plan.outcome.execution_margin,
+                factors: self.plan.outcome.factors,
                 exposure,
-                property_proceeds: self.plan.property_proceeds,
+                property_proceeds: self.plan.outcome.property_proceeds,
                 discovered_information,
                 after_action_information,
                 after_action_report,
                 history_event,
             },
         );
-        Ok(self.plan.operation)
+        Ok(self.plan.snapshot.operation)
     }
 }
 
@@ -445,16 +466,16 @@ pub(crate) fn validate_operation_resolution_plan(
     validate_plan_snapshot(state, &plan)?;
     let record = state
         .operations
-        .get_operation(plan.operation)
+        .get_operation(plan.snapshot.operation)
         .expect("validated resolution operation must exist");
     let expected_property_proceeds =
-        calculate_property_proceeds(registry, state, record, plan.objective_outcome)?;
-    if plan.property_proceeds != expected_property_proceeds {
+        calculate_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
+    if plan.outcome.property_proceeds != expected_property_proceeds {
         return Err(OperationResolutionError::StalePropertyProceedsContext {
-            operation: plan.operation,
+            operation: plan.snapshot.operation,
         });
     }
-    let surveillance_information = match &plan.surveillance {
+    let surveillance_information = match &plan.outcome.surveillance {
         Some(surveillance) => validate_surveillance_information(
             state,
             record.responsible_organization(),
@@ -471,23 +492,23 @@ pub(crate) fn validate_operation_resolution_plan(
             topic: crate::intelligence::InformationTopic::OperationalOutcome,
             source_entity: Some(EntityRef::Character(record.leader())),
             subject: EntityRef::Operation(record.id()),
-            observed_at: plan.resolved_at,
+            observed_at: plan.snapshot.resolved_at,
             reliability: Reliability::DirectAccess,
             specificity: Specificity::Precise,
-            summary: plan.summary.clone(),
+            summary: plan.narrative.summary.clone(),
         },
     )?;
     let history = validate_record_event(
         state,
         HistoryEventDraft {
-            occurred_at: plan.resolved_at,
+            occurred_at: plan.snapshot.resolved_at,
             kind: HistoryEventKind::Operation,
             summary: format!(
                 "{} ended with objective {}.",
                 record.title(),
-                outcome_label(plan.objective_outcome)
+                outcome_label(plan.outcome.objective_outcome)
             ),
-            entities: plan.history_entities.clone(),
+            entities: plan.narrative.history_entities.clone(),
         },
     )?;
     let report = validate_record_report(
@@ -498,15 +519,20 @@ pub(crate) fn validate_operation_resolution_plan(
             title: format!("{} after-action report", record.title()),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
-                summary: plan.summary.clone(),
+                summary: plan.narrative.summary.clone(),
                 sources: Vec::new(),
-                entities: plan.history_entities.clone(),
+                entities: plan.narrative.history_entities.clone(),
                 decision: None,
             }],
         },
     )?;
-    let (incident, incident_authority) =
-        validate_exposure_incident(registry, state, record, &plan.exposure, plan.resolved_at)?;
+    let (incident, incident_authority) = validate_exposure_incident(
+        registry,
+        state,
+        record,
+        &plan.outcome.exposure,
+        plan.snapshot.resolved_at,
+    )?;
     Ok(ValidatedOperationResolution {
         plan,
         incident,
@@ -613,32 +639,34 @@ fn validate_plan_snapshot(
 ) -> Result<(), OperationResolutionError> {
     let record = state
         .operations
-        .get_operation(plan.operation)
-        .ok_or(OperationResolutionError::MissingOperation(plan.operation))?;
-    if record.version() != plan.expected_operation_version {
+        .get_operation(plan.snapshot.operation)
+        .ok_or(OperationResolutionError::MissingOperation(
+            plan.snapshot.operation,
+        ))?;
+    if record.version() != plan.snapshot.expected_operation_version {
         return Err(OperationResolutionError::StaleOperation {
-            operation: plan.operation,
-            expected: plan.expected_operation_version,
+            operation: plan.snapshot.operation,
+            expected: plan.snapshot.expected_operation_version,
             found: record.version(),
         });
     }
     if record.status() != OperationStatus::InProgress {
         return Err(OperationResolutionError::OperationNotInProgress(
-            plan.operation,
+            plan.snapshot.operation,
         ));
     }
     let due_at = record
         .resolution_due_at()
         .expect("in-progress operation must have a resolution due time");
-    if plan.resolved_at < due_at {
+    if plan.snapshot.resolved_at < due_at {
         return Err(OperationResolutionError::ResolutionNotDue {
-            operation: plan.operation,
+            operation: plan.snapshot.operation,
             due_at,
         });
     }
-    if state.now() != plan.resolved_at {
+    if state.now() != plan.snapshot.resolved_at {
         return Err(OperationResolutionError::StaleResolutionTime {
-            expected: plan.resolved_at,
+            expected: plan.snapshot.resolved_at,
             found: state.now(),
         });
     }
@@ -648,15 +676,17 @@ fn validate_plan_snapshot(
         record
             .started_at()
             .expect("in-progress operation must have a start time"),
-        plan.resolved_at,
+        plan.snapshot.resolved_at,
     );
-    if current_police_snapshot != plan.police_snapshot
-        || plan.factors.target_police_presence() != plan.police_snapshot.target_presence
-        || plan.exposure.neighborhood != plan.police_snapshot.exposure_neighborhood
-        || plan.exposure.factors.target_police_presence() != plan.police_snapshot.target_presence
+    if current_police_snapshot != plan.snapshot.police_snapshot
+        || plan.outcome.factors.target_police_presence()
+            != plan.snapshot.police_snapshot.target_presence
+        || plan.outcome.exposure.neighborhood != plan.snapshot.police_snapshot.exposure_neighborhood
+        || plan.outcome.exposure.factors.target_police_presence()
+            != plan.snapshot.police_snapshot.target_presence
     {
         return Err(OperationResolutionError::StalePoliceDeploymentContext {
-            operation: plan.operation,
+            operation: plan.snapshot.operation,
         });
     }
     let current_police_response = record.police_response().map(|response_id| {
@@ -670,16 +700,17 @@ fn validate_plan_snapshot(
             arrived_at: response.arrived_at(),
         }
     });
-    if current_police_response != plan.police_response
-        || did_police_response_arrive_by(state, record, plan.resolved_at)
-            != plan.factors.police_response_arrived()
-        || plan.exposure.factors.police_response_arrived() != plan.factors.police_response_arrived()
+    if current_police_response != plan.snapshot.police_response
+        || did_police_response_arrive_by(state, record, plan.snapshot.resolved_at)
+            != plan.outcome.factors.police_response_arrived()
+        || plan.outcome.exposure.factors.police_response_arrived()
+            != plan.outcome.factors.police_response_arrived()
     {
         return Err(OperationResolutionError::StalePoliceResponseContext {
-            operation: plan.operation,
+            operation: plan.snapshot.operation,
         });
     }
-    if let Some(surveillance) = &plan.surveillance {
+    if let Some(surveillance) = &plan.outcome.surveillance {
         validate_surveillance_plan_snapshot(state, surveillance)?;
     }
     Ok(())
@@ -2279,12 +2310,12 @@ mod tests {
             OperationResolutionRandomness::new(0, 0),
         )
         .expect("due prepared operation should resolve deterministically");
-        assert_eq!(plan.factors.intelligence_quality().value(), 99);
-        assert_eq!(plan.factors.intelligence_adjustment(), -13);
-        assert_eq!(plan.execution_margin, 50);
-        assert_eq!(plan.exposure.factors.intelligence_mitigation(), 19);
-        assert_eq!(plan.exposure.score, 33);
-        assert_eq!(plan.exposure.level, OperationExposureLevel::Trace);
+        assert_eq!(plan.outcome.factors.intelligence_quality().value(), 99);
+        assert_eq!(plan.outcome.factors.intelligence_adjustment(), -13);
+        assert_eq!(plan.outcome.execution_margin, 50);
+        assert_eq!(plan.outcome.exposure.factors.intelligence_mitigation(), 19);
+        assert_eq!(plan.outcome.exposure.score, 33);
+        assert_eq!(plan.outcome.exposure.level, OperationExposureLevel::Trace);
 
         validate_operation_resolution_plan(&registry, &state, plan)
             .expect("fresh causal resolution plan should validate")
@@ -2894,7 +2925,7 @@ mod tests {
             OperationResolutionRandomness::new(0, 0),
         )
         .expect("due operation should be plannable before response processing");
-        assert!(!stale_plan.factors.police_response_arrived());
+        assert!(!stale_plan.outcome.factors.police_response_arrived());
         let response_outcome =
             crate::operations::police_response_integration::process_due_police_responses(
                 &mut response_state,
@@ -2928,15 +2959,15 @@ mod tests {
             OperationResolutionRandomness::new(0, 0),
         )
         .expect("unrouted control operation should plan");
-        assert!(response_plan.factors.police_response_arrived());
-        assert!(!control_plan.factors.police_response_arrived());
+        assert!(response_plan.outcome.factors.police_response_arrived());
+        assert!(!control_plan.outcome.factors.police_response_arrived());
         let execution = registry.get_operation(OperationKind::Burglary).execution();
         assert_eq!(
-            control_plan.execution_margin - response_plan.execution_margin,
+            control_plan.outcome.execution_margin - response_plan.outcome.execution_margin,
             i16::from(execution.police_arrival_difficulty_penalty())
         );
         assert_eq!(
-            response_plan.exposure.score - control_plan.exposure.score,
+            response_plan.outcome.exposure.score - control_plan.outcome.exposure.score,
             i16::from(execution.police_arrival_exposure_penalty())
         );
         validate_operation_resolution_plan(&registry, &response_state, response_plan)
@@ -3024,6 +3055,7 @@ mod tests {
         .expect("due operation should resolve against active patrol state");
         assert_eq!(
             stale_plan
+                .outcome
                 .factors
                 .target_police_presence()
                 .map(Rating::value),
@@ -3061,6 +3093,7 @@ mod tests {
         .expect("operation should re-plan against revised patrol schedule");
         assert_eq!(
             fresh_plan
+                .outcome
                 .factors
                 .target_police_presence()
                 .map(Rating::value),
@@ -3068,6 +3101,7 @@ mod tests {
         );
         assert_eq!(
             fresh_plan
+                .outcome
                 .exposure
                 .factors
                 .target_police_presence()
@@ -3116,17 +3150,22 @@ mod tests {
         )
         .expect("due operation should resolve across its whole execution window");
         assert_eq!(
-            plan.factors.target_police_presence().map(Rating::value),
+            plan.outcome
+                .factors
+                .target_police_presence()
+                .map(Rating::value),
             Some(2)
         );
         assert_eq!(
-            plan.exposure
+            plan.outcome
+                .exposure
                 .factors
                 .target_police_presence()
                 .map(Rating::value),
             Some(2)
         );
         assert!(!plan
+            .narrative
             .summary
             .contains("High local police presence materially increased execution pressure."));
         validate_operation_resolution_plan(&registry, &state, plan)
@@ -3154,17 +3193,22 @@ mod tests {
         )
         .expect("favorable property operation should resolve");
         assert_eq!(
-            achieved_plan.objective_outcome,
+            achieved_plan.outcome.objective_outcome,
             OperationObjectiveOutcome::Achieved
         );
         let achieved_proceeds = achieved_plan
+            .outcome
             .property_proceeds
             .expect("achieved property acquisition should create held proceeds");
         assert_eq!(achieved_proceeds.estimated_value().cents(), 56_400);
         assert!(achieved_plan
+            .narrative
             .summary
             .contains("estimated held value of 56400 cents"));
-        assert!(achieved_plan.summary.contains("remains unliquidated"));
+        assert!(achieved_plan
+            .narrative
+            .summary
+            .contains("remains unliquidated"));
         validate_operation_resolution_plan(&registry, &achieved_state, achieved_plan)
             .expect("achieved property proceeds should validate")
             .commit(&mut achieved_state)
@@ -3307,11 +3351,12 @@ mod tests {
         )
         .expect("neutral property operation should resolve");
         assert_eq!(
-            partial_plan.objective_outcome,
+            partial_plan.outcome.objective_outcome,
             OperationObjectiveOutcome::Partial
         );
         assert_eq!(
             partial_plan
+                .outcome
                 .property_proceeds
                 .expect("partial property acquisition should create reduced held proceeds")
                 .estimated_value()
@@ -3351,7 +3396,10 @@ mod tests {
             OperationResolutionRandomness::new(12, 0),
         )
         .expect("favorable property operation should resolve");
-        assert_eq!(plan.objective_outcome, OperationObjectiveOutcome::Achieved);
+        assert_eq!(
+            plan.outcome.objective_outcome,
+            OperationObjectiveOutcome::Achieved
+        );
         validate_operation_resolution_plan(&registry, &state, plan)
             .expect("property acquisition should validate")
             .commit(&mut state)
@@ -3487,7 +3535,7 @@ mod tests {
         )
         .expect("due exposure operation should resolve a plan");
         assert!(matches!(
-            plan.exposure.level,
+            plan.outcome.exposure.level,
             OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
         ));
         let validated = validate_operation_resolution_plan(&registry, &state, plan)
@@ -3552,7 +3600,7 @@ mod tests {
         )
         .expect("due exposed operation should resolve a plan");
         assert!(matches!(
-            plan.exposure.level,
+            plan.outcome.exposure.level,
             OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
         ));
         let validated = validate_operation_resolution_plan(&registry, &state, plan)

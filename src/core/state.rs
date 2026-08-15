@@ -234,6 +234,8 @@ mod tests {
     use crate::build_registry;
     use crate::core::attention::{set_auto_pause, AttentionClass};
     use crate::core::entity::EntityRef;
+    use crate::core::id::IdKind;
+    use crate::core::invariants::{validate_state, StateValidationError};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::simulation::{decide_index, run_tick};
     use crate::decisions::decision_system::{
@@ -1398,6 +1400,33 @@ mod tests {
             version
         );
         crate::core::invariants::validate_invariants(&state);
+    }
+
+    #[test]
+    fn state_validation_rejects_rewound_id_allocator() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x1D_1933);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Allocator Validation Organization".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("organization fixture should validate");
+
+        state
+            .ids
+            .set_next_raw_for_test(IdKind::Organization, organization.raw());
+        assert_eq!(
+            validate_state(&state),
+            Err(StateValidationError::InvalidIdAllocator {
+                kind: "organization",
+                next: organization.raw(),
+                highest: organization.raw(),
+            })
+        );
     }
 
     #[test]

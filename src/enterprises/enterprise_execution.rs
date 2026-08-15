@@ -209,44 +209,64 @@ pub fn validate_establish_enterprise(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnterpriseCyclePlan {
+struct EnterpriseCycleSnapshot {
     enterprise: EnterpriseId,
     expected_enterprise_version: u32,
     authority: ResolvedMandateAuthority,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnterpriseCycleEconomics {
     gross_revenue: Money,
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
     attention: AttentionClass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnterpriseCycleManagement {
     manager_management: Option<Rating>,
     policy_setting: Option<PolicySetting>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnterpriseCycleAccounts {
     cash_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnterpriseCyclePlan {
+    snapshot: EnterpriseCycleSnapshot,
+    economics: EnterpriseCycleEconomics,
+    management: EnterpriseCycleManagement,
+    accounts: EnterpriseCycleAccounts,
+}
+
 impl EnterpriseCyclePlan {
     pub fn enterprise(&self) -> EnterpriseId {
-        self.enterprise
+        self.snapshot.enterprise
     }
     pub fn gross_revenue(&self) -> Money {
-        self.gross_revenue
+        self.economics.gross_revenue
     }
     pub fn operating_cost(&self) -> Money {
-        self.operating_cost
+        self.economics.operating_cost
     }
     pub fn net_cash(&self) -> Money {
-        self.net_cash
+        self.economics.net_cash
     }
     pub fn variance_basis_points(&self) -> i16 {
-        self.variance_basis_points
+        self.economics.variance_basis_points
     }
     pub fn attention(&self) -> AttentionClass {
-        self.attention
+        self.economics.attention
     }
     pub fn policy_setting(&self) -> Option<PolicySetting> {
-        self.policy_setting
+        self.management.policy_setting
     }
 }
 
@@ -325,20 +345,28 @@ pub fn decide_enterprise_cycle(
         AttentionClass::Routine
     };
     Ok(EnterpriseCyclePlan {
-        enterprise,
-        expected_enterprise_version: record.version(),
-        authority,
-        occurred_at: state.now(),
-        next_cycle_at: due_at + economics.cycle(),
-        gross_revenue,
-        operating_cost,
-        net_cash,
-        variance_basis_points,
-        attention,
-        manager_management,
-        policy_setting,
-        cash_account: record.cash_account(),
-        settlement_account: record.settlement_account(),
+        snapshot: EnterpriseCycleSnapshot {
+            enterprise,
+            expected_enterprise_version: record.version(),
+            authority,
+            occurred_at: state.now(),
+            next_cycle_at: due_at + economics.cycle(),
+        },
+        economics: EnterpriseCycleEconomics {
+            gross_revenue,
+            operating_cost,
+            net_cash,
+            variance_basis_points,
+            attention,
+        },
+        management: EnterpriseCycleManagement {
+            manager_management,
+            policy_setting,
+        },
+        accounts: EnterpriseCycleAccounts {
+            cash_account: record.cash_account(),
+            settlement_account: record.settlement_account(),
+        },
     })
 }
 
@@ -352,30 +380,34 @@ impl ValidatedEnterpriseCycle {
     pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
         let record = state
             .enterprises
-            .get_enterprise(self.plan.enterprise)
-            .ok_or(EnterpriseError::MissingEnterprise(self.plan.enterprise))?;
-        if record.version() != self.plan.expected_enterprise_version {
+            .get_enterprise(self.plan.snapshot.enterprise)
+            .ok_or(EnterpriseError::MissingEnterprise(
+                self.plan.snapshot.enterprise,
+            ))?;
+        if record.version() != self.plan.snapshot.expected_enterprise_version {
             return Err(EnterpriseError::StaleEnterprise {
-                enterprise: self.plan.enterprise,
-                expected: self.plan.expected_enterprise_version,
+                enterprise: self.plan.snapshot.enterprise,
+                expected: self.plan.snapshot.expected_enterprise_version,
                 found: record.version(),
             });
         }
         if record.status() != EnterpriseStatus::Active {
-            return Err(EnterpriseError::EnterpriseNotActive(self.plan.enterprise));
+            return Err(EnterpriseError::EnterpriseNotActive(
+                self.plan.snapshot.enterprise,
+            ));
         }
-        if state.now() != self.plan.occurred_at {
+        if state.now() != self.plan.snapshot.occurred_at {
             return Err(EnterpriseError::StaleCycleTime {
-                expected: self.plan.occurred_at,
+                expected: self.plan.snapshot.occurred_at,
                 found: state.now(),
             });
         }
-        validate_mandate_authority_snapshot(state, self.plan.authority)?;
+        validate_mandate_authority_snapshot(state, self.plan.snapshot.authority)?;
         validate_enterprise_accounts(
             state,
             record.organization(),
-            self.plan.cash_account,
-            self.plan.settlement_account,
+            self.plan.accounts.cash_account,
+            self.plan.accounts.settlement_account,
             Some(record.id()),
         )?;
         let transaction = match self.ledger {
@@ -389,19 +421,27 @@ impl ValidatedEnterpriseCycle {
         state.enterprises.apply_cycle(
             EnterpriseCycleRecord {
                 id: cycle_id,
-                enterprise: self.plan.enterprise,
-                occurred_at: self.plan.occurred_at,
-                gross_revenue: self.plan.gross_revenue,
-                operating_cost: self.plan.operating_cost,
-                net_cash: self.plan.net_cash,
-                variance_basis_points: self.plan.variance_basis_points,
-                attention: self.plan.attention,
-                manager_management: self.plan.manager_management,
-                policy_setting: self.plan.policy_setting,
-                transaction,
-                information,
+                context: super::EnterpriseCycleContext {
+                    enterprise: self.plan.snapshot.enterprise,
+                    occurred_at: self.plan.snapshot.occurred_at,
+                },
+                financials: super::EnterpriseCycleFinancials {
+                    gross_revenue: self.plan.economics.gross_revenue,
+                    operating_cost: self.plan.economics.operating_cost,
+                    net_cash: self.plan.economics.net_cash,
+                    variance_basis_points: self.plan.economics.variance_basis_points,
+                },
+                artifacts: super::EnterpriseCycleArtifacts {
+                    attention: self.plan.economics.attention,
+                    manager_management: self.plan.management.manager_management,
+                    policy_setting: self.plan.management.policy_setting,
+                },
+                provenance: super::EnterpriseCycleProvenance {
+                    transaction,
+                    information,
+                },
             },
-            self.plan.next_cycle_at,
+            self.plan.snapshot.next_cycle_at,
         );
         Ok(cycle_id)
     }
@@ -413,52 +453,56 @@ pub fn validate_enterprise_cycle_plan(
 ) -> Result<ValidatedEnterpriseCycle, EnterpriseError> {
     let record = state
         .enterprises
-        .get_enterprise(plan.enterprise)
-        .ok_or(EnterpriseError::MissingEnterprise(plan.enterprise))?;
-    if record.version() != plan.expected_enterprise_version {
+        .get_enterprise(plan.snapshot.enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(plan.snapshot.enterprise))?;
+    if record.version() != plan.snapshot.expected_enterprise_version {
         return Err(EnterpriseError::StaleEnterprise {
-            enterprise: plan.enterprise,
-            expected: plan.expected_enterprise_version,
+            enterprise: plan.snapshot.enterprise,
+            expected: plan.snapshot.expected_enterprise_version,
             found: record.version(),
         });
     }
     if record.status() != EnterpriseStatus::Active {
-        return Err(EnterpriseError::EnterpriseNotActive(plan.enterprise));
+        return Err(EnterpriseError::EnterpriseNotActive(
+            plan.snapshot.enterprise,
+        ));
     }
-    if state.now() != plan.occurred_at {
+    if state.now() != plan.snapshot.occurred_at {
         return Err(EnterpriseError::StaleCycleTime {
-            expected: plan.occurred_at,
+            expected: plan.snapshot.occurred_at,
             found: state.now(),
         });
     }
-    validate_mandate_authority_snapshot(state, plan.authority)?;
+    validate_mandate_authority_snapshot(state, plan.snapshot.authority)?;
     validate_enterprise_accounts(
         state,
         record.organization(),
-        plan.cash_account,
-        plan.settlement_account,
+        plan.accounts.cash_account,
+        plan.accounts.settlement_account,
         Some(record.id()),
     )?;
-    let ledger = if plan.net_cash == Money::ZERO {
+    let ledger = if plan.economics.net_cash == Money::ZERO {
         None
     } else {
         Some(validate_record_transaction(
             state,
             LedgerTransactionDraft {
-                occurred_at: plan.occurred_at,
-                memo: format!("Routine enterprise settlement for {}", plan.enterprise),
+                occurred_at: plan.snapshot.occurred_at,
+                memo: format!(
+                    "Routine enterprise settlement for {}",
+                    plan.snapshot.enterprise
+                ),
                 postings: vec![
                     LedgerPosting {
-                        account: plan.cash_account,
-                        amount: plan.net_cash,
+                        account: plan.accounts.cash_account,
+                        amount: plan.economics.net_cash,
                     },
                     LedgerPosting {
-                        account: plan.settlement_account,
+                        account: plan.accounts.settlement_account,
                         amount: Money::from_cents(
-                            plan.net_cash
-                                .cents()
-                                .checked_neg()
-                                .ok_or(EnterpriseError::ArithmeticOverflow(plan.enterprise))?,
+                            plan.economics.net_cash.cents().checked_neg().ok_or(
+                                EnterpriseError::ArithmeticOverflow(plan.snapshot.enterprise),
+                            )?,
                         ),
                     },
                 ],
@@ -466,7 +510,7 @@ pub fn validate_enterprise_cycle_plan(
             },
         )?)
     };
-    let information = match plan.attention {
+    let information = match plan.economics.attention {
         AttentionClass::Notable => Some(validate_record_information(
             state,
             InformationDraft {
@@ -475,15 +519,15 @@ pub fn validate_enterprise_cycle_plan(
                 topic: crate::intelligence::InformationTopic::FinancialPerformance,
                 source_entity: Some(EntityRef::Character(record.manager())),
                 subject: EntityRef::Enterprise(record.id()),
-                observed_at: plan.occurred_at,
+                observed_at: plan.snapshot.occurred_at,
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
                 summary: format!(
                     "Enterprise cycle reported gross {} cents, operating cost {} cents, net cash {} cents, with variance {} basis points.",
-                    plan.gross_revenue.cents(),
-                    plan.operating_cost.cents(),
-                    plan.net_cash.cents(),
-                    plan.variance_basis_points,
+                    plan.economics.gross_revenue.cents(),
+                    plan.economics.operating_cost.cents(),
+                    plan.economics.net_cash.cents(),
+                    plan.economics.variance_basis_points,
                 ),
             },
         )?),

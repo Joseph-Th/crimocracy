@@ -919,7 +919,7 @@ impl WorldState {
             let ownership_end = history.peek().map(|next| next.changed_at());
             if change.new_owner() == owner
                 && change.changed_at() <= period_end
-                && ownership_end.is_none_or(|end| end >= period_start)
+                && ownership_end.is_none_or(|end| end > period_start)
             {
                 return true;
             }
@@ -935,8 +935,18 @@ impl WorldState {
         self.characters.records.values()
     }
 
+    pub(crate) fn neighborhoods(&self) -> impl Iterator<Item = &NeighborhoodRecord> {
+        self.neighborhoods.values()
+    }
+
     pub(crate) fn businesses(&self) -> impl Iterator<Item = &BusinessRecord> {
         self.businesses.records.values()
+    }
+
+    pub(crate) fn business_ownership_changes(
+        &self,
+    ) -> impl Iterator<Item = &BusinessOwnershipChangeRecord> {
+        self.businesses.ownership_changes.values()
     }
 
     pub(crate) fn insert_organization(&mut self, record: OrganizationRecord) {

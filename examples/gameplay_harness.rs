@@ -1,3 +1,10 @@
+//! Controlled/calibration harness for deterministic strategy and integration evidence.
+//!
+//! RUSH, PRESS, and RECON use canonical production operations and player-visible information.
+//! `[DEV AUDIT]` output may inspect hidden state after decisions for diagnostics, but hidden state
+//! never feeds action selection. Batch runs vary the simulation seed only; strategy policy is
+//! deterministic and matched branches use the same seed.
+
 use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::entity::EntityRef;
@@ -76,6 +83,7 @@ use std::error::Error;
 
 const NARRATIVE_SEED: u64 = 0x1933_0514;
 const DEFAULT_BATCH_SAMPLES: u64 = 24;
+const MAX_BATCH_SAMPLES: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Strategy {
@@ -344,17 +352,17 @@ impl Aggregate {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let samples = std::env::args()
-        .skip_while(|argument| argument != "--samples")
-        .nth(1)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BATCH_SAMPLES);
+    let samples = parse_sample_count()?;
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
+    println!("Mode: controlled/calibration strategy comparison with bounded scenario sensitivity.");
+    println!(
+        "Evidence boundary: synthetic setup through production paths; policy inputs are player-visible, while [DEV AUDIT] is diagnostic only.\n"
+    );
     println!("Narrative comparison uses seed {NARRATIVE_SEED:#x}.\n");
 
-    println!("--- PLAYER SESSION: RUSH ---");
+    println!("--- CONTROLLED SESSION: RUSH ---");
     let rush = play_session(
         Strategy::Rush,
         ScenarioProfile::NightTrap,
@@ -362,7 +370,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         true,
         true,
     )?;
-    println!("\n--- PLAYER SESSION: PRESS ---");
+    println!("\n--- CONTROLLED SESSION: PRESS ---");
     let press = play_session(
         Strategy::Press,
         ScenarioProfile::NightTrap,
@@ -370,7 +378,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         true,
         true,
     )?;
-    println!("\n--- PLAYER SESSION: RECON ---");
+    println!("\n--- CONTROLLED SESSION: RECON ---");
     let recon = play_session(
         Strategy::Recon,
         ScenarioProfile::NightTrap,
@@ -417,6 +425,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn parse_sample_count() -> Result<u64, Box<dyn Error>> {
+    let mut arguments = std::env::args().skip(1);
+    let mut samples = DEFAULT_BATCH_SAMPLES;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--samples" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--samples requires an integer value")?;
+                samples = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --samples value '{value}'"))?;
+                if !(1..=MAX_BATCH_SAMPLES).contains(&samples) {
+                    return Err(format!(
+                        "--samples must be between 1 and {MAX_BATCH_SAMPLES}, found {samples}"
+                    )
+                    .into());
+                }
+            }
+            _ => return Err(format!("unsupported gameplay_harness argument '{argument}'").into()),
+        }
+    }
+    Ok(samples)
 }
 
 fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {

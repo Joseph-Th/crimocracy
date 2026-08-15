@@ -1097,23 +1097,27 @@ mod tests {
 
         let first_evidence = add_evidence(
             &mut state,
-            investigation,
-            police,
-            EntityRef::Character(middle),
-            EntityRef::Character(first),
-            strength,
-            reliability,
-            admissibility,
+            TestEvidenceDraft {
+                investigation,
+                police,
+                subject: EntityRef::Character(middle),
+                origin: EntityRef::Character(first),
+                strength,
+                reliability,
+                admissibility,
+            },
         );
         let second_evidence = add_evidence(
             &mut state,
-            investigation,
-            police,
-            EntityRef::Character(target),
-            EntityRef::Character(middle),
-            strength,
-            reliability,
-            admissibility,
+            TestEvidenceDraft {
+                investigation,
+                police,
+                subject: EntityRef::Character(target),
+                origin: EntityRef::Character(middle),
+                strength,
+                reliability,
+                admissibility,
+            },
         );
         WorkFixture {
             state,
@@ -1128,9 +1132,7 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn add_evidence(
-        state: &mut AppState,
+    struct TestEvidenceDraft {
         investigation: InvestigationId,
         police: crate::core::id::OrganizationId,
         subject: EntityRef,
@@ -1138,7 +1140,18 @@ mod tests {
         strength: EvidenceStrength,
         reliability: EvidenceReliability,
         admissibility: Admissibility,
-    ) -> EvidenceId {
+    }
+
+    fn add_evidence(state: &mut AppState, draft: TestEvidenceDraft) -> EvidenceId {
+        let TestEvidenceDraft {
+            investigation,
+            police,
+            subject,
+            origin,
+            strength,
+            reliability,
+            admissibility,
+        } = draft;
         validate_add_evidence(
             state,
             EvidenceDraft {
@@ -1442,13 +1455,15 @@ mod tests {
                 .expect("pattern analysis should schedule");
         let direct = add_evidence(
             &mut fixture.state,
-            fixture.investigation,
-            fixture.police,
-            EntityRef::Character(fixture.target),
-            EntityRef::Character(fixture.first),
-            EvidenceStrength::Direct,
-            EvidenceReliability::HighlyReliable,
-            Admissibility::Admissible,
+            TestEvidenceDraft {
+                investigation: fixture.investigation,
+                police: fixture.police,
+                subject: EntityRef::Character(fixture.target),
+                origin: EntityRef::Character(fixture.first),
+                strength: EvidenceStrength::Direct,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+            },
         );
         fixture.state.advance_clock(SimDuration::from_minutes(360));
         let plan = decide_investigation_work_resolution(
@@ -1506,13 +1521,15 @@ mod tests {
                 .expect("initial schedule token should validate");
         add_evidence(
             &mut fixture.state,
-            fixture.investigation,
-            fixture.police,
-            EntityRef::Character(fixture.middle),
-            EntityRef::Character(fixture.target),
-            EvidenceStrength::Weak,
-            EvidenceReliability::Mixed,
-            Admissibility::Unknown,
+            TestEvidenceDraft {
+                investigation: fixture.investigation,
+                police: fixture.police,
+                subject: EntityRef::Character(fixture.middle),
+                origin: EntityRef::Character(fixture.target),
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Mixed,
+                admissibility: Admissibility::Unknown,
+            },
         );
         assert!(matches!(
             stale_schedule.commit(&mut fixture.state),
@@ -1674,23 +1691,27 @@ mod tests {
         .expect("post-restore investigator assignment should commit");
         add_evidence(
             &mut restored,
-            second_investigation,
-            fixture.police,
-            EntityRef::Character(fixture.middle),
-            EntityRef::Character(fixture.first),
-            EvidenceStrength::Strong,
-            EvidenceReliability::Credible,
-            Admissibility::Admissible,
+            TestEvidenceDraft {
+                investigation: second_investigation,
+                police: fixture.police,
+                subject: EntityRef::Character(fixture.middle),
+                origin: EntityRef::Character(fixture.first),
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::Credible,
+                admissibility: Admissibility::Admissible,
+            },
         );
         add_evidence(
             &mut restored,
-            second_investigation,
-            fixture.police,
-            EntityRef::Character(fixture.target),
-            EntityRef::Character(fixture.middle),
-            EvidenceStrength::Strong,
-            EvidenceReliability::Credible,
-            Admissibility::Admissible,
+            TestEvidenceDraft {
+                investigation: second_investigation,
+                police: fixture.police,
+                subject: EntityRef::Character(fixture.target),
+                origin: EntityRef::Character(fixture.middle),
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::Credible,
+                admissibility: Admissibility::Admissible,
+            },
         );
         let second_work = validate_schedule_investigation_work(
             &registry,

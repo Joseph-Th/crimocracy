@@ -84,18 +84,24 @@ impl ValidatedPoliceResponseDispatch {
         let id = state.ids.next_police_response();
         state.legal.insert_police_response(PoliceResponseRecord {
             id,
-            authority: self.draft.authority,
-            neighborhood: self.draft.neighborhood,
-            source_operation: self.draft.source_operation,
-            dispatched_at: self.validated_at,
-            arrival_due_at: self.draft.arrival_due_at,
-            arrived_at: None,
-            alert_score: self.draft.alert_score,
-            response_presence: self.response_presence,
-            jurisdiction_version: self.jurisdiction_version,
-            patrol: self.patrol,
-            status: PoliceResponseStatus::Dispatched,
-            version: 1,
+            routing: super::PoliceResponseRouting {
+                authority: self.draft.authority,
+                neighborhood: self.draft.neighborhood,
+                source_operation: self.draft.source_operation,
+            },
+            timing: super::PoliceResponseTiming {
+                dispatched_at: self.validated_at,
+                arrival_due_at: self.draft.arrival_due_at,
+                arrived_at: None,
+            },
+            state: super::PoliceResponseState {
+                alert_score: self.draft.alert_score,
+                response_presence: self.response_presence,
+                jurisdiction_version: self.jurisdiction_version,
+                patrol: self.patrol,
+                status: PoliceResponseStatus::Dispatched,
+                version: 1,
+            },
         });
         Ok(id)
     }

@@ -466,7 +466,12 @@ pub fn validate_delegated_recruitment_attempt(
         resolve_policy_for_manager(state, authority.manager, PolicyKind::IndependentRecruitment)?;
     let approval = match policy.setting {
         PolicySetting::IndependentRecruitment(approval) => approval,
-        _ => unreachable!("policy kind resolution returned the wrong policy variant"),
+        PolicySetting::CollectionForce(_)
+        | PolicySetting::PatrolBribery(_)
+        | PolicySetting::CasualtyResponse(_)
+        | PolicySetting::AssociateLegalSupport(_) => {
+            unreachable!("policy kind resolution returned the wrong policy variant")
+        }
     };
     if approval != ApprovalPolicy::Delegated {
         return Err(RecruitmentError::IndependentRecruitmentNotDelegated {
@@ -527,7 +532,12 @@ pub(crate) fn validate_approved_recruitment_attempt(
         resolve_policy_for_manager(state, authority.manager, PolicyKind::IndependentRecruitment)?;
     let approval = match policy.setting {
         PolicySetting::IndependentRecruitment(approval) => approval,
-        _ => unreachable!("policy kind resolution returned the wrong policy variant"),
+        PolicySetting::CollectionForce(_)
+        | PolicySetting::PatrolBribery(_)
+        | PolicySetting::CasualtyResponse(_)
+        | PolicySetting::AssociateLegalSupport(_) => {
+            unreachable!("policy kind resolution returned the wrong policy variant")
+        }
     };
     if approval != ApprovalPolicy::RequireApproval {
         return Err(

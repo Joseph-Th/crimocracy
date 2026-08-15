@@ -623,7 +623,12 @@ pub fn validate_request_recruitment_approval(
         resolve_policy_for_manager(state, draft.recruiter, PolicyKind::IndependentRecruitment)?;
     let approval = match policy.setting {
         PolicySetting::IndependentRecruitment(approval) => approval,
-        _ => unreachable!("policy kind resolution returned the wrong policy variant"),
+        PolicySetting::CollectionForce(_)
+        | PolicySetting::PatrolBribery(_)
+        | PolicySetting::CasualtyResponse(_)
+        | PolicySetting::AssociateLegalSupport(_) => {
+            unreachable!("policy kind resolution returned the wrong policy variant")
+        }
     };
     if approval != ApprovalPolicy::RequireApproval {
         return Err(DecisionError::RecruitmentApprovalPolicyMismatch { policy: approval });

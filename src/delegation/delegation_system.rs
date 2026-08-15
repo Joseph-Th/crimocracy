@@ -432,10 +432,7 @@ pub fn resolve_policy_for_manager(
     validate_manager(state, manager, organization)?;
     if let Some(mandate) = state.delegation.active_for_manager(manager) {
         if let Some(setting) = mandate.standing_order(kind) {
-            return Ok(ResolvedPolicy {
-                setting,
-                source: PolicySource::Mandate(mandate.id()),
-            });
+            return build_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
         }
     }
     let organization_record = state
@@ -449,10 +446,19 @@ pub fn resolve_policy_for_manager(
                 organization,
                 policy: kind,
             })?;
-    Ok(ResolvedPolicy {
-        setting,
-        source: PolicySource::Organization(organization),
-    })
+    build_resolved_policy(kind, setting, PolicySource::Organization(organization))
+}
+
+fn build_resolved_policy(
+    expected: PolicyKind,
+    setting: PolicySetting,
+    source: PolicySource,
+) -> Result<ResolvedPolicy, DelegationError> {
+    let actual = setting.kind();
+    if actual != expected {
+        return Err(DelegationError::PolicyKindMismatch { expected, actual });
+    }
+    Ok(ResolvedPolicy { setting, source })
 }
 
 fn validate_manager(

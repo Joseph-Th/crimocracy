@@ -153,17 +153,23 @@ impl ValidatedContactEstablishment {
         let id = state.ids.next_contact();
         state.contacts.insert_contact(InstitutionalContactRecord {
             id,
-            sponsor: self.draft.sponsor,
-            handler: self.draft.handler,
-            contact: self.draft.contact,
-            institution: self.institution,
-            kind: self.kind,
-            handler_to_contact: self.handler_to_contact,
-            contact_to_handler: self.contact_to_handler,
-            status: ContactStatus::Active,
-            established_at: self.validated_at,
-            terminated_at: None,
-            version: 1,
+            parties: super::ContactParties {
+                sponsor: self.draft.sponsor,
+                handler: self.draft.handler,
+                contact: self.draft.contact,
+                institution: self.institution,
+                kind: self.kind,
+            },
+            relationship_basis: super::ContactRelationshipBasis {
+                handler_to_contact: self.handler_to_contact,
+                contact_to_handler: self.contact_to_handler,
+            },
+            lifecycle: super::ContactLifecycle {
+                status: ContactStatus::Active,
+                established_at: self.validated_at,
+                terminated_at: None,
+                version: 1,
+            },
         });
         Ok(id)
     }

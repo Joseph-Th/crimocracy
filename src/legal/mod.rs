@@ -114,27 +114,47 @@ pub enum LegalRepresentationEndReason {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LegalRepresentationRecord {
-    id: LegalRepresentationId,
+pub(super) struct LegalRepresentationParties {
     arrest: ArrestId,
     defendant: CharacterId,
     sponsor: OrganizationId,
     counsel: CharacterId,
     counsel_institution: OrganizationId,
     contact: ContactId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct LegalRepresentationPayment {
     fee: Money,
     payer_account: FinancialAccountId,
     provider_account: FinancialAccountId,
     payment: LedgerTransactionId,
     authorization: Option<MandateAuthority>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct LegalRepresentationLifecycle {
     retained_at: SimTime,
     ended_at: Option<SimTime>,
     end_reason: Option<LegalRepresentationEndReason>,
     status: LegalRepresentationStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct LegalRepresentationArtifacts {
     information: InformationId,
     report: ReportId,
     ended_information: Option<InformationId>,
     ended_report: Option<ReportId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LegalRepresentationRecord {
+    id: LegalRepresentationId,
+    parties: LegalRepresentationParties,
+    payment: LegalRepresentationPayment,
+    lifecycle: LegalRepresentationLifecycle,
+    artifacts: LegalRepresentationArtifacts,
     version: u32,
 }
 
@@ -144,79 +164,79 @@ impl LegalRepresentationRecord {
     }
 
     pub fn arrest(&self) -> ArrestId {
-        self.arrest
+        self.parties.arrest
     }
 
     pub fn defendant(&self) -> CharacterId {
-        self.defendant
+        self.parties.defendant
     }
 
     pub fn sponsor(&self) -> OrganizationId {
-        self.sponsor
+        self.parties.sponsor
     }
 
     pub fn counsel(&self) -> CharacterId {
-        self.counsel
+        self.parties.counsel
     }
 
     pub fn counsel_institution(&self) -> OrganizationId {
-        self.counsel_institution
+        self.parties.counsel_institution
     }
 
     pub fn contact(&self) -> ContactId {
-        self.contact
+        self.parties.contact
     }
 
     pub fn fee(&self) -> Money {
-        self.fee
+        self.payment.fee
     }
 
     pub fn payer_account(&self) -> FinancialAccountId {
-        self.payer_account
+        self.payment.payer_account
     }
 
     pub fn provider_account(&self) -> FinancialAccountId {
-        self.provider_account
+        self.payment.provider_account
     }
 
     pub fn payment(&self) -> LedgerTransactionId {
-        self.payment
+        self.payment.payment
     }
 
     pub fn authorization(&self) -> Option<MandateAuthority> {
-        self.authorization
+        self.payment.authorization
     }
 
     pub fn retained_at(&self) -> SimTime {
-        self.retained_at
+        self.lifecycle.retained_at
     }
 
     pub fn ended_at(&self) -> Option<SimTime> {
-        self.ended_at
+        self.lifecycle.ended_at
     }
 
     pub fn end_reason(&self) -> Option<LegalRepresentationEndReason> {
-        self.end_reason
+        self.lifecycle.end_reason
     }
 
     pub fn status(&self) -> LegalRepresentationStatus {
-        self.status
+        self.lifecycle.status
     }
 
     pub fn information(&self) -> InformationId {
-        self.information
+        self.artifacts.information
     }
 
     pub fn report(&self) -> ReportId {
-        self.report
+        self.artifacts.report
     }
 
     pub fn ended_information(&self) -> Option<InformationId> {
-        self.ended_information
+        self.artifacts.ended_information
     }
 
     pub fn ended_report(&self) -> Option<ReportId> {
-        self.ended_report
+        self.artifacts.ended_report
     }
 
     pub fn version(&self) -> u32 {
@@ -269,22 +289,42 @@ impl ProsecutionCaseResolution {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProsecutionCaseRecord {
-    id: ProsecutionCaseId,
+pub(super) struct ProsecutionCaseContext {
     arrest: ArrestId,
     defendant: CharacterId,
     source_investigation: InvestigationId,
     source_authority: OrganizationId,
     prosecutor_office: OrganizationId,
     lead_prosecutor: CharacterId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ProsecutionCaseReferrals {
     evidence: BTreeSet<EvidenceId>,
     initial_referral: ProsecutionReferralId,
     referrals: BTreeSet<ProsecutionReferralId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ProsecutionCaseLifecycle {
     opened_at: SimTime,
     resolved_at: Option<SimTime>,
     status: ProsecutionCaseStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ProsecutionCaseResolutionArtifacts {
     resolution_information: Option<InformationId>,
     resolution_report: Option<ReportId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProsecutionCaseRecord {
+    id: ProsecutionCaseId,
+    context: ProsecutionCaseContext,
+    referrals: ProsecutionCaseReferrals,
+    lifecycle: ProsecutionCaseLifecycle,
+    resolution_artifacts: ProsecutionCaseResolutionArtifacts,
     version: u32,
 }
 
@@ -293,46 +333,46 @@ impl ProsecutionCaseRecord {
         self.id
     }
     pub fn arrest(&self) -> ArrestId {
-        self.arrest
+        self.context.arrest
     }
     pub fn defendant(&self) -> CharacterId {
-        self.defendant
+        self.context.defendant
     }
     pub fn source_investigation(&self) -> InvestigationId {
-        self.source_investigation
+        self.context.source_investigation
     }
     pub fn source_authority(&self) -> OrganizationId {
-        self.source_authority
+        self.context.source_authority
     }
     pub fn prosecutor_office(&self) -> OrganizationId {
-        self.prosecutor_office
+        self.context.prosecutor_office
     }
     pub fn lead_prosecutor(&self) -> CharacterId {
-        self.lead_prosecutor
+        self.context.lead_prosecutor
     }
     pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
-        &self.evidence
+        &self.referrals.evidence
     }
     pub fn initial_referral(&self) -> ProsecutionReferralId {
-        self.initial_referral
+        self.referrals.initial_referral
     }
     pub fn referrals(&self) -> &BTreeSet<ProsecutionReferralId> {
-        &self.referrals
+        &self.referrals.referrals
     }
     pub fn opened_at(&self) -> SimTime {
-        self.opened_at
+        self.lifecycle.opened_at
     }
     pub fn resolved_at(&self) -> Option<SimTime> {
-        self.resolved_at
+        self.lifecycle.resolved_at
     }
     pub fn status(&self) -> ProsecutionCaseStatus {
-        self.status
+        self.lifecycle.status
     }
     pub fn resolution_information(&self) -> Option<InformationId> {
-        self.resolution_information
+        self.resolution_artifacts.resolution_information
     }
     pub fn resolution_report(&self) -> Option<ReportId> {
-        self.resolution_report
+        self.resolution_artifacts.resolution_report
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -1214,14 +1254,21 @@ impl PoliceResponsePatrolSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoliceResponseRecord {
-    id: PoliceResponseId,
+pub(super) struct PoliceResponseRouting {
     authority: OrganizationId,
     neighborhood: NeighborhoodId,
     source_operation: OperationId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct PoliceResponseTiming {
     dispatched_at: SimTime,
     arrival_due_at: SimTime,
     arrived_at: Option<SimTime>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct PoliceResponseState {
     alert_score: i16,
     response_presence: Rating,
     jurisdiction_version: u32,
@@ -1230,45 +1277,53 @@ pub struct PoliceResponseRecord {
     version: u32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoliceResponseRecord {
+    id: PoliceResponseId,
+    routing: PoliceResponseRouting,
+    timing: PoliceResponseTiming,
+    state: PoliceResponseState,
+}
+
 impl PoliceResponseRecord {
     pub fn id(&self) -> PoliceResponseId {
         self.id
     }
     pub fn authority(&self) -> OrganizationId {
-        self.authority
+        self.routing.authority
     }
     pub fn neighborhood(&self) -> NeighborhoodId {
-        self.neighborhood
+        self.routing.neighborhood
     }
     pub fn source_operation(&self) -> OperationId {
-        self.source_operation
+        self.routing.source_operation
     }
     pub fn dispatched_at(&self) -> SimTime {
-        self.dispatched_at
+        self.timing.dispatched_at
     }
     pub fn arrival_due_at(&self) -> SimTime {
-        self.arrival_due_at
+        self.timing.arrival_due_at
     }
     pub fn arrived_at(&self) -> Option<SimTime> {
-        self.arrived_at
+        self.timing.arrived_at
     }
     pub fn alert_score(&self) -> i16 {
-        self.alert_score
+        self.state.alert_score
     }
     pub fn response_presence(&self) -> Rating {
-        self.response_presence
+        self.state.response_presence
     }
     pub fn jurisdiction_version(&self) -> u32 {
-        self.jurisdiction_version
+        self.state.jurisdiction_version
     }
     pub fn patrol(&self) -> Option<PoliceResponsePatrolSnapshot> {
-        self.patrol
+        self.state.patrol
     }
     pub fn status(&self) -> PoliceResponseStatus {
-        self.status
+        self.state.status
     }
     pub fn version(&self) -> u32 {
-        self.version
+        self.state.version
     }
 }
 
@@ -2764,9 +2819,10 @@ impl LegalState {
             .police_responses
             .get_mut(&id)
             .expect("validated police response disappeared before arrival commit");
-        record.status = PoliceResponseStatus::Arrived;
-        record.arrived_at = Some(at);
-        record.version = record
+        record.state.status = PoliceResponseStatus::Arrived;
+        record.timing.arrived_at = Some(at);
+        record.state.version = record
+            .state
             .version
             .checked_add(1)
             .expect("police response version counter exhausted");
@@ -2931,11 +2987,11 @@ impl LegalState {
             .legal_representations
             .get_mut(&id)
             .expect("validated legal representation disappeared before end commit");
-        record.status = LegalRepresentationStatus::Ended;
-        record.ended_at = Some(ended_at);
-        record.end_reason = Some(reason);
-        record.ended_information = Some(information);
-        record.ended_report = Some(report);
+        record.lifecycle.status = LegalRepresentationStatus::Ended;
+        record.lifecycle.ended_at = Some(ended_at);
+        record.lifecycle.end_reason = Some(reason);
+        record.artifacts.ended_information = Some(information);
+        record.artifacts.ended_report = Some(report);
         record.version = record
             .version
             .checked_add(1)
@@ -3022,7 +3078,7 @@ impl LegalState {
             .get_mut(&case_id)
             .expect("validated prosecution case disappeared before referral commit");
         for evidence in referral.evidence() {
-            let inserted = case.evidence.insert(*evidence);
+            let inserted = case.referrals.evidence.insert(*evidence);
             debug_assert!(inserted, "supplemental referral must add new evidence");
             self.indexes
                 .prosecutions
@@ -3037,7 +3093,7 @@ impl LegalState {
                 .or_default()
                 .insert(referral_id);
         }
-        case.referrals.insert(referral_id);
+        case.referrals.referrals.insert(referral_id);
         case.version = case
             .version
             .checked_add(1)
@@ -3077,10 +3133,10 @@ impl LegalState {
             .prosecution_cases
             .get_mut(&id)
             .expect("validated prosecution case disappeared before resolution commit");
-        case.status = resolution.status();
-        case.resolved_at = Some(resolved_at);
-        case.resolution_information = Some(information);
-        case.resolution_report = Some(report);
+        case.lifecycle.status = resolution.status();
+        case.lifecycle.resolved_at = Some(resolved_at);
+        case.resolution_artifacts.resolution_information = Some(information);
+        case.resolution_artifacts.resolution_report = Some(report);
         case.version = case
             .version
             .checked_add(1)

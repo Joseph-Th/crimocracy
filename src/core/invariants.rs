@@ -6,10 +6,10 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
     ArrestId, BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId,
-    ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, InformantDisclosureId,
-    InformantId, InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId,
-    LegalRepresentationId, MandateId, OperationId, OpportunityId, OrganizationId,
-    PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
+    ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, IdCounters, IdKind,
+    InformantDisclosureId, InformantId, InformationId, InvestigationId, InvestigationWorkId,
+    LedgerTransactionId, LegalRepresentationId, MandateId, OperationId, OpportunityId,
+    OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
     RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
@@ -74,6 +74,16 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StateValidationError {
+    #[error("{kind} state contains reserved persistent ID 0")]
+    InvalidPersistentId { kind: &'static str },
+    #[error(
+        "{kind} ID allocator next value {next} is not greater than highest persisted ID {highest}"
+    )]
+    InvalidIdAllocator {
+        kind: &'static str,
+        next: u32,
+        highest: u32,
+    },
     #[error("{subsystem} derived indexes are inconsistent with source records")]
     IndexInconsistency { subsystem: &'static str },
     #[error("{context} references missing entity {entity:?}")]
@@ -329,6 +339,7 @@ pub enum StateValidationError {
 }
 
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
+    validate_id_allocators(state)?;
     validate_indexes(state)?;
     validate_world_state(state)?;
     validate_social_and_intelligence(state)?;
@@ -341,6 +352,237 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_business_economies(state)?;
     validate_enterprises(state)?;
     validate_legal_reports_and_history(state)?;
+    Ok(())
+}
+
+fn validate_id_allocators(state: &AppState) -> Result<(), StateValidationError> {
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Organization,
+        state.world.organizations().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Character,
+        state.world.characters().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Neighborhood,
+        state.world.neighborhoods().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Business,
+        state.world.businesses().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::BusinessOwnershipChange,
+        state
+            .world
+            .business_ownership_changes()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Operation,
+        state
+            .operations
+            .operations()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Opportunity,
+        state
+            .opportunities
+            .opportunities()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Information,
+        state
+            .intelligence
+            .information()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Contact,
+        state.contacts.contacts().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::ContactDisclosure,
+        state.contacts.disclosures().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Investigation,
+        state.legal.investigations().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::InvestigationWork,
+        state
+            .legal
+            .investigation_work()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::PatrolDeployment,
+        state
+            .legal
+            .patrol_deployments()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::PoliceResponse,
+        state
+            .legal
+            .police_responses()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::CaseWitness,
+        state.legal.case_witnesses().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::WitnessStatement,
+        state
+            .legal
+            .witness_statements()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Informant,
+        state.legal.informants().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::InformantDisclosure,
+        state
+            .legal
+            .informant_disclosures()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Evidence,
+        state.legal.all_evidence().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Arrest,
+        state.legal.arrests().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::LegalRepresentation,
+        state
+            .legal
+            .legal_representations()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::ProsecutionCase,
+        state
+            .legal
+            .prosecution_cases()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::ProsecutionReferral,
+        state
+            .legal
+            .prosecution_referrals()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Report,
+        state.reports.reports().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::HistoryEvent,
+        state.history.events().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::FinancialAccount,
+        state.finance.accounts().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::LedgerTransaction,
+        state.finance.transactions().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::DecisionRequest,
+        state.decisions.decisions().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Mandate,
+        state.delegation.mandates().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::RecruitmentAttempt,
+        state.recruitment.attempts().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::Enterprise,
+        state
+            .enterprises
+            .enterprises()
+            .map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::EnterpriseCycle,
+        state.enterprises.cycles().map(|record| record.id().raw()),
+    )?;
+    validate_id_allocator(
+        &state.ids,
+        IdKind::BusinessCycle,
+        state.economy.cycles().map(|record| record.id().raw()),
+    )?;
+    Ok(())
+}
+
+fn validate_id_allocator(
+    counters: &IdCounters,
+    kind: IdKind,
+    ids: impl Iterator<Item = u32>,
+) -> Result<(), StateValidationError> {
+    let mut highest = 0;
+    for id in ids {
+        if id == 0 {
+            return Err(StateValidationError::InvalidPersistentId { kind: kind.label() });
+        }
+        highest = highest.max(id);
+    }
+    let next = counters.next_raw(kind);
+    if next <= highest {
+        return Err(StateValidationError::InvalidIdAllocator {
+            kind: kind.label(),
+            next,
+            highest,
+        });
+    }
     Ok(())
 }
 
@@ -4714,7 +4956,11 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                             && is_reviewable_evidence_kind(evidence.kind())
                     })
             }
-            _ => false,
+            (InvestigationWorkKind::PatternAnalysis, InvestigationWorkFocus::Evidence(_))
+            | (
+                InvestigationWorkKind::EvidenceReview,
+                InvestigationWorkFocus::EntityConnection { from: _, to: _ },
+            ) => false,
         };
         if !focus_is_valid
             || work.scheduled_at() > state.now()
@@ -4871,7 +5117,14 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                                 superseding.kind() == EvidenceKind::ForensicAnalysis
                                     && superseding.derived_from() == &BTreeSet::from([source])
                             }
-                            _ => false,
+                            (
+                                InvestigationWorkKind::PatternAnalysis,
+                                InvestigationWorkFocus::Evidence(_),
+                            )
+                            | (
+                                InvestigationWorkKind::EvidenceReview,
+                                InvestigationWorkFocus::EntityConnection { from: _, to: _ },
+                            ) => false,
                         };
                         if superseding.investigation() != work.investigation()
                             || superseding.discovered_at() > resolution.resolved_at()
@@ -5282,6 +5535,10 @@ pub fn validate_invariants(state: &AppState) {
         state.state_schema_version(),
         CURRENT_STATE_SCHEMA_VERSION,
         "Serialization Completeness: in-memory state schema version is not current"
+    );
+    debug_assert!(
+        validate_id_allocators(state).is_ok(),
+        "Serialization Completeness: persistent ID allocators are not ahead of stored records"
     );
 
     state.world.debug_validate_indexes();

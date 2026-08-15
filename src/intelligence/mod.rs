@@ -73,19 +73,39 @@ pub enum Specificity {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InformationRecord {
-    id: InformationId,
+pub(super) struct InformationSource {
     holder: KnowledgeHolder,
     source_kind: InformationSourceKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InformationSubject {
     topic: InformationTopic,
     source_entity: Option<EntityRef>,
     subject: EntityRef,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InformationChronology {
     observed_at: SimTime,
     recorded_at: SimTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InformationAssessment {
     reliability: Reliability,
     specificity: Specificity,
     derived_from: BTreeSet<InformationId>,
     summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InformationRecord {
+    id: InformationId,
+    source: InformationSource,
+    subject: InformationSubject,
+    chronology: InformationChronology,
+    assessment: InformationAssessment,
 }
 
 impl InformationRecord {
@@ -93,37 +113,37 @@ impl InformationRecord {
         self.id
     }
     pub fn holder(&self) -> KnowledgeHolder {
-        self.holder
+        self.source.holder
     }
     pub fn source_kind(&self) -> InformationSourceKind {
-        self.source_kind
+        self.source.source_kind
     }
     pub fn topic(&self) -> InformationTopic {
-        self.topic
+        self.subject.topic
     }
     pub fn source_entity(&self) -> Option<EntityRef> {
-        self.source_entity
+        self.subject.source_entity
     }
     pub fn subject(&self) -> EntityRef {
-        self.subject
+        self.subject.subject
     }
     pub fn observed_at(&self) -> SimTime {
-        self.observed_at
+        self.chronology.observed_at
     }
     pub fn recorded_at(&self) -> SimTime {
-        self.recorded_at
+        self.chronology.recorded_at
     }
     pub fn reliability(&self) -> Reliability {
-        self.reliability
+        self.assessment.reliability
     }
     pub fn specificity(&self) -> Specificity {
-        self.specificity
+        self.assessment.specificity
     }
     pub fn derived_from(&self) -> &BTreeSet<InformationId> {
-        &self.derived_from
+        &self.assessment.derived_from
     }
     pub fn summary(&self) -> &str {
-        &self.summary
+        &self.assessment.summary
     }
 }
 
