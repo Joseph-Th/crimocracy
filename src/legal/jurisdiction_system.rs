@@ -163,6 +163,8 @@ fn validate_jurisdiction_dependencies(
     match organization.kind() {
         OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority => {}
         OrganizationKind::Criminal
+        | OrganizationKind::LegalServices
+        | OrganizationKind::Prosecutor
         | OrganizationKind::Political
         | OrganizationKind::Press
         | OrganizationKind::Labor

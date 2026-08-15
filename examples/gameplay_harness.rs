@@ -4,6 +4,7 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
     BusinessId, CharacterId, EnterpriseId, InformationId, OperationId, OrganizationId,
 };
+use crimocracy::core::invariants::validate_state;
 use crimocracy::core::simulation::{run_tick, TickOutcome};
 use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
@@ -18,17 +19,26 @@ use crimocracy::economy::business_reporting::resolve_organization_business_finan
 use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::enterprises::enterprise_execution::validate_establish_enterprise;
 use crimocracy::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
-use crimocracy::finance::finance_system::insert_account;
-use crimocracy::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
+use crimocracy::finance::finance_system::{insert_account, validate_record_transaction};
+use crimocracy::finance::{
+    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    Money,
+};
 use crimocracy::intelligence::intelligence_system::validate_record_information;
 use crimocracy::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
 use crimocracy::legal::jurisdiction_system::validate_set_jurisdiction;
+use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
 use crimocracy::legal::patrol_system::validate_establish_patrol_deployment;
+use crimocracy::legal::prosecution_system::{
+    validate_decline_prosecution_case, validate_open_prosecution_case,
+};
 use crimocracy::legal::{
-    DayMinute, InvestigationWorkStatus, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
+    Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
+    EvidenceStrength, InvestigationDraft, InvestigationWorkStatus, JurisdictionDraft,
+    LegalRepresentationDraft, PatrolDeploymentDraft, PatrolWindow, ProsecutionCaseDraft,
 };
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::property_disposition::{
@@ -55,6 +65,11 @@ use crimocracy::world::{
     CapabilityKind, CharacterDraft, DriveKind, NeighborhoodDraft, NeighborhoodEconomyProfile,
     NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
     PolicyKind, PolicySetting, Rating, TraitKind,
+};
+use crimocracy::{
+    contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft},
+    legal::arrest_system::validate_arrest,
+    legal::investigation_system::{validate_add_evidence, validate_open_investigation},
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -373,6 +388,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "[HARNESS CHECK] Unchanged legitimate and delegated-enterprise systems produced identical cashflow across strategy branches."
     );
 
+    println!("\n--- LEGAL FOUNDATION CHECK ---");
+    run_legal_foundation_check()?;
+
     println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
     let (rush_aggregate, press_aggregate, recon_aggregate) =
         run_strategy_batch(ScenarioProfile::NightTrap, samples)?;
@@ -398,6 +416,271 @@ fn main() -> Result<(), Box<dyn Error>> {
         recon.print("RECON");
     }
 
+    Ok(())
+}
+
+fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1E6A_1933);
+
+    let sponsor = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Harbor Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )?;
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Harbor Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )?;
+    let firm = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Vale & Mercer".to_owned(),
+            kind: OrganizationKind::LegalServices,
+        },
+    )?;
+    let prosecutor_office = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Harbor District Prosecutor".to_owned(),
+            kind: OrganizationKind::Prosecutor,
+        },
+    )?;
+
+    let handler = insert_character(
+        &registry,
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Legal Liaison".to_owned(),
+            organization: Some(sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    let defendant = insert_character(
+        &registry,
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Associate".to_owned(),
+            organization: Some(sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    let counsel = insert_character(
+        &registry,
+        &mut state,
+        CharacterDraft {
+            name: "Elena Vale".to_owned(),
+            organization: Some(firm),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(87))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    let prosecutor = insert_character(
+        &registry,
+        &mut state,
+        CharacterDraft {
+            name: "Ada Mercer".to_owned(),
+            organization: Some(prosecutor_office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(90))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+
+    validate_set_relationship(
+        &state,
+        handler,
+        counsel,
+        RelationshipDimensions {
+            trust: level(68),
+            respect: level(72),
+            fear: level(0),
+            affection: level(12),
+            dependence: level(25),
+            resentment: level(0),
+            debt: level(10),
+        },
+    )?
+    .commit(&mut state);
+    let contact = validate_establish_contact(
+        &state,
+        InstitutionalContactDraft {
+            sponsor,
+            handler,
+            contact: counsel,
+        },
+    )?
+    .commit(&mut state)?;
+
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Harbor arrest matter".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(defendant)]),
+        },
+    )?
+    .commit(&mut state)?;
+    let evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(defendant),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )?
+    .commit(&mut state)?;
+    let arrest = validate_arrest(
+        &state,
+        ArrestDraft {
+            character: defendant,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )?
+    .commit(&mut state)?;
+
+    let payer = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(sponsor),
+            kind: AccountKind::AccountedFunds,
+            label: "Harbor legal reserve".to_owned(),
+        },
+    )?;
+    let reserve_source = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(sponsor),
+            kind: AccountKind::Settlement,
+            label: "Harbor legal reserve source".to_owned(),
+        },
+    )?;
+    let provider = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(firm),
+            kind: AccountKind::LegitimateOperating,
+            label: "Vale & Mercer client receipts".to_owned(),
+        },
+    )?;
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Fund legal reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve_source,
+                    amount: Money::from_cents(-20_000),
+                },
+                LedgerPosting {
+                    account: payer,
+                    amount: Money::from_cents(20_000),
+                },
+            ],
+            authorization: None,
+        },
+    )?
+    .commit(&mut state)?;
+    let representation = validate_retain_legal_representation(
+        &state,
+        LegalRepresentationDraft {
+            arrest,
+            sponsor,
+            contact,
+            fee: Money::from_cents(5_000),
+            payer_account: payer,
+            provider_account: provider,
+            authorization: None,
+        },
+    )?
+    .commit(&mut state)?;
+
+    let prosecution_case = validate_open_prosecution_case(
+        &state,
+        ProsecutionCaseDraft {
+            arrest,
+            prosecutor_office,
+            lead_prosecutor: prosecutor,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )?
+    .commit(&mut state)?;
+
+    validate_state(&state)?;
+    let representation_record = state
+        .legal()
+        .get_legal_representation(representation)
+        .ok_or("legal representation disappeared from harness state")?;
+    let prosecution_record = state
+        .legal()
+        .get_prosecution_case(prosecution_case)
+        .ok_or("prosecution case disappeared from harness state")?;
+    let evidence_record = state
+        .legal()
+        .get_evidence(evidence)
+        .ok_or("source evidence disappeared from harness state")?;
+    if evidence_record.custodian() != police
+        || !prosecution_record.evidence().contains(&evidence)
+        || representation_record.fee() != Money::from_cents(5_000)
+        || state
+            .finance()
+            .get_account(provider)
+            .is_none_or(|account| account.balance() != Money::from_cents(5_000))
+    {
+        return Err("legal foundation harness invariants did not produce expected state".into());
+    }
+
+    validate_decline_prosecution_case(&state, prosecution_case)?.commit(&mut state)?;
+    validate_state(&state)?;
+    let resolved_case = state
+        .legal()
+        .get_prosecution_case(prosecution_case)
+        .ok_or("resolved prosecution case disappeared from harness state")?;
+    if resolved_case.status() != crimocracy::legal::ProsecutionCaseStatus::Declined
+        || resolved_case.resolved_at() != Some(state.now())
+        || resolved_case.resolution_information().is_none()
+        || resolved_case.resolution_report().is_none()
+        || state
+            .legal()
+            .open_prosecution_case_for(arrest, prosecutor_office)
+            .is_some()
+    {
+        return Err("prosecution decline lifecycle did not produce expected state".into());
+    }
+
+    println!(
+        "[HARNESS CHECK] Arrest {arrest} retained counsel {representation} for 5000c, referred evidence to prosecution case {prosecution_case} without transferring police custody, then recorded a provenance-backed prosecution decline."
+    );
     Ok(())
 }
 
@@ -1117,6 +1400,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
                 scope: ResponsibilityScope::Neighborhood(neighborhood),
             },
             location: EnterpriseLocation::Business(front),
+            supporting_businesses: BTreeSet::new(),
             cash_account: enterprise_cash,
             settlement_account: enterprise_settlement,
         },

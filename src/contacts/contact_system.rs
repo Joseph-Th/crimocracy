@@ -4,7 +4,10 @@ use crate::contacts::{
     ContactDisclosureRecord, ContactKind, ContactRelationshipSnapshot, ContactStatus,
     InstitutionalContactRecord,
 };
-use crate::core::id::{CharacterId, ContactDisclosureId, ContactId, InformationId, OrganizationId};
+use crate::core::id::{
+    ArrestId, CharacterId, ContactDisclosureId, ContactId, InformationId, LegalRepresentationId,
+    OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::{
@@ -27,6 +30,11 @@ pub enum ContactError {
     InvalidHandler {
         handler: CharacterId,
         sponsor: OrganizationId,
+    },
+    #[error("contact handler {handler} is detained under arrest {arrest}")]
+    DetainedHandler {
+        handler: CharacterId,
+        arrest: ArrestId,
     },
     #[error("institutional contact character {0} does not exist")]
     MissingContact(CharacterId),
@@ -55,6 +63,13 @@ pub enum ContactError {
     MissingContactRecord(ContactId),
     #[error("institutional contact {0} is not active")]
     ContactNotActive(ContactId),
+    #[error(
+        "institutional contact {contact} supports active legal representation {representation}"
+    )]
+    ActiveLegalRepresentation {
+        contact: ContactId,
+        representation: LegalRepresentationId,
+    },
     #[error("institutional contact {contact} changed after validation; expected version {expected}, found {found}")]
     StaleContact {
         contact: ContactId,
@@ -227,6 +242,16 @@ impl ValidatedContactTermination {
         if record.status() != ContactStatus::Active {
             return Err(ContactError::ContactNotActive(self.contact));
         }
+        if let Some(representation) = state
+            .legal
+            .active_representations_for_contact(self.contact)
+            .next()
+        {
+            return Err(ContactError::ActiveLegalRepresentation {
+                contact: self.contact,
+                representation: representation.id(),
+            });
+        }
         state
             .contacts
             .terminate_contact(self.contact, self.validated_at);
@@ -244,6 +269,16 @@ pub fn validate_terminate_contact(
         .ok_or(ContactError::MissingContactRecord(contact))?;
     if record.status() != ContactStatus::Active {
         return Err(ContactError::ContactNotActive(contact));
+    }
+    if let Some(representation) = state
+        .legal
+        .active_representations_for_contact(contact)
+        .next()
+    {
+        return Err(ContactError::ActiveLegalRepresentation {
+            contact,
+            representation: representation.id(),
+        });
     }
     Ok(ValidatedContactTermination {
         contact,
@@ -337,7 +372,9 @@ pub const fn information_source_kind(kind: ContactKind) -> InformationSourceKind
 pub(crate) fn expected_contact_kind(kind: OrganizationKind) -> Option<ContactKind> {
     match kind {
         OrganizationKind::LawEnforcement => Some(ContactKind::Police),
-        OrganizationKind::LegalAuthority => Some(ContactKind::Legal),
+        OrganizationKind::LegalAuthority
+        | OrganizationKind::LegalServices
+        | OrganizationKind::Prosecutor => Some(ContactKind::Legal),
         OrganizationKind::Political => Some(ContactKind::Political),
         OrganizationKind::Press => Some(ContactKind::Press),
         OrganizationKind::Labor => Some(ContactKind::Labor),
@@ -369,6 +406,12 @@ fn validate_contact_dependencies(
         || handler_record.organization() != Some(sponsor)
     {
         return Err(ContactError::InvalidHandler { handler, sponsor });
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(handler) {
+        return Err(ContactError::DetainedHandler {
+            handler,
+            arrest: arrest.id(),
+        });
     }
     let contact_record = state
         .world
@@ -404,6 +447,12 @@ fn validate_disclosure_source(
     contact: &InstitutionalContactRecord,
     source: InformationId,
 ) -> Result<(), ContactError> {
+    if let Some(arrest) = state.legal.active_arrest_for_character(contact.handler()) {
+        return Err(ContactError::DetainedHandler {
+            handler: contact.handler(),
+            arrest: arrest.id(),
+        });
+    }
     let information = state
         .intelligence
         .get_information(source)

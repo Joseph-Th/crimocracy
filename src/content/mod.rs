@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 12;
+pub const CURRENT_CONTENT_REVISION: u32 = 13;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -405,6 +405,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
             },
             Some(PolicyKind::CollectionForce),
             BTreeSet::new(),
+            BTreeSet::new(),
         ),
         (
             EnterpriseKind::Gambling,
@@ -427,11 +428,45 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 BusinessFunction::MeetingSpace,
                 BusinessFunction::CustomerAccess,
             ]),
+            BTreeSet::new(),
+        ),
+        (
+            EnterpriseKind::AlcoholDistribution,
+            "Alcohol distribution",
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(16_000),
+                base_operating_cost: Money::from_cents(10_000),
+                demand_revenue_per_point: Money::from_cents(130),
+                commerce_revenue_per_point: Money::from_cents(50),
+                wealth_revenue_per_point: Money::from_cents(25),
+                management_revenue_per_point: Money::from_cents(45),
+                police_cost_per_point: Money::from_cents(40),
+                gross_variance_basis_points: 1_800,
+                notable_variance_basis_points: 1_200,
+            },
+            None,
+            BTreeSet::new(),
+            BTreeSet::from([
+                BusinessFunction::VehicleFleet,
+                BusinessFunction::Warehousing,
+                BusinessFunction::DistributionInfrastructure,
+                BusinessFunction::CustomerAccess,
+            ]),
         ),
     ];
-    for (kind, name, economics, policy, required_business_functions) in definitions {
+    for (kind, name, economics, policy, required_business_functions, required_network_functions) in
+        definitions
+    {
         builder
-            .register_enterprise(kind, name, economics, policy, required_business_functions)
+            .register_enterprise(
+                kind,
+                name,
+                economics,
+                policy,
+                required_business_functions,
+                required_network_functions,
+            )
             .unwrap_or_else(|error| panic!("invalid enterprise registry: {error}"));
     }
 }

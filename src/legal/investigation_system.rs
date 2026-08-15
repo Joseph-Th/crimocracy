@@ -2,7 +2,7 @@
 
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, OrganizationId,
+    ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::legal::{
@@ -39,6 +39,11 @@ pub enum InvestigationError {
     },
     #[error("character {0} is not active and cannot be assigned investigative work")]
     InactiveInvestigator(CharacterId),
+    #[error("character {investigator} is detained under arrest {arrest}")]
+    DetainedInvestigator {
+        investigator: CharacterId,
+        arrest: ArrestId,
+    },
     #[error("character {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
     #[error("character {investigator} already has role {role:?} on investigation {investigation}")]
@@ -100,6 +105,13 @@ pub enum InvestigationError {
         investigation: InvestigationId,
         work: InvestigationWorkId,
     },
+    #[error(
+        "investigation {investigation} has active arrest {arrest} and cannot transition lifecycle"
+    )]
+    ActiveArrestBlocksTransition {
+        investigation: InvestigationId,
+        arrest: ArrestId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +169,8 @@ fn validate_investigation_draft(
     match owner.kind() {
         OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority => {}
         OrganizationKind::Criminal
+        | OrganizationKind::LegalServices
+        | OrganizationKind::Prosecutor
         | OrganizationKind::Political
         | OrganizationKind::Press
         | OrganizationKind::Labor
@@ -265,6 +279,18 @@ fn validate_investigation_transition_dependencies(
             work: work.id(),
         });
     }
+    if transition != InvestigationTransition::Resume {
+        if let Some(arrest) = state
+            .legal
+            .arrests_for_investigation(investigation_id)
+            .find(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
+        {
+            return Err(InvestigationError::ActiveArrestBlocksTransition {
+                investigation: investigation_id,
+                arrest: arrest.id(),
+            });
+        }
+    }
     if transition == InvestigationTransition::Resume {
         let owner = state.world.get_organization(investigation.owner()).ok_or(
             InvestigationError::MissingOrganization(investigation.owner()),
@@ -279,6 +305,12 @@ fn validate_investigation_transition_dependencies(
                 .ok_or(InvestigationError::MissingCharacter(*investigator_id))?;
             if investigator.lifecycle() != Lifecycle::Active {
                 return Err(InvestigationError::InactiveInvestigator(*investigator_id));
+            }
+            if let Some(arrest) = state.legal.active_arrest_for_character(*investigator_id) {
+                return Err(InvestigationError::DetainedInvestigator {
+                    investigator: *investigator_id,
+                    arrest: arrest.id(),
+                });
             }
             if investigator.organization() != Some(investigation.owner()) {
                 return Err(InvestigationError::InvestigatorOwnerMismatch {
@@ -387,8 +419,13 @@ pub(crate) fn staff_unassigned_active_investigations(
             .filter_map(|investigator| {
                 let record = state.world.get_character(*investigator)?;
                 let capability = record.capability(CapabilityKind::Investigation)?;
-                (record.lifecycle() == Lifecycle::Active && record.organization() == Some(owner))
-                    .then_some((*investigator, capability.value()))
+                (record.lifecycle() == Lifecycle::Active
+                    && record.organization() == Some(owner)
+                    && state
+                        .legal
+                        .active_arrest_for_character(*investigator)
+                        .is_none())
+                .then_some((*investigator, capability.value()))
             })
             .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
             .map(|(investigator, _)| investigator);
@@ -399,6 +436,10 @@ pub(crate) fn staff_unassigned_active_investigations(
                 .characters_in_organization(owner)
                 .filter(|record| {
                     record.lifecycle() == Lifecycle::Active
+                        && state
+                            .legal
+                            .active_arrest_for_character(record.id())
+                            .is_none()
                         && state
                             .legal
                             .active_investigation_for_investigator(record.id())
@@ -447,6 +488,12 @@ fn validate_investigator_assignment_dependencies(
         .ok_or(InvestigationError::MissingCharacter(investigator_id))?;
     if investigator.lifecycle() != Lifecycle::Active {
         return Err(InvestigationError::InactiveInvestigator(investigator_id));
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(investigator_id) {
+        return Err(InvestigationError::DetainedInvestigator {
+            investigator: investigator_id,
+            arrest: arrest.id(),
+        });
     }
     if investigator.organization() != Some(investigation.owner()) {
         return Err(InvestigationError::InvestigatorOwnerMismatch {

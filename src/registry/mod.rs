@@ -556,6 +556,7 @@ pub struct EnterpriseDefinition {
     economics: EnterpriseEconomicsDefinition,
     policy: Option<PolicyKind>,
     required_business_functions: BTreeSet<BusinessFunction>,
+    required_network_functions: BTreeSet<BusinessFunction>,
 }
 
 impl EnterpriseDefinition {
@@ -573,6 +574,9 @@ impl EnterpriseDefinition {
     }
     pub fn required_business_functions(&self) -> &BTreeSet<BusinessFunction> {
         &self.required_business_functions
+    }
+    pub fn required_network_functions(&self) -> &BTreeSet<BusinessFunction> {
+        &self.required_network_functions
     }
 }
 
@@ -1364,6 +1368,7 @@ impl RegistryBuilder {
         economics: EnterpriseEconomicsDefinition,
         policy: Option<PolicyKind>,
         required_business_functions: BTreeSet<BusinessFunction>,
+        required_network_functions: BTreeSet<BusinessFunction>,
     ) -> Result<(), RegistryBuildError> {
         if economics.cycle.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidEnterpriseCycle(kind));
@@ -1398,6 +1403,7 @@ impl RegistryBuilder {
                     economics,
                     policy,
                     required_business_functions,
+                    required_network_functions,
                 },
             )
             .is_some()
@@ -1642,6 +1648,41 @@ mod tests {
             AttentionClass::Notable
         );
         assert_eq!(definition.max_source_entries(), 8);
+    }
+
+    #[test]
+    fn authored_alcohol_distribution_requires_concrete_commercial_network() {
+        let registry = build_registry();
+        let definition = registry.get_enterprise(EnterpriseKind::AlcoholDistribution);
+        assert_eq!(definition.kind(), EnterpriseKind::AlcoholDistribution);
+        assert_eq!(definition.display_name(), "Alcohol distribution");
+        assert!(definition.required_business_functions().is_empty());
+        assert_eq!(
+            definition.required_network_functions(),
+            &BTreeSet::from([
+                BusinessFunction::VehicleFleet,
+                BusinessFunction::Warehousing,
+                BusinessFunction::DistributionInfrastructure,
+                BusinessFunction::CustomerAccess,
+            ])
+        );
+        let economics = definition.economics();
+        assert_eq!(economics.cycle(), SimDuration::from_minutes(1_440));
+        assert_eq!(economics.base_gross(), Money::from_cents(16_000));
+        assert_eq!(economics.base_operating_cost(), Money::from_cents(10_000));
+        assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(130));
+        assert_eq!(
+            economics.commerce_revenue_per_point(),
+            Money::from_cents(50)
+        );
+        assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(25));
+        assert_eq!(
+            economics.management_revenue_per_point(),
+            Money::from_cents(45)
+        );
+        assert_eq!(economics.police_cost_per_point(), Money::from_cents(40));
+        assert_eq!(economics.gross_variance_basis_points(), 1_800);
+        assert_eq!(economics.notable_variance_basis_points(), 1_200);
     }
 
     #[test]

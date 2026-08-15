@@ -22,6 +22,8 @@ pub enum OrganizationKind {
     Criminal,
     LawEnforcement,
     LegalAuthority,
+    LegalServices,
+    Prosecutor,
     Political,
     Press,
     Labor,

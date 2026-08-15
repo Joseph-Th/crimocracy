@@ -1,7 +1,7 @@
 //! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
 use crate::core::id::{
-    BusinessId, CharacterId, EnterpriseId, MandateId, NeighborhoodId, OrganizationId,
+    ArrestId, BusinessId, CharacterId, EnterpriseId, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::delegation::{
@@ -26,6 +26,11 @@ pub enum DelegationError {
     InvalidManager {
         manager: CharacterId,
         organization: OrganizationId,
+    },
+    #[error("manager {manager} is detained under arrest {arrest}")]
+    DetainedManager {
+        manager: CharacterId,
+        arrest: ArrestId,
     },
     #[error("manager {manager} already has active mandate {mandate}")]
     ExistingMandate {
@@ -472,6 +477,12 @@ fn validate_manager(
         return Err(DelegationError::InvalidManager {
             manager,
             organization,
+        });
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(manager) {
+        return Err(DelegationError::DetainedManager {
+            manager,
+            arrest: arrest.id(),
         });
     }
     Ok(manager_record)

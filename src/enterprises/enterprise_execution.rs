@@ -32,8 +32,10 @@ use crate::intelligence::{
 };
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
 use crate::world::{
-    BusinessFunction, CapabilityKind, Lifecycle, NeighborhoodProfile, PolicySetting, Rating,
+    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile, PolicySetting,
+    Rating,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -58,6 +60,24 @@ pub enum EnterpriseError {
     MissingBusinessFunction {
         business: BusinessId,
         function: BusinessFunction,
+    },
+    #[error("supporting business {0} does not exist or is inactive")]
+    InvalidSupportingBusiness(BusinessId),
+    #[error("supporting business {business} is owned by {owner:?}, not enterprise organization {organization}")]
+    SupportingBusinessOwnershipMismatch {
+        business: BusinessId,
+        owner: BusinessOwner,
+        organization: OrganizationId,
+    },
+    #[error("supporting business {business} duplicates the enterprise's hosted business location")]
+    DuplicateSupportingLocation { business: BusinessId },
+    #[error("enterprise support network lacks required function {function:?}")]
+    MissingNetworkFunction { function: BusinessFunction },
+    #[error("supporting business {business} changed after validation; expected version {expected}, found {found}")]
+    StaleSupportingBusiness {
+        business: BusinessId,
+        expected: u32,
+        found: u32,
     },
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
@@ -116,6 +136,7 @@ pub struct ValidatedEnterpriseEstablishment {
     draft: EnterpriseDraft,
     authority: ResolvedMandateAuthority,
     cycle_duration: SimDuration,
+    supporting_business_versions: BTreeMap<BusinessId, u32>,
 }
 
 impl ValidatedEnterpriseEstablishment {
@@ -126,6 +147,13 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.organization,
             self.draft.authority,
             self.draft.location,
+        )?;
+        validate_supporting_business_versions(state, &self.supporting_business_versions)?;
+        validate_supporting_businesses(
+            state,
+            self.draft.organization,
+            self.draft.location,
+            &self.draft.supporting_businesses,
         )?;
         validate_enterprise_accounts(
             state,
@@ -155,7 +183,13 @@ pub fn validate_establish_enterprise(
     let definition = registry.get_enterprise(draft.kind);
     let authority = resolve_mandate_authority(state, draft.authority)?;
     validate_enterprise_environment(state, draft.organization, draft.authority, draft.location)?;
-    validate_business_location_requirements(definition, state, draft.location)?;
+    validate_enterprise_business_dependencies(
+        definition,
+        state,
+        draft.organization,
+        draft.location,
+        &draft.supporting_businesses,
+    )?;
     validate_enterprise_accounts(
         state,
         draft.organization,
@@ -164,10 +198,13 @@ pub fn validate_establish_enterprise(
         None,
     )?;
     let cycle_duration = definition.economics().cycle();
+    let supporting_business_versions =
+        snapshot_supporting_business_versions(state, &draft.supporting_businesses)?;
     Ok(ValidatedEnterpriseEstablishment {
         draft,
         authority,
         cycle_duration,
+        supporting_business_versions,
     })
 }
 
@@ -247,7 +284,13 @@ pub fn decide_enterprise_cycle(
         record.authority(),
         record.location(),
     )?;
-    validate_business_location_requirements(definition, state, record.location())?;
+    validate_enterprise_business_dependencies(
+        definition,
+        state,
+        record.organization(),
+        record.location(),
+        record.supporting_businesses(),
+    )?;
     validate_enterprise_accounts(
         state,
         record.organization(),
@@ -469,6 +512,7 @@ pub struct ValidatedEnterpriseStatusChange {
     change: EnterpriseStatusChange,
     cycle_duration: Option<SimDuration>,
     authority: Option<ResolvedMandateAuthority>,
+    supporting_business_versions: BTreeMap<BusinessId, u32>,
 }
 
 impl ValidatedEnterpriseStatusChange {
@@ -491,6 +535,13 @@ impl ValidatedEnterpriseStatusChange {
                 record.organization(),
                 record.authority(),
                 record.location(),
+            )?;
+            validate_supporting_business_versions(state, &self.supporting_business_versions)?;
+            validate_supporting_businesses(
+                state,
+                record.organization(),
+                record.location(),
+                record.supporting_businesses(),
             )?;
             validate_enterprise_accounts(
                 state,
@@ -534,6 +585,7 @@ pub fn validate_suspend_enterprise(
         change: EnterpriseStatusChange::Suspend,
         cycle_duration: None,
         authority: None,
+        supporting_business_versions: BTreeMap::new(),
     })
 }
 
@@ -561,7 +613,13 @@ pub fn validate_resume_enterprise(
         record.location(),
     )?;
     let definition = registry.get_enterprise(record.kind());
-    validate_business_location_requirements(definition, state, record.location())?;
+    validate_enterprise_business_dependencies(
+        definition,
+        state,
+        record.organization(),
+        record.location(),
+        record.supporting_businesses(),
+    )?;
     validate_enterprise_accounts(
         state,
         record.organization(),
@@ -570,12 +628,15 @@ pub fn validate_resume_enterprise(
         Some(record.id()),
     )?;
     let cycle_duration = definition.economics().cycle();
+    let supporting_business_versions =
+        snapshot_supporting_business_versions(state, record.supporting_businesses())?;
     Ok(ValidatedEnterpriseStatusChange {
         enterprise,
         expected_version: record.version(),
         change: EnterpriseStatusChange::Resume,
         cycle_duration: Some(cycle_duration),
         authority: Some(authority),
+        supporting_business_versions,
     })
 }
 
@@ -596,11 +657,27 @@ pub fn validate_close_enterprise(
         change: EnterpriseStatusChange::Close,
         cycle_duration: None,
         authority: None,
+        supporting_business_versions: BTreeMap::new(),
     })
 }
 
 pub(crate) fn due_active_enterprises(state: &AppState) -> Vec<EnterpriseId> {
-    state.enterprises.due_at_or_before(state.now())
+    state
+        .enterprises
+        .due_at_or_before(state.now())
+        .into_iter()
+        .filter(|enterprise| {
+            state
+                .enterprises
+                .get_enterprise(*enterprise)
+                .is_some_and(|record| {
+                    state
+                        .legal
+                        .active_arrest_for_character(record.manager())
+                        .is_none()
+                })
+        })
+        .collect()
 }
 
 fn validate_enterprise_environment(
@@ -720,6 +797,111 @@ fn validate_business_location_requirements(
             return Err(EnterpriseError::MissingBusinessFunction {
                 business: business_id,
                 function: *function,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_enterprise_business_dependencies(
+    definition: &EnterpriseDefinition,
+    state: &AppState,
+    organization: OrganizationId,
+    location: EnterpriseLocation,
+    supporting_businesses: &BTreeSet<BusinessId>,
+) -> Result<(), EnterpriseError> {
+    validate_business_location_requirements(definition, state, location)?;
+    validate_supporting_businesses(state, organization, location, supporting_businesses)?;
+
+    if definition.required_network_functions().is_empty() {
+        return Ok(());
+    }
+    let mut available = BTreeSet::new();
+    if let EnterpriseLocation::Business(business_id) = location {
+        let business = state
+            .world
+            .get_business(business_id)
+            .ok_or(EnterpriseError::InvalidLocation(location))?;
+        available.extend(business.functions().iter().copied());
+    }
+    for business_id in supporting_businesses {
+        let business = state
+            .world
+            .get_business(*business_id)
+            .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
+        available.extend(business.functions().iter().copied());
+    }
+    for function in definition.required_network_functions() {
+        if !available.contains(function) {
+            return Err(EnterpriseError::MissingNetworkFunction {
+                function: *function,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_supporting_businesses(
+    state: &AppState,
+    organization: OrganizationId,
+    location: EnterpriseLocation,
+    supporting_businesses: &BTreeSet<BusinessId>,
+) -> Result<(), EnterpriseError> {
+    for business_id in supporting_businesses {
+        if matches!(location, EnterpriseLocation::Business(location_id) if location_id == *business_id)
+        {
+            return Err(EnterpriseError::DuplicateSupportingLocation {
+                business: *business_id,
+            });
+        }
+        let business = state
+            .world
+            .get_business(*business_id)
+            .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
+        if business.lifecycle() != Lifecycle::Active {
+            return Err(EnterpriseError::InvalidSupportingBusiness(*business_id));
+        }
+        if business.owner() != BusinessOwner::Organization(organization) {
+            return Err(EnterpriseError::SupportingBusinessOwnershipMismatch {
+                business: *business_id,
+                owner: business.owner(),
+                organization,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_supporting_business_versions(
+    state: &AppState,
+    supporting_businesses: &BTreeSet<BusinessId>,
+) -> Result<BTreeMap<BusinessId, u32>, EnterpriseError> {
+    supporting_businesses
+        .iter()
+        .map(|business_id| {
+            let business = state
+                .world
+                .get_business(*business_id)
+                .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
+            Ok((*business_id, business.version()))
+        })
+        .collect()
+}
+
+fn validate_supporting_business_versions(
+    state: &AppState,
+    versions: &BTreeMap<BusinessId, u32>,
+) -> Result<(), EnterpriseError> {
+    for (business_id, expected) in versions {
+        let business = state
+            .world
+            .get_business(*business_id)
+            .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
+        if business.version() != *expected {
+            return Err(EnterpriseError::StaleSupportingBusiness {
+                business: *business_id,
+                expected: *expected,
+                found: business.version(),
             });
         }
     }
@@ -883,7 +1065,10 @@ fn apply_basis_point_variance(
 mod tests {
     use super::*;
     use crate::build_registry;
-    use crate::core::invariants::validate_invariants;
+    use crate::core::entity::EntityRef;
+    use crate::core::invariants::{
+        validate_invariants, validate_state, validate_state_against_registry,
+    };
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::simulation::run_tick;
     use crate::delegation::delegation_system::{
@@ -899,10 +1084,17 @@ mod tests {
     use crate::enterprises::EnterpriseKind;
     use crate::finance::finance_system::insert_account;
     use crate::finance::{FinancialAccountDraft, FinancialOwner};
+    use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
+    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::{
+        Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+        EvidenceStrength, InvestigationDraft,
+    };
     use crate::reports::enterprise_financial_report::validate_enterprise_financial_report;
     use crate::reports::ReportKind;
     use crate::world::world_system::{
         insert_business, insert_character, insert_neighborhood, insert_organization,
+        validate_transfer_business_ownership, WorldError,
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
@@ -1025,6 +1217,7 @@ mod tests {
                 organization: fixture.organization,
                 authority: fixture.authority,
                 location: fixture.location,
+                supporting_businesses: BTreeSet::new(),
                 cash_account: fixture.cash,
                 settlement_account: fixture.settlement,
             },
@@ -1032,6 +1225,80 @@ mod tests {
         .expect("enterprise fixture should validate")
         .commit(&mut fixture.state)
         .expect("enterprise fixture should commit")
+    }
+
+    fn insert_support_business(
+        registry: &Registry,
+        fixture: &mut EnterpriseFixture,
+        name: &str,
+        kind: BusinessKind,
+        functions: BTreeSet<BusinessFunction>,
+        owner: BusinessOwner,
+    ) -> BusinessId {
+        let neighborhood = match fixture.location {
+            EnterpriseLocation::Neighborhood(id) => id,
+            EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+        };
+        insert_business(
+            registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: name.to_owned(),
+                kind,
+                functions,
+                neighborhood,
+                owner,
+            },
+        )
+        .expect("support business fixture should validate")
+    }
+
+    fn alcohol_support_network(
+        registry: &Registry,
+        fixture: &mut EnterpriseFixture,
+    ) -> (BusinessId, BusinessId) {
+        let transport = insert_support_business(
+            registry,
+            fixture,
+            "Harbor Freight & Storage",
+            BusinessKind::Transportation,
+            BTreeSet::from([
+                BusinessFunction::VehicleFleet,
+                BusinessFunction::Warehousing,
+                BusinessFunction::DistributionInfrastructure,
+            ]),
+            BusinessOwner::Organization(fixture.organization),
+        );
+        let retail = insert_support_business(
+            registry,
+            fixture,
+            "Neighborhood Bottle Shop",
+            BusinessKind::Retail,
+            BTreeSet::from([BusinessFunction::CustomerAccess]),
+            BusinessOwner::Organization(fixture.organization),
+        );
+        (transport, retail)
+    }
+
+    fn establish_alcohol_distribution(
+        registry: &Registry,
+        fixture: &mut EnterpriseFixture,
+        supporting_businesses: BTreeSet<BusinessId>,
+    ) -> Result<EnterpriseId, EnterpriseError> {
+        validate_establish_enterprise(
+            registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::AlcoholDistribution,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                supporting_businesses,
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )?
+        .commit(&mut fixture.state)
     }
 
     #[test]
@@ -1087,6 +1354,99 @@ mod tests {
     }
 
     #[test]
+    fn detained_enterprise_manager_pauses_due_cycles_until_release() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        let manager = fixture.authority.manager;
+        let police = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Enterprise Custody Police".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let investigation = validate_open_investigation(
+            &fixture.state,
+            InvestigationDraft {
+                owner: police,
+                title: "Enterprise manager custody inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Character(manager)]),
+            },
+        )
+        .expect("custody investigation should validate")
+        .commit(&mut fixture.state)
+        .expect("custody investigation should commit");
+        let evidence = validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(manager),
+                origin: None,
+                kind: EvidenceKind::FinancialRecord,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("custody evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("custody evidence should commit");
+
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let arrest = validate_arrest(
+            &fixture.state,
+            ArrestDraft {
+                character: manager,
+                investigation,
+                evidence: BTreeSet::from([evidence]),
+            },
+        )
+        .expect("manager arrest should not require revoking formal enterprise authority")
+        .commit(&mut fixture.state)
+        .expect("manager arrest should commit");
+
+        assert!(due_active_enterprises(&fixture.state).is_empty());
+        let detained_tick = run_tick(&registry, &mut fixture.state);
+        assert!(detained_tick.enterprise_cycles.is_empty());
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("enterprise should persist")
+                .next_cycle_at(),
+            Some(SimTime::from_minutes(1_440))
+        );
+        validate_state(&fixture.state).expect("paused enterprise detention state should validate");
+        validate_invariants(&fixture.state);
+
+        validate_release_arrest(&fixture.state, arrest)
+            .expect("manager detention should release")
+            .commit(&mut fixture.state)
+            .expect("manager release should commit");
+        let released_tick = run_tick(&registry, &mut fixture.state);
+        assert_eq!(released_tick.enterprise_cycles.len(), 1);
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_cycle(released_tick.enterprise_cycles[0])
+                .expect("released manager should produce the overdue enterprise cycle")
+                .enterprise(),
+            enterprise
+        );
+        validate_state(&fixture.state).expect("resumed enterprise state should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
     fn settlement_account_is_exclusive_to_one_enterprise_history() {
         let registry = build_registry();
         let mut fixture = make_test_enterprise_fixture();
@@ -1100,6 +1460,7 @@ mod tests {
                 organization: fixture.organization,
                 authority: fixture.authority,
                 location: fixture.location,
+                supporting_businesses: BTreeSet::new(),
                 cash_account: fixture.cash,
                 settlement_account: fixture.settlement,
             },
@@ -1154,6 +1515,7 @@ mod tests {
                 organization: fixture.organization,
                 authority: fixture.authority,
                 location: EnterpriseLocation::Business(incomplete_venue),
+                supporting_businesses: BTreeSet::new(),
                 cash_account: fixture.cash,
                 settlement_account: fixture.settlement,
             },
@@ -1193,6 +1555,7 @@ mod tests {
                 organization: fixture.organization,
                 authority: fixture.authority,
                 location: EnterpriseLocation::Business(valid_venue),
+                supporting_businesses: BTreeSet::new(),
                 cash_account: fixture.cash,
                 settlement_account: fixture.settlement,
             },
@@ -1209,6 +1572,284 @@ mod tests {
                 .location(),
             EnterpriseLocation::Business(valid_venue)
         );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn alcohol_distribution_uses_owned_business_network_and_survives_save_before_cycle() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+        let enterprise = establish_alcohol_distribution(
+            &registry,
+            &mut fixture,
+            BTreeSet::from([transport, retail]),
+        )
+        .expect("complete owned distribution network should establish");
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .enterprises_supported_by_business(transport)
+                .map(|record| record.id())
+                .collect::<Vec<_>>(),
+            vec![enterprise]
+        );
+        validate_state(&fixture.state).expect("alcohol distribution state should validate");
+        validate_state_against_registry(&registry, &fixture.state)
+            .expect("alcohol distribution network should satisfy authored content");
+        validate_invariants(&fixture.state);
+
+        let save = build_save(&registry, &fixture.state)
+            .expect("alcohol distribution state should build a save");
+        let bytes = bincode::serialize(&save).expect("save should serialize");
+        let decoded: SaveEnvelope = bincode::deserialize(&bytes).expect("save should deserialize");
+        let mut restored = restore_save(&registry, decoded)
+            .expect("alcohol distribution support indexes should restore");
+        assert_eq!(
+            restored
+                .enterprises()
+                .enterprises_supported_by_business(retail)
+                .map(|record| record.id())
+                .collect::<Vec<_>>(),
+            vec![enterprise]
+        );
+
+        restored.advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_enterprise_cycle(&registry, &restored, enterprise, 0)
+            .expect("valid alcohol distribution network should resolve a due cycle");
+        assert_eq!(plan.gross_revenue(), Money::from_cents(31_100));
+        assert_eq!(plan.operating_cost(), Money::from_cents(11_600));
+        assert_eq!(plan.net_cash(), Money::from_cents(19_500));
+        validate_enterprise_cycle_plan(&restored, plan)
+            .expect("fresh alcohol distribution cycle should validate")
+            .commit(&mut restored)
+            .expect("alcohol distribution cycle should commit");
+        validate_state(&restored).expect("resolved alcohol distribution state should validate");
+        validate_state_against_registry(&registry, &restored)
+            .expect("resolved alcohol distribution state should remain authored-valid");
+        validate_invariants(&restored);
+    }
+
+    #[test]
+    fn alcohol_distribution_rejects_incomplete_or_foreign_support_networks() {
+        let registry = build_registry();
+        let mut incomplete = make_test_enterprise_fixture();
+        let incomplete_organization = incomplete.organization;
+        let transport = insert_support_business(
+            &registry,
+            &mut incomplete,
+            "Incomplete Freight Network",
+            BusinessKind::Transportation,
+            BTreeSet::from([
+                BusinessFunction::VehicleFleet,
+                BusinessFunction::Warehousing,
+                BusinessFunction::DistributionInfrastructure,
+            ]),
+            BusinessOwner::Organization(incomplete_organization),
+        );
+        let error =
+            establish_alcohol_distribution(&registry, &mut incomplete, BTreeSet::from([transport]))
+                .expect_err("distribution network without retail access must be rejected");
+        assert_eq!(
+            error,
+            EnterpriseError::MissingNetworkFunction {
+                function: BusinessFunction::CustomerAccess,
+            }
+        );
+
+        let mut foreign = make_test_enterprise_fixture();
+        let network = insert_support_business(
+            &registry,
+            &mut foreign,
+            "Independent Distribution Combine",
+            BusinessKind::Transportation,
+            BTreeSet::from([
+                BusinessFunction::VehicleFleet,
+                BusinessFunction::Warehousing,
+                BusinessFunction::DistributionInfrastructure,
+                BusinessFunction::CustomerAccess,
+            ]),
+            BusinessOwner::Independent,
+        );
+        let error =
+            establish_alcohol_distribution(&registry, &mut foreign, BTreeSet::from([network]))
+                .expect_err("foreign business capacity must not be consumed implicitly");
+        assert_eq!(
+            error,
+            EnterpriseError::SupportingBusinessOwnershipMismatch {
+                business: network,
+                owner: BusinessOwner::Independent,
+                organization: foreign.organization,
+            }
+        );
+        validate_state(&incomplete.state).expect("rejected incomplete network should not mutate");
+        validate_state(&foreign.state).expect("rejected foreign network should not mutate");
+        validate_invariants(&incomplete.state);
+        validate_invariants(&foreign.state);
+    }
+
+    #[test]
+    fn distribution_establishment_token_stales_when_support_ownership_changes() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+        let expected_version = fixture
+            .state
+            .world()
+            .get_business(retail)
+            .expect("support business should exist")
+            .version();
+        let establishment = validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::AlcoholDistribution,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                supporting_businesses: BTreeSet::from([transport, retail]),
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .expect("complete distribution network should initially validate");
+
+        validate_transfer_business_ownership(&fixture.state, retail, BusinessOwner::Independent)
+            .expect("no committed enterprise should lock support ownership yet")
+            .commit(&mut fixture.state)
+            .expect("support ownership transfer should commit before enterprise establishment");
+        let found_version = fixture
+            .state
+            .world()
+            .get_business(retail)
+            .expect("support business should remain")
+            .version();
+        assert_eq!(
+            establishment
+                .commit(&mut fixture.state)
+                .expect_err("support mutation must stale validated establishment"),
+            EnterpriseError::StaleSupportingBusiness {
+                business: retail,
+                expected: expected_version,
+                found: found_version,
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .enterprises_supported_by_business(transport)
+                .count(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.cash)
+                .expect("cash account should persist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.settlement)
+                .expect("settlement account should persist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_state(&fixture.state)
+            .expect("stale establishment rejection should preserve valid state");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn active_distribution_network_locks_business_ownership_and_resume_revalidates_versions() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+        let enterprise = establish_alcohol_distribution(
+            &registry,
+            &mut fixture,
+            BTreeSet::from([transport, retail]),
+        )
+        .expect("complete network should establish");
+
+        let error = validate_transfer_business_ownership(
+            &fixture.state,
+            retail,
+            BusinessOwner::Independent,
+        )
+        .expect_err("active enterprise must lock supporting business ownership");
+        assert_eq!(
+            error,
+            WorldError::ActiveEnterpriseSupport {
+                business: retail,
+                enterprise,
+                organization: fixture.organization,
+            }
+        );
+
+        validate_suspend_enterprise(&fixture.state, enterprise)
+            .expect("active distribution enterprise should suspend")
+            .commit(&mut fixture.state)
+            .expect("distribution suspension should commit");
+        let stale_resume = validate_resume_enterprise(&registry, &fixture.state, enterprise)
+            .expect("owned support network should initially validate for resume");
+        validate_transfer_business_ownership(&fixture.state, retail, BusinessOwner::Independent)
+            .expect("suspended enterprise should release support ownership lock")
+            .commit(&mut fixture.state)
+            .expect("support ownership transfer should commit while suspended");
+        assert_eq!(
+            stale_resume
+                .commit(&mut fixture.state)
+                .expect_err("support ownership mutation must stale prior resume token"),
+            EnterpriseError::StaleSupportingBusiness {
+                business: retail,
+                expected: 1,
+                found: 2,
+            }
+        );
+        let fresh_error = match validate_resume_enterprise(&registry, &fixture.state, enterprise) {
+            Ok(_) => panic!("foreign-owned support network must not resume"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            fresh_error,
+            EnterpriseError::SupportingBusinessOwnershipMismatch {
+                business: retail,
+                owner: BusinessOwner::Independent,
+                organization: fixture.organization,
+            }
+        );
+
+        validate_transfer_business_ownership(
+            &fixture.state,
+            retail,
+            BusinessOwner::Organization(fixture.organization),
+        )
+        .expect("suspended support business should be transferable back")
+        .commit(&mut fixture.state)
+        .expect("support ownership restoration should commit");
+        validate_resume_enterprise(&registry, &fixture.state, enterprise)
+            .expect("restored network should resume")
+            .commit(&mut fixture.state)
+            .expect("restored distribution enterprise resume should commit");
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("distribution enterprise should persist")
+                .status(),
+            EnterpriseStatus::Active
+        );
+        validate_state(&fixture.state).expect("restored distribution network should validate");
+        validate_state_against_registry(&registry, &fixture.state)
+            .expect("restored distribution network should satisfy authored content");
         validate_invariants(&fixture.state);
     }
 
@@ -1257,6 +1898,7 @@ mod tests {
                 organization: fixture.organization,
                 authority: fixture.authority,
                 location: fixture.location,
+                supporting_businesses: BTreeSet::new(),
                 cash_account: fixture.cash,
                 settlement_account: fixture.settlement,
             },

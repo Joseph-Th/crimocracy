@@ -5,10 +5,11 @@ use crate::contacts::{ContactRelationshipSnapshot, ContactStatus};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId, ContactId,
-    DecisionRequestId, EnterpriseCycleId, EnterpriseId, InformantDisclosureId, InformantId,
-    InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId, MandateId,
-    OperationId, OpportunityId, OrganizationId, PatrolDeploymentId, PoliceResponseId,
+    ArrestId, BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId,
+    ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, InformantDisclosureId,
+    InformantId, InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId,
+    LegalRepresentationId, MandateId, OperationId, OpportunityId, OrganizationId,
+    PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
     RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
@@ -33,9 +34,10 @@ use crate::legal::investigation_work_execution::{
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
 use crate::legal::witness_system::{witness_reliability, witness_strength};
 use crate::legal::{
-    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InformantStatus,
-    InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
-    InvestigationWorkStatus, PatrolDeploymentStatus, PoliceResponseStatus, WitnessCooperation,
+    Admissibility, ArrestStatus, EvidenceKind, EvidenceReliability, EvidenceStrength,
+    InformantStatus, InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind,
+    InvestigationWorkOutcome, InvestigationWorkStatus, LegalRepresentationStatus,
+    PatrolDeploymentStatus, PoliceResponseStatus, ProsecutionCaseStatus, WitnessCooperation,
 };
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
@@ -147,6 +149,16 @@ pub enum StateValidationError {
     InvalidPatrolDeployment { deployment: PatrolDeploymentId },
     #[error("police response {response} has invalid persisted state")]
     InvalidPoliceResponse { response: PoliceResponseId },
+    #[error("arrest {arrest} has invalid persisted custody state or provenance")]
+    InvalidArrest { arrest: ArrestId },
+    #[error("legal representation {representation} has invalid persisted state or provenance")]
+    InvalidLegalRepresentation {
+        representation: LegalRepresentationId,
+    },
+    #[error("prosecution case {case} has invalid persisted state or referral provenance")]
+    InvalidProsecutionCase { case: ProsecutionCaseId },
+    #[error("prosecution referral {referral} has invalid persisted evidence or report provenance")]
+    InvalidProsecutionReferral { referral: ProsecutionReferralId },
     #[error("investigation {investigation} has invalid investigator staffing")]
     InvalidInvestigationStaffing { investigation: InvestigationId },
     #[error("investigation work {work} has invalid persisted state")]
@@ -292,6 +304,16 @@ pub enum StateValidationError {
     EnterpriseBusinessRequirementMissing {
         enterprise: EnterpriseId,
         business: BusinessId,
+        function: BusinessFunction,
+    },
+    #[error("enterprise {enterprise} has invalid supporting business {business}")]
+    InvalidEnterpriseSupportingBusiness {
+        enterprise: EnterpriseId,
+        business: BusinessId,
+    },
+    #[error("enterprise {enterprise} support network lacks required function {function:?}")]
+    EnterpriseNetworkRequirementMissing {
+        enterprise: EnterpriseId,
         function: BusinessFunction,
     },
     #[error("business {business} has invalid operating economy state")]
@@ -640,19 +662,41 @@ pub fn validate_state_against_registry(
     }
     for enterprise in state.enterprises.enterprises() {
         let definition = registry.get_enterprise(enterprise.kind());
-        let EnterpriseLocation::Business(business_id) = enterprise.location() else {
-            continue;
-        };
-        let business = state.world.get_business(business_id).ok_or(
-            StateValidationError::InvalidEnterpriseLocation {
-                enterprise: enterprise.id(),
-            },
-        )?;
-        for function in definition.required_business_functions() {
-            if !business.has_function(*function) {
-                return Err(StateValidationError::EnterpriseBusinessRequirementMissing {
+        let mut network_functions = BTreeSet::new();
+        if let EnterpriseLocation::Business(business_id) = enterprise.location() {
+            let business = state.world.get_business(business_id).ok_or(
+                StateValidationError::InvalidEnterpriseLocation {
                     enterprise: enterprise.id(),
-                    business: business_id,
+                },
+            )?;
+            for function in definition.required_business_functions() {
+                if !business.has_function(*function) {
+                    return Err(StateValidationError::EnterpriseBusinessRequirementMissing {
+                        enterprise: enterprise.id(),
+                        business: business_id,
+                        function: *function,
+                    });
+                }
+            }
+            network_functions.extend(business.functions().iter().copied());
+        } else if !definition.required_business_functions().is_empty() {
+            return Err(StateValidationError::InvalidEnterpriseLocation {
+                enterprise: enterprise.id(),
+            });
+        }
+        for business_id in enterprise.supporting_businesses() {
+            let business = state.world.get_business(*business_id).ok_or(
+                StateValidationError::InvalidEnterpriseSupportingBusiness {
+                    enterprise: enterprise.id(),
+                    business: *business_id,
+                },
+            )?;
+            network_functions.extend(business.functions().iter().copied());
+        }
+        for function in definition.required_network_functions() {
+            if !network_functions.contains(function) {
+                return Err(StateValidationError::EnterpriseNetworkRequirementMissing {
+                    enterprise: enterprise.id(),
                     function: *function,
                 });
             }
@@ -3661,6 +3705,25 @@ fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
             }
         };
 
+        let mut supporting_businesses =
+            Vec::with_capacity(enterprise.supporting_businesses().len());
+        for business_id in enterprise.supporting_businesses() {
+            if matches!(enterprise.location(), EnterpriseLocation::Business(location_id) if location_id == *business_id)
+            {
+                return Err(StateValidationError::InvalidEnterpriseSupportingBusiness {
+                    enterprise: enterprise.id(),
+                    business: *business_id,
+                });
+            }
+            let business = state.world.get_business(*business_id).ok_or(
+                StateValidationError::InvalidEnterpriseSupportingBusiness {
+                    enterprise: enterprise.id(),
+                    business: *business_id,
+                },
+            )?;
+            supporting_businesses.push(business);
+        }
+
         let cash = state.finance.get_account(enterprise.cash_account()).ok_or(
             StateValidationError::InvalidEnterpriseAccounts {
                 enterprise: enterprise.id(),
@@ -3738,6 +3801,11 @@ fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
                     || !mandate.scopes().contains(&authority.scope)
                     || !authority_covers_location
                     || !location_is_active
+                    || supporting_businesses.iter().any(|business| {
+                        business.lifecycle() != Lifecycle::Active
+                            || business.owner()
+                                != BusinessOwner::Organization(enterprise.organization())
+                    })
                 {
                     return Err(StateValidationError::InvalidEnterpriseAuthority {
                         enterprise: enterprise.id(),
@@ -3848,6 +3916,470 @@ fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
             (true, Some(_)) | (false, None) => {
                 return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_legal_representations(state: &AppState) -> Result<(), StateValidationError> {
+    let mut payments = BTreeSet::new();
+    let mut information_ids = BTreeSet::new();
+    let mut report_ids = BTreeSet::new();
+    for representation in state.legal.legal_representations() {
+        let invalid = || StateValidationError::InvalidLegalRepresentation {
+            representation: representation.id(),
+        };
+        let arrest = state
+            .legal
+            .get_arrest(representation.arrest())
+            .ok_or_else(invalid)?;
+        let defendant = state
+            .world
+            .get_character(representation.defendant())
+            .ok_or_else(invalid)?;
+        let sponsor = state
+            .world
+            .get_organization(representation.sponsor())
+            .ok_or_else(invalid)?;
+        let counsel = state
+            .world
+            .get_character(representation.counsel())
+            .ok_or_else(invalid)?;
+        let firm = state
+            .world
+            .get_organization(representation.counsel_institution())
+            .ok_or_else(invalid)?;
+        let contact = state
+            .contacts
+            .get_contact(representation.contact())
+            .ok_or_else(invalid)?;
+        let payer = state
+            .finance
+            .get_account(representation.payer_account())
+            .ok_or_else(invalid)?;
+        let provider = state
+            .finance
+            .get_account(representation.provider_account())
+            .ok_or_else(invalid)?;
+        let payment = state
+            .finance
+            .get_transaction(representation.payment())
+            .ok_or_else(invalid)?;
+        let retained_information = state
+            .intelligence
+            .get_information(representation.information())
+            .ok_or_else(invalid)?;
+        let retained_report = state
+            .reports
+            .get_report(representation.report())
+            .ok_or_else(invalid)?;
+
+        let Some(outflow) = representation
+            .fee()
+            .cents()
+            .checked_neg()
+            .map(Money::from_cents)
+        else {
+            return Err(invalid());
+        };
+        let has_payer_posting = payment.postings().iter().any(|posting| {
+            posting.account == representation.payer_account() && posting.amount == outflow
+        });
+        let has_provider_posting = payment.postings().iter().any(|posting| {
+            posting.account == representation.provider_account()
+                && posting.amount == representation.fee()
+        });
+        let authority_is_valid = match (representation.authorization(), payment.budget_usage()) {
+            (None, None) => true,
+            (Some(authority), Some(usage)) => {
+                authority.scope == ResponsibilityScope::Function(ResponsibilityFunction::Legal)
+                    && usage.mandate() == authority.mandate
+                    && usage.manager() == authority.manager
+                    && usage.scope() == authority.scope
+                    && usage.funding_account() == representation.payer_account()
+                    && usage.amount() == representation.fee()
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        };
+        let expected_retained_entities = BTreeSet::from([
+            EntityRef::Character(representation.defendant()),
+            EntityRef::Character(representation.counsel()),
+            EntityRef::Organization(representation.counsel_institution()),
+            EntityRef::Investigation(arrest.investigation()),
+        ]);
+        let retained_report_is_valid = retained_report.recipient() == representation.sponsor()
+            && retained_report.kind() == ReportKind::Legal
+            && retained_report.title() == "Legal representation retained"
+            && retained_report.generated_at() == representation.retained_at()
+            && retained_report.entries().len() == 1
+            && retained_report.entries()[0].attention == AttentionClass::Notable
+            && retained_report.entries()[0].summary == retained_information.summary()
+            && retained_report.entries()[0].sources.is_empty()
+            && retained_report.entries()[0].decision.is_none()
+            && retained_report.entries()[0].entities == expected_retained_entities;
+
+        if arrest.character() != representation.defendant()
+            || sponsor.kind() != OrganizationKind::Criminal
+            || firm.kind() != OrganizationKind::LegalServices
+            || contact.sponsor() != representation.sponsor()
+            || contact.contact() != representation.counsel()
+            || contact.institution() != representation.counsel_institution()
+            || contact.kind() != crate::contacts::ContactKind::Legal
+            || counsel.capability(CapabilityKind::LegalKnowledge).is_none()
+            || representation.fee() <= Money::ZERO
+            || representation.retained_at() > state.now()
+            || representation.version() == 0
+            || payer.owner() != FinancialOwner::Organization(representation.sponsor())
+            || !matches!(
+                payer.kind(),
+                AccountKind::StreetCash
+                    | AccountKind::ConcealedCash
+                    | AccountKind::AccountedFunds
+                    | AccountKind::LegitimateOperating
+            )
+            || provider.owner()
+                != FinancialOwner::Organization(representation.counsel_institution())
+            || provider.kind() != AccountKind::LegitimateOperating
+            || payment.occurred_at() != representation.retained_at()
+            || payment.postings().len() != 2
+            || !has_payer_posting
+            || !has_provider_posting
+            || !authority_is_valid
+            || retained_information.holder()
+                != KnowledgeHolder::Organization(representation.sponsor())
+            || retained_information.source_kind() != InformationSourceKind::AfterAction
+            || retained_information.topic() != InformationTopic::LegalActivity
+            || retained_information.source_entity()
+                != Some(EntityRef::Character(representation.counsel()))
+            || retained_information.subject() != EntityRef::Character(representation.defendant())
+            || retained_information.observed_at() != representation.retained_at()
+            || retained_information.recorded_at() != representation.retained_at()
+            || retained_information.reliability() != Reliability::DirectAccess
+            || retained_information.specificity() != Specificity::Precise
+            || !retained_information.derived_from().is_empty()
+            || retained_information.summary().trim().is_empty()
+            || !retained_report_is_valid
+            || !payments.insert(representation.payment())
+            || !information_ids.insert(representation.information())
+            || !report_ids.insert(representation.report())
+        {
+            return Err(invalid());
+        }
+
+        match representation.status() {
+            LegalRepresentationStatus::Active => {
+                if representation.version() != 1
+                    || representation.ended_at().is_some()
+                    || representation.end_reason().is_some()
+                    || representation.ended_information().is_some()
+                    || representation.ended_report().is_some()
+                    || contact.status() != ContactStatus::Active
+                    || defendant.lifecycle() != Lifecycle::Active
+                    || sponsor.lifecycle() != Lifecycle::Active
+                    || counsel.lifecycle() != Lifecycle::Active
+                    || counsel.organization() != Some(representation.counsel_institution())
+                    || firm.lifecycle() != Lifecycle::Active
+                    || state
+                        .legal
+                        .active_representation_for_arrest(representation.arrest())
+                        .is_none_or(|active| active.id() != representation.id())
+                {
+                    return Err(invalid());
+                }
+            }
+            LegalRepresentationStatus::Ended => {
+                let ended_at = representation.ended_at().ok_or_else(invalid)?;
+                let ended_information_id =
+                    representation.ended_information().ok_or_else(invalid)?;
+                let ended_report_id = representation.ended_report().ok_or_else(invalid)?;
+                let ended_information = state
+                    .intelligence
+                    .get_information(ended_information_id)
+                    .ok_or_else(invalid)?;
+                let ended_report = state
+                    .reports
+                    .get_report(ended_report_id)
+                    .ok_or_else(invalid)?;
+                let expected_ended_entities = BTreeSet::from([
+                    EntityRef::Character(representation.defendant()),
+                    EntityRef::Character(representation.counsel()),
+                    EntityRef::Organization(representation.counsel_institution()),
+                ]);
+                if representation.version() != 2
+                    || ended_at < representation.retained_at()
+                    || ended_at > state.now()
+                    || representation.end_reason().is_none()
+                    || state
+                        .legal
+                        .active_representation_for_arrest(representation.arrest())
+                        .is_some_and(|active| active.id() == representation.id())
+                    || ended_information.holder()
+                        != KnowledgeHolder::Organization(representation.sponsor())
+                    || ended_information.source_kind() != InformationSourceKind::AfterAction
+                    || ended_information.topic() != InformationTopic::LegalActivity
+                    || ended_information.source_entity()
+                        != Some(EntityRef::Character(representation.counsel()))
+                    || ended_information.subject()
+                        != EntityRef::Character(representation.defendant())
+                    || ended_information.observed_at() != ended_at
+                    || ended_information.recorded_at() != ended_at
+                    || ended_information.reliability() != Reliability::DirectAccess
+                    || ended_information.specificity() != Specificity::Precise
+                    || !ended_information.derived_from().is_empty()
+                    || ended_information.summary().trim().is_empty()
+                    || ended_report.recipient() != representation.sponsor()
+                    || ended_report.kind() != ReportKind::Legal
+                    || ended_report.title() != "Legal representation ended"
+                    || ended_report.generated_at() != ended_at
+                    || ended_report.entries().len() != 1
+                    || ended_report.entries()[0].attention != AttentionClass::Notable
+                    || ended_report.entries()[0].summary != ended_information.summary()
+                    || !ended_report.entries()[0].sources.is_empty()
+                    || ended_report.entries()[0].decision.is_some()
+                    || ended_report.entries()[0].entities != expected_ended_entities
+                    || !information_ids.insert(ended_information_id)
+                    || !report_ids.insert(ended_report_id)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationError> {
+    let mut seen_referrals = BTreeSet::new();
+    let mut seen_information = BTreeSet::new();
+    let mut seen_reports = BTreeSet::new();
+    for case in state.legal.prosecution_cases() {
+        let invalid_case = || StateValidationError::InvalidProsecutionCase { case: case.id() };
+        let arrest = state
+            .legal
+            .get_arrest(case.arrest())
+            .ok_or_else(invalid_case)?;
+        let investigation = state
+            .legal
+            .get_investigation(case.source_investigation())
+            .ok_or_else(invalid_case)?;
+        let source_authority = state
+            .world
+            .get_organization(case.source_authority())
+            .ok_or_else(invalid_case)?;
+        let office = state
+            .world
+            .get_organization(case.prosecutor_office())
+            .ok_or_else(invalid_case)?;
+        let lead = state
+            .world
+            .get_character(case.lead_prosecutor())
+            .ok_or_else(invalid_case)?;
+        let defendant = state
+            .world
+            .get_character(case.defendant())
+            .ok_or_else(invalid_case)?;
+        let referral_version = u32::try_from(case.referrals().len()).map_err(|_| invalid_case())?;
+        let expected_version = match case.status() {
+            ProsecutionCaseStatus::Reviewing => referral_version,
+            ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed => {
+                referral_version.checked_add(1).ok_or_else(invalid_case)?
+            }
+        };
+        if case.opened_at() > state.now()
+            || case.version() != expected_version
+            || case.referrals().is_empty()
+            || !case.referrals().contains(&case.initial_referral())
+            || arrest.character() != case.defendant()
+            || arrest.investigation() != case.source_investigation()
+            || arrest.authority() != case.source_authority()
+            || investigation.owner() != case.source_authority()
+            || source_authority.kind() != OrganizationKind::LawEnforcement
+            || office.kind() != OrganizationKind::Prosecutor
+            || lead.capability(CapabilityKind::LegalKnowledge).is_none()
+            || case.evidence().is_empty()
+            || !arrest.evidence().is_subset(case.evidence())
+        {
+            return Err(invalid_case());
+        }
+
+        let expected_entities = BTreeSet::from([
+            EntityRef::Character(case.defendant()),
+            EntityRef::Organization(case.source_authority()),
+            EntityRef::Organization(case.prosecutor_office()),
+            EntityRef::Character(case.lead_prosecutor()),
+            EntityRef::Investigation(case.source_investigation()),
+        ]);
+
+        match case.status() {
+            ProsecutionCaseStatus::Reviewing => {
+                if case.resolved_at().is_some()
+                    || case.resolution_information().is_some()
+                    || case.resolution_report().is_some()
+                    || source_authority.lifecycle() != Lifecycle::Active
+                    || office.lifecycle() != Lifecycle::Active
+                    || lead.lifecycle() != Lifecycle::Active
+                    || lead.organization() != Some(case.prosecutor_office())
+                    || state
+                        .legal
+                        .open_prosecution_case_for(case.arrest(), case.prosecutor_office())
+                        .is_none_or(|open| open.id() != case.id())
+                {
+                    return Err(invalid_case());
+                }
+            }
+            ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed => {
+                let resolved_at = case.resolved_at().ok_or_else(invalid_case)?;
+                let information_id = case.resolution_information().ok_or_else(invalid_case)?;
+                let report_id = case.resolution_report().ok_or_else(invalid_case)?;
+                let information = state
+                    .intelligence
+                    .get_information(information_id)
+                    .ok_or_else(invalid_case)?;
+                let report = state
+                    .reports
+                    .get_report(report_id)
+                    .ok_or_else(invalid_case)?;
+                let (expected_title, expected_summary) =
+                    if case.status() == ProsecutionCaseStatus::Declined {
+                        (
+                            "Prosecution declined",
+                            format!(
+                                "{} declined prosecution of {} after review by {}.",
+                                office.name(),
+                                defendant.name(),
+                                lead.name()
+                            ),
+                        )
+                    } else {
+                        (
+                            "Prosecution review closed",
+                            format!(
+                                "{} closed its prosecution review of {} after review by {}.",
+                                office.name(),
+                                defendant.name(),
+                                lead.name()
+                            ),
+                        )
+                    };
+                if resolved_at < case.opened_at()
+                    || resolved_at > state.now()
+                    || state
+                        .legal
+                        .open_prosecution_case_for(case.arrest(), case.prosecutor_office())
+                        .is_some_and(|open| open.id() == case.id())
+                    || !seen_information.insert(information_id)
+                    || information.holder()
+                        != KnowledgeHolder::Organization(case.prosecutor_office())
+                    || information.source_kind() != InformationSourceKind::AfterAction
+                    || information.topic() != InformationTopic::LegalActivity
+                    || information.source_entity()
+                        != Some(EntityRef::Character(case.lead_prosecutor()))
+                    || information.subject() != EntityRef::Character(case.defendant())
+                    || information.observed_at() != resolved_at
+                    || information.recorded_at() != resolved_at
+                    || information.reliability() != Reliability::DirectAccess
+                    || information.specificity() != Specificity::Precise
+                    || !information.derived_from().is_empty()
+                    || information.summary() != expected_summary
+                    || !seen_reports.insert(report_id)
+                    || report.recipient() != case.prosecutor_office()
+                    || report.kind() != ReportKind::Legal
+                    || report.title() != expected_title
+                    || report.generated_at() != resolved_at
+                    || report.entries().len() != 1
+                    || report.entries()[0].attention != AttentionClass::Notable
+                    || report.entries()[0].summary != information.summary()
+                    || !report.entries()[0].sources.is_empty()
+                    || report.entries()[0].decision.is_some()
+                    || report.entries()[0].entities != expected_entities
+                {
+                    return Err(invalid_case());
+                }
+            }
+        }
+        let mut referred_evidence = BTreeSet::new();
+        for referral_id in case.referrals() {
+            let invalid_referral = || StateValidationError::InvalidProsecutionReferral {
+                referral: *referral_id,
+            };
+            let referral = state
+                .legal
+                .get_prosecution_referral(*referral_id)
+                .ok_or_else(invalid_referral)?;
+            let information = state
+                .intelligence
+                .get_information(referral.information())
+                .ok_or_else(invalid_referral)?;
+            let report = state
+                .reports
+                .get_report(referral.report())
+                .ok_or_else(invalid_referral)?;
+            let is_initial = referral.id() == case.initial_referral();
+            let expected_title = if is_initial {
+                "Prosecution case referral"
+            } else {
+                "Prosecution evidence supplement"
+            };
+            if !seen_referrals.insert(referral.id())
+                || referral.prosecution_case() != case.id()
+                || referral.source_investigation() != case.source_investigation()
+                || referral.source_authority() != case.source_authority()
+                || referral.prosecutor_office() != case.prosecutor_office()
+                || referral.evidence().is_empty()
+                || referral.referred_at() < case.opened_at()
+                || referral.referred_at() > state.now()
+                || case
+                    .resolved_at()
+                    .is_some_and(|resolved_at| referral.referred_at() > resolved_at)
+                || (is_initial && referral.referred_at() != case.opened_at())
+                || referral.evidence().iter().any(|evidence_id| {
+                    state
+                        .legal
+                        .get_evidence(*evidence_id)
+                        .is_none_or(|evidence| {
+                            evidence.investigation() != case.source_investigation()
+                                || evidence.custodian() != case.source_authority()
+                                || evidence.discovered_at() > referral.referred_at()
+                        })
+                        || !referred_evidence.insert(*evidence_id)
+                })
+                || !seen_information.insert(referral.information())
+                || information.holder() != KnowledgeHolder::Organization(case.prosecutor_office())
+                || information.source_kind() != InformationSourceKind::AfterAction
+                || information.topic() != InformationTopic::LegalActivity
+                || information.source_entity()
+                    != Some(EntityRef::Organization(case.source_authority()))
+                || information.subject() != EntityRef::Character(case.defendant())
+                || information.observed_at() != referral.referred_at()
+                || information.recorded_at() != referral.referred_at()
+                || information.reliability() != Reliability::DirectAccess
+                || information.specificity() != Specificity::Precise
+                || !information.derived_from().is_empty()
+                || information.summary().trim().is_empty()
+                || !seen_reports.insert(referral.report())
+                || report.recipient() != case.prosecutor_office()
+                || report.kind() != ReportKind::Legal
+                || report.title() != expected_title
+                || report.generated_at() != referral.referred_at()
+                || report.entries().len() != 1
+                || report.entries()[0].attention != AttentionClass::Notable
+                || report.entries()[0].summary != information.summary()
+                || !report.entries()[0].sources.is_empty()
+                || report.entries()[0].decision.is_some()
+                || report.entries()[0].entities != expected_entities
+            {
+                return Err(invalid_referral());
+            }
+        }
+        if referred_evidence != *case.evidence() {
+            return Err(invalid_case());
+        }
+    }
+    for referral in state.legal.prosecution_referrals() {
+        if !seen_referrals.contains(&referral.id()) {
+            return Err(StateValidationError::InvalidProsecutionReferral {
+                referral: referral.id(),
+            });
         }
     }
     Ok(())
@@ -3999,6 +4531,98 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
         }
     }
 
+    for arrest in state.legal.arrests() {
+        let character = state.world.get_character(arrest.character()).ok_or(
+            StateValidationError::InvalidArrest {
+                arrest: arrest.id(),
+            },
+        )?;
+        let authority = state.world.get_organization(arrest.authority()).ok_or(
+            StateValidationError::InvalidArrest {
+                arrest: arrest.id(),
+            },
+        )?;
+        let investigation = state
+            .legal
+            .get_investigation(arrest.investigation())
+            .ok_or(StateValidationError::InvalidArrest {
+                arrest: arrest.id(),
+            })?;
+        if authority.kind() != OrganizationKind::LawEnforcement
+            || investigation.owner() != arrest.authority()
+            || !investigation
+                .subjects()
+                .contains(&EntityRef::Character(arrest.character()))
+            || arrest.evidence().is_empty()
+            || arrest.arrested_at() > state.now()
+            || arrest.version() == 0
+            || arrest.evidence().iter().any(|evidence_id| {
+                state
+                    .legal
+                    .get_evidence(*evidence_id)
+                    .is_none_or(|evidence| {
+                        evidence.investigation() != arrest.investigation()
+                            || evidence.custodian() != arrest.authority()
+                            || evidence.subject() != EntityRef::Character(arrest.character())
+                            || evidence.discovered_at() > arrest.arrested_at()
+                    })
+            })
+        {
+            return Err(StateValidationError::InvalidArrest {
+                arrest: arrest.id(),
+            });
+        }
+        match arrest.status() {
+            ArrestStatus::Detained => {
+                let active_operation = state.operations.operations().any(|operation| {
+                    matches!(
+                        operation.status(),
+                        OperationStatus::Authorized
+                            | OperationStatus::InProgress
+                            | OperationStatus::AwaitingDecision
+                    ) && (operation.leader() == arrest.character()
+                        || operation
+                            .roles()
+                            .values()
+                            .any(|participant| *participant == arrest.character()))
+                });
+                if arrest.released_at().is_some()
+                    || arrest.version() != 1
+                    || investigation.status() != InvestigationStatus::Active
+                    || character.lifecycle() != Lifecycle::Active
+                    || authority.lifecycle() != Lifecycle::Active
+                    || state
+                        .legal
+                        .active_arrest_for_character(arrest.character())
+                        .is_none_or(|active| active.id() != arrest.id())
+                    || state
+                        .legal
+                        .work_for_investigator(arrest.character())
+                        .any(|work| work.status() == InvestigationWorkStatus::Scheduled)
+                    || active_operation
+                {
+                    return Err(StateValidationError::InvalidArrest {
+                        arrest: arrest.id(),
+                    });
+                }
+            }
+            ArrestStatus::Released => {
+                if arrest.version() != 2
+                    || arrest.released_at().is_none_or(|released_at| {
+                        released_at < arrest.arrested_at() || released_at > state.now()
+                    })
+                {
+                    return Err(StateValidationError::InvalidArrest {
+                        arrest: arrest.id(),
+                    });
+                }
+            }
+        }
+    }
+
+    validate_legal_representations(state)?;
+    validate_prosecution_cases(state)?;
+
     for investigation in state.legal.investigations() {
         let owner = state.world.get_organization(investigation.owner()).ok_or(
             StateValidationError::MissingEntity {
@@ -4023,8 +4647,7 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
         match investigation.status() {
             InvestigationStatus::Active
             | InvestigationStatus::Suspended
-            | InvestigationStatus::Closed
-            | InvestigationStatus::Referred => {}
+            | InvestigationStatus::Closed => {}
         }
         if investigation.version() == 0
             || investigation

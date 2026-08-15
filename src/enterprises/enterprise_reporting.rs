@@ -382,6 +382,7 @@ mod tests {
                     scope,
                 },
                 location: EnterpriseLocation::Neighborhood(neighborhood),
+                supporting_businesses: BTreeSet::new(),
                 cash_account: cash,
                 settlement_account: settlement,
             },

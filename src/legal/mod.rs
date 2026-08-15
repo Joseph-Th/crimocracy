@@ -1,21 +1,28 @@
 //! Legal institutions, patrol deployment, investigations, evidence graphs, witnesses, and informants.
 
+pub mod arrest_system;
 pub mod case_graph;
 pub mod informant_system;
 pub mod investigation_system;
 pub mod investigation_work_execution;
 pub mod jurisdiction_system;
+pub mod legal_representation_system;
 pub mod patrol_system;
 pub mod police_response_system;
+pub mod prosecution_system;
 pub mod witness_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CaseWitnessId, CharacterId, EvidenceId, InformantDisclosureId, InformantId, InformationId,
-    InvestigationId, InvestigationWorkId, NeighborhoodId, OperationId, OrganizationId,
-    PatrolDeploymentId, PoliceResponseId, WitnessStatementId,
+    ArrestId, CaseWitnessId, CharacterId, ContactId, EvidenceId, FinancialAccountId,
+    InformantDisclosureId, InformantId, InformationId, InvestigationId, InvestigationWorkId,
+    LedgerTransactionId, LegalRepresentationId, NeighborhoodId, OperationId, OrganizationId,
+    PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId, ReportId,
+    WitnessStatementId,
 };
 use crate::core::time::SimTime;
+use crate::delegation::MandateAuthority;
+use crate::finance::Money;
 use crate::world::Rating;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,13 +33,394 @@ pub enum InvestigationStatus {
     Active,
     Suspended,
     Closed,
-    Referred,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrestStatus {
+    Detained,
+    Released,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArrestRecord {
+    id: ArrestId,
+    character: CharacterId,
+    authority: OrganizationId,
+    investigation: InvestigationId,
+    evidence: BTreeSet<EvidenceId>,
+    arrested_at: SimTime,
+    released_at: Option<SimTime>,
+    status: ArrestStatus,
+    version: u32,
+}
+
+impl ArrestRecord {
+    pub fn id(&self) -> ArrestId {
+        self.id
+    }
+
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn authority(&self) -> OrganizationId {
+        self.authority
+    }
+
+    pub fn investigation(&self) -> InvestigationId {
+        self.investigation
+    }
+
+    pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
+        &self.evidence
+    }
+
+    pub fn arrested_at(&self) -> SimTime {
+        self.arrested_at
+    }
+
+    pub fn released_at(&self) -> Option<SimTime> {
+        self.released_at
+    }
+
+    pub fn status(&self) -> ArrestStatus {
+        self.status
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ArrestDraft {
+    pub character: CharacterId,
+    pub investigation: InvestigationId,
+    pub evidence: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegalRepresentationStatus {
+    Active,
+    Ended,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegalRepresentationEndReason {
+    MatterConcluded,
+    Replaced,
+    SponsorWithdrawn,
+    CounselWithdrawn,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LegalRepresentationRecord {
+    id: LegalRepresentationId,
+    arrest: ArrestId,
+    defendant: CharacterId,
+    sponsor: OrganizationId,
+    counsel: CharacterId,
+    counsel_institution: OrganizationId,
+    contact: ContactId,
+    fee: Money,
+    payer_account: FinancialAccountId,
+    provider_account: FinancialAccountId,
+    payment: LedgerTransactionId,
+    authorization: Option<MandateAuthority>,
+    retained_at: SimTime,
+    ended_at: Option<SimTime>,
+    end_reason: Option<LegalRepresentationEndReason>,
+    status: LegalRepresentationStatus,
+    information: InformationId,
+    report: ReportId,
+    ended_information: Option<InformationId>,
+    ended_report: Option<ReportId>,
+    version: u32,
+}
+
+impl LegalRepresentationRecord {
+    pub fn id(&self) -> LegalRepresentationId {
+        self.id
+    }
+
+    pub fn arrest(&self) -> ArrestId {
+        self.arrest
+    }
+
+    pub fn defendant(&self) -> CharacterId {
+        self.defendant
+    }
+
+    pub fn sponsor(&self) -> OrganizationId {
+        self.sponsor
+    }
+
+    pub fn counsel(&self) -> CharacterId {
+        self.counsel
+    }
+
+    pub fn counsel_institution(&self) -> OrganizationId {
+        self.counsel_institution
+    }
+
+    pub fn contact(&self) -> ContactId {
+        self.contact
+    }
+
+    pub fn fee(&self) -> Money {
+        self.fee
+    }
+
+    pub fn payer_account(&self) -> FinancialAccountId {
+        self.payer_account
+    }
+
+    pub fn provider_account(&self) -> FinancialAccountId {
+        self.provider_account
+    }
+
+    pub fn payment(&self) -> LedgerTransactionId {
+        self.payment
+    }
+
+    pub fn authorization(&self) -> Option<MandateAuthority> {
+        self.authorization
+    }
+
+    pub fn retained_at(&self) -> SimTime {
+        self.retained_at
+    }
+
+    pub fn ended_at(&self) -> Option<SimTime> {
+        self.ended_at
+    }
+
+    pub fn end_reason(&self) -> Option<LegalRepresentationEndReason> {
+        self.end_reason
+    }
+
+    pub fn status(&self) -> LegalRepresentationStatus {
+        self.status
+    }
+
+    pub fn information(&self) -> InformationId {
+        self.information
+    }
+
+    pub fn report(&self) -> ReportId {
+        self.report
+    }
+
+    pub fn ended_information(&self) -> Option<InformationId> {
+        self.ended_information
+    }
+
+    pub fn ended_report(&self) -> Option<ReportId> {
+        self.ended_report
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LegalRepresentationDraft {
+    pub arrest: ArrestId,
+    pub sponsor: OrganizationId,
+    pub contact: ContactId,
+    pub fee: Money,
+    pub payer_account: FinancialAccountId,
+    pub provider_account: FinancialAccountId,
+    pub authorization: Option<MandateAuthority>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct LegalRepresentationIndexes {
+    by_arrest: BTreeMap<ArrestId, BTreeSet<LegalRepresentationId>>,
+    by_defendant: BTreeMap<CharacterId, BTreeSet<LegalRepresentationId>>,
+    by_sponsor: BTreeMap<OrganizationId, BTreeSet<LegalRepresentationId>>,
+    by_counsel: BTreeMap<CharacterId, BTreeSet<LegalRepresentationId>>,
+    by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
+    active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
+    active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProsecutionCaseStatus {
+    Reviewing,
+    Declined,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProsecutionCaseResolution {
+    Declined,
+    Closed,
+}
+
+impl ProsecutionCaseResolution {
+    fn status(self) -> ProsecutionCaseStatus {
+        match self {
+            Self::Declined => ProsecutionCaseStatus::Declined,
+            Self::Closed => ProsecutionCaseStatus::Closed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProsecutionCaseRecord {
+    id: ProsecutionCaseId,
+    arrest: ArrestId,
+    defendant: CharacterId,
+    source_investigation: InvestigationId,
+    source_authority: OrganizationId,
+    prosecutor_office: OrganizationId,
+    lead_prosecutor: CharacterId,
+    evidence: BTreeSet<EvidenceId>,
+    initial_referral: ProsecutionReferralId,
+    referrals: BTreeSet<ProsecutionReferralId>,
+    opened_at: SimTime,
+    resolved_at: Option<SimTime>,
+    status: ProsecutionCaseStatus,
+    resolution_information: Option<InformationId>,
+    resolution_report: Option<ReportId>,
+    version: u32,
+}
+
+impl ProsecutionCaseRecord {
+    pub fn id(&self) -> ProsecutionCaseId {
+        self.id
+    }
+    pub fn arrest(&self) -> ArrestId {
+        self.arrest
+    }
+    pub fn defendant(&self) -> CharacterId {
+        self.defendant
+    }
+    pub fn source_investigation(&self) -> InvestigationId {
+        self.source_investigation
+    }
+    pub fn source_authority(&self) -> OrganizationId {
+        self.source_authority
+    }
+    pub fn prosecutor_office(&self) -> OrganizationId {
+        self.prosecutor_office
+    }
+    pub fn lead_prosecutor(&self) -> CharacterId {
+        self.lead_prosecutor
+    }
+    pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
+        &self.evidence
+    }
+    pub fn initial_referral(&self) -> ProsecutionReferralId {
+        self.initial_referral
+    }
+    pub fn referrals(&self) -> &BTreeSet<ProsecutionReferralId> {
+        &self.referrals
+    }
+    pub fn opened_at(&self) -> SimTime {
+        self.opened_at
+    }
+    pub fn resolved_at(&self) -> Option<SimTime> {
+        self.resolved_at
+    }
+    pub fn status(&self) -> ProsecutionCaseStatus {
+        self.status
+    }
+    pub fn resolution_information(&self) -> Option<InformationId> {
+        self.resolution_information
+    }
+    pub fn resolution_report(&self) -> Option<ReportId> {
+        self.resolution_report
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProsecutionReferralRecord {
+    id: ProsecutionReferralId,
+    prosecution_case: ProsecutionCaseId,
+    source_investigation: InvestigationId,
+    source_authority: OrganizationId,
+    prosecutor_office: OrganizationId,
+    evidence: BTreeSet<EvidenceId>,
+    referred_at: SimTime,
+    information: InformationId,
+    report: ReportId,
+}
+
+impl ProsecutionReferralRecord {
+    pub fn id(&self) -> ProsecutionReferralId {
+        self.id
+    }
+    pub fn prosecution_case(&self) -> ProsecutionCaseId {
+        self.prosecution_case
+    }
+    pub fn source_investigation(&self) -> InvestigationId {
+        self.source_investigation
+    }
+    pub fn source_authority(&self) -> OrganizationId {
+        self.source_authority
+    }
+    pub fn prosecutor_office(&self) -> OrganizationId {
+        self.prosecutor_office
+    }
+    pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
+        &self.evidence
+    }
+    pub fn referred_at(&self) -> SimTime {
+        self.referred_at
+    }
+    pub fn information(&self) -> InformationId {
+        self.information
+    }
+    pub fn report(&self) -> ReportId {
+        self.report
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProsecutionCaseDraft {
+    pub arrest: ArrestId,
+    pub prosecutor_office: OrganizationId,
+    pub lead_prosecutor: CharacterId,
+    pub evidence: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProsecutionReferralDraft {
+    pub prosecution_case: ProsecutionCaseId,
+    pub evidence: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ProsecutionIndexes {
+    cases_by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
+    cases_by_defendant: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
+    cases_by_source_investigation: BTreeMap<InvestigationId, BTreeSet<ProsecutionCaseId>>,
+    cases_by_office: BTreeMap<OrganizationId, BTreeSet<ProsecutionCaseId>>,
+    cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
+    cases_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionCaseId>>,
+    open_by_arrest_office: BTreeMap<(ArrestId, OrganizationId), ProsecutionCaseId>,
+    referrals_by_case: BTreeMap<ProsecutionCaseId, BTreeSet<ProsecutionReferralId>>,
+    referrals_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionReferralId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InvestigatorRole {
     Lead,
     Investigator,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ArrestIndexes {
+    by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
+    by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
+    by_authority: BTreeMap<OrganizationId, BTreeSet<ArrestId>>,
+    active_by_character: BTreeMap<CharacterId, ArrestId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -968,6 +1356,9 @@ struct LegalIndexes {
     jurisdictions: JurisdictionIndexes,
     patrols: PatrolIndexes,
     police_responses: PoliceResponseIndexes,
+    arrests: ArrestIndexes,
+    representations: LegalRepresentationIndexes,
+    prosecutions: ProsecutionIndexes,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -982,6 +1373,10 @@ pub struct LegalState {
     jurisdictions: BTreeMap<OrganizationId, JurisdictionRecord>,
     patrol_deployments: BTreeMap<PatrolDeploymentId, PatrolDeploymentRecord>,
     police_responses: BTreeMap<PoliceResponseId, PoliceResponseRecord>,
+    arrests: BTreeMap<ArrestId, ArrestRecord>,
+    legal_representations: BTreeMap<LegalRepresentationId, LegalRepresentationRecord>,
+    prosecution_cases: BTreeMap<ProsecutionCaseId, ProsecutionCaseRecord>,
+    prosecution_referrals: BTreeMap<ProsecutionReferralId, ProsecutionReferralRecord>,
     indexes: LegalIndexes,
 }
 
@@ -1104,6 +1499,208 @@ impl LegalState {
     }
     pub fn get_police_response(&self, id: PoliceResponseId) -> Option<&PoliceResponseRecord> {
         self.police_responses.get(&id)
+    }
+    pub fn get_arrest(&self, id: ArrestId) -> Option<&ArrestRecord> {
+        self.arrests.get(&id)
+    }
+    pub fn active_arrest_for_character(&self, character: CharacterId) -> Option<&ArrestRecord> {
+        self.indexes
+            .arrests
+            .active_by_character
+            .get(&character)
+            .and_then(|id| self.arrests.get(id))
+    }
+    pub fn arrests_for_character(
+        &self,
+        character: CharacterId,
+    ) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .by_character
+            .get(&character)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.arrests.get(id))
+    }
+    pub fn arrests_for_investigation(
+        &self,
+        investigation: InvestigationId,
+    ) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .by_investigation
+            .get(&investigation)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.arrests.get(id))
+    }
+    pub fn arrests_for_authority(
+        &self,
+        authority: OrganizationId,
+    ) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .by_authority
+            .get(&authority)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.arrests.get(id))
+    }
+    pub fn get_legal_representation(
+        &self,
+        id: LegalRepresentationId,
+    ) -> Option<&LegalRepresentationRecord> {
+        self.legal_representations.get(&id)
+    }
+    pub fn active_representation_for_arrest(
+        &self,
+        arrest: ArrestId,
+    ) -> Option<&LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .active_by_arrest
+            .get(&arrest)
+            .and_then(|id| self.legal_representations.get(id))
+    }
+    pub fn representations_for_arrest(
+        &self,
+        arrest: ArrestId,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .by_arrest
+            .get(&arrest)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.legal_representations.get(id))
+    }
+    pub fn representations_for_defendant(
+        &self,
+        defendant: CharacterId,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .by_defendant
+            .get(&defendant)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.legal_representations.get(id))
+    }
+    pub fn representations_for_sponsor(
+        &self,
+        sponsor: OrganizationId,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .by_sponsor
+            .get(&sponsor)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.legal_representations.get(id))
+    }
+    pub(crate) fn active_representations_for_contact(
+        &self,
+        contact: ContactId,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .active_by_contact
+            .get(&contact)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.legal_representations.get(id))
+    }
+    pub fn get_prosecution_case(&self, id: ProsecutionCaseId) -> Option<&ProsecutionCaseRecord> {
+        self.prosecution_cases.get(&id)
+    }
+    pub fn get_prosecution_referral(
+        &self,
+        id: ProsecutionReferralId,
+    ) -> Option<&ProsecutionReferralRecord> {
+        self.prosecution_referrals.get(&id)
+    }
+    pub fn open_prosecution_case_for(
+        &self,
+        arrest: ArrestId,
+        prosecutor_office: OrganizationId,
+    ) -> Option<&ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .open_by_arrest_office
+            .get(&(arrest, prosecutor_office))
+            .and_then(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_cases_for_arrest(
+        &self,
+        arrest: ArrestId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .cases_by_arrest
+            .get(&arrest)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_cases_for_defendant(
+        &self,
+        defendant: CharacterId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .cases_by_defendant
+            .get(&defendant)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_cases_for_office(
+        &self,
+        office: OrganizationId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .cases_by_office
+            .get(&office)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_cases_for_lead(
+        &self,
+        lead: CharacterId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .cases_by_lead
+            .get(&lead)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_cases_with_evidence(
+        &self,
+        evidence: EvidenceId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .cases_by_evidence
+            .get(&evidence)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_cases.get(id))
+    }
+    pub fn prosecution_referrals_for_case(
+        &self,
+        case: ProsecutionCaseId,
+    ) -> impl Iterator<Item = &ProsecutionReferralRecord> {
+        self.indexes
+            .prosecutions
+            .referrals_by_case
+            .get(&case)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.prosecution_referrals.get(id))
     }
     pub fn police_response_for_operation(
         &self,
@@ -1416,6 +2013,18 @@ impl LegalState {
     }
     pub(crate) fn police_responses(&self) -> impl Iterator<Item = &PoliceResponseRecord> {
         self.police_responses.values()
+    }
+    pub(crate) fn arrests(&self) -> impl Iterator<Item = &ArrestRecord> {
+        self.arrests.values()
+    }
+    pub(crate) fn legal_representations(&self) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.legal_representations.values()
+    }
+    pub(crate) fn prosecution_cases(&self) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.prosecution_cases.values()
+    }
+    pub(crate) fn prosecution_referrals(&self) -> impl Iterator<Item = &ProsecutionReferralRecord> {
+        self.prosecution_referrals.values()
     }
     pub(crate) fn insert_investigation(&mut self, record: InvestigationRecord) {
         if record.status() == InvestigationStatus::Active && record.lead_investigator().is_none() {
@@ -2162,6 +2771,629 @@ impl LegalState {
             .checked_add(1)
             .expect("police response version counter exhausted");
     }
+    pub(crate) fn insert_arrest(&mut self, record: ArrestRecord) {
+        let id = record.id();
+        debug_assert_eq!(
+            record.status(),
+            ArrestStatus::Detained,
+            "Lifecycle Validity: new arrest records must begin in detention"
+        );
+        self.indexes
+            .arrests
+            .by_character
+            .entry(record.character())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .arrests
+            .by_investigation
+            .entry(record.investigation())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .arrests
+            .by_authority
+            .entry(record.authority())
+            .or_default()
+            .insert(id);
+        let previous_active = self
+            .indexes
+            .arrests
+            .active_by_character
+            .insert(record.character(), id);
+        debug_assert!(
+            previous_active.is_none(),
+            "Ownership Exclusivity: character has multiple active detentions"
+        );
+        let previous = self.arrests.insert(id, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate arrest ID inserted"
+        );
+    }
+    pub(crate) fn release_arrest(&mut self, id: ArrestId, released_at: SimTime) {
+        let character = self
+            .arrests
+            .get(&id)
+            .expect("validated arrest disappeared before release commit")
+            .character();
+        let removed = self.indexes.arrests.active_by_character.remove(&character);
+        debug_assert_eq!(
+            removed,
+            Some(id),
+            "Derived Data Consistency: active detention index changed before release"
+        );
+        let record = self
+            .arrests
+            .get_mut(&id)
+            .expect("validated arrest disappeared before release commit");
+        record.status = ArrestStatus::Released;
+        record.released_at = Some(released_at);
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("arrest version counter exhausted");
+    }
+    pub(crate) fn insert_legal_representation(&mut self, record: LegalRepresentationRecord) {
+        let id = record.id();
+        debug_assert_eq!(
+            record.status(),
+            LegalRepresentationStatus::Active,
+            "Lifecycle Validity: new legal representation must begin active"
+        );
+        self.indexes
+            .representations
+            .by_arrest
+            .entry(record.arrest())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .representations
+            .by_defendant
+            .entry(record.defendant())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .representations
+            .by_sponsor
+            .entry(record.sponsor())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .representations
+            .by_counsel
+            .entry(record.counsel())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .representations
+            .by_contact
+            .entry(record.contact())
+            .or_default()
+            .insert(id);
+        let previous = self
+            .indexes
+            .representations
+            .active_by_arrest
+            .insert(record.arrest(), id);
+        debug_assert!(
+            previous.is_none(),
+            "Ownership Exclusivity: arrest has multiple active legal representations"
+        );
+        self.indexes
+            .representations
+            .active_by_contact
+            .entry(record.contact())
+            .or_default()
+            .insert(id);
+        let previous = self.legal_representations.insert(id, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate legal representation ID inserted"
+        );
+    }
+    pub(crate) fn end_legal_representation(
+        &mut self,
+        id: LegalRepresentationId,
+        ended_at: SimTime,
+        reason: LegalRepresentationEndReason,
+        information: InformationId,
+        report: ReportId,
+    ) {
+        let (arrest, contact) = {
+            let record = self
+                .legal_representations
+                .get(&id)
+                .expect("validated legal representation disappeared before end commit");
+            (record.arrest(), record.contact())
+        };
+        let removed = self
+            .indexes
+            .representations
+            .active_by_arrest
+            .remove(&arrest);
+        debug_assert_eq!(removed, Some(id));
+        if let Some(ids) = self
+            .indexes
+            .representations
+            .active_by_contact
+            .get_mut(&contact)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.indexes
+                    .representations
+                    .active_by_contact
+                    .remove(&contact);
+            }
+        }
+        let record = self
+            .legal_representations
+            .get_mut(&id)
+            .expect("validated legal representation disappeared before end commit");
+        record.status = LegalRepresentationStatus::Ended;
+        record.ended_at = Some(ended_at);
+        record.end_reason = Some(reason);
+        record.ended_information = Some(information);
+        record.ended_report = Some(report);
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("legal representation version counter exhausted");
+    }
+    pub(crate) fn insert_prosecution_case(
+        &mut self,
+        case: ProsecutionCaseRecord,
+        referral: ProsecutionReferralRecord,
+    ) {
+        let case_id = case.id();
+        let referral_id = referral.id();
+        debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
+        debug_assert_eq!(referral.prosecution_case(), case_id);
+        debug_assert_eq!(case.initial_referral(), referral_id);
+        debug_assert_eq!(case.referrals(), &BTreeSet::from([referral_id]));
+        debug_assert_eq!(case.evidence(), referral.evidence());
+        self.indexes
+            .prosecutions
+            .cases_by_arrest
+            .entry(case.arrest())
+            .or_default()
+            .insert(case_id);
+        self.indexes
+            .prosecutions
+            .cases_by_defendant
+            .entry(case.defendant())
+            .or_default()
+            .insert(case_id);
+        self.indexes
+            .prosecutions
+            .cases_by_source_investigation
+            .entry(case.source_investigation())
+            .or_default()
+            .insert(case_id);
+        self.indexes
+            .prosecutions
+            .cases_by_office
+            .entry(case.prosecutor_office())
+            .or_default()
+            .insert(case_id);
+        self.indexes
+            .prosecutions
+            .cases_by_lead
+            .entry(case.lead_prosecutor())
+            .or_default()
+            .insert(case_id);
+        for evidence in case.evidence() {
+            self.indexes
+                .prosecutions
+                .cases_by_evidence
+                .entry(*evidence)
+                .or_default()
+                .insert(case_id);
+            self.indexes
+                .prosecutions
+                .referrals_by_evidence
+                .entry(*evidence)
+                .or_default()
+                .insert(referral_id);
+        }
+        let previous_open = self
+            .indexes
+            .prosecutions
+            .open_by_arrest_office
+            .insert((case.arrest(), case.prosecutor_office()), case_id);
+        debug_assert!(previous_open.is_none());
+        self.indexes
+            .prosecutions
+            .referrals_by_case
+            .entry(case_id)
+            .or_default()
+            .insert(referral_id);
+        let previous_case = self.prosecution_cases.insert(case_id, case);
+        let previous_referral = self.prosecution_referrals.insert(referral_id, referral);
+        debug_assert!(previous_case.is_none());
+        debug_assert!(previous_referral.is_none());
+    }
+    pub(crate) fn add_prosecution_referral(&mut self, referral: ProsecutionReferralRecord) {
+        let referral_id = referral.id();
+        let case_id = referral.prosecution_case();
+        let case = self
+            .prosecution_cases
+            .get_mut(&case_id)
+            .expect("validated prosecution case disappeared before referral commit");
+        for evidence in referral.evidence() {
+            let inserted = case.evidence.insert(*evidence);
+            debug_assert!(inserted, "supplemental referral must add new evidence");
+            self.indexes
+                .prosecutions
+                .cases_by_evidence
+                .entry(*evidence)
+                .or_default()
+                .insert(case_id);
+            self.indexes
+                .prosecutions
+                .referrals_by_evidence
+                .entry(*evidence)
+                .or_default()
+                .insert(referral_id);
+        }
+        case.referrals.insert(referral_id);
+        case.version = case
+            .version
+            .checked_add(1)
+            .expect("prosecution case version counter exhausted");
+        self.indexes
+            .prosecutions
+            .referrals_by_case
+            .entry(case_id)
+            .or_default()
+            .insert(referral_id);
+        let previous = self.prosecution_referrals.insert(referral_id, referral);
+        debug_assert!(previous.is_none());
+    }
+    pub(crate) fn resolve_prosecution_case(
+        &mut self,
+        id: ProsecutionCaseId,
+        resolution: ProsecutionCaseResolution,
+        resolved_at: SimTime,
+        information: InformationId,
+        report: ReportId,
+    ) {
+        let (arrest, office) = {
+            let case = self
+                .prosecution_cases
+                .get(&id)
+                .expect("validated prosecution case disappeared before resolution commit");
+            debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
+            (case.arrest(), case.prosecutor_office())
+        };
+        let removed = self
+            .indexes
+            .prosecutions
+            .open_by_arrest_office
+            .remove(&(arrest, office));
+        debug_assert_eq!(removed, Some(id));
+        let case = self
+            .prosecution_cases
+            .get_mut(&id)
+            .expect("validated prosecution case disappeared before resolution commit");
+        case.status = resolution.status();
+        case.resolved_at = Some(resolved_at);
+        case.resolution_information = Some(information);
+        case.resolution_report = Some(report);
+        case.version = case
+            .version
+            .checked_add(1)
+            .expect("prosecution case version counter exhausted");
+    }
+    fn has_consistent_prosecution_indexes(&self) -> bool {
+        for case in self.prosecution_cases.values() {
+            let id = case.id();
+            if !self
+                .indexes
+                .prosecutions
+                .cases_by_arrest
+                .get(&case.arrest())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .prosecutions
+                    .cases_by_defendant
+                    .get(&case.defendant())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .prosecutions
+                    .cases_by_source_investigation
+                    .get(&case.source_investigation())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .prosecutions
+                    .cases_by_office
+                    .get(&case.prosecutor_office())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .prosecutions
+                    .cases_by_lead
+                    .get(&case.lead_prosecutor())
+                    .is_some_and(|ids| ids.contains(&id))
+                || case.evidence().iter().any(|evidence| {
+                    !self
+                        .indexes
+                        .prosecutions
+                        .cases_by_evidence
+                        .get(evidence)
+                        .is_some_and(|ids| ids.contains(&id))
+                })
+                || case.referrals().iter().any(|referral| {
+                    !self
+                        .indexes
+                        .prosecutions
+                        .referrals_by_case
+                        .get(&id)
+                        .is_some_and(|ids| ids.contains(referral))
+                })
+            {
+                return false;
+            }
+            let open = self
+                .indexes
+                .prosecutions
+                .open_by_arrest_office
+                .get(&(case.arrest(), case.prosecutor_office()));
+            match case.status() {
+                ProsecutionCaseStatus::Reviewing if open != Some(&id) => return false,
+                ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed
+                    if open == Some(&id) =>
+                {
+                    return false
+                }
+                ProsecutionCaseStatus::Reviewing
+                | ProsecutionCaseStatus::Declined
+                | ProsecutionCaseStatus::Closed => {}
+            }
+        }
+        for referral in self.prosecution_referrals.values() {
+            let case = match self.prosecution_cases.get(&referral.prosecution_case()) {
+                Some(case) => case,
+                None => return false,
+            };
+            if !case.referrals().contains(&referral.id())
+                || !referral.evidence().is_subset(case.evidence())
+                || !self
+                    .indexes
+                    .prosecutions
+                    .referrals_by_case
+                    .get(&case.id())
+                    .is_some_and(|ids| ids.contains(&referral.id()))
+                || referral.evidence().iter().any(|evidence| {
+                    !self
+                        .indexes
+                        .prosecutions
+                        .referrals_by_evidence
+                        .get(evidence)
+                        .is_some_and(|ids| ids.contains(&referral.id()))
+                })
+            {
+                return false;
+            }
+        }
+        for (key, id) in &self.indexes.prosecutions.open_by_arrest_office {
+            if !self.prosecution_cases.get(id).is_some_and(|case| {
+                (case.arrest(), case.prosecutor_office()) == *key
+                    && case.status() == ProsecutionCaseStatus::Reviewing
+            }) {
+                return false;
+            }
+        }
+        true
+    }
+    fn has_consistent_legal_representation_indexes(&self) -> bool {
+        for record in self.legal_representations.values() {
+            let id = record.id();
+            if !self
+                .indexes
+                .representations
+                .by_arrest
+                .get(&record.arrest())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .representations
+                    .by_defendant
+                    .get(&record.defendant())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .representations
+                    .by_sponsor
+                    .get(&record.sponsor())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .representations
+                    .by_counsel
+                    .get(&record.counsel())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .representations
+                    .by_contact
+                    .get(&record.contact())
+                    .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
+            let arrest_active = self
+                .indexes
+                .representations
+                .active_by_arrest
+                .get(&record.arrest());
+            let contact_active = self
+                .indexes
+                .representations
+                .active_by_contact
+                .get(&record.contact())
+                .is_some_and(|ids| ids.contains(&id));
+            match record.status() {
+                LegalRepresentationStatus::Active
+                    if arrest_active != Some(&id) || !contact_active =>
+                {
+                    return false
+                }
+                LegalRepresentationStatus::Ended
+                    if arrest_active == Some(&id) || contact_active =>
+                {
+                    return false
+                }
+                LegalRepresentationStatus::Active | LegalRepresentationStatus::Ended => {}
+            }
+        }
+        for (arrest, id) in &self.indexes.representations.active_by_arrest {
+            if !self.legal_representations.get(id).is_some_and(|record| {
+                record.arrest() == *arrest && record.status() == LegalRepresentationStatus::Active
+            }) {
+                return false;
+            }
+        }
+        for (contact, ids) in &self.indexes.representations.active_by_contact {
+            if ids.iter().any(|id| {
+                !self.legal_representations.get(id).is_some_and(|record| {
+                    record.contact() == *contact
+                        && record.status() == LegalRepresentationStatus::Active
+                })
+            }) {
+                return false;
+            }
+        }
+        for (arrest, ids) in &self.indexes.representations.by_arrest {
+            if ids.iter().any(|id| {
+                !self
+                    .legal_representations
+                    .get(id)
+                    .is_some_and(|record| record.arrest() == *arrest)
+            }) {
+                return false;
+            }
+        }
+        for (defendant, ids) in &self.indexes.representations.by_defendant {
+            if ids.iter().any(|id| {
+                !self
+                    .legal_representations
+                    .get(id)
+                    .is_some_and(|record| record.defendant() == *defendant)
+            }) {
+                return false;
+            }
+        }
+        for (sponsor, ids) in &self.indexes.representations.by_sponsor {
+            if ids.iter().any(|id| {
+                !self
+                    .legal_representations
+                    .get(id)
+                    .is_some_and(|record| record.sponsor() == *sponsor)
+            }) {
+                return false;
+            }
+        }
+        for (counsel, ids) in &self.indexes.representations.by_counsel {
+            if ids.iter().any(|id| {
+                !self
+                    .legal_representations
+                    .get(id)
+                    .is_some_and(|record| record.counsel() == *counsel)
+            }) {
+                return false;
+            }
+        }
+        for (contact, ids) in &self.indexes.representations.by_contact {
+            if ids.iter().any(|id| {
+                !self
+                    .legal_representations
+                    .get(id)
+                    .is_some_and(|record| record.contact() == *contact)
+            }) {
+                return false;
+            }
+        }
+        true
+    }
+    fn has_consistent_arrest_indexes(&self) -> bool {
+        for arrest in self.arrests.values() {
+            let id = arrest.id();
+            if !self
+                .indexes
+                .arrests
+                .by_character
+                .get(&arrest.character())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .arrests
+                    .by_investigation
+                    .get(&arrest.investigation())
+                    .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .arrests
+                    .by_authority
+                    .get(&arrest.authority())
+                    .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
+            let active = self
+                .indexes
+                .arrests
+                .active_by_character
+                .get(&arrest.character());
+            match arrest.status() {
+                ArrestStatus::Detained if active != Some(&id) => return false,
+                ArrestStatus::Released if active == Some(&id) => return false,
+                ArrestStatus::Detained | ArrestStatus::Released => {}
+            }
+        }
+        for (character, ids) in &self.indexes.arrests.by_character {
+            if ids.iter().any(|id| {
+                !self
+                    .arrests
+                    .get(id)
+                    .is_some_and(|record| record.character() == *character)
+            }) {
+                return false;
+            }
+        }
+        for (investigation, ids) in &self.indexes.arrests.by_investigation {
+            if ids.iter().any(|id| {
+                !self
+                    .arrests
+                    .get(id)
+                    .is_some_and(|record| record.investigation() == *investigation)
+            }) {
+                return false;
+            }
+        }
+        for (authority, ids) in &self.indexes.arrests.by_authority {
+            if ids.iter().any(|id| {
+                !self
+                    .arrests
+                    .get(id)
+                    .is_some_and(|record| record.authority() == *authority)
+            }) {
+                return false;
+            }
+        }
+        for (character, id) in &self.indexes.arrests.active_by_character {
+            if !self.arrests.get(id).is_some_and(|record| {
+                record.character() == *character && record.status() == ArrestStatus::Detained
+            }) {
+                return false;
+            }
+        }
+        true
+    }
     fn has_consistent_police_response_indexes(&self) -> bool {
         for response in self.police_responses.values() {
             let id = response.id();
@@ -2238,7 +3470,11 @@ impl LegalState {
         true
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        if !self.has_consistent_police_response_indexes() {
+        if !self.has_consistent_arrest_indexes()
+            || !self.has_consistent_legal_representation_indexes()
+            || !self.has_consistent_prosecution_indexes()
+            || !self.has_consistent_police_response_indexes()
+        {
             return false;
         }
         for investigation in self.investigations.values() {
@@ -2872,6 +4108,18 @@ impl LegalState {
     }
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
+            self.has_consistent_arrest_indexes(),
+            "Derived Data Consistency: arrest indexes disagree with source records"
+        );
+        debug_assert!(
+            self.has_consistent_legal_representation_indexes(),
+            "Derived Data Consistency: legal representation indexes disagree with source records"
+        );
+        debug_assert!(
+            self.has_consistent_prosecution_indexes(),
+            "Derived Data Consistency: prosecution indexes disagree with source records"
+        );
+        debug_assert!(
             self.has_consistent_police_response_indexes(),
             "Derived Data Consistency: police response indexes disagree with source records"
         );
@@ -2933,6 +4181,41 @@ impl LegalState {
                         .is_some_and(|ids| ids.contains(&investigation.id())),
                     "Index Completeness: investigator reverse index is missing an assigned case"
                 );
+            }
+        }
+        for arrest in self.arrests.values() {
+            debug_assert!(
+                self.indexes
+                    .arrests
+                    .by_character
+                    .get(&arrest.character())
+                    .is_some_and(|ids| ids.contains(&arrest.id())),
+                "Index Completeness: character arrest index is missing an arrest"
+            );
+            debug_assert!(
+                self.indexes
+                    .arrests
+                    .by_investigation
+                    .get(&arrest.investigation())
+                    .is_some_and(|ids| ids.contains(&arrest.id())),
+                "Index Completeness: investigation arrest index is missing an arrest"
+            );
+            debug_assert!(
+                self.indexes
+                    .arrests
+                    .by_authority
+                    .get(&arrest.authority())
+                    .is_some_and(|ids| ids.contains(&arrest.id())),
+                "Index Completeness: authority arrest index is missing an arrest"
+            );
+            let active = self
+                .indexes
+                .arrests
+                .active_by_character
+                .get(&arrest.character());
+            match arrest.status() {
+                ArrestStatus::Detained => debug_assert_eq!(active, Some(&arrest.id())),
+                ArrestStatus::Released => debug_assert_ne!(active, Some(&arrest.id())),
             }
         }
         for evidence in self.evidence.values() {

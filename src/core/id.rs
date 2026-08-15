@@ -47,6 +47,10 @@ define_id!(WitnessStatementId, "witness-statement");
 define_id!(InformantId, "informant");
 define_id!(InformantDisclosureId, "informant-disclosure");
 define_id!(EvidenceId, "evidence");
+define_id!(ArrestId, "arrest");
+define_id!(LegalRepresentationId, "legal-representation");
+define_id!(ProsecutionCaseId, "prosecution-case");
+define_id!(ProsecutionReferralId, "prosecution-referral");
 define_id!(ReportId, "report");
 define_id!(HistoryEventId, "history");
 define_id!(FinancialAccountId, "account");
@@ -79,6 +83,10 @@ pub(crate) struct IdCounters {
     informant: u32,
     informant_disclosure: u32,
     evidence: u32,
+    arrest: u32,
+    legal_representation: u32,
+    prosecution_case: u32,
+    prosecution_referral: u32,
     report: u32,
     history_event: u32,
     financial_account: u32,
@@ -113,6 +121,10 @@ impl IdCounters {
             informant: 1,
             informant_disclosure: 1,
             evidence: 1,
+            arrest: 1,
+            legal_representation: 1,
+            prosecution_case: 1,
+            prosecution_referral: 1,
             report: 1,
             history_event: 1,
             financial_account: 1,
@@ -220,6 +232,28 @@ impl IdCounters {
 
     pub(crate) fn next_evidence(&mut self) -> EvidenceId {
         EvidenceId::from_raw(Self::take(&mut self.evidence, "evidence"))
+    }
+
+    pub(crate) fn next_arrest(&mut self) -> ArrestId {
+        ArrestId::from_raw(Self::take(&mut self.arrest, "arrest"))
+    }
+
+    pub(crate) fn next_legal_representation(&mut self) -> LegalRepresentationId {
+        LegalRepresentationId::from_raw(Self::take(
+            &mut self.legal_representation,
+            "legal representation",
+        ))
+    }
+
+    pub(crate) fn next_prosecution_case(&mut self) -> ProsecutionCaseId {
+        ProsecutionCaseId::from_raw(Self::take(&mut self.prosecution_case, "prosecution case"))
+    }
+
+    pub(crate) fn next_prosecution_referral(&mut self) -> ProsecutionReferralId {
+        ProsecutionReferralId::from_raw(Self::take(
+            &mut self.prosecution_referral,
+            "prosecution referral",
+        ))
     }
 
     pub(crate) fn next_report(&mut self) -> ReportId {

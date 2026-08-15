@@ -937,7 +937,6 @@ fn investigation_status_label(status: InvestigationStatus) -> &'static str {
         InvestigationStatus::Active => "active",
         InvestigationStatus::Suspended => "quiet or suspended",
         InvestigationStatus::Closed => "closed",
-        InvestigationStatus::Referred => "referred to another authority",
     }
 }
 

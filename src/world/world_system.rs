@@ -1,10 +1,13 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, InformantId, InvestigationId,
-    MandateId, NeighborhoodId, OperationId, OrganizationId,
+    ArrestId, BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, EnterpriseId,
+    InformantId, InvestigationId, MandateId, NeighborhoodId, OperationId, OrganizationId,
+    ProsecutionCaseId,
 };
 use crate::core::state::AppState;
+use crate::enterprises::EnterpriseStatus;
+use crate::legal::ProsecutionCaseStatus;
 use crate::operations::OperationStatus;
 use crate::registry::Registry;
 use crate::world::{
@@ -42,6 +45,12 @@ pub enum WorldError {
         expected: u32,
         found: u32,
     },
+    #[error("business {business} supports active enterprise {enterprise} for organization {organization}")]
+    ActiveEnterpriseSupport {
+        business: BusinessId,
+        enterprise: EnterpriseId,
+        organization: OrganizationId,
+    },
     #[error("supervisor {supervisor} does not belong to requested organization {organization:?}")]
     SupervisorOrganizationMismatch {
         supervisor: CharacterId,
@@ -65,6 +74,21 @@ pub enum WorldError {
     ActiveInvestigationAssignment {
         character: CharacterId,
         investigation: InvestigationId,
+    },
+    #[error("character {character} is detained under arrest {arrest}")]
+    ActiveArrestAssignment {
+        character: CharacterId,
+        arrest: ArrestId,
+    },
+    #[error("character {character} is lead prosecutor for open prosecution case {case}")]
+    ActiveProsecutionAssignment {
+        character: CharacterId,
+        case: ProsecutionCaseId,
+    },
+    #[error("supervisor {supervisor} is detained under arrest {arrest}")]
+    DetainedSupervisor {
+        supervisor: CharacterId,
+        arrest: ArrestId,
     },
     #[error(
         "character {character} is active informant {informant} for target handler organization {handler}"
@@ -268,6 +292,22 @@ fn validate_reassignment_preconditions(
     validate_membership(state, organization, supervisor)?;
 
     if organization != record.organization() {
+        if let Some(arrest) = state.legal.active_arrest_for_character(character) {
+            return Err(WorldError::ActiveArrestAssignment {
+                character,
+                arrest: arrest.id(),
+            });
+        }
+        if let Some(case) = state
+            .legal
+            .prosecution_cases_for_lead(character)
+            .find(|case| case.status() == ProsecutionCaseStatus::Reviewing)
+        {
+            return Err(WorldError::ActiveProsecutionAssignment {
+                character,
+                case: case.id(),
+            });
+        }
         if let Some(contact) = state.contacts.active_contacts_for_handler(character).next() {
             return Err(WorldError::ActiveInstitutionalContactHandler {
                 character,
@@ -419,6 +459,7 @@ impl ValidatedBusinessOwnershipTransfer {
             });
         }
         validate_business_owner(state, self.new_owner)?;
+        validate_business_support_ownership_change(state, self.business, self.new_owner)?;
         if self.new_owner == self.previous_owner {
             return Err(WorldError::BusinessOwnershipUnchanged {
                 business: self.business,
@@ -451,6 +492,7 @@ pub fn validate_transfer_business_ownership(
 ) -> Result<ValidatedBusinessOwnershipTransfer, WorldError> {
     let record = validate_transferable_business(state, business)?;
     validate_business_owner(state, new_owner)?;
+    validate_business_support_ownership_change(state, business, new_owner)?;
     if record.owner() == new_owner {
         return Err(WorldError::BusinessOwnershipUnchanged {
             business,
@@ -463,6 +505,28 @@ pub fn validate_transfer_business_ownership(
         expected_version: record.version(),
         previous_owner: record.owner(),
     })
+}
+
+fn validate_business_support_ownership_change(
+    state: &AppState,
+    business: BusinessId,
+    new_owner: BusinessOwner,
+) -> Result<(), WorldError> {
+    for enterprise in state
+        .enterprises
+        .enterprises_supported_by_business(business)
+    {
+        if enterprise.status() == EnterpriseStatus::Active
+            && new_owner != BusinessOwner::Organization(enterprise.organization())
+        {
+            return Err(WorldError::ActiveEnterpriseSupport {
+                business,
+                enterprise: enterprise.id(),
+                organization: enterprise.organization(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_transferable_business(
@@ -526,6 +590,12 @@ fn validate_membership(
             .world
             .get_character(supervisor_id)
             .ok_or(WorldError::MissingCharacter(supervisor_id))?;
+        if let Some(arrest) = state.legal.active_arrest_for_character(supervisor_id) {
+            return Err(WorldError::DetainedSupervisor {
+                supervisor: supervisor_id,
+                arrest: arrest.id(),
+            });
+        }
         if supervisor_record.organization() != organization {
             return Err(WorldError::SupervisorOrganizationMismatch {
                 supervisor: supervisor_id,

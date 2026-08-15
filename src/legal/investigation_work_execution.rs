@@ -1,7 +1,7 @@
 //! Scheduled detective pattern analysis; this sibling system derives new case evidence only from evidence already owned by the investigation.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, EvidenceId, InvestigationId, InvestigationWorkId};
+use crate::core::id::{ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::legal::case_graph::resolve_evidence_path;
@@ -33,6 +33,11 @@ pub enum InvestigationWorkError {
     },
     #[error("investigator {0} is not active")]
     InactiveInvestigator(CharacterId),
+    #[error("investigator {investigator} is detained under arrest {arrest}")]
+    DetainedInvestigator {
+        investigator: CharacterId,
+        arrest: ArrestId,
+    },
     #[error("investigator {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
     #[error("investigation work focus must connect two distinct entities")]
@@ -273,6 +278,12 @@ fn validate_case_and_investigator(
         return Err(InvestigationWorkError::InactiveInvestigator(
             investigator_id,
         ));
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(investigator_id) {
+        return Err(InvestigationWorkError::DetainedInvestigator {
+            investigator: investigator_id,
+            arrest: arrest.id(),
+        });
     }
     if investigator.organization() != Some(investigation.owner()) {
         return Err(InvestigationWorkError::InvestigatorNotAssigned {

@@ -5,8 +5,8 @@ pub mod enterprise_reporting;
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    EnterpriseCycleId, EnterpriseId, FinancialAccountId, InformationId, LedgerTransactionId,
-    MandateId, NeighborhoodId, OrganizationId,
+    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, InformationId,
+    LedgerTransactionId, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::time::SimTime;
 use crate::delegation::MandateAuthority;
@@ -19,10 +19,14 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum EnterpriseKind {
     Protection,
     Gambling,
+    AlcoholDistribution,
 }
 
-pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 2] =
-    [EnterpriseKind::Protection, EnterpriseKind::Gambling];
+pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 3] = [
+    EnterpriseKind::Protection,
+    EnterpriseKind::Gambling,
+    EnterpriseKind::AlcoholDistribution,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EnterpriseLocation {
@@ -48,6 +52,7 @@ struct EnterpriseAssignment {
     organization: OrganizationId,
     authority: MandateAuthority,
     location: EnterpriseLocation,
+    supporting_businesses: BTreeSet<BusinessId>,
     cash_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
 }
@@ -91,6 +96,10 @@ impl EnterpriseRecord {
 
     pub fn location(&self) -> EnterpriseLocation {
         self.assignment.location
+    }
+
+    pub fn supporting_businesses(&self) -> &BTreeSet<BusinessId> {
+        &self.assignment.supporting_businesses
     }
 
     pub fn cash_account(&self) -> FinancialAccountId {
@@ -195,6 +204,7 @@ pub struct EnterpriseState {
     by_organization: BTreeMap<OrganizationId, BTreeSet<EnterpriseId>>,
     by_manager: BTreeMap<crate::core::id::CharacterId, BTreeSet<EnterpriseId>>,
     by_location: BTreeMap<EnterpriseLocation, BTreeSet<EnterpriseId>>,
+    by_supporting_business: BTreeMap<BusinessId, BTreeSet<EnterpriseId>>,
     by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
@@ -243,6 +253,17 @@ impl EnterpriseState {
     ) -> impl Iterator<Item = &EnterpriseRecord> {
         self.by_location
             .get(&location)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.records.get(id))
+    }
+
+    pub fn enterprises_supported_by_business(
+        &self,
+        business: BusinessId,
+    ) -> impl Iterator<Item = &EnterpriseRecord> {
+        self.by_supporting_business
+            .get(&business)
             .into_iter()
             .flatten()
             .filter_map(|id| self.records.get(id))
@@ -308,6 +329,12 @@ impl EnterpriseState {
             .entry(record.location())
             .or_default()
             .insert(id);
+        for business in record.supporting_businesses() {
+            self.by_supporting_business
+                .entry(*business)
+                .or_default()
+                .insert(id);
+        }
         self.by_mandate
             .entry(record.authority().mandate)
             .or_default()
@@ -468,6 +495,12 @@ impl EnterpriseState {
                     .by_location
                     .get(&record.location())
                     .is_some_and(|ids| ids.contains(&record.id()))
+                || record.supporting_businesses().iter().any(|business| {
+                    !self
+                        .by_supporting_business
+                        .get(business)
+                        .is_some_and(|ids| ids.contains(&record.id()))
+                })
                 || !self
                     .by_mandate
                     .get(&record.authority().mandate)
@@ -521,6 +554,17 @@ impl EnterpriseState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.location() == *location)
+                {
+                    return false;
+                }
+            }
+        }
+        for (business, ids) in &self.by_supporting_business {
+            for id in ids {
+                if !self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| record.supporting_businesses().contains(business))
                 {
                     return false;
                 }
@@ -603,6 +647,7 @@ pub struct EnterpriseDraft {
     pub organization: OrganizationId,
     pub authority: MandateAuthority,
     pub location: EnterpriseLocation,
+    pub supporting_businesses: BTreeSet<BusinessId>,
     pub cash_account: FinancialAccountId,
     pub settlement_account: FinancialAccountId,
 }
@@ -618,6 +663,7 @@ pub(crate) fn build_enterprise_record(
         organization,
         authority,
         location,
+        supporting_businesses,
         cash_account,
         settlement_account,
     } = draft;
@@ -627,6 +673,7 @@ pub(crate) fn build_enterprise_record(
             organization,
             authority,
             location,
+            supporting_businesses,
             cash_account,
             settlement_account,
         },

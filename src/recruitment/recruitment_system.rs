@@ -3,7 +3,7 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, InformationId, OrganizationId, RecruitmentAttemptId,
+    ArrestId, CharacterId, DecisionRequestId, InformationId, OrganizationId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -55,6 +55,11 @@ pub enum RecruitmentError {
     MissingRecruiter(CharacterId),
     #[error("recruiter {0} is not active")]
     InactiveRecruiter(CharacterId),
+    #[error("recruiter {recruiter} is detained under arrest {arrest}")]
+    DetainedRecruiter {
+        recruiter: CharacterId,
+        arrest: ArrestId,
+    },
     #[error("recruiter {recruiter} is not a member of target organization {organization}")]
     RecruiterOrganizationMismatch {
         recruiter: CharacterId,
@@ -289,6 +294,9 @@ pub(crate) fn resolve_due_autonomous_recruitment(
         let Some(manager_record) = state.world().get_character(manager) else {
             continue;
         };
+        if state.legal().active_arrest_for_character(manager).is_some() {
+            continue;
+        }
         if !matches!(
             manager_record.autonomy(),
             AutonomyLevel::Delegated | AutonomyLevel::Broad
@@ -796,6 +804,12 @@ fn validate_target_and_recruiter(
         .ok_or(RecruitmentError::MissingRecruiter(recruiter))?;
     if recruiter_record.lifecycle() != Lifecycle::Active {
         return Err(RecruitmentError::InactiveRecruiter(recruiter));
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(recruiter) {
+        return Err(RecruitmentError::DetainedRecruiter {
+            recruiter,
+            arrest: arrest.id(),
+        });
     }
     if recruiter_record.organization() != Some(target_organization) {
         return Err(RecruitmentError::RecruiterOrganizationMismatch {

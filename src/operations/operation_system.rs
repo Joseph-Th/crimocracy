@@ -3,7 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId, PoliceResponseId,
+    ArrestId, CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId,
+    PoliceResponseId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -64,6 +65,11 @@ pub enum OperationError {
     },
     #[error("character {0} assigned to an operation is not active")]
     InactiveParticipant(CharacterId),
+    #[error("character {character} is detained under arrest {arrest} and cannot participate")]
+    DetainedParticipant {
+        character: CharacterId,
+        arrest: ArrestId,
+    },
     #[error(
         "character {character} changed after operation validation; expected version {expected}, found {found}"
     )]
@@ -171,6 +177,12 @@ impl ValidatedOperation {
             if record.lifecycle() != Lifecycle::Active {
                 return Err(OperationError::InactiveParticipant(*participant));
             }
+            if let Some(arrest) = state.legal.active_arrest_for_character(*participant) {
+                return Err(OperationError::DetainedParticipant {
+                    character: *participant,
+                    arrest: arrest.id(),
+                });
+            }
         }
         let leader = state
             .world
@@ -258,6 +270,12 @@ pub fn validate_authorize_operation(
             organization: draft.responsible_organization,
         });
     }
+    if let Some(arrest) = state.legal.active_arrest_for_character(draft.leader) {
+        return Err(OperationError::DetainedParticipant {
+            character: draft.leader,
+            arrest: arrest.id(),
+        });
+    }
     if draft.scheduled_for < state.now() {
         return Err(OperationError::ScheduledInPast);
     }
@@ -291,6 +309,12 @@ pub fn validate_authorize_operation(
             .ok_or(OperationError::MissingCharacter(*participant))?;
         if record.lifecycle() != Lifecycle::Active {
             return Err(OperationError::InactiveParticipant(*participant));
+        }
+        if let Some(arrest) = state.legal.active_arrest_for_character(*participant) {
+            return Err(OperationError::DetainedParticipant {
+                character: *participant,
+                arrest: arrest.id(),
+            });
         }
         expected_participant_versions.insert(*participant, record.version());
     }
