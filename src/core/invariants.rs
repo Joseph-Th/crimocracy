@@ -27,20 +27,25 @@ use crate::intelligence::{
 use crate::legal::informant_system::{informant_reliability, informant_strength};
 use crate::legal::investigation_work_execution::{
     calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
+    find_superseding_evidence, improve_evidence_reliability, is_reviewable_evidence_kind,
     minimum_source_reliability, source_evidence_forms_simple_path,
 };
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
 use crate::legal::witness_system::{witness_reliability, witness_strength};
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InformantStatus,
-    InvestigationStatus, InvestigationWorkOutcome, InvestigationWorkStatus, PatrolDeploymentStatus,
-    PoliceResponseStatus, WitnessCooperation,
+    InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
+    InvestigationWorkStatus, PatrolDeploymentStatus, PoliceResponseStatus, WitnessCooperation,
 };
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
-    classify_exposure_level, classify_objective_outcome, did_police_response_arrive_by,
+    calculate_property_proceeds, classify_exposure_level, classify_objective_outcome,
+    did_police_response_arrive_by,
 };
 use crate::operations::operation_system::is_information_subject_relevant;
+use crate::operations::property_disposition::{
+    build_disposition_summary, calculate_property_liquidation_value,
+};
 use crate::operations::surveillance_integration::{
     expected_persisted_surveillance_signatures, is_supported_surveillance_target,
     is_valid_persisted_surveillance_information,
@@ -48,7 +53,7 @@ use crate::operations::surveillance_integration::{
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
     OperationExposureLevel, OperationKind, OperationObjective, OperationObjectiveOutcome,
-    OperationStatus,
+    OperationRecord, OperationResolutionRecord, OperationStatus,
 };
 use crate::opportunities::OpportunityResolution;
 use crate::recruitment::recruitment_system::{
@@ -132,6 +137,8 @@ pub enum StateValidationError {
     InvalidOperationDefinition { operation: OperationId },
     #[error("operation {operation} has invalid persisted exposure or legal consequences")]
     InvalidOperationExposure { operation: OperationId },
+    #[error("operation {operation} has invalid persisted property disposition")]
+    InvalidOperationPropertyDisposition { operation: OperationId },
     #[error("opportunity {opportunity} has invalid persisted provenance or lifecycle state")]
     InvalidOpportunity { opportunity: OpportunityId },
     #[error("organization {organization} has invalid legal jurisdiction state")]
@@ -293,6 +300,8 @@ pub enum StateValidationError {
     InvalidBusinessEconomyAccounts { business: BusinessId },
     #[error("business {business} has invalid operating economy scheduling state")]
     InvalidBusinessEconomySchedule { business: BusinessId },
+    #[error("business {business} has invalid ownership history")]
+    InvalidBusinessOwnershipHistory { business: BusinessId },
     #[error("business cycle {cycle} has invalid economics or provenance")]
     InvalidBusinessCycle { cycle: BusinessCycleId },
 }
@@ -380,10 +389,23 @@ pub fn validate_state_against_registry(
             let factors = resolution.factors();
             let expected_margin = calculate_execution_margin(execution, factors);
             let expected_outcome = classify_objective_outcome(execution, expected_margin);
-            let (expected_intelligence_quality, expected_intelligence_adjustment) =
-                calculate_intelligence_factors(registry, state, operation.id());
+            let (
+                expected_intelligence_quality,
+                expected_intelligence_adjustment,
+                expected_intelligence_topics_covered,
+                expected_intelligence_topics_relevant,
+            ) = calculate_intelligence_factors(registry, state, operation.id());
             let expected_police_response_arrived =
                 did_police_response_arrive_by(state, operation, resolution.resolved_at());
+            let expected_property_proceeds = calculate_property_proceeds(
+                registry,
+                state,
+                operation,
+                resolution.objective_outcome(),
+            )
+            .map_err(|_| StateValidationError::InvalidOperationDefinition {
+                operation: operation.id(),
+            })?;
             if factors.variance().unsigned_abs() > execution.variance_limit()
                 || factors.time_pressure() > 30
                 || factors.approach_adjustment()
@@ -392,13 +414,40 @@ pub fn validate_state_against_registry(
                         .expect("validated operation approach must have an execution adjustment")
                 || factors.intelligence_quality() != expected_intelligence_quality
                 || factors.intelligence_adjustment() != expected_intelligence_adjustment
+                || factors.intelligence_topics_covered() != expected_intelligence_topics_covered
+                || factors.intelligence_topics_relevant() != expected_intelligence_topics_relevant
+                || factors.intelligence_topics_covered() > factors.intelligence_topics_relevant()
                 || factors.police_response_arrived() != expected_police_response_arrived
                 || resolution.execution_margin() != expected_margin
                 || resolution.objective_outcome() != expected_outcome
+                || resolution.property_proceeds() != expected_property_proceeds
             {
                 return Err(StateValidationError::InvalidOperationDefinition {
                     operation: operation.id(),
                 });
+            }
+            if let Some(disposition) = operation.property_disposition() {
+                let proceeds = resolution.property_proceeds().ok_or(
+                    StateValidationError::InvalidOperationPropertyDisposition {
+                        operation: operation.id(),
+                    },
+                )?;
+                let expected_realized = calculate_property_liquidation_value(
+                    registry,
+                    operation.kind(),
+                    proceeds.estimated_value(),
+                    operation.id(),
+                )
+                .map_err(|_| {
+                    StateValidationError::InvalidOperationPropertyDisposition {
+                        operation: operation.id(),
+                    }
+                })?;
+                if disposition.realized_value() != expected_realized {
+                    return Err(StateValidationError::InvalidOperationPropertyDisposition {
+                        operation: operation.id(),
+                    });
+                }
             }
 
             let exposure = resolution.exposure();
@@ -488,9 +537,12 @@ pub fn validate_state_against_registry(
         {
             return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
         }
+        let expected_superseded_by = find_superseding_evidence(state, work);
         match resolution.outcome() {
             InvestigationWorkOutcome::Connected => {
-                if expected_margin < definition.connected_margin()
+                if work.kind() != InvestigationWorkKind::PatternAnalysis
+                    || expected_margin < definition.connected_margin()
+                    || expected_superseded_by.is_some()
                     || resolution.superseded_by().is_some()
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
@@ -512,8 +564,42 @@ pub fn validate_state_against_registry(
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
             }
+            InvestigationWorkOutcome::Developed => {
+                if work.kind() != InvestigationWorkKind::EvidenceReview
+                    || expected_margin < definition.connected_margin()
+                    || expected_superseded_by.is_some()
+                    || resolution.superseded_by().is_some()
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+                let source_id = work
+                    .focus()
+                    .evidence_id()
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                let source = state
+                    .legal
+                    .get_evidence(source_id)
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                let evidence = state
+                    .legal
+                    .get_evidence(resolution.derived_evidence().ok_or(
+                        StateValidationError::InvalidInvestigationWork { work: work.id() },
+                    )?)
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                if evidence.kind() != EvidenceKind::ForensicAnalysis
+                    || evidence.subject() != source.subject()
+                    || evidence.origin() != source.origin()
+                    || evidence.strength() != source.strength()
+                    || evidence.reliability() != improve_evidence_reliability(source.reliability())
+                    || evidence.admissibility() != source.admissibility()
+                    || evidence.derived_from() != &BTreeSet::from([source_id])
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+            }
             InvestigationWorkOutcome::Inconclusive => {
                 if expected_margin >= definition.connected_margin()
+                    || expected_superseded_by.is_some()
                     || resolution.superseded_by().is_some()
                     || resolution.derived_evidence().is_some()
                 {
@@ -521,7 +607,10 @@ pub fn validate_state_against_registry(
                 }
             }
             InvestigationWorkOutcome::Superseded => {
-                if resolution.superseded_by().is_none() || resolution.derived_evidence().is_some() {
+                if expected_superseded_by.is_none()
+                    || resolution.superseded_by() != expected_superseded_by
+                    || resolution.derived_evidence().is_some()
+                {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
             }
@@ -802,6 +891,38 @@ fn validate_world_state(state: &AppState) -> Result<(), StateValidationError> {
                     context: "business owner",
                     entity,
                 });
+            }
+        }
+        if business.version() == 0
+            || state
+                .world
+                .get_business_ownership_change_for_version(business.id(), business.version())
+                .is_none_or(|change| change.new_owner() != business.owner())
+        {
+            return Err(StateValidationError::InvalidBusinessOwnershipHistory {
+                business: business.id(),
+            });
+        }
+        for change in state.world.business_ownership_history(business.id()) {
+            if change.changed_at() > state.now() {
+                return Err(StateValidationError::InvalidBusinessOwnershipHistory {
+                    business: business.id(),
+                });
+            }
+            for historical_owner in [change.previous_owner(), Some(change.new_owner())]
+                .into_iter()
+                .flatten()
+            {
+                let entity = match historical_owner {
+                    BusinessOwner::Independent => None,
+                    BusinessOwner::Organization(id) => Some(EntityRef::Organization(id)),
+                    BusinessOwner::Character(id) => Some(EntityRef::Character(id)),
+                };
+                if entity.is_some_and(|entity| !is_entity_present(state, entity)) {
+                    return Err(StateValidationError::InvalidBusinessOwnershipHistory {
+                        business: business.id(),
+                    });
+                }
             }
         }
     }
@@ -1534,6 +1655,9 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
     let mut operation_discovered_information = BTreeSet::new();
     let mut operation_after_action_reports = BTreeSet::new();
     let mut operation_history_events = BTreeSet::new();
+    let mut property_disposition_transactions = BTreeSet::new();
+    let mut property_disposition_information = BTreeSet::new();
+    let mut property_disposition_reports = BTreeSet::new();
     for operation in state.operations.operations() {
         let organization = state
             .world
@@ -1667,6 +1791,13 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
             }
             OperationStatus::Completed | OperationStatus::Aborted => {}
         }
+        if operation.status() != OperationStatus::Completed
+            && operation.property_disposition().is_some()
+        {
+            return Err(StateValidationError::InvalidOperationPropertyDisposition {
+                operation: operation.id(),
+            });
+        }
         match operation.status() {
             OperationStatus::Authorized => {
                 if operation.started_at().is_some()
@@ -1742,6 +1873,29 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                         operation: operation.id(),
                     });
                 }
+                if let Some(proceeds) = resolution.property_proceeds() {
+                    let valid_target = matches!(
+                        operation.objective(),
+                        OperationObjective::AcquireProperty { target }
+                            if *target == proceeds.target()
+                    );
+                    if !valid_target
+                        || resolution.objective_outcome() == OperationObjectiveOutcome::Failed
+                        || proceeds.estimated_value().cents() <= 0
+                    {
+                        return Err(StateValidationError::InvalidOperationDefinition {
+                            operation: operation.id(),
+                        });
+                    }
+                }
+                validate_operation_property_disposition(
+                    state,
+                    operation,
+                    resolution,
+                    &mut property_disposition_transactions,
+                    &mut property_disposition_information,
+                    &mut property_disposition_reports,
+                )?;
                 let information = state
                     .intelligence
                     .get_information(resolution.after_action_information())
@@ -1853,6 +2007,175 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_operation_property_disposition(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &OperationResolutionRecord,
+    transactions: &mut BTreeSet<LedgerTransactionId>,
+    information_ids: &mut BTreeSet<InformationId>,
+    reports: &mut BTreeSet<ReportId>,
+) -> Result<(), StateValidationError> {
+    let Some(disposition) = operation.property_disposition() else {
+        return Ok(());
+    };
+    let invalid = || StateValidationError::InvalidOperationPropertyDisposition {
+        operation: operation.id(),
+    };
+    let proceeds = resolution.property_proceeds().ok_or_else(invalid)?;
+    if disposition.disposed_at() < resolution.resolved_at()
+        || disposition.disposed_at() > state.now()
+        || disposition.realized_value().cents() <= 0
+        || disposition.realized_value().cents() > proceeds.estimated_value().cents()
+        || !transactions.insert(disposition.transaction())
+        || !information_ids.insert(disposition.information())
+        || !reports.insert(disposition.report())
+    {
+        return Err(invalid());
+    }
+
+    let venue = state
+        .world
+        .get_business(disposition.venue())
+        .ok_or_else(invalid)?;
+    let ownership = state
+        .world
+        .get_business_ownership_change_for_version(disposition.venue(), disposition.venue_version())
+        .ok_or_else(invalid)?;
+    let next_ownership_at_disposition = disposition
+        .venue_version()
+        .checked_add(1)
+        .and_then(|version| {
+            state
+                .world
+                .get_business_ownership_change_for_version(disposition.venue(), version)
+        })
+        .is_some_and(|next| next.changed_at() <= disposition.disposed_at());
+    if disposition.venue_version() > venue.version()
+        || ownership.new_owner()
+            != BusinessOwner::Organization(operation.responsible_organization())
+        || ownership.changed_at() > disposition.disposed_at()
+        || next_ownership_at_disposition
+        || state
+            .world
+            .business_owner_at(disposition.venue(), disposition.disposed_at())
+            != Some(BusinessOwner::Organization(
+                operation.responsible_organization(),
+            ))
+        || !venue.has_function(BusinessFunction::ResaleMarket)
+    {
+        return Err(invalid());
+    }
+
+    let cash = state
+        .finance
+        .get_account(disposition.cash_account())
+        .ok_or_else(invalid)?;
+    let settlement = state
+        .finance
+        .get_account(disposition.settlement_account())
+        .ok_or_else(invalid)?;
+    let expected_owner = FinancialOwner::Organization(operation.responsible_organization());
+    if disposition.cash_account() == disposition.settlement_account()
+        || cash.owner() != expected_owner
+        || settlement.owner() != expected_owner
+        || !matches!(
+            cash.kind(),
+            AccountKind::StreetCash | AccountKind::ConcealedCash
+        )
+        || settlement.kind() != AccountKind::Settlement
+    {
+        return Err(invalid());
+    }
+
+    let transaction = state
+        .finance
+        .get_transaction(disposition.transaction())
+        .ok_or_else(invalid)?;
+    let negative_value = disposition
+        .realized_value()
+        .cents()
+        .checked_neg()
+        .map(Money::from_cents)
+        .ok_or_else(invalid)?;
+    let has_cash_posting = transaction.postings().iter().any(|posting| {
+        posting.account == disposition.cash_account()
+            && posting.amount == disposition.realized_value()
+    });
+    let has_settlement_posting = transaction.postings().iter().any(|posting| {
+        posting.account == disposition.settlement_account() && posting.amount == negative_value
+    });
+    if transaction.occurred_at() != disposition.disposed_at()
+        || transaction.memo()
+            != format!(
+                "Property liquidation for {} through {}",
+                operation.id(),
+                disposition.venue()
+            )
+        || transaction.postings().len() != 2
+        || !has_cash_posting
+        || !has_settlement_posting
+        || transaction.budget_usage().is_some()
+    {
+        return Err(invalid());
+    }
+
+    let information = state
+        .intelligence
+        .get_information(disposition.information())
+        .ok_or_else(invalid)?;
+    if information.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
+        || information.source_kind() != InformationSourceKind::Accountant
+        || information.topic() != InformationTopic::FinancialPerformance
+        || information.source_entity() != Some(EntityRef::Business(disposition.venue()))
+        || information.subject() != EntityRef::Operation(operation.id())
+        || information.observed_at() != disposition.disposed_at()
+        || information.recorded_at() != disposition.disposed_at()
+        || information.reliability() != Reliability::DirectAccess
+        || information.specificity() != Specificity::Precise
+        || information.summary()
+            != build_disposition_summary(
+                operation.title(),
+                venue.name(),
+                proceeds.estimated_value(),
+                disposition.realized_value(),
+            )
+    {
+        return Err(invalid());
+    }
+    let report = state
+        .reports
+        .get_report(disposition.report())
+        .ok_or_else(invalid)?;
+    let expected_summary = build_disposition_summary(
+        operation.title(),
+        venue.name(),
+        proceeds.estimated_value(),
+        disposition.realized_value(),
+    );
+    if report.recipient() != operation.responsible_organization()
+        || report.kind() != ReportKind::Financial
+        || report.title() != "Property disposition"
+        || report.generated_at() != disposition.disposed_at()
+        || report.entries().len() != 1
+    {
+        return Err(invalid());
+    }
+    let entry = &report.entries()[0];
+    if entry.attention != AttentionClass::Notable
+        || entry.summary != expected_summary
+        || !entry.sources.is_empty()
+        || entry.entities
+            != BTreeSet::from([
+                EntityRef::Operation(operation.id()),
+                EntityRef::Business(disposition.venue()),
+            ])
+        || entry.decision.is_some()
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -3195,15 +3518,23 @@ fn validate_business_economies(state: &AppState) -> Result<(), StateValidationEr
             .world
             .get_business(cycle.business())
             .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        let ownership = state
+            .world
+            .get_business_ownership_change_for_version(cycle.business(), cycle.business_version())
+            .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
         if cycle.occurred_at() < economy.established_at()
             || cycle.occurred_at() > state.now()
+            || cycle.business_version() == 0
+            || cycle.business_version() > business.version()
+            || ownership.new_owner() != cycle.owner()
+            || ownership.changed_at() > cycle.occurred_at()
             || cycle.gross_revenue().cents() < 0
             || cycle.operating_cost().cents() < 0
             || cycle.gross_revenue().checked_sub(cycle.operating_cost()) != Some(cycle.net_cash())
         {
             return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
         }
-        let expected_holder = match business.owner() {
+        let expected_holder = match cycle.owner() {
             BusinessOwner::Independent => None,
             BusinessOwner::Organization(id) => Some(KnowledgeHolder::Organization(id)),
             BusinessOwner::Character(id) => Some(KnowledgeHolder::Character(id)),
@@ -3742,12 +4073,29 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
             .world
             .get_character(work.investigator())
             .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-        if work.focus().from() >= work.focus().to()
-            || !is_entity_present(state, work.focus().from())
-            || !is_entity_present(state, work.focus().to())
+        let focus_is_valid = match (work.kind(), work.focus()) {
+            (
+                InvestigationWorkKind::PatternAnalysis,
+                InvestigationWorkFocus::EntityConnection { from, to },
+            ) => {
+                from < to
+                    && is_entity_present(state, from)
+                    && is_entity_present(state, to)
+                    && source_evidence_forms_simple_path(state, work)
+            }
+            (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Evidence(source)) => {
+                work.source_evidence() == &BTreeSet::from([source])
+                    && state.legal.get_evidence(source).is_some_and(|evidence| {
+                        evidence.investigation() == work.investigation()
+                            && evidence.discovered_at() <= work.scheduled_at()
+                            && is_reviewable_evidence_kind(evidence.kind())
+                    })
+            }
+            _ => false,
+        };
+        if !focus_is_valid
             || work.scheduled_at() > state.now()
             || work.due_at() <= work.scheduled_at()
-            || !source_evidence_forms_simple_path(state, work)
             || work.source_evidence().iter().any(|source| {
                 state.legal.get_evidence(*source).is_none_or(|evidence| {
                     evidence.investigation() != work.investigation()
@@ -3786,7 +4134,9 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                 }
                 match resolution.outcome() {
                     InvestigationWorkOutcome::Connected => {
-                        if resolution.superseded_by().is_some() {
+                        if work.kind() != InvestigationWorkKind::PatternAnalysis
+                            || resolution.superseded_by().is_some()
+                        {
                             return Err(StateValidationError::InvalidInvestigationWork {
                                 work: work.id(),
                             });
@@ -3819,6 +4169,49 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                             });
                         }
                     }
+                    InvestigationWorkOutcome::Developed => {
+                        if work.kind() != InvestigationWorkKind::EvidenceReview
+                            || resolution.superseded_by().is_some()
+                        {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                        let source_id = work.focus().evidence_id().ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        let source = state.legal.get_evidence(source_id).ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        let derived_id = resolution.derived_evidence().ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        if !derived_evidence_from_work.insert(derived_id) {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                        let derived = state.legal.get_evidence(derived_id).ok_or(
+                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        )?;
+                        if derived.investigation() != work.investigation()
+                            || derived.custodian() != investigation.owner()
+                            || derived.kind() != EvidenceKind::ForensicAnalysis
+                            || derived.subject() != source.subject()
+                            || derived.origin() != source.origin()
+                            || derived.strength() != source.strength()
+                            || derived.reliability()
+                                != improve_evidence_reliability(source.reliability())
+                            || derived.admissibility() != source.admissibility()
+                            || derived.discovered_at() != resolution.resolved_at()
+                            || derived.derived_from() != &BTreeSet::from([source_id])
+                            || source_id >= derived_id
+                        {
+                            return Err(StateValidationError::InvalidInvestigationWork {
+                                work: work.id(),
+                            });
+                        }
+                    }
                     InvestigationWorkOutcome::Inconclusive => {
                         if resolution.superseded_by().is_some()
                             || resolution.derived_evidence().is_some()
@@ -3840,15 +4233,26 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                         let superseding = state.legal.get_evidence(superseding_id).ok_or(
                             StateValidationError::InvalidInvestigationWork { work: work.id() },
                         )?;
-                        let direct = superseding.origin().is_some_and(|origin| {
-                            (origin == work.focus().from()
-                                && superseding.subject() == work.focus().to())
-                                || (origin == work.focus().to()
-                                    && superseding.subject() == work.focus().from())
-                        });
+                        let valid_superseding = match (work.kind(), work.focus()) {
+                            (
+                                InvestigationWorkKind::PatternAnalysis,
+                                InvestigationWorkFocus::EntityConnection { from, to },
+                            ) => superseding.origin().is_some_and(|origin| {
+                                (origin == from && superseding.subject() == to)
+                                    || (origin == to && superseding.subject() == from)
+                            }),
+                            (
+                                InvestigationWorkKind::EvidenceReview,
+                                InvestigationWorkFocus::Evidence(source),
+                            ) => {
+                                superseding.kind() == EvidenceKind::ForensicAnalysis
+                                    && superseding.derived_from() == &BTreeSet::from([source])
+                            }
+                            _ => false,
+                        };
                         if superseding.investigation() != work.investigation()
                             || superseding.discovered_at() > resolution.resolved_at()
-                            || !direct
+                            || !valid_superseding
                         {
                             return Err(StateValidationError::InvalidInvestigationWork {
                                 work: work.id(),
@@ -4091,7 +4495,8 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
                     | EvidenceKind::KnownAssociation
                     | EvidenceKind::Document
                     | EvidenceKind::Ballistics
-                    | EvidenceKind::PatternLink => false,
+                    | EvidenceKind::PatternLink
+                    | EvidenceKind::ForensicAnalysis => false,
                 };
             if !valid_source {
                 return Err(StateValidationError::InvalidEvidenceProvenance {
@@ -4114,6 +4519,16 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
             EvidenceKind::PatternLink => {
                 if evidence.source().is_some()
                     || evidence.derived_from().len() < 2
+                    || !derived_evidence_from_work.contains(&evidence.id())
+                {
+                    return Err(StateValidationError::InvalidEvidenceProvenance {
+                        evidence: evidence.id(),
+                    });
+                }
+            }
+            EvidenceKind::ForensicAnalysis => {
+                if evidence.source().is_some()
+                    || evidence.derived_from().len() != 1
                     || !derived_evidence_from_work.contains(&evidence.id())
                 {
                     return Err(StateValidationError::InvalidEvidenceProvenance {
@@ -4261,6 +4676,10 @@ pub fn validate_invariants(state: &AppState) {
     state.legal.debug_validate_indexes();
     state.reports.debug_validate_indexes();
     state.history.debug_validate_indexes();
+    debug_assert!(
+        validate_world_state(state).is_ok(),
+        "World Runtime Validity: hierarchy, business ownership, or world references are inconsistent"
+    );
     debug_assert!(
         validate_business_economies(state).is_ok(),
         "Business Economy Runtime Validity: business schedules, accounts, cycles, or provenance are inconsistent"

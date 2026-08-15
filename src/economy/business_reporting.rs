@@ -53,7 +53,7 @@ pub fn resolve_business_financial_summary(
         .world()
         .get_business(business)
         .ok_or(BusinessReportingError::MissingBusiness(business))?;
-    resolve_summary(state, [record], period_start, period_end)
+    resolve_summary(state, [record], period_start, period_end, None)
 }
 
 pub fn resolve_organization_business_financial_summary(
@@ -66,17 +66,30 @@ pub fn resolve_organization_business_financial_summary(
     if state.world().get_organization(organization).is_none() {
         return Err(BusinessReportingError::MissingOrganization(organization));
     }
+    let owner = BusinessOwner::Organization(organization);
     resolve_summary(
         state,
-        state.world.businesses().filter(|business| {
-            business.owner() == BusinessOwner::Organization(organization)
-                && state
-                    .economy()
-                    .get_business_economy(business.id())
-                    .is_some()
-        }),
+        state
+            .world()
+            .businesses_ever_owned_by_organization(organization)
+            .filter(|business| {
+                let Some(economy) = state.economy().get_business_economy(business.id()) else {
+                    return false;
+                };
+                if economy.established_at() > period_end {
+                    return false;
+                }
+                let ownership_start = period_start.max(economy.established_at());
+                state.world.business_was_owned_during(
+                    business.id(),
+                    owner,
+                    ownership_start,
+                    period_end,
+                )
+            }),
         period_start,
         period_end,
+        Some(owner),
     )
 }
 
@@ -103,6 +116,7 @@ pub fn resolve_neighborhood_business_financial_summary(
             }),
         period_start,
         period_end,
+        None,
     )
 }
 
@@ -125,6 +139,7 @@ fn resolve_summary<'a>(
     businesses: impl IntoIterator<Item = &'a crate::world::BusinessRecord>,
     period_start: SimTime,
     period_end: SimTime,
+    cycle_owner: Option<BusinessOwner>,
 ) -> Result<BusinessFinancialSummary, BusinessReportingError> {
     let mut totals = BusinessFinancialTotals::default();
     let mut by_kind = BTreeMap::new();
@@ -139,7 +154,9 @@ fn resolve_summary<'a>(
         let kind_totals = by_kind.entry(business.kind()).or_default();
         increment_business_count(kind_totals)?;
         for cycle in state.economy().cycles_for(business.id()).filter(|cycle| {
-            cycle.occurred_at() >= period_start && cycle.occurred_at() <= period_end
+            cycle.occurred_at() >= period_start
+                && cycle.occurred_at() <= period_end
+                && cycle_owner.is_none_or(|owner| cycle.owner() == owner)
         }) {
             add_cycle(
                 &mut totals,

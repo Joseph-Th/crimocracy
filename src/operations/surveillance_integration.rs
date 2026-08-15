@@ -831,6 +831,7 @@ fn business_function_label(function: BusinessFunction) -> &'static str {
         BusinessFunction::Warehousing => "storage space",
         BusinessFunction::MeetingSpace => "private meeting space",
         BusinessFunction::CustomerAccess => "regular customer access",
+        BusinessFunction::ResaleMarket => "resale-market access",
         BusinessFunction::UnionAccess => "union access",
         BusinessFunction::DistributionInfrastructure => "distribution infrastructure",
         BusinessFunction::ProfessionalRecords => "professional record handling",
@@ -1303,10 +1304,12 @@ mod tests {
         .expect("intelligence-backed burglary should commit");
         let start = run_tick(&fixture.registry, &mut fixture.state);
         assert!(start.started_operations.contains(&burglary));
-        let (quality, adjustment) =
+        let (quality, adjustment, covered, relevant) =
             calculate_intelligence_factors(&fixture.registry, &fixture.state, burglary);
         assert!(quality.value() > 0);
         assert!(adjustment < 0);
+        assert!(covered > 0);
+        assert!(covered < relevant);
         validate_state(&fixture.state).expect("surveillance-backed planning state should validate");
         validate_invariants(&fixture.state);
     }

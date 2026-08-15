@@ -38,32 +38,52 @@ pub enum InvestigatorRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InvestigationWorkKind {
     PatternAnalysis,
+    EvidenceReview,
 }
 
-pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 1] =
-    [InvestigationWorkKind::PatternAnalysis];
+pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 2] = [
+    InvestigationWorkKind::PatternAnalysis,
+    InvestigationWorkKind::EvidenceReview,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct InvestigationWorkFocus {
-    from: EntityRef,
-    to: EntityRef,
+pub enum InvestigationWorkFocus {
+    EntityConnection { from: EntityRef, to: EntityRef },
+    Evidence(EvidenceId),
 }
 
 impl InvestigationWorkFocus {
     pub fn new(from: EntityRef, to: EntityRef) -> Self {
         if from <= to {
-            Self { from, to }
+            Self::EntityConnection { from, to }
         } else {
-            Self { from: to, to: from }
+            Self::EntityConnection { from: to, to: from }
         }
     }
 
+    pub fn evidence(evidence: EvidenceId) -> Self {
+        Self::Evidence(evidence)
+    }
+
     pub fn from(self) -> EntityRef {
-        self.from
+        match self {
+            Self::EntityConnection { from, .. } => from,
+            Self::Evidence(evidence) => EntityRef::Evidence(evidence),
+        }
     }
 
     pub fn to(self) -> EntityRef {
-        self.to
+        match self {
+            Self::EntityConnection { to, .. } => to,
+            Self::Evidence(evidence) => EntityRef::Evidence(evidence),
+        }
+    }
+
+    pub fn evidence_id(self) -> Option<EvidenceId> {
+        match self {
+            Self::Evidence(evidence) => Some(evidence),
+            Self::EntityConnection { .. } => None,
+        }
     }
 }
 
@@ -76,6 +96,7 @@ pub enum InvestigationWorkStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvestigationWorkOutcome {
     Connected,
+    Developed,
     Inconclusive,
     Superseded,
 }
@@ -240,6 +261,7 @@ pub enum EvidenceKind {
     Document,
     Ballistics,
     PatternLink,
+    ForensicAnalysis,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -867,6 +889,7 @@ struct InvestigationIndexes {
     by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
     investigations_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     investigations_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationId>>,
+    active_without_lead: BTreeSet<InvestigationId>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1358,6 +1381,15 @@ impl LegalState {
     pub(crate) fn investigations(&self) -> impl Iterator<Item = &InvestigationRecord> {
         self.investigations.values()
     }
+    pub(crate) fn active_investigations_without_lead(
+        &self,
+    ) -> impl Iterator<Item = InvestigationId> + '_ {
+        self.indexes
+            .investigations
+            .active_without_lead
+            .iter()
+            .copied()
+    }
     pub(crate) fn investigation_work(&self) -> impl Iterator<Item = &InvestigationWorkRecord> {
         self.investigation_work.values()
     }
@@ -1386,6 +1418,12 @@ impl LegalState {
         self.police_responses.values()
     }
     pub(crate) fn insert_investigation(&mut self, record: InvestigationRecord) {
+        if record.status() == InvestigationStatus::Active && record.lead_investigator().is_none() {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .insert(record.id());
+        }
         self.indexes
             .investigations
             .by_owner
@@ -1781,6 +1819,19 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        let needs_lead = investigation.status == InvestigationStatus::Active
+            && investigation.lead_investigator.is_none();
+        if needs_lead {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .insert(investigation_id);
+        } else {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .remove(&investigation_id);
+        }
     }
     pub(crate) fn set_investigator_role(
         &mut self,
@@ -1805,6 +1856,19 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        let needs_lead = investigation.status == InvestigationStatus::Active
+            && investigation.lead_investigator.is_none();
+        if needs_lead {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .insert(investigation_id);
+        } else {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .remove(&investigation_id);
+        }
         self.indexes
             .investigations
             .investigations_by_investigator
@@ -1833,6 +1897,19 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        let needs_lead = investigation.status == InvestigationStatus::Active
+            && investigation.lead_investigator.is_none();
+        if needs_lead {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .insert(investigation_id);
+        } else {
+            self.indexes
+                .investigations
+                .active_without_lead
+                .remove(&investigation_id);
+        }
         if let Some(investigations) = self
             .indexes
             .investigations
@@ -2200,6 +2277,17 @@ impl LegalState {
             {
                 return false;
             }
+            let should_need_lead = investigation.status() == InvestigationStatus::Active
+                && investigation.lead_investigator().is_none();
+            if self
+                .indexes
+                .investigations
+                .active_without_lead
+                .contains(&investigation.id())
+                != should_need_lead
+            {
+                return false;
+            }
             for investigator in investigation.assigned_investigators() {
                 if !self
                     .indexes
@@ -2210,6 +2298,18 @@ impl LegalState {
                 {
                     return false;
                 }
+            }
+        }
+        for investigation in &self.indexes.investigations.active_without_lead {
+            if !self
+                .investigations
+                .get(investigation)
+                .is_some_and(|record| {
+                    record.status() == InvestigationStatus::Active
+                        && record.lead_investigator().is_none()
+                })
+            {
+                return false;
             }
         }
         for informant in self.informants.values() {
@@ -2815,6 +2915,15 @@ impl LegalState {
                     "Derived Data Consistency: investigation lead is not assigned to the case"
                 );
             }
+            debug_assert_eq!(
+                self.indexes
+                    .investigations
+                    .active_without_lead
+                    .contains(&investigation.id()),
+                investigation.status() == InvestigationStatus::Active
+                    && investigation.lead_investigator().is_none(),
+                "Derived Data Consistency: unstaffed active investigation index disagrees with case"
+            );
             for investigator in investigation.assigned_investigators() {
                 debug_assert!(
                     self.indexes

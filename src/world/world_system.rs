@@ -1,17 +1,17 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    BusinessId, CharacterId, ContactId, InformantId, InvestigationId, MandateId, NeighborhoodId,
-    OperationId, OrganizationId,
+    BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, InformantId, InvestigationId,
+    MandateId, NeighborhoodId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::operations::OperationStatus;
 use crate::registry::Registry;
 use crate::world::{
-    BusinessDraft, BusinessOwner, BusinessRecord, CharacterCapabilities, CharacterDisposition,
-    CharacterDraft, CharacterIdentity, CharacterMembership, CharacterRecord, CharacterRuntime,
-    Lifecycle, NeighborhoodDraft, NeighborhoodRecord, OrganizationDraft, OrganizationKind,
-    OrganizationRecord, PolicySetting,
+    BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
+    CharacterCapabilities, CharacterDisposition, CharacterDraft, CharacterIdentity,
+    CharacterMembership, CharacterRecord, CharacterRuntime, Lifecycle, NeighborhoodDraft,
+    NeighborhoodRecord, OrganizationDraft, OrganizationKind, OrganizationRecord, PolicySetting,
 };
 use thiserror::Error;
 
@@ -25,6 +25,23 @@ pub enum WorldError {
     MissingCharacter(CharacterId),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
+    #[error("business {0} does not exist")]
+    MissingBusiness(BusinessId),
+    #[error("business {0} is not active")]
+    InactiveBusiness(BusinessId),
+    #[error("business {business} is already owned by {owner:?}")]
+    BusinessOwnershipUnchanged {
+        business: BusinessId,
+        owner: BusinessOwner,
+    },
+    #[error(
+        "business {business} changed after validation; expected version {expected}, found {found}"
+    )]
+    StaleBusiness {
+        business: BusinessId,
+        expected: u32,
+        found: u32,
+    },
     #[error("supervisor {supervisor} does not belong to requested organization {organization:?}")]
     SupervisorOrganizationMismatch {
         supervisor: CharacterId,
@@ -341,31 +358,143 @@ pub fn insert_business(
         return Err(WorldError::MissingNeighborhood(draft.neighborhood));
     }
     registry.get_business(draft.kind);
-    match draft.owner {
-        BusinessOwner::Independent => {}
+    validate_business_owner(state, draft.owner)?;
+
+    let id = state.ids.next_business();
+    let ownership_change = state.ids.next_business_ownership_change();
+    let changed_at = state.now();
+    let BusinessDraft {
+        name,
+        kind,
+        functions,
+        neighborhood,
+        owner,
+    } = draft;
+    state.world.insert_business(
+        BusinessRecord {
+            id,
+            name,
+            kind,
+            functions,
+            neighborhood,
+            owner,
+            lifecycle: Lifecycle::Active,
+            version: 1,
+        },
+        BusinessOwnershipChangeRecord {
+            id: ownership_change,
+            business: id,
+            previous_owner: None,
+            new_owner: owner,
+            changed_at,
+            resulting_business_version: 1,
+        },
+    );
+    Ok(id)
+}
+
+#[derive(Debug)]
+pub struct ValidatedBusinessOwnershipTransfer {
+    business: BusinessId,
+    new_owner: BusinessOwner,
+    expected_version: u32,
+    previous_owner: BusinessOwner,
+}
+
+impl ValidatedBusinessOwnershipTransfer {
+    pub fn commit(self, state: &mut AppState) -> Result<BusinessOwnershipChangeId, WorldError> {
+        let record = validate_transferable_business(state, self.business)?;
+        if record.version() != self.expected_version {
+            return Err(WorldError::StaleBusiness {
+                business: self.business,
+                expected: self.expected_version,
+                found: record.version(),
+            });
+        }
+        if record.owner() != self.previous_owner {
+            return Err(WorldError::StaleBusiness {
+                business: self.business,
+                expected: self.expected_version,
+                found: record.version(),
+            });
+        }
+        validate_business_owner(state, self.new_owner)?;
+        if self.new_owner == self.previous_owner {
+            return Err(WorldError::BusinessOwnershipUnchanged {
+                business: self.business,
+                owner: self.new_owner,
+            });
+        }
+        let resulting_business_version = self
+            .expected_version
+            .checked_add(1)
+            .expect("business version counter exhausted");
+        let id = state.ids.next_business_ownership_change();
+        state
+            .world
+            .transfer_business_ownership(BusinessOwnershipChangeRecord {
+                id,
+                business: self.business,
+                previous_owner: Some(self.previous_owner),
+                new_owner: self.new_owner,
+                changed_at: state.now(),
+                resulting_business_version,
+            });
+        Ok(id)
+    }
+}
+
+pub fn validate_transfer_business_ownership(
+    state: &AppState,
+    business: BusinessId,
+    new_owner: BusinessOwner,
+) -> Result<ValidatedBusinessOwnershipTransfer, WorldError> {
+    let record = validate_transferable_business(state, business)?;
+    validate_business_owner(state, new_owner)?;
+    if record.owner() == new_owner {
+        return Err(WorldError::BusinessOwnershipUnchanged {
+            business,
+            owner: new_owner,
+        });
+    }
+    Ok(ValidatedBusinessOwnershipTransfer {
+        business,
+        new_owner,
+        expected_version: record.version(),
+        previous_owner: record.owner(),
+    })
+}
+
+fn validate_transferable_business(
+    state: &AppState,
+    business: BusinessId,
+) -> Result<&BusinessRecord, WorldError> {
+    let record = state
+        .world
+        .get_business(business)
+        .ok_or(WorldError::MissingBusiness(business))?;
+    if record.lifecycle() != Lifecycle::Active {
+        return Err(WorldError::InactiveBusiness(business));
+    }
+    Ok(record)
+}
+
+fn validate_business_owner(state: &AppState, owner: BusinessOwner) -> Result<(), WorldError> {
+    match owner {
+        BusinessOwner::Independent => Ok(()),
         BusinessOwner::Organization(id) => {
             if state.world.get_organization(id).is_none() {
                 return Err(WorldError::MissingOrganization(id));
             }
+            Ok(())
         }
         BusinessOwner::Character(id) => {
             if state.world.get_character(id).is_none() {
                 return Err(WorldError::MissingCharacter(id));
             }
+            Ok(())
         }
     }
-
-    let id = state.ids.next_business();
-    state.world.insert_business(BusinessRecord {
-        id,
-        name: draft.name,
-        kind: draft.kind,
-        functions: draft.functions,
-        neighborhood: draft.neighborhood,
-        owner: draft.owner,
-        lifecycle: Lifecycle::Active,
-    });
-    Ok(id)
 }
 
 pub fn set_policy(
@@ -412,9 +541,15 @@ mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::invariants::validate_invariants;
+    use crate::core::time::{SimDuration, SimTime};
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
-    use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+    use crate::world::{
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+        Rating,
+    };
     use std::collections::{BTreeMap, BTreeSet};
 
     fn make_test_character(
@@ -438,6 +573,297 @@ mod tests {
             },
         )
         .expect("test character should validate")
+    }
+
+    fn rating(value: u8) -> Rating {
+        Rating::try_new(value).expect("test rating must be valid")
+    }
+
+    fn make_test_business(
+        registry: &Registry,
+        state: &mut AppState,
+        owner: BusinessOwner,
+    ) -> BusinessId {
+        let neighborhood = insert_neighborhood(
+            state,
+            NeighborhoodDraft {
+                name: "Ownership Test Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(50),
+                        commercial_activity: rating(60),
+                        illicit_demand: rating(30),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(50),
+                        political_influence: rating(50),
+                        social_cohesion: rating(50),
+                        visible_violence_tolerance: rating(20),
+                    },
+                },
+            },
+        )
+        .expect("test neighborhood should validate");
+        insert_business(
+            registry,
+            state,
+            BusinessDraft {
+                name: "Ownership Test Business".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood,
+                owner,
+            },
+        )
+        .expect("test business should validate")
+    }
+
+    #[test]
+    fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x0B51_0001);
+        let first_owner = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "First Holding Company".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("first owner should validate");
+        let second_owner = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Second Holding Company".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("second owner should validate");
+        let individual_owner = make_test_character(
+            &registry,
+            &mut state,
+            "Individual Proprietor",
+            second_owner,
+            None,
+        );
+        let business = make_test_business(
+            &registry,
+            &mut state,
+            BusinessOwner::Organization(first_owner),
+        );
+
+        let initial = state
+            .world()
+            .get_business_ownership_change_for_version(business, 1)
+            .expect("initial ownership should be durable");
+        assert_eq!(initial.previous_owner(), None);
+        assert_eq!(
+            initial.new_owner(),
+            BusinessOwner::Organization(first_owner)
+        );
+        assert_eq!(initial.changed_at(), SimTime::ZERO);
+        assert_eq!(
+            state
+                .world()
+                .businesses_owned_by_organization(first_owner)
+                .count(),
+            1
+        );
+
+        state.advance_clock(SimDuration::from_minutes(15));
+        let change = validate_transfer_business_ownership(
+            &state,
+            business,
+            BusinessOwner::Organization(second_owner),
+        )
+        .expect("ownership transfer should validate")
+        .commit(&mut state)
+        .expect("ownership transfer should commit");
+
+        let record = state
+            .world()
+            .get_business(business)
+            .expect("business should remain present");
+        assert_eq!(record.owner(), BusinessOwner::Organization(second_owner));
+        assert_eq!(record.version(), 2);
+        assert_eq!(
+            state
+                .world()
+                .businesses_owned_by_organization(first_owner)
+                .count(),
+            0
+        );
+        assert_eq!(
+            state
+                .world()
+                .businesses_owned_by_organization(second_owner)
+                .count(),
+            1
+        );
+        let change = state
+            .world()
+            .get_business_ownership_change(change)
+            .expect("ownership change should persist");
+        assert_eq!(
+            change.previous_owner(),
+            Some(BusinessOwner::Organization(first_owner))
+        );
+        assert_eq!(
+            change.new_owner(),
+            BusinessOwner::Organization(second_owner)
+        );
+        assert_eq!(change.changed_at(), SimTime::from_minutes(15));
+        assert_eq!(change.resulting_business_version(), 2);
+        assert_eq!(
+            state.world().business_ownership_history(business).count(),
+            2
+        );
+        assert_eq!(
+            state.world().business_owner_at(business, SimTime::ZERO),
+            Some(BusinessOwner::Organization(first_owner))
+        );
+        assert_eq!(
+            state
+                .world()
+                .business_owner_at(business, SimTime::from_minutes(15)),
+            Some(BusinessOwner::Organization(second_owner))
+        );
+
+        state.advance_clock(SimDuration::from_minutes(5));
+        validate_transfer_business_ownership(
+            &state,
+            business,
+            BusinessOwner::Character(individual_owner),
+        )
+        .expect("character ownership transfer should validate")
+        .commit(&mut state)
+        .expect("character ownership transfer should commit");
+        let record = state
+            .world()
+            .get_business(business)
+            .expect("business should remain present after character transfer");
+        assert_eq!(record.owner(), BusinessOwner::Character(individual_owner));
+        assert_eq!(record.version(), 3);
+        assert_eq!(
+            state
+                .world()
+                .businesses_owned_by_organization(second_owner)
+                .count(),
+            0
+        );
+        assert_eq!(
+            state
+                .world()
+                .businesses_ever_owned_by_organization(first_owner)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .world()
+                .businesses_ever_owned_by_organization(second_owner)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .world()
+                .businesses_owned_by_character(individual_owner)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .world()
+                .businesses_ever_owned_by_character(individual_owner)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state.world().business_ownership_history(business).count(),
+            3
+        );
+        assert_eq!(
+            state
+                .world()
+                .business_owner_at(business, SimTime::from_minutes(20)),
+            Some(BusinessOwner::Character(individual_owner))
+        );
+        assert!(state.world().business_was_owned_during(
+            business,
+            BusinessOwner::Organization(second_owner),
+            SimTime::from_minutes(15),
+            SimTime::from_minutes(20),
+        ));
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn stale_business_ownership_token_cannot_overwrite_newer_title() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x0B51_0002);
+        let first_owner = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Initial Owner".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("first owner should validate");
+        let intended_owner = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Intended Buyer".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("intended owner should validate");
+        let business = make_test_business(
+            &registry,
+            &mut state,
+            BusinessOwner::Organization(first_owner),
+        );
+        let stale = validate_transfer_business_ownership(
+            &state,
+            business,
+            BusinessOwner::Organization(intended_owner),
+        )
+        .expect("first transfer should validate");
+        validate_transfer_business_ownership(&state, business, BusinessOwner::Independent)
+            .expect("newer transfer should validate")
+            .commit(&mut state)
+            .expect("newer transfer should commit");
+
+        let error = stale
+            .commit(&mut state)
+            .expect_err("stale transfer must not overwrite newer title");
+        assert_eq!(
+            error,
+            WorldError::StaleBusiness {
+                business,
+                expected: 1,
+                found: 2,
+            }
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_business(business)
+                .expect("business should remain present")
+                .owner(),
+            BusinessOwner::Independent
+        );
+        assert_eq!(
+            state.world().business_ownership_history(business).count(),
+            2
+        );
+        validate_invariants(&state);
     }
 
     #[test]

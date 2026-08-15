@@ -1,10 +1,18 @@
 //! Operation-facing police dispatch planning and deterministic response-arrival processing.
 
+use crate::core::entity::EntityRef;
 use crate::core::id::{OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
     validate_request_police_arrival_decision_on_arrival, DecisionError, DecisionRequestOutcome,
+};
+use crate::intelligence::intelligence_system::{
+    validate_record_information, IntelligenceError, ValidatedInformation,
+};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
 };
 use crate::legal::jurisdiction_system::resolve_police_response_authority;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
@@ -27,6 +35,8 @@ pub(crate) enum PoliceResponseIntegrationError {
     PoliceResponse(#[from] PoliceResponseError),
     #[error(transparent)]
     Decision(#[from] DecisionError),
+    #[error(transparent)]
+    Intelligence(#[from] IntelligenceError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,7 +131,7 @@ pub(crate) fn process_due_police_responses(
     let mut arrived = Vec::with_capacity(due.len());
     let mut decisions = Vec::new();
     for response_id in due {
-        let (operation_id, should_abort_before_entry, decision) = {
+        let (operation_id, should_abort_before_entry, decision, participant_pressure) = {
             let response = state
                 .legal
                 .get_police_response(response_id)
@@ -150,7 +160,19 @@ pub(crate) fn process_due_police_responses(
             } else {
                 None
             };
-            (operation.id(), should_abort, decision)
+            let participant_pressure = if matches!(
+                operation.status(),
+                OperationStatus::InProgress | OperationStatus::AwaitingDecision
+            ) {
+                validate_participant_police_pressure_information(
+                    state,
+                    operation,
+                    response.authority(),
+                )?
+            } else {
+                Vec::new()
+            };
+            (operation.id(), should_abort, decision, participant_pressure)
         };
 
         let arrival = validate_police_response_arrival(state, response_id)?;
@@ -174,7 +196,54 @@ pub(crate) fn process_due_police_responses(
                     .expect("prevalidated police-response decision request must remain current"),
             );
         }
+        for information in participant_pressure {
+            information.commit(state);
+        }
         arrived.push(response_id);
     }
     Ok(PoliceResponseProcessingOutcome { arrived, decisions })
+}
+
+fn validate_participant_police_pressure_information(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    authority: crate::core::id::OrganizationId,
+) -> Result<Vec<ValidatedInformation>, IntelligenceError> {
+    let authority_name = state
+        .world
+        .get_organization(authority)
+        .map_or("law enforcement", |record| record.name());
+    let mut participants = operation
+        .roles()
+        .values()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    participants.insert(operation.leader());
+    participants
+        .into_iter()
+        .map(|participant| {
+            let participant_name = state
+                .world
+                .get_character(participant)
+                .expect("validated operation participant must exist")
+                .name();
+            validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Character(participant),
+                    source_kind: InformationSourceKind::DirectObservation,
+                    topic: InformationTopic::PoliceActivity,
+                    source_entity: Some(EntityRef::Organization(authority)),
+                    subject: EntityRef::Character(participant),
+                    observed_at: state.now(),
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: format!(
+                        "{participant_name} directly experienced {authority_name} responding during {}.",
+                        operation.title()
+                    ),
+                },
+            )
+        })
+        .collect()
 }

@@ -11,6 +11,7 @@ use crate::legal::{
     InvestigatorRole,
 };
 use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
+use std::cmp::Reverse;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -81,6 +82,8 @@ pub enum InvestigationError {
     NoIncidentEvidence,
     #[error("pattern-link evidence must be produced by canonical investigation work")]
     PatternLinkRequiresInvestigationWork,
+    #[error("forensic-analysis evidence must be produced by canonical investigation work")]
+    ForensicAnalysisRequiresInvestigationWork,
     #[error(
         "informant-statement evidence must be produced by the canonical informant disclosure path"
     )]
@@ -366,6 +369,65 @@ pub fn validate_assign_investigator(
     })
 }
 
+pub(crate) fn staff_unassigned_active_investigations(
+    state: &mut AppState,
+) -> Result<Vec<(InvestigationId, CharacterId)>, InvestigationError> {
+    let investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
+    let mut staffed = Vec::new();
+
+    for investigation_id in investigations {
+        let investigation = state
+            .legal
+            .get_investigation(investigation_id)
+            .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
+        let owner = investigation.owner();
+        let assigned_candidate = investigation
+            .assigned_investigators()
+            .iter()
+            .filter_map(|investigator| {
+                let record = state.world.get_character(*investigator)?;
+                let capability = record.capability(CapabilityKind::Investigation)?;
+                (record.lifecycle() == Lifecycle::Active && record.organization() == Some(owner))
+                    .then_some((*investigator, capability.value()))
+            })
+            .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
+            .map(|(investigator, _)| investigator);
+
+        let investigator = assigned_candidate.or_else(|| {
+            state
+                .world
+                .characters_in_organization(owner)
+                .filter(|record| {
+                    record.lifecycle() == Lifecycle::Active
+                        && state
+                            .legal
+                            .active_investigation_for_investigator(record.id())
+                            .is_none()
+                })
+                .filter_map(|record| {
+                    record
+                        .capability(CapabilityKind::Investigation)
+                        .map(|capability| (record.id(), capability.value()))
+                })
+                .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
+                .map(|(investigator, _)| investigator)
+        });
+        let Some(investigator) = investigator else {
+            continue;
+        };
+
+        validate_assign_investigator(
+            state,
+            investigation_id,
+            investigator,
+            InvestigatorRole::Lead,
+        )?
+        .commit(state)?;
+        staffed.push((investigation_id, investigator));
+    }
+    Ok(staffed)
+}
+
 fn validate_investigator_assignment_dependencies(
     state: &AppState,
     investigation_id: InvestigationId,
@@ -548,6 +610,9 @@ fn validate_evidence_draft(
     if draft.kind == crate::legal::EvidenceKind::PatternLink {
         return Err(InvestigationError::PatternLinkRequiresInvestigationWork);
     }
+    if draft.kind == crate::legal::EvidenceKind::ForensicAnalysis {
+        return Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork);
+    }
     if draft.kind == crate::legal::EvidenceKind::InformantStatement {
         return Err(InvestigationError::InformantStatementRequiresDisclosure);
     }
@@ -669,6 +734,9 @@ fn validate_incident_intake_dependencies(
         if evidence.kind == crate::legal::EvidenceKind::PatternLink {
             return Err(InvestigationError::PatternLinkRequiresInvestigationWork);
         }
+        if evidence.kind == crate::legal::EvidenceKind::ForensicAnalysis {
+            return Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork);
+        }
         if !is_entity_present(state, evidence.subject) {
             return Err(InvestigationError::MissingEntity(evidence.subject));
         }
@@ -734,6 +802,89 @@ mod tests {
             },
         )
         .expect("investigator fixture should validate")
+    }
+
+    #[test]
+    fn autonomous_staffing_assigns_best_available_detective_and_respects_active_case_capacity() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x57AF_F193);
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Staffing Bureau".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let criminal = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Staffing Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("criminal fixture should validate");
+        let junior = insert_test_investigator(&registry, &mut state, police, "Junior", 70);
+        let senior = insert_test_investigator(&registry, &mut state, police, "Senior", 92);
+        let first = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "First autonomous staffing inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+            },
+        )
+        .expect("first case should validate")
+        .commit(&mut state)
+        .expect("first case should commit");
+
+        state = restore_save(
+            &registry,
+            build_save(&registry, &state).expect("unstaffed case state should save"),
+        )
+        .expect("unstaffed case index should survive save restoration");
+
+        let staffed = staff_unassigned_active_investigations(&mut state)
+            .expect("available detectives should staff the first case");
+        assert_eq!(staffed, vec![(first, senior)]);
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(first)
+                .expect("first case should persist")
+                .lead_investigator(),
+            Some(senior)
+        );
+
+        let second = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "Second autonomous staffing inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+            },
+        )
+        .expect("second case should validate")
+        .commit(&mut state)
+        .expect("second case should commit");
+        let staffed = staff_unassigned_active_investigations(&mut state)
+            .expect("remaining detective should staff the second case");
+        assert_eq!(staffed, vec![(second, junior)]);
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(second)
+                .expect("second case should persist")
+                .lead_investigator(),
+            Some(junior)
+        );
+        assert!(staff_unassigned_active_investigations(&mut state)
+            .expect("already staffed cases should be a no-op")
+            .is_empty());
+        validate_state(&state).expect("autonomous staffing state should validate");
+        validate_invariants(&state);
     }
 
     #[test]

@@ -1339,4 +1339,51 @@ mod tests {
             .expect("executive-brief opportunity integration should remain valid");
         validate_invariants(&fixture.state);
     }
+
+    #[test]
+    fn converted_opportunity_discovery_is_not_resurfaced_in_later_executive_brief() {
+        let mut fixture = make_fixture();
+        designate_player_organization(&mut fixture.state, fixture.organization)
+            .expect("criminal fixture organization should be eligible as player organization");
+        let summary = "Bellmore Jewelry may be vulnerable around its Thursday delivery window.";
+        let opportunity = validate_discover_operation_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            opportunity_draft(&fixture, SimTime::from_minutes(2_000)),
+        )
+        .expect("player opportunity should validate")
+        .commit(&mut fixture.state)
+        .expect("player opportunity should commit");
+        let operation = authorize_matching_operation(&mut fixture);
+        validate_convert_opportunity(&fixture.state, opportunity, operation)
+            .expect("matching operation should convert the opportunity")
+            .commit(&mut fixture.state)
+            .expect("opportunity conversion should commit");
+
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_439));
+        let tick = run_tick(&fixture.registry, &mut fixture.state);
+        let executive_brief = tick
+            .executive_brief
+            .expect("daily boundary should synthesize an executive brief");
+        let brief = fixture
+            .state
+            .reports()
+            .get_report(executive_brief)
+            .expect("executive brief should persist");
+        assert!(brief.entries().iter().all(|entry| entry.summary != summary));
+        assert_eq!(
+            fixture
+                .state
+                .opportunities()
+                .get_opportunity(opportunity)
+                .expect("converted opportunity should persist")
+                .status(),
+            OpportunityStatus::Converted
+        );
+        validate_state(&fixture.state)
+            .expect("converted-opportunity brief filtering should remain structurally valid");
+        validate_invariants(&fixture.state);
+    }
 }

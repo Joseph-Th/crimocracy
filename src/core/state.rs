@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 26;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 34;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -33,6 +33,10 @@ struct StateMetadata {
 struct SimulationRuntime {
     now: SimTime,
     rng: ChaCha8Rng,
+    operation_rng: ChaCha8Rng,
+    investigation_rng: ChaCha8Rng,
+    business_rng: ChaCha8Rng,
+    enterprise_rng: ChaCha8Rng,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -73,6 +77,10 @@ impl AppState {
             simulation: SimulationRuntime {
                 now: SimTime::ZERO,
                 rng: ChaCha8Rng::seed_from_u64(seed),
+                operation_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x4F50_4552)),
+                investigation_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x494E_5653)),
+                business_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x4255_5349)),
+                enterprise_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x454E_5452)),
             },
             campaign: CampaignRuntime::default(),
             ids: IdCounters::new(),
@@ -189,6 +197,29 @@ impl AppState {
     pub(crate) fn rng_mut(&mut self) -> &mut ChaCha8Rng {
         &mut self.simulation.rng
     }
+
+    pub(crate) fn operation_rng_mut(&mut self) -> &mut ChaCha8Rng {
+        &mut self.simulation.operation_rng
+    }
+
+    pub(crate) fn investigation_rng_mut(&mut self) -> &mut ChaCha8Rng {
+        &mut self.simulation.investigation_rng
+    }
+
+    pub(crate) fn business_rng_mut(&mut self) -> &mut ChaCha8Rng {
+        &mut self.simulation.business_rng
+    }
+
+    pub(crate) fn enterprise_rng_mut(&mut self) -> &mut ChaCha8Rng {
+        &mut self.simulation.enterprise_rng
+    }
+}
+
+fn domain_seed(seed: u64, domain: u64) -> u64 {
+    let mut value = seed ^ domain.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 impl Default for AppState {

@@ -2,7 +2,10 @@
 
 pub mod world_system;
 
-use crate::core::id::{BusinessId, CharacterId, NeighborhoodId, OrganizationId};
+use crate::core::id::{
+    BusinessId, BusinessOwnershipChangeId, CharacterId, NeighborhoodId, OrganizationId,
+};
+use crate::core::time::SimTime;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -431,6 +434,7 @@ pub enum BusinessFunction {
     Warehousing,
     MeetingSpace,
     CustomerAccess,
+    ResaleMarket,
     UnionAccess,
     DistributionInfrastructure,
     ProfessionalRecords,
@@ -452,6 +456,7 @@ pub struct BusinessRecord {
     neighborhood: NeighborhoodId,
     owner: BusinessOwner,
     lifecycle: Lifecycle,
+    version: u32,
 }
 
 impl BusinessRecord {
@@ -485,6 +490,46 @@ impl BusinessRecord {
 
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BusinessOwnershipChangeRecord {
+    id: BusinessOwnershipChangeId,
+    business: BusinessId,
+    previous_owner: Option<BusinessOwner>,
+    new_owner: BusinessOwner,
+    changed_at: SimTime,
+    resulting_business_version: u32,
+}
+
+impl BusinessOwnershipChangeRecord {
+    pub fn id(&self) -> BusinessOwnershipChangeId {
+        self.id
+    }
+
+    pub fn business(&self) -> BusinessId {
+        self.business
+    }
+
+    pub fn previous_owner(&self) -> Option<BusinessOwner> {
+        self.previous_owner
+    }
+
+    pub fn new_owner(&self) -> BusinessOwner {
+        self.new_owner
+    }
+
+    pub fn changed_at(&self) -> SimTime {
+        self.changed_at
+    }
+
+    pub fn resulting_business_version(&self) -> u32 {
+        self.resulting_business_version
     }
 }
 
@@ -567,26 +612,132 @@ struct BusinessStore {
     records: BTreeMap<BusinessId, BusinessRecord>,
     by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<BusinessId>>,
     by_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
+    by_character_owner: BTreeMap<CharacterId, BTreeSet<BusinessId>>,
+    by_historical_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
+    by_historical_character_owner: BTreeMap<CharacterId, BTreeSet<BusinessId>>,
+    ownership_changes: BTreeMap<BusinessOwnershipChangeId, BusinessOwnershipChangeRecord>,
+    ownership_change_by_business_version: BTreeMap<(BusinessId, u32), BusinessOwnershipChangeId>,
 }
 
 impl BusinessStore {
-    fn insert(&mut self, record: BusinessRecord) {
+    fn insert(&mut self, record: BusinessRecord, initial_ownership: BusinessOwnershipChangeRecord) {
         let id = record.id();
         self.by_neighborhood
             .entry(record.neighborhood())
             .or_default()
             .insert(id);
-        if let BusinessOwner::Organization(organization) = record.owner() {
-            self.by_organization_owner
-                .entry(organization)
-                .or_default()
-                .insert(id);
-        }
+        self.add_owner_index(id, record.owner());
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate business ID inserted"
         );
+        self.insert_ownership_change(initial_ownership);
+    }
+
+    fn transfer_ownership(&mut self, change: BusinessOwnershipChangeRecord) {
+        let business = change.business();
+        let (previous_owner, previous_version) = {
+            let record = self
+                .records
+                .get(&business)
+                .expect("validated business disappeared before ownership commit");
+            (record.owner(), record.version())
+        };
+        debug_assert_eq!(change.previous_owner(), Some(previous_owner));
+        debug_assert_eq!(
+            change.resulting_business_version(),
+            previous_version
+                .checked_add(1)
+                .expect("business version counter exhausted")
+        );
+        self.remove_owner_index(business, previous_owner);
+        let record = self
+            .records
+            .get_mut(&business)
+            .expect("validated business disappeared before ownership commit");
+        record.owner = change.new_owner();
+        record.version = change.resulting_business_version();
+        self.add_owner_index(business, change.new_owner());
+        self.insert_ownership_change(change);
+    }
+
+    fn insert_ownership_change(&mut self, change: BusinessOwnershipChangeRecord) {
+        let key = (change.business(), change.resulting_business_version());
+        self.add_historical_owner_index(change.business(), change.new_owner());
+        let previous_version = self
+            .ownership_change_by_business_version
+            .insert(key, change.id());
+        debug_assert!(
+            previous_version.is_none(),
+            "Index Uniqueness: duplicate business ownership version inserted"
+        );
+        let previous = self.ownership_changes.insert(change.id(), change);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate business ownership change ID inserted"
+        );
+    }
+
+    fn add_owner_index(&mut self, business: BusinessId, owner: BusinessOwner) {
+        match owner {
+            BusinessOwner::Independent => {}
+            BusinessOwner::Organization(organization) => {
+                self.by_organization_owner
+                    .entry(organization)
+                    .or_default()
+                    .insert(business);
+            }
+            BusinessOwner::Character(character) => {
+                self.by_character_owner
+                    .entry(character)
+                    .or_default()
+                    .insert(business);
+            }
+        }
+    }
+
+    fn add_historical_owner_index(&mut self, business: BusinessId, owner: BusinessOwner) {
+        match owner {
+            BusinessOwner::Independent => {}
+            BusinessOwner::Organization(organization) => {
+                self.by_historical_organization_owner
+                    .entry(organization)
+                    .or_default()
+                    .insert(business);
+            }
+            BusinessOwner::Character(character) => {
+                self.by_historical_character_owner
+                    .entry(character)
+                    .or_default()
+                    .insert(business);
+            }
+        }
+    }
+
+    fn remove_owner_index(&mut self, business: BusinessId, owner: BusinessOwner) {
+        match owner {
+            BusinessOwner::Independent => {}
+            BusinessOwner::Organization(organization) => {
+                Self::remove_business_index(&mut self.by_organization_owner, organization, business)
+            }
+            BusinessOwner::Character(character) => {
+                Self::remove_business_index(&mut self.by_character_owner, character, business)
+            }
+        }
+    }
+
+    fn remove_business_index<K: Ord + Copy>(
+        index: &mut BTreeMap<K, BTreeSet<BusinessId>>,
+        key: K,
+        business: BusinessId,
+    ) {
+        if let Some(ids) = index.get_mut(&key) {
+            ids.remove(&business);
+            if ids.is_empty() {
+                index.remove(&key);
+            }
+        }
     }
 }
 
@@ -617,6 +768,13 @@ impl WorldState {
 
     pub fn get_business(&self, id: BusinessId) -> Option<&BusinessRecord> {
         self.businesses.records.get(&id)
+    }
+
+    pub fn get_business_ownership_change(
+        &self,
+        id: BusinessOwnershipChangeId,
+    ) -> Option<&BusinessOwnershipChangeRecord> {
+        self.businesses.ownership_changes.get(&id)
     }
 
     pub fn characters_in_organization(
@@ -652,6 +810,121 @@ impl WorldState {
             .filter_map(|business_id| self.businesses.records.get(business_id))
     }
 
+    pub fn businesses_ever_owned_by_organization(
+        &self,
+        id: OrganizationId,
+    ) -> impl Iterator<Item = &BusinessRecord> {
+        self.businesses
+            .by_historical_organization_owner
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| self.businesses.records.get(business_id))
+    }
+
+    pub fn businesses_ever_owned_by_character(
+        &self,
+        id: CharacterId,
+    ) -> impl Iterator<Item = &BusinessRecord> {
+        self.businesses
+            .by_historical_character_owner
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| self.businesses.records.get(business_id))
+    }
+
+    pub fn businesses_owned_by_organization(
+        &self,
+        id: OrganizationId,
+    ) -> impl Iterator<Item = &BusinessRecord> {
+        self.businesses
+            .by_organization_owner
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| self.businesses.records.get(business_id))
+    }
+
+    pub fn businesses_owned_by_character(
+        &self,
+        id: CharacterId,
+    ) -> impl Iterator<Item = &BusinessRecord> {
+        self.businesses
+            .by_character_owner
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|business_id| self.businesses.records.get(business_id))
+    }
+
+    pub fn business_ownership_history(
+        &self,
+        business: BusinessId,
+    ) -> impl Iterator<Item = &BusinessOwnershipChangeRecord> {
+        let version = self
+            .businesses
+            .records
+            .get(&business)
+            .map_or(0, BusinessRecord::version);
+        (1..=version).filter_map(move |business_version| {
+            self.businesses
+                .ownership_change_by_business_version
+                .get(&(business, business_version))
+                .and_then(|id| self.businesses.ownership_changes.get(id))
+        })
+    }
+
+    pub fn business_owner_at_version(
+        &self,
+        business: BusinessId,
+        version: u32,
+    ) -> Option<BusinessOwner> {
+        self.get_business_ownership_change_for_version(business, version)
+            .map(BusinessOwnershipChangeRecord::new_owner)
+    }
+
+    pub fn get_business_ownership_change_for_version(
+        &self,
+        business: BusinessId,
+        version: u32,
+    ) -> Option<&BusinessOwnershipChangeRecord> {
+        self.businesses
+            .ownership_change_by_business_version
+            .get(&(business, version))
+            .and_then(|id| self.businesses.ownership_changes.get(id))
+    }
+
+    pub fn business_owner_at(&self, business: BusinessId, at: SimTime) -> Option<BusinessOwner> {
+        self.business_ownership_history(business)
+            .filter(|change| change.changed_at() <= at)
+            .max_by_key(|change| (change.changed_at(), change.resulting_business_version()))
+            .map(BusinessOwnershipChangeRecord::new_owner)
+    }
+
+    pub fn business_was_owned_during(
+        &self,
+        business: BusinessId,
+        owner: BusinessOwner,
+        period_start: SimTime,
+        period_end: SimTime,
+    ) -> bool {
+        if period_start > period_end {
+            return false;
+        }
+        let mut history = self.business_ownership_history(business).peekable();
+        while let Some(change) = history.next() {
+            let ownership_end = history.peek().map(|next| next.changed_at());
+            if change.new_owner() == owner
+                && change.changed_at() <= period_end
+                && ownership_end.is_none_or(|end| end >= period_start)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn organizations(&self) -> impl Iterator<Item = &OrganizationRecord> {
         self.organizations.values()
     }
@@ -684,8 +957,16 @@ impl WorldState {
         );
     }
 
-    pub(crate) fn insert_business(&mut self, record: BusinessRecord) {
-        self.businesses.insert(record);
+    pub(crate) fn insert_business(
+        &mut self,
+        record: BusinessRecord,
+        initial_ownership: BusinessOwnershipChangeRecord,
+    ) {
+        self.businesses.insert(record, initial_ownership);
+    }
+
+    pub(crate) fn transfer_business_ownership(&mut self, change: BusinessOwnershipChangeRecord) {
+        self.businesses.transfer_ownership(change);
     }
 
     pub(crate) fn set_policy(&mut self, id: OrganizationId, setting: PolicySetting) {
@@ -771,6 +1052,70 @@ impl WorldState {
                     return false;
                 }
             }
+            if let BusinessOwner::Character(character) = record.owner() {
+                if !self
+                    .businesses
+                    .by_character_owner
+                    .get(&character)
+                    .is_some_and(|ids| ids.contains(&record.id()))
+                {
+                    return false;
+                }
+            }
+            if record.version() == 0 {
+                return false;
+            }
+            let mut previous_owner = None;
+            let mut previous_time = None;
+            for version in 1..=record.version() {
+                let Some(change_id) = self
+                    .businesses
+                    .ownership_change_by_business_version
+                    .get(&(record.id(), version))
+                else {
+                    return false;
+                };
+                let Some(change) = self.businesses.ownership_changes.get(change_id) else {
+                    return false;
+                };
+                if change.business() != record.id()
+                    || change.resulting_business_version() != version
+                    || (version == 1 && change.previous_owner().is_some())
+                    || (version > 1 && change.previous_owner() != previous_owner)
+                    || change.previous_owner() == Some(change.new_owner())
+                    || previous_time.is_some_and(|time| change.changed_at() < time)
+                {
+                    return false;
+                }
+                match change.new_owner() {
+                    BusinessOwner::Independent => {}
+                    BusinessOwner::Organization(organization) => {
+                        if !self
+                            .businesses
+                            .by_historical_organization_owner
+                            .get(&organization)
+                            .is_some_and(|ids| ids.contains(&record.id()))
+                        {
+                            return false;
+                        }
+                    }
+                    BusinessOwner::Character(character) => {
+                        if !self
+                            .businesses
+                            .by_historical_character_owner
+                            .get(&character)
+                            .is_some_and(|ids| ids.contains(&record.id()))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                previous_owner = Some(change.new_owner());
+                previous_time = Some(change.changed_at());
+            }
+            if previous_owner != Some(record.owner()) {
+                return false;
+            }
         }
         for (neighborhood, ids) in &self.businesses.by_neighborhood {
             for id in ids {
@@ -791,6 +1136,79 @@ impl WorldState {
                 }) {
                     return false;
                 }
+            }
+        }
+        for (character, ids) in &self.businesses.by_character_owner {
+            for id in ids {
+                if !self
+                    .businesses
+                    .records
+                    .get(id)
+                    .is_some_and(|record| record.owner() == BusinessOwner::Character(*character))
+                {
+                    return false;
+                }
+            }
+        }
+        for (organization, ids) in &self.businesses.by_historical_organization_owner {
+            for id in ids {
+                let Some(record) = self.businesses.records.get(id) else {
+                    return false;
+                };
+                let found = (1..=record.version()).any(|version| {
+                    self.businesses
+                        .ownership_change_by_business_version
+                        .get(&(*id, version))
+                        .and_then(|change_id| self.businesses.ownership_changes.get(change_id))
+                        .is_some_and(|change| {
+                            change.new_owner() == BusinessOwner::Organization(*organization)
+                        })
+                });
+                if !found {
+                    return false;
+                }
+            }
+        }
+        for (character, ids) in &self.businesses.by_historical_character_owner {
+            for id in ids {
+                let Some(record) = self.businesses.records.get(id) else {
+                    return false;
+                };
+                let found = (1..=record.version()).any(|version| {
+                    self.businesses
+                        .ownership_change_by_business_version
+                        .get(&(*id, version))
+                        .and_then(|change_id| self.businesses.ownership_changes.get(change_id))
+                        .is_some_and(|change| {
+                            change.new_owner() == BusinessOwner::Character(*character)
+                        })
+                });
+                if !found {
+                    return false;
+                }
+            }
+        }
+        for (key, id) in &self.businesses.ownership_change_by_business_version {
+            if !self
+                .businesses
+                .ownership_changes
+                .get(id)
+                .is_some_and(|change| {
+                    (change.business(), change.resulting_business_version()) == *key
+                })
+            {
+                return false;
+            }
+        }
+        for change in self.businesses.ownership_changes.values() {
+            if self
+                .businesses
+                .ownership_change_by_business_version
+                .get(&(change.business(), change.resulting_business_version()))
+                != Some(&change.id())
+                || !self.businesses.records.contains_key(&change.business())
+            {
+                return false;
             }
         }
         true
@@ -862,6 +1280,15 @@ impl WorldState {
                         .get(&organization)
                         .is_some_and(|ids| ids.contains(&record.id())),
                     "Index Completeness: business owner index is missing a business"
+                );
+            }
+            if let BusinessOwner::Character(character) = record.owner() {
+                debug_assert!(
+                    self.businesses
+                        .by_character_owner
+                        .get(&character)
+                        .is_some_and(|ids| ids.contains(&record.id())),
+                    "Index Completeness: business character-owner index is missing a business"
                 );
             }
         }

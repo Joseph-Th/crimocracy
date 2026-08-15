@@ -76,6 +76,12 @@ pub enum BusinessEconomyError {
         expected: u32,
         found: u32,
     },
+    #[error("business {business} ownership changed after cycle planning; expected version {expected}, found {found}")]
+    StaleBusiness {
+        business: BusinessId,
+        expected: u32,
+        found: u32,
+    },
     #[error(
         "business cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
@@ -150,6 +156,8 @@ pub fn validate_establish_business_economy(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusinessCyclePlan {
     business: BusinessId,
+    expected_business_version: u32,
+    owner: BusinessOwner,
     expected_economy_version: u32,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
@@ -243,6 +251,8 @@ pub fn decide_business_cycle(
     };
     Ok(BusinessCyclePlan {
         business,
+        expected_business_version: business_record.version(),
+        owner: business_record.owner(),
         expected_economy_version: economy.version(),
         occurred_at: state.now(),
         next_cycle_at: due_at + economics.cycle(),
@@ -264,7 +274,14 @@ pub struct ValidatedBusinessCycle {
 
 impl ValidatedBusinessCycle {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
-        validate_business(state, self.plan.business)?;
+        let business = validate_business(state, self.plan.business)?;
+        if business.version() != self.plan.expected_business_version {
+            return Err(BusinessEconomyError::StaleBusiness {
+                business: self.plan.business,
+                expected: self.plan.expected_business_version,
+                found: business.version(),
+            });
+        }
         let economy = state
             .economy
             .get_business_economy(self.plan.business)
@@ -306,6 +323,8 @@ impl ValidatedBusinessCycle {
             BusinessCycleRecord {
                 id: cycle,
                 business: self.plan.business,
+                business_version: self.plan.expected_business_version,
+                owner: self.plan.owner,
                 occurred_at: self.plan.occurred_at,
                 gross_revenue: self.plan.gross_revenue,
                 operating_cost: self.plan.operating_cost,
@@ -326,6 +345,13 @@ pub fn validate_business_cycle_plan(
     plan: BusinessCyclePlan,
 ) -> Result<ValidatedBusinessCycle, BusinessEconomyError> {
     let business = validate_business(state, plan.business)?;
+    if business.version() != plan.expected_business_version {
+        return Err(BusinessEconomyError::StaleBusiness {
+            business: plan.business,
+            expected: plan.expected_business_version,
+            found: business.version(),
+        });
+    }
     let economy = state
         .economy
         .get_business_economy(plan.business)
@@ -383,7 +409,7 @@ pub fn validate_business_cycle_plan(
             },
         )?)
     };
-    let information = match (plan.attention, accounting_holder(business.owner())) {
+    let information = match (plan.attention, accounting_holder(plan.owner)) {
         (AttentionClass::Notable, Some(holder)) => Some(validate_record_information(
             state,
             InformationDraft {
@@ -556,6 +582,26 @@ pub(crate) fn due_active_businesses(state: &AppState) -> Vec<BusinessId> {
     state.economy.due_at_or_before(state.now())
 }
 
+pub(crate) fn estimate_business_gross_potential(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<Money, BusinessEconomyError> {
+    let business_record = validate_business(state, business)?;
+    let neighborhood = state
+        .world
+        .get_neighborhood(business_record.neighborhood())
+        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
+    if neighborhood.lifecycle() != Lifecycle::Active {
+        return Err(BusinessEconomyError::InactiveBusiness(business));
+    }
+    resolve_gross_before_variance(
+        business,
+        registry.get_business(business_record.kind()).economics(),
+        neighborhood.profile(),
+    )
+}
+
 fn validate_business(
     state: &AppState,
     business: BusinessId,
@@ -694,7 +740,10 @@ mod tests {
     use crate::finance::{FinancialAccountDraft, FinancialOwner};
     use crate::reports::organization_financial_report::validate_organization_financial_report;
     use crate::reports::ReportKind;
-    use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
+    use crate::world::world_system::{
+        insert_business, insert_neighborhood, insert_organization,
+        validate_transfer_business_ownership,
+    };
     use crate::world::{
         BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
         NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
@@ -848,6 +897,195 @@ mod tests {
                 .expect("settlement account should exist")
                 .balance(),
             Money::from_cents(-10_000)
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn ownership_change_invalidates_prevalidated_business_cycle_atomically() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
+            .expect("due business cycle should resolve");
+        let validated = validate_business_cycle_plan(&fixture.state, plan)
+            .expect("business cycle should validate before ownership changes");
+        let successor = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Successor Holdings".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("successor organization should validate");
+        validate_transfer_business_ownership(
+            &fixture.state,
+            fixture.business,
+            BusinessOwner::Organization(successor),
+        )
+        .expect("business ownership change should validate")
+        .commit(&mut fixture.state)
+        .expect("business ownership change should commit");
+
+        let error = validated
+            .commit(&mut fixture.state)
+            .expect_err("ownership change must invalidate a prevalidated cycle");
+        assert_eq!(
+            error,
+            BusinessEconomyError::StaleBusiness {
+                business: fixture.business,
+                expected: 1,
+                found: 2,
+            }
+        );
+        assert_eq!(
+            fixture.state.economy().cycles_for(fixture.business).count(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.operating)
+                .expect("operating account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.settlement)
+                .expect("settlement account should exist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn transferred_business_cycles_remain_attributed_to_the_owner_at_commit() {
+        let registry = build_registry();
+        let mut fixture = make_business_economy_fixture();
+        establish_business_economy(&registry, &mut fixture);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let first_cycle = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
+            .expect("first due business cycle should resolve");
+        let first_cycle = validate_business_cycle_plan(&fixture.state, first_cycle)
+            .expect("first business cycle should validate")
+            .commit(&mut fixture.state)
+            .expect("first business cycle should commit");
+        let first_cycle_record = fixture
+            .state
+            .economy()
+            .get_cycle(first_cycle)
+            .expect("first business cycle should persist");
+        assert_eq!(
+            first_cycle_record.owner(),
+            BusinessOwner::Organization(fixture.organization)
+        );
+        assert_eq!(first_cycle_record.business_version(), 1);
+
+        let successor = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Acquiring Company".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("acquiring organization should validate");
+        validate_transfer_business_ownership(
+            &fixture.state,
+            fixture.business,
+            BusinessOwner::Organization(successor),
+        )
+        .expect("same-minute ownership transfer should validate")
+        .commit(&mut fixture.state)
+        .expect("same-minute ownership transfer should commit");
+
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let second_cycle = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
+            .expect("second due business cycle should resolve");
+        let second_cycle = validate_business_cycle_plan(&fixture.state, second_cycle)
+            .expect("second business cycle should validate")
+            .commit(&mut fixture.state)
+            .expect("second business cycle should commit");
+        let second_cycle_record = fixture
+            .state
+            .economy()
+            .get_cycle(second_cycle)
+            .expect("second business cycle should persist");
+        assert_eq!(
+            second_cycle_record.owner(),
+            BusinessOwner::Organization(successor)
+        );
+        assert_eq!(second_cycle_record.business_version(), 2);
+
+        let original_summary = resolve_organization_business_financial_summary(
+            &fixture.state,
+            fixture.organization,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("original owner summary should preserve historical attribution");
+        let successor_summary = resolve_organization_business_financial_summary(
+            &fixture.state,
+            successor,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("successor summary should include only post-transfer cycles");
+        assert_eq!(original_summary.totals.business_count, 1);
+        assert_eq!(original_summary.totals.cycle_count, 1);
+        assert_eq!(original_summary.totals.notable_cycle_count, 1);
+        assert_eq!(successor_summary.totals.business_count, 1);
+        assert_eq!(successor_summary.totals.cycle_count, 1);
+        assert_eq!(successor_summary.totals.notable_cycle_count, 1);
+
+        let original_report = validate_organization_financial_report(
+            &fixture.state,
+            fixture.organization,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("original owner report should retain its notable historical cycle")
+        .commit(&mut fixture.state);
+        let successor_report = validate_organization_financial_report(
+            &fixture.state,
+            successor,
+            SimTime::ZERO,
+            fixture.state.now(),
+        )
+        .expect("successor report should include its notable post-transfer cycle")
+        .commit(&mut fixture.state);
+        assert_eq!(
+            fixture
+                .state
+                .reports()
+                .get_report(original_report)
+                .expect("original owner report should persist")
+                .entries()
+                .len(),
+            2
+        );
+        assert_eq!(
+            fixture
+                .state
+                .reports()
+                .get_report(successor_report)
+                .expect("successor report should persist")
+                .entries()
+                .len(),
+            2
         );
         validate_invariants(&fixture.state);
     }
@@ -1016,6 +1254,23 @@ mod tests {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_439));
+        let successor = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Saved Successor Holdings".to_owned(),
+                kind: OrganizationKind::Commercial,
+            },
+        )
+        .expect("saved successor organization should validate");
+        validate_transfer_business_ownership(
+            &fixture.state,
+            fixture.business,
+            BusinessOwner::Organization(successor),
+        )
+        .expect("pre-save ownership transfer should validate")
+        .commit(&mut fixture.state)
+        .expect("pre-save ownership transfer should commit");
 
         let envelope = build_save(&registry, &fixture.state)
             .expect("business economy state should build a valid save");
@@ -1038,6 +1293,23 @@ mod tests {
             .economy()
             .get_cycle(continued.business_cycles[0])
             .expect("restored cycle should exist");
+        assert_eq!(
+            original_cycle.owner(),
+            BusinessOwner::Organization(successor)
+        );
+        assert_eq!(
+            restored_cycle.owner(),
+            BusinessOwner::Organization(successor)
+        );
+        assert_eq!(original_cycle.business_version(), 2);
+        assert_eq!(restored_cycle.business_version(), 2);
+        assert_eq!(
+            restored
+                .world()
+                .business_ownership_history(fixture.business)
+                .count(),
+            2
+        );
         assert_eq!(
             original_cycle.gross_revenue(),
             restored_cycle.gross_revenue()

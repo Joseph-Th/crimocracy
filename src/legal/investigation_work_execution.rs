@@ -8,9 +8,10 @@ use crate::legal::case_graph::resolve_evidence_path;
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
-    InvestigationWorkDraft, InvestigationWorkFactors, InvestigationWorkIdentity,
-    InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkRecord,
-    InvestigationWorkResolution, InvestigationWorkRuntime, InvestigationWorkStatus,
+    InvestigationWorkDraft, InvestigationWorkFactors, InvestigationWorkFocus,
+    InvestigationWorkIdentity, InvestigationWorkKind, InvestigationWorkOutcome,
+    InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkRuntime,
+    InvestigationWorkStatus,
 };
 use crate::registry::{InvestigationWorkDefinition, Registry};
 use crate::world::{CapabilityKind, Lifecycle, Rating};
@@ -49,6 +50,11 @@ pub enum InvestigationWorkError {
         investigation: InvestigationId,
         from: EntityRef,
         to: EntityRef,
+    },
+    #[error("evidence {evidence} has already been reviewed as evidence {derived}")]
+    EvidenceAlreadyReviewed {
+        evidence: EvidenceId,
+        derived: EvidenceId,
     },
     #[error("scheduled investigation work {work} already covers this case focus")]
     DuplicateScheduledWork { work: InvestigationWorkId },
@@ -128,7 +134,7 @@ impl ValidatedInvestigationWorkSchedule {
         }
         validate_case_and_investigator(state, self.draft.investigation, self.draft.investigator)?;
         validate_no_duplicate_work(state, self.draft)?;
-        let current_sources = resolve_pattern_sources(state, self.draft)?;
+        let current_sources = resolve_work_sources(state, self.draft)?;
         if current_sources != self.source_evidence {
             return Err(InvestigationWorkError::StaleInvestigation {
                 investigation: self.draft.investigation,
@@ -170,13 +176,8 @@ pub fn validate_schedule_investigation_work(
     draft: InvestigationWorkDraft,
 ) -> Result<ValidatedInvestigationWorkSchedule, InvestigationWorkError> {
     validate_case_and_investigator(state, draft.investigation, draft.investigator)?;
-    if draft.focus.from() == draft.focus.to() {
-        return Err(InvestigationWorkError::InvalidFocus);
-    }
     validate_no_duplicate_work(state, draft)?;
-    let source_evidence = match draft.kind {
-        InvestigationWorkKind::PatternAnalysis => resolve_pattern_sources(state, draft)?,
-    };
+    let source_evidence = resolve_work_sources(state, draft)?;
     let investigation = state
         .legal
         .get_investigation(draft.investigation)
@@ -193,6 +194,56 @@ pub fn validate_schedule_investigation_work(
         expected_investigator_version: investigator.version(),
         duration_minutes: duration.as_minutes(),
     })
+}
+
+fn resolve_work_sources(
+    state: &AppState,
+    draft: InvestigationWorkDraft,
+) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
+    match draft.kind {
+        InvestigationWorkKind::PatternAnalysis => {
+            if !matches!(
+                draft.focus,
+                crate::legal::InvestigationWorkFocus::EntityConnection { .. }
+            ) || draft.focus.from() == draft.focus.to()
+            {
+                return Err(InvestigationWorkError::InvalidFocus);
+            }
+            resolve_pattern_sources(state, draft)
+        }
+        InvestigationWorkKind::EvidenceReview => resolve_review_source(state, draft),
+    }
+}
+
+fn resolve_review_source(
+    state: &AppState,
+    draft: InvestigationWorkDraft,
+) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
+    let evidence_id = draft
+        .focus
+        .evidence_id()
+        .ok_or(InvestigationWorkError::InvalidFocus)?;
+    let evidence = state
+        .legal
+        .get_evidence(evidence_id)
+        .ok_or(InvestigationWorkError::InvalidSourceEvidence(evidence_id))?;
+    if evidence.investigation() != draft.investigation {
+        return Err(InvestigationWorkError::InvalidSourceEvidence(evidence_id));
+    }
+    if !is_reviewable_evidence_kind(evidence.kind()) {
+        return Err(InvestigationWorkError::InvalidFocus);
+    }
+    if let Some(derived) = state
+        .legal
+        .derived_evidence_from(evidence_id)
+        .find(|derived| derived.kind() == EvidenceKind::ForensicAnalysis)
+    {
+        return Err(InvestigationWorkError::EvidenceAlreadyReviewed {
+            evidence: evidence_id,
+            derived: derived.id(),
+        });
+    }
+    Ok(BTreeSet::from([evidence_id]))
 }
 
 fn validate_case_and_investigator(
@@ -348,11 +399,14 @@ pub fn decide_investigation_work_resolution(
         .expect("validated scheduled investigator must exist");
     let (factors, margin) =
         calculate_work_factors_and_margin(definition, state, work, randomness.variance())?;
-    let superseded_by = find_direct_case_evidence(state, work);
+    let superseded_by = find_superseding_evidence(state, work);
     let outcome = if superseded_by.is_some() {
         InvestigationWorkOutcome::Superseded
     } else if margin >= definition.connected_margin() {
-        InvestigationWorkOutcome::Connected
+        match work.kind() {
+            InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
+            InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
+        }
     } else {
         InvestigationWorkOutcome::Inconclusive
     };
@@ -510,10 +564,24 @@ fn admissibility_score(admissibility: Admissibility) -> u8 {
     }
 }
 
-pub(crate) fn find_direct_case_evidence(
+pub(crate) fn find_superseding_evidence(
     state: &AppState,
     work: &InvestigationWorkRecord,
 ) -> Option<EvidenceId> {
+    let own_derived = work
+        .resolution()
+        .and_then(|resolution| resolution.derived_evidence());
+    if work.kind() == InvestigationWorkKind::EvidenceReview {
+        let source = work.focus().evidence_id()?;
+        return state
+            .legal
+            .derived_evidence_from(source)
+            .find(|evidence| {
+                Some(evidence.id()) != own_derived
+                    && evidence.kind() == EvidenceKind::ForensicAnalysis
+            })
+            .map(|evidence| evidence.id());
+    }
     let from = work.focus().from();
     let to = work.focus().to();
     state
@@ -523,10 +591,11 @@ pub(crate) fn find_direct_case_evidence(
         .flat_map(|investigation| investigation.evidence().iter())
         .filter_map(|id| state.legal.get_evidence(*id))
         .find(|evidence| {
-            evidence.origin().is_some_and(|origin| {
-                (origin == from && evidence.subject() == to)
-                    || (origin == to && evidence.subject() == from)
-            })
+            Some(evidence.id()) != own_derived
+                && evidence.origin().is_some_and(|origin| {
+                    (origin == from && evidence.subject() == to)
+                        || (origin == to && evidence.subject() == from)
+                })
         })
         .map(|evidence| evidence.id())
 }
@@ -600,7 +669,8 @@ struct DerivedEvidenceDraft {
     investigation: InvestigationId,
     custodian: crate::core::id::OrganizationId,
     subject: EntityRef,
-    origin: EntityRef,
+    origin: Option<EntityRef>,
+    kind: EvidenceKind,
     strength: EvidenceStrength,
     reliability: EvidenceReliability,
     admissibility: Admissibility,
@@ -643,6 +713,7 @@ impl ValidatedInvestigationWorkResolution {
                     .legal
                     .get_investigation_work(self.plan.work)
                     .expect("validated investigation work must exist");
+                debug_assert_eq!(work.kind(), InvestigationWorkKind::PatternAnalysis);
                 let strength = derive_pattern_strength(self.plan.factors.source_support());
                 let reliability = minimum_source_reliability(state, work)?;
                 let admissibility = derive_pattern_admissibility(state, work);
@@ -654,11 +725,42 @@ impl ValidatedInvestigationWorkResolution {
                         .expect("validated investigation must exist")
                         .owner(),
                     subject: work.focus().to(),
-                    origin: work.focus().from(),
+                    origin: Some(work.focus().from()),
+                    kind: EvidenceKind::PatternLink,
                     strength,
                     reliability,
                     admissibility,
                     derived_from: work.source_evidence().clone(),
+                })
+            }
+            InvestigationWorkOutcome::Developed => {
+                let work = state
+                    .legal
+                    .get_investigation_work(self.plan.work)
+                    .expect("validated investigation work must exist");
+                debug_assert_eq!(work.kind(), InvestigationWorkKind::EvidenceReview);
+                let source_id = work
+                    .focus()
+                    .evidence_id()
+                    .expect("evidence review work must focus one evidence record");
+                let source = state
+                    .legal
+                    .get_evidence(source_id)
+                    .expect("validated evidence review source must exist");
+                Some(DerivedEvidenceDraft {
+                    investigation: work.investigation(),
+                    custodian: state
+                        .legal
+                        .get_investigation(work.investigation())
+                        .expect("validated investigation must exist")
+                        .owner(),
+                    subject: source.subject(),
+                    origin: source.origin(),
+                    kind: EvidenceKind::ForensicAnalysis,
+                    strength: source.strength(),
+                    reliability: improve_evidence_reliability(source.reliability()),
+                    admissibility: source.admissibility(),
+                    derived_from: BTreeSet::from([source_id]),
                 })
             }
             InvestigationWorkOutcome::Inconclusive | InvestigationWorkOutcome::Superseded => None,
@@ -673,12 +775,12 @@ impl ValidatedInvestigationWorkResolution {
                 },
                 connection: EvidenceConnection {
                     subject: draft.subject,
-                    origin: Some(draft.origin),
+                    origin: draft.origin,
                     source: None,
                     derived_from: draft.derived_from,
                 },
                 assessment: EvidenceAssessment {
-                    kind: EvidenceKind::PatternLink,
+                    kind: draft.kind,
                     strength: draft.strength,
                     reliability: draft.reliability,
                     admissibility: draft.admissibility,
@@ -702,6 +804,74 @@ impl ValidatedInvestigationWorkResolution {
         );
         Ok(self.plan.work)
     }
+}
+
+pub(crate) fn improve_evidence_reliability(
+    reliability: EvidenceReliability,
+) -> EvidenceReliability {
+    match reliability {
+        EvidenceReliability::Questionable => EvidenceReliability::Mixed,
+        EvidenceReliability::Mixed => EvidenceReliability::Credible,
+        EvidenceReliability::Credible | EvidenceReliability::HighlyReliable => {
+            EvidenceReliability::HighlyReliable
+        }
+    }
+}
+
+pub(crate) fn schedule_initial_evidence_reviews(
+    registry: &Registry,
+    state: &mut AppState,
+    staffed: &[(InvestigationId, CharacterId)],
+) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
+    let mut scheduled = Vec::new();
+    for (investigation_id, investigator) in staffed {
+        if state
+            .legal
+            .work_for_investigation(*investigation_id)
+            .next()
+            .is_some()
+        {
+            continue;
+        }
+        let source = state
+            .legal
+            .get_investigation(*investigation_id)
+            .into_iter()
+            .flat_map(|investigation| investigation.evidence().iter())
+            .filter_map(|id| state.legal.get_evidence(*id))
+            .find(|evidence| is_reviewable_evidence_kind(evidence.kind()))
+            .map(|evidence| evidence.id());
+        let Some(source) = source else {
+            continue;
+        };
+        let work = validate_schedule_investigation_work(
+            registry,
+            state,
+            InvestigationWorkDraft {
+                investigation: *investigation_id,
+                investigator: *investigator,
+                kind: InvestigationWorkKind::EvidenceReview,
+                focus: InvestigationWorkFocus::evidence(source),
+            },
+        )?
+        .commit(state)?;
+        scheduled.push(work);
+    }
+    Ok(scheduled)
+}
+
+pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {
+    matches!(
+        kind,
+        EvidenceKind::Fingerprint
+            | EvidenceKind::RecoveredProperty
+            | EvidenceKind::FinancialRecord
+            | EvidenceKind::Surveillance
+            | EvidenceKind::CommunicationRecord
+            | EvidenceKind::Document
+            | EvidenceKind::Ballistics
+            | EvidenceKind::VehicleDescription
+    )
 }
 
 pub(crate) fn minimum_source_reliability(
@@ -734,11 +904,14 @@ pub fn validate_investigation_work_resolution_plan(
     let definition = registry.get_investigation_work(work.kind());
     let (expected_factors, expected_margin) =
         calculate_work_factors_and_margin(definition, state, work, plan.factors.variance())?;
-    let expected_superseded_by = find_direct_case_evidence(state, work);
+    let expected_superseded_by = find_superseding_evidence(state, work);
     let expected_outcome = if expected_superseded_by.is_some() {
         InvestigationWorkOutcome::Superseded
     } else if expected_margin >= definition.connected_margin() {
-        InvestigationWorkOutcome::Connected
+        match work.kind() {
+            InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
+            InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
+        }
     } else {
         InvestigationWorkOutcome::Inconclusive
     };
@@ -1078,6 +1251,117 @@ mod tests {
         validate_state(&fixture.state).expect("completed pattern analysis state should be valid");
         validate_state_against_registry(&registry, &fixture.state)
             .expect("completed pattern analysis should match authored definitions");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn evidence_review_develops_case_owned_evidence_without_inventing_subjects() {
+        let registry = build_registry();
+        let mut fixture = make_fixture(
+            90,
+            EvidenceStrength::Strong,
+            EvidenceReliability::Credible,
+            Admissibility::Admissible,
+        );
+        let fingerprint = validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation: fixture.investigation,
+                custodian: fixture.police,
+                subject: EntityRef::Character(fixture.first),
+                origin: None,
+                kind: EvidenceKind::Fingerprint,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::Mixed,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("fingerprint evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("fingerprint evidence should commit");
+        let subjects_before = fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("investigation should persist")
+            .subjects()
+            .clone();
+        let draft = InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(fingerprint),
+        };
+        let work = validate_schedule_investigation_work(&registry, &fixture.state, draft)
+            .expect("case-owned fingerprint should support evidence review")
+            .commit(&mut fixture.state)
+            .expect("evidence review should schedule");
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_investigation_work(work)
+                .expect("scheduled evidence review should persist")
+                .due_at(),
+            SimTime::from_minutes(180)
+        );
+
+        for _ in 0..179 {
+            assert!(run_tick(&registry, &mut fixture.state)
+                .resolved_investigation_work
+                .is_empty());
+        }
+        let outcome = run_tick(&registry, &mut fixture.state);
+        assert_eq!(outcome.resolved_investigation_work, vec![work]);
+        let record = fixture
+            .state
+            .legal()
+            .get_investigation_work(work)
+            .expect("completed evidence review should persist");
+        let resolution = record
+            .resolution()
+            .expect("review should have a resolution");
+        assert_eq!(resolution.outcome(), InvestigationWorkOutcome::Developed);
+        let derived_id = resolution
+            .derived_evidence()
+            .expect("successful evidence review should derive forensic analysis");
+        let source = fixture
+            .state
+            .legal()
+            .get_evidence(fingerprint)
+            .expect("source fingerprint should persist");
+        let derived = fixture
+            .state
+            .legal()
+            .get_evidence(derived_id)
+            .expect("forensic analysis should persist");
+        assert_eq!(derived.kind(), EvidenceKind::ForensicAnalysis);
+        assert_eq!(derived.subject(), source.subject());
+        assert_eq!(derived.origin(), source.origin());
+        assert_eq!(derived.strength(), source.strength());
+        assert_eq!(derived.reliability(), EvidenceReliability::Credible);
+        assert_eq!(derived.admissibility(), source.admissibility());
+        assert_eq!(derived.derived_from(), &BTreeSet::from([fingerprint]));
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_investigation(fixture.investigation)
+                .expect("investigation should persist after review")
+                .subjects(),
+            &subjects_before
+        );
+        assert!(matches!(
+            validate_schedule_investigation_work(&registry, &fixture.state, draft),
+            Err(InvestigationWorkError::EvidenceAlreadyReviewed {
+                evidence,
+                derived
+            }) if evidence == fingerprint && derived == derived_id
+        ));
+        validate_state(&fixture.state).expect("evidence review state should validate");
+        validate_state_against_registry(&registry, &fixture.state)
+            .expect("evidence review should remain registry-valid");
         validate_invariants(&fixture.state);
     }
 

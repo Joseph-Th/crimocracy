@@ -191,6 +191,19 @@ fn collect_source_candidates(
         if report.kind() == ReportKind::ExecutiveBrief {
             continue;
         }
+        if disposition_report_is_redundant_in_window(state, report, previous_brief) {
+            continue;
+        }
+        if state
+            .opportunities()
+            .opportunity_for_report(report.id())
+            .is_some_and(|opportunity| {
+                report.id() == opportunity.report()
+                    && opportunity.status() != crate::opportunities::OpportunityStatus::Open
+            })
+        {
+            continue;
+        }
         for (entry_index, entry) in report.entries().iter().enumerate() {
             if entry.attention < minimum_attention {
                 continue;
@@ -209,14 +222,90 @@ fn collect_source_candidates(
                     continue;
                 }
             }
+            let entry = refresh_operation_financial_state(state, report.id(), entry);
             candidates.push(SourceCandidate {
                 report: report.id(),
                 entry_index,
-                entry: entry.clone(),
+                entry,
             });
         }
     }
     candidates
+}
+
+fn disposition_report_is_redundant_in_window(
+    state: &AppState,
+    report: &crate::reports::ReportRecord,
+    previous_brief: Option<ReportId>,
+) -> bool {
+    if report.kind() != ReportKind::Financial || report.title() != "Property disposition" {
+        return false;
+    }
+    report.entries().iter().any(|entry| {
+        entry.entities.iter().any(|entity| {
+            let EntityRef::Operation(operation_id) = entity else {
+                return false;
+            };
+            state
+                .operations()
+                .get_operation(*operation_id)
+                .is_some_and(|operation| {
+                    operation
+                        .property_disposition()
+                        .is_some_and(|disposition| disposition.report() == report.id())
+                        && operation.resolution().is_some_and(|resolution| {
+                            previous_brief
+                                .is_none_or(|previous| resolution.after_action_report() > previous)
+                        })
+                })
+        })
+    })
+}
+
+fn refresh_operation_financial_state(
+    state: &AppState,
+    source_report: ReportId,
+    entry: &ReportEntry,
+) -> ReportEntry {
+    let mut refreshed = entry.clone();
+    for entity in &entry.entities {
+        let EntityRef::Operation(operation_id) = entity else {
+            continue;
+        };
+        let Some(operation) = state.operations().get_operation(*operation_id) else {
+            continue;
+        };
+        let Some(resolution) = operation.resolution() else {
+            continue;
+        };
+        if resolution.after_action_report() != source_report {
+            continue;
+        }
+        let (Some(proceeds), Some(disposition)) = (
+            resolution.property_proceeds(),
+            operation.property_disposition(),
+        ) else {
+            continue;
+        };
+        let Some(venue) = state.world().get_business(disposition.venue()) else {
+            continue;
+        };
+        let prior = format!(
+            "The crew secured property with an estimated held value of {} cents; it remains unliquidated.",
+            proceeds.estimated_value().cents()
+        );
+        if !refreshed.summary.contains(&prior) {
+            continue;
+        }
+        let current = format!(
+            "The crew secured property with an estimated held value of {} cents; it was later liquidated through {} for {} cents.",
+            proceeds.estimated_value().cents(),
+            venue.name(),
+            disposition.realized_value().cents()
+        );
+        refreshed.summary = refreshed.summary.replace(&prior, &current);
+    }
+    refreshed
 }
 
 fn deduplicate_source_candidates(candidates: Vec<SourceCandidate>) -> Vec<SourceCandidate> {

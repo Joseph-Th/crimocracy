@@ -13,11 +13,12 @@ use crate::registry::{
     BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, ExecutiveBriefDefinitionSpec,
     InvestigationWorkDefinitionSpec, OperationDifficultyDefinition, OperationExecutionDefinition,
     OperationExposureDefinition, OperationIntelligenceDefinition,
-    OperationPoliceResponseDefinition, RecruitmentDefinitionSpec,
-    RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
-    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
-    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
-    RecruitmentWeightsDefinition, Registry, RegistryBuilder,
+    OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
+    RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
+    RecruitmentInformationQualityDefinition, RecruitmentRelationshipDefinition,
+    RecruitmentRelationshipSupportDefinition, RecruitmentScoringDefinition,
+    RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition, RecruitmentWeightsDefinition,
+    Registry, RegistryBuilder,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, DriveKind,
@@ -26,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 8;
+pub const CURRENT_CONTENT_REVISION: u32 = 12;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -84,6 +85,7 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
         .register_recruitment(RecruitmentDefinitionSpec {
             timing: RecruitmentTimingDefinition {
                 cooldown: SimDuration::from_minutes(10_080),
+                autonomous_attempt_cadence: SimDuration::from_minutes(1_440),
                 perceived_legal_pressure_max_age: SimDuration::from_minutes(20_160),
             },
             scoring: RecruitmentScoringDefinition {
@@ -245,6 +247,20 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
                 base_difficulty: 55,
                 additional_source_difficulty: 8,
                 source_support_weight: 30,
+                variance_limit: 12,
+                connected_margin: 0,
+            },
+        )
+        .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
+    builder
+        .register_investigation_work(
+            InvestigationWorkKind::EvidenceReview,
+            "Evidence review",
+            InvestigationWorkDefinitionSpec {
+                duration: SimDuration::from_minutes(180),
+                base_difficulty: 45,
+                additional_source_difficulty: 0,
+                source_support_weight: 35,
                 variance_limit: 12,
                 connected_margin: 0,
             },
@@ -685,6 +701,35 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             entry_offset: entry_minutes.map(SimDuration::from_minutes),
             arrival_difficulty_penalty: response_difficulty,
             arrival_exposure_penalty: response_exposure,
+        },
+        property_proceeds: match kind {
+            OperationKind::Burglary => Some(OperationPropertyProceedsDefinition {
+                business_gross_basis_points: 30_000,
+                partial_recovery_basis_points: 4_000,
+                liquidation_recovery_basis_points: 6_500,
+            }),
+            OperationKind::Hijacking => Some(OperationPropertyProceedsDefinition {
+                business_gross_basis_points: 25_000,
+                partial_recovery_basis_points: 3_500,
+                liquidation_recovery_basis_points: 5_500,
+            }),
+            OperationKind::DocumentTheft => Some(OperationPropertyProceedsDefinition {
+                business_gross_basis_points: 12_500,
+                partial_recovery_basis_points: 5_000,
+                liquidation_recovery_basis_points: 4_000,
+            }),
+            OperationKind::Robbery
+            | OperationKind::Smuggling
+            | OperationKind::Intimidation
+            | OperationKind::Kidnapping
+            | OperationKind::Surveillance
+            | OperationKind::Sabotage
+            | OperationKind::Bribery
+            | OperationKind::WitnessPressure
+            | OperationKind::GamblingEvent
+            | OperationKind::CovertTransfer
+            | OperationKind::Extraction
+            | OperationKind::RivalInfiltration => None,
         },
     }
 }

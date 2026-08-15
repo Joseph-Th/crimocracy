@@ -370,6 +370,66 @@ pub(crate) fn resolve_patrol_presence_snapshot(
     }
 }
 
+pub(crate) fn resolve_patrol_presence_interval_snapshot(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+    start: SimTime,
+    end: SimTime,
+) -> PatrolPresenceSnapshot {
+    if end <= start {
+        return resolve_patrol_presence_snapshot(state, neighborhood, end);
+    }
+
+    let mut deployment_versions = BTreeMap::new();
+    let mut daily_presence = [0_u8; MINUTES_PER_DAY as usize];
+    let mut has_deployment = false;
+    for deployment in state
+        .legal
+        .active_patrol_deployments_for_neighborhood(neighborhood)
+    {
+        has_deployment = true;
+        deployment_versions.insert(deployment.id(), deployment.version());
+        for window in deployment.windows() {
+            let start_minute = usize::from(window.start().value());
+            let presence = window.presence().value();
+            for offset in 0..usize::from(window.duration_minutes()) {
+                let minute = (start_minute + offset) % usize::from(MINUTES_PER_DAY);
+                daily_presence[minute] = daily_presence[minute].max(presence);
+            }
+        }
+    }
+    if !has_deployment {
+        return PatrolPresenceSnapshot {
+            deployment_versions,
+            presence: None,
+        };
+    }
+
+    let duration = end.as_minutes().saturating_sub(start.as_minutes());
+    let day_minutes = u64::from(MINUTES_PER_DAY);
+    let daily_total: u64 = daily_presence.iter().map(|value| u64::from(*value)).sum();
+    let full_days = duration / day_minutes;
+    let remainder = duration % day_minutes;
+    let mut total_presence = daily_total.saturating_mul(full_days);
+    let start_minute = start.as_minutes() % day_minutes;
+    for offset in 0..remainder {
+        let minute = usize::try_from((start_minute + offset) % day_minutes)
+            .expect("minute-of-day remainder must fit usize");
+        total_presence = total_presence.saturating_add(u64::from(daily_presence[minute]));
+    }
+    let average = total_presence
+        .saturating_add(duration / 2)
+        .checked_div(duration)
+        .expect("positive patrol interval duration must divide");
+    let average = u8::try_from(average).expect("average patrol presence must fit u8");
+    PatrolPresenceSnapshot {
+        deployment_versions,
+        presence: Some(
+            Rating::try_new(average).expect("average patrol presence must remain within bounds"),
+        ),
+    }
+}
+
 pub(crate) fn resolve_authority_patrol_presence_snapshot(
     state: &AppState,
     organization: OrganizationId,

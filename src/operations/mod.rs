@@ -3,14 +3,17 @@
 pub(crate) mod operation_execution;
 pub mod operation_system;
 pub(crate) mod police_response_integration;
+pub mod property_disposition;
 pub(crate) mod surveillance_integration;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, EvidenceId, HistoryEventId, InformationId, InvestigationId,
-    NeighborhoodId, OperationId, OrganizationId, PoliceResponseId, ReportId,
+    BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId, HistoryEventId,
+    InformationId, InvestigationId, LedgerTransactionId, NeighborhoodId, OperationId,
+    OrganizationId, PoliceResponseId, ReportId,
 };
 use crate::core::time::SimTime;
+use crate::finance::Money;
 use crate::world::Rating;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -310,11 +313,87 @@ impl OperationExposureRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationPropertyProceedsRecord {
+    target: EntityRef,
+    estimated_value: Money,
+}
+
+impl OperationPropertyProceedsRecord {
+    pub(crate) fn new(target: EntityRef, estimated_value: Money) -> Self {
+        Self {
+            target,
+            estimated_value,
+        }
+    }
+
+    pub fn target(self) -> EntityRef {
+        self.target
+    }
+
+    pub fn estimated_value(self) -> Money {
+        self.estimated_value
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationPropertyDispositionRecord {
+    disposed_at: SimTime,
+    venue: BusinessId,
+    venue_version: u32,
+    realized_value: Money,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    transaction: LedgerTransactionId,
+    information: InformationId,
+    report: ReportId,
+}
+
+impl OperationPropertyDispositionRecord {
+    pub fn disposed_at(self) -> SimTime {
+        self.disposed_at
+    }
+
+    pub fn venue(self) -> BusinessId {
+        self.venue
+    }
+
+    pub fn venue_version(self) -> u32 {
+        self.venue_version
+    }
+
+    pub fn realized_value(self) -> Money {
+        self.realized_value
+    }
+
+    pub fn cash_account(self) -> FinancialAccountId {
+        self.cash_account
+    }
+
+    pub fn settlement_account(self) -> FinancialAccountId {
+        self.settlement_account
+    }
+
+    pub fn transaction(self) -> LedgerTransactionId {
+        self.transaction
+    }
+
+    pub fn information(self) -> InformationId {
+        self.information
+    }
+
+    pub fn report(self) -> ReportId {
+        self.report
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResolutionFactors {
     role_capability_average: Rating,
     leader_management: Option<Rating>,
     intelligence_quality: Rating,
     intelligence_adjustment: i8,
+    intelligence_topics_covered: u8,
+    intelligence_topics_relevant: u8,
     target_police_presence: Option<Rating>,
     police_response_arrived: bool,
     approach_adjustment: i8,
@@ -337,6 +416,14 @@ impl OperationResolutionFactors {
 
     pub fn intelligence_adjustment(self) -> i8 {
         self.intelligence_adjustment
+    }
+
+    pub fn intelligence_topics_covered(self) -> u8 {
+        self.intelligence_topics_covered
+    }
+
+    pub fn intelligence_topics_relevant(self) -> u8 {
+        self.intelligence_topics_relevant
     }
 
     pub fn target_police_presence(self) -> Option<Rating> {
@@ -367,6 +454,7 @@ pub struct OperationResolutionRecord {
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposureRecord,
+    property_proceeds: Option<OperationPropertyProceedsRecord>,
     discovered_information: BTreeSet<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
@@ -392,6 +480,10 @@ impl OperationResolutionRecord {
 
     pub fn exposure(&self) -> &OperationExposureRecord {
         &self.exposure
+    }
+
+    pub fn property_proceeds(&self) -> Option<OperationPropertyProceedsRecord> {
+        self.property_proceeds
     }
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
@@ -440,6 +532,7 @@ struct OperationRuntime {
     police_response: Option<PoliceResponseId>,
     awaiting_decision_since: Option<SimTime>,
     resolution: Option<OperationResolutionRecord>,
+    property_disposition: Option<OperationPropertyDispositionRecord>,
     abort: Option<OperationAbortRecord>,
     version: u32,
 }
@@ -526,6 +619,10 @@ impl OperationRecord {
 
     pub fn resolution(&self) -> Option<&OperationResolutionRecord> {
         self.runtime.resolution.as_ref()
+    }
+
+    pub fn property_disposition(&self) -> Option<OperationPropertyDispositionRecord> {
+        self.runtime.property_disposition
     }
 
     pub fn abort_record(&self) -> Option<OperationAbortRecord> {
@@ -831,6 +928,39 @@ impl OperationState {
             record.runtime.awaiting_decision_since = None;
         }
         self.change_status(id, OperationStatus::Completed);
+    }
+
+    pub(crate) fn set_property_disposition(
+        &mut self,
+        id: OperationId,
+        disposition: OperationPropertyDispositionRecord,
+    ) {
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated operation disappeared before property disposition commit");
+        assert_eq!(
+            record.status(),
+            OperationStatus::Completed,
+            "only completed operations may dispose acquired property"
+        );
+        assert!(
+            record
+                .resolution()
+                .and_then(OperationResolutionRecord::property_proceeds)
+                .is_some(),
+            "property disposition requires persisted property proceeds"
+        );
+        assert!(
+            record.runtime.property_disposition.is_none(),
+            "operation property may only be disposed once"
+        );
+        record.runtime.property_disposition = Some(disposition);
+        record.runtime.version = record
+            .runtime
+            .version
+            .checked_add(1)
+            .expect("operation version counter exhausted");
     }
 
     fn change_status(&mut self, id: OperationId, next: OperationStatus) {

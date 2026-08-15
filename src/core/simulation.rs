@@ -1,8 +1,8 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
 
 use crate::core::id::{
-    BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId, OpportunityId,
-    PoliceResponseId, ReportId,
+    BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,
+    OperationId, OpportunityId, PoliceResponseId, RecruitmentAttemptId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
@@ -14,9 +14,11 @@ use crate::economy::business_economy_system::{
 use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, due_active_enterprises, validate_enterprise_cycle_plan,
 };
+use crate::legal::investigation_system::staff_unassigned_active_investigations;
 use crate::legal::investigation_work_execution::{
     decide_investigation_work_resolution, due_scheduled_investigation_work,
-    validate_investigation_work_resolution_plan, InvestigationWorkRandomness,
+    schedule_initial_evidence_reviews, validate_investigation_work_resolution_plan,
+    InvestigationWorkRandomness,
 };
 use crate::operations::operation_execution::{
     decide_operation_resolution, due_in_progress_operations, validate_operation_resolution_plan,
@@ -27,6 +29,7 @@ use crate::operations::operation_system::{
 };
 use crate::operations::police_response_integration::process_due_police_responses;
 use crate::opportunities::opportunity_system::expire_due_opportunities;
+use crate::recruitment::recruitment_system::resolve_due_autonomous_recruitment;
 use crate::registry::Registry;
 use crate::reports::executive_brief::{
     decide_executive_brief, is_executive_brief_due, validate_executive_brief_plan,
@@ -41,9 +44,12 @@ pub struct TickOutcome {
     pub arrived_police_responses: Vec<PoliceResponseId>,
     pub decision_requests: Vec<DecisionRequestOutcome>,
     pub resolved_operations: Vec<OperationId>,
+    pub staffed_investigations: Vec<(InvestigationId, CharacterId)>,
+    pub scheduled_investigation_work: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
+    pub recruitment_attempts: Vec<RecruitmentAttemptId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub executive_brief: Option<ReportId>,
 }
@@ -73,8 +79,12 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("due operation must still exist")
             .kind();
         let execution = registry.get_operation(kind).execution();
-        let execution_variance = decide_signed_variance(state, execution.variance_limit());
-        let exposure_variance = decide_signed_variance(state, execution.exposure_variance_limit());
+        let execution_variance =
+            decide_signed_variance(state.operation_rng_mut(), execution.variance_limit());
+        let exposure_variance = decide_signed_variance(
+            state.operation_rng_mut(),
+            execution.exposure_variance_limit(),
+        );
         let plan = decide_operation_resolution(
             registry,
             state,
@@ -88,6 +98,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated operation resolution must commit atomically");
         resolved_operations.push(resolved);
     }
+    let staffed_investigations = staff_unassigned_active_investigations(state)
+        .expect("valid state should staff available investigators onto active cases");
+    let scheduled_investigation_work =
+        schedule_initial_evidence_reviews(registry, state, &staffed_investigations)
+            .expect("newly staffed investigations should schedule valid initial evidence work");
     // Detective work resolves after operation consequences so legal state created by an operation
     // is visible to later institutional work in the same minute without bypassing evidence ownership.
     let due_investigation_work = due_scheduled_investigation_work(state);
@@ -99,7 +114,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("due investigation work must still exist")
             .kind();
         let variance_limit = registry.get_investigation_work(kind).variance_limit();
-        let variance = decide_signed_variance(state, variance_limit);
+        let variance = decide_signed_variance(state.investigation_rng_mut(), variance_limit);
         let plan = decide_investigation_work_resolution(
             registry,
             state,
@@ -125,7 +140,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .get_business(kind)
             .economics()
             .gross_variance_basis_points();
-        let variance = decide_basis_point_variance(state, variance_limit);
+        let variance = decide_basis_point_variance(state.business_rng_mut(), variance_limit);
         let plan = decide_business_cycle(registry, state, business, variance)
             .expect("due active business must resolve a valid cycle plan");
         let cycle = validate_business_cycle_plan(state, plan)
@@ -146,7 +161,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .get_enterprise(kind)
             .economics()
             .gross_variance_basis_points();
-        let variance = decide_basis_point_variance(state, variance_limit);
+        let variance = decide_basis_point_variance(state.enterprise_rng_mut(), variance_limit);
         let plan = decide_enterprise_cycle(registry, state, enterprise, variance)
             .expect("due active enterprise must resolve a valid cycle plan");
         let cycle = validate_enterprise_cycle_plan(state, plan)
@@ -155,8 +170,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated enterprise cycle must commit atomically");
         enterprise_cycles.push(cycle);
     }
+    let recruitment_attempts = resolve_due_autonomous_recruitment(registry, state)
+        .expect("valid state should resolve due autonomous recruitment");
     // Executive synthesis runs last so a due brief sees every report and decision created by
-    // operational, investigative, and financial work that resolved in the same simulation minute.
+    // operational, investigative, financial, and delegated personnel work that resolved in the
+    // same simulation minute.
     let executive_brief = state.player_organization().and_then(|recipient| {
         is_executive_brief_due(registry, state.now()).then(|| {
             let plan = decide_executive_brief(registry, state, recipient)
@@ -174,31 +192,34 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         arrived_police_responses,
         decision_requests,
         resolved_operations,
+        staffed_investigations,
+        scheduled_investigation_work,
         resolved_investigation_work,
         business_cycles,
         enterprise_cycles,
+        recruitment_attempts,
         expired_opportunities,
         executive_brief,
     }
 }
 
-fn decide_signed_variance(state: &mut AppState, limit: u8) -> i8 {
+fn decide_signed_variance(rng: &mut impl RngCore, limit: u8) -> i8 {
     let width = usize::from(limit)
         .checked_mul(2)
         .and_then(|value| value.checked_add(1))
         .expect("signed variance choice range overflowed usize");
-    let draw = decide_index(state, width).expect("signed variance range is never empty");
+    let draw = decide_index_from_rng(rng, width).expect("signed variance range is never empty");
     let signed =
         i16::try_from(draw).expect("operation variance draw must fit i16") - i16::from(limit);
     i8::try_from(signed).expect("authored signed variance limit must fit i8")
 }
 
-fn decide_basis_point_variance(state: &mut AppState, limit: u16) -> i16 {
+fn decide_basis_point_variance(rng: &mut impl RngCore, limit: u16) -> i16 {
     let width = usize::from(limit)
         .checked_mul(2)
         .and_then(|value| value.checked_add(1))
         .expect("enterprise variance choice range overflowed usize");
-    let draw = decide_index(state, width).expect("enterprise variance range is never empty");
+    let draw = decide_index_from_rng(rng, width).expect("enterprise variance range is never empty");
     let signed =
         i32::try_from(draw).expect("enterprise variance draw must fit i32") - i32::from(limit);
     i16::try_from(signed).expect("authored enterprise variance limit must fit i16")
@@ -214,15 +235,52 @@ pub fn decide_index(
     state: &mut AppState,
     choice_count: usize,
 ) -> Result<usize, RandomDecisionError> {
+    decide_index_from_rng(state.rng_mut(), choice_count)
+}
+
+fn decide_index_from_rng(
+    rng: &mut impl RngCore,
+    choice_count: usize,
+) -> Result<usize, RandomDecisionError> {
     if choice_count == 0 {
         return Err(RandomDecisionError::EmptyChoiceSet);
     }
     let bound = u64::try_from(choice_count).expect("usize choice count must fit into u64");
     let rejection_zone = u64::MAX - (u64::MAX % bound);
     loop {
-        let draw = state.rng_mut().next_u64();
+        let draw = rng.next_u64();
         if draw < rejection_zone {
             return Ok((draw % bound) as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_random_streams_do_not_cross_contaminate_unrelated_simulation_work() {
+        let mut baseline = AppState::new(0x1933_0814);
+        let mut operation_heavy = baseline.clone();
+
+        for _ in 0..64 {
+            decide_signed_variance(operation_heavy.operation_rng_mut(), 12);
+        }
+
+        for _ in 0..32 {
+            assert_eq!(
+                decide_basis_point_variance(baseline.business_rng_mut(), 2_500),
+                decide_basis_point_variance(operation_heavy.business_rng_mut(), 2_500)
+            );
+            assert_eq!(
+                decide_basis_point_variance(baseline.enterprise_rng_mut(), 2_500),
+                decide_basis_point_variance(operation_heavy.enterprise_rng_mut(), 2_500)
+            );
+            assert_eq!(
+                decide_signed_variance(baseline.investigation_rng_mut(), 12),
+                decide_signed_variance(operation_heavy.investigation_rng_mut(), 12)
+            );
         }
     }
 }

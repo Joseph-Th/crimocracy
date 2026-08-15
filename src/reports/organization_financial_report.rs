@@ -3,7 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, InformationId, OrganizationId,
+    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, InformationId, OperationId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -13,6 +14,8 @@ use crate::economy::business_reporting::{
 use crate::enterprises::enterprise_reporting::{
     resolve_organization_enterprise_financial_summary, EnterpriseReportingError,
 };
+use crate::finance::Money;
+use crate::operations::OperationStatus;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
@@ -25,6 +28,8 @@ pub enum OrganizationFinancialReportError {
     MissingNotableInformation,
     #[error("notable financial cycle references missing information {0}")]
     MissingNotableInformationRecord(InformationId),
+    #[error("organization financial aggregation overflowed")]
+    ArithmeticOverflow,
     #[error(transparent)]
     Business(#[from] BusinessReportingError),
     #[error(transparent)]
@@ -43,6 +48,14 @@ enum NotableFinancialItem {
     Enterprise {
         cycle: EnterpriseCycleId,
         enterprise: EnterpriseId,
+        information: InformationId,
+    },
+    OperationProperty {
+        operation: OperationId,
+        information: InformationId,
+    },
+    OperationPropertyDisposition {
+        operation: OperationId,
         information: InformationId,
     },
 }
@@ -65,10 +78,14 @@ pub fn validate_organization_financial_report(
         period_start,
         period_end,
     )?;
+    let (property_operation_count, held_property_value) =
+        resolve_held_operation_property(state, recipient, period_start, period_end)?;
+    let (property_disposition_count, realized_property_cash) =
+        resolve_liquidated_operation_property(state, recipient, period_start, period_end)?;
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Routine,
         summary: format!(
-            "Legitimate businesses: {} businesses, {} cycles, gross {} cents, operating cost {} cents, net {} cents. Illicit enterprises: {} enterprises, {} cycles, gross {} cents, operating cost {} cents, net {} cents.",
+            "Legitimate businesses: {} businesses, {} cycles, gross {} cents, operating cost {} cents, net {} cents. Illicit enterprises: {} enterprises, {} cycles, gross {} cents, operating cost {} cents, net {} cents. Held operation property at period end: {} operation(s), estimated value {} cents, unliquidated. Liquidated operation property during period: {} disposition(s), realized cash {} cents.",
             business_summary.totals.business_count,
             business_summary.totals.cycle_count,
             business_summary.totals.gross_revenue.cents(),
@@ -79,6 +96,10 @@ pub fn validate_organization_financial_report(
             enterprise_summary.totals.gross_revenue.cents(),
             enterprise_summary.totals.operating_cost.cents(),
             enterprise_summary.totals.net_cash.cents(),
+            property_operation_count,
+            held_property_value.cents(),
+            property_disposition_count,
+            realized_property_cash.cents(),
         ),
         sources: Vec::new(),
         entities: BTreeSet::new(),
@@ -92,6 +113,18 @@ pub fn validate_organization_financial_report(
         period_start,
         period_end,
     )?);
+    notable.extend(collect_operation_property_items(
+        state,
+        recipient,
+        period_start,
+        period_end,
+    ));
+    notable.extend(collect_operation_property_disposition_items(
+        state,
+        recipient,
+        period_start,
+        period_end,
+    ));
     notable.sort_by_key(|(occurred_at, item)| (*occurred_at, *item));
     for (_, item) in notable {
         entries.push(build_notable_entry(state, item)?);
@@ -108,6 +141,114 @@ pub fn validate_organization_financial_report(
     )?)
 }
 
+fn resolve_held_operation_property(
+    state: &AppState,
+    recipient: OrganizationId,
+    _period_start: SimTime,
+    period_end: SimTime,
+) -> Result<(u32, Money), OrganizationFinancialReportError> {
+    let mut count = 0_u32;
+    let mut value = Money::ZERO;
+    for operation in state.operations().operations_for_organization(recipient) {
+        let Some(resolution) = operation.resolution() else {
+            continue;
+        };
+        if resolution.resolved_at() > period_end {
+            continue;
+        }
+        let Some(proceeds) = resolution.property_proceeds() else {
+            continue;
+        };
+        if operation
+            .property_disposition()
+            .is_some_and(|disposition| disposition.disposed_at() <= period_end)
+        {
+            continue;
+        }
+        count = count
+            .checked_add(1)
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        value = value
+            .checked_add(proceeds.estimated_value())
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    }
+    Ok((count, value))
+}
+
+fn resolve_liquidated_operation_property(
+    state: &AppState,
+    recipient: OrganizationId,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Result<(u32, Money), OrganizationFinancialReportError> {
+    let mut count = 0_u32;
+    let mut value = Money::ZERO;
+    for operation in state.operations().operations_for_organization(recipient) {
+        let Some(disposition) = operation.property_disposition() else {
+            continue;
+        };
+        if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
+            continue;
+        }
+        count = count
+            .checked_add(1)
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        value = value
+            .checked_add(disposition.realized_value())
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    }
+    Ok((count, value))
+}
+
+fn collect_operation_property_items(
+    state: &AppState,
+    recipient: OrganizationId,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Vec<(SimTime, NotableFinancialItem)> {
+    state
+        .operations()
+        .operations_for_organization(recipient)
+        .filter(|operation| operation.status() == OperationStatus::Completed)
+        .filter_map(|operation| {
+            let resolution = operation.resolution()?;
+            (resolution.resolved_at() >= period_start
+                && resolution.resolved_at() <= period_end
+                && resolution.property_proceeds().is_some())
+            .then_some((
+                resolution.resolved_at(),
+                NotableFinancialItem::OperationProperty {
+                    operation: operation.id(),
+                    information: resolution.after_action_information(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn collect_operation_property_disposition_items(
+    state: &AppState,
+    recipient: OrganizationId,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Vec<(SimTime, NotableFinancialItem)> {
+    state
+        .operations()
+        .operations_for_organization(recipient)
+        .filter_map(|operation| {
+            let disposition = operation.property_disposition()?;
+            (disposition.disposed_at() >= period_start && disposition.disposed_at() <= period_end)
+                .then_some((
+                    disposition.disposed_at(),
+                    NotableFinancialItem::OperationPropertyDisposition {
+                        operation: operation.id(),
+                        information: disposition.information(),
+                    },
+                ))
+        })
+        .collect()
+}
+
 fn collect_notable_business_cycles(
     state: &AppState,
     recipient: OrganizationId,
@@ -116,15 +257,15 @@ fn collect_notable_business_cycles(
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
     for business in state.world.businesses().filter(|business| {
-        business.owner() == BusinessOwner::Organization(recipient)
-            && state
-                .economy()
-                .get_business_economy(business.id())
-                .is_some()
+        state
+            .economy()
+            .get_business_economy(business.id())
+            .is_some()
     }) {
         for cycle in state.economy().cycles_for(business.id()).filter(|cycle| {
             cycle.occurred_at() >= period_start
                 && cycle.occurred_at() <= period_end
+                && cycle.owner() == BusinessOwner::Organization(recipient)
                 && cycle.attention() == AttentionClass::Notable
         }) {
             let information = cycle
@@ -198,6 +339,22 @@ fn build_notable_entry(
             information,
             EntityRef::Enterprise(enterprise),
             format!("Enterprise cycle {cycle}"),
+        ),
+        NotableFinancialItem::OperationProperty {
+            operation,
+            information,
+        } => (
+            information,
+            EntityRef::Operation(operation),
+            format!("Operation proceeds {operation}"),
+        ),
+        NotableFinancialItem::OperationPropertyDisposition {
+            operation,
+            information,
+        } => (
+            information,
+            EntityRef::Operation(operation),
+            format!("Property disposition {operation}"),
         ),
     };
     let record = state

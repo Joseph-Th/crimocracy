@@ -218,6 +218,7 @@ impl ValidatedOperation {
                 police_response: None,
                 awaiting_decision_since: None,
                 resolution: None,
+                property_disposition: None,
                 abort: None,
                 version: 1,
             },

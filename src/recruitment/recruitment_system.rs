@@ -1,5 +1,6 @@
 //! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
 
+use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     CharacterId, DecisionRequestId, InformationId, OrganizationId, RecruitmentAttemptId,
@@ -29,12 +30,15 @@ use crate::recruitment::{
     RecruitmentRecordParts, RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot,
 };
 use crate::registry::{RecruitmentDefinition, Registry};
+use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::social::RelationshipDimensions;
 use crate::world::world_system::{
     validate_reassign_character, ValidatedCharacterReassignment, WorldError,
 };
 use crate::world::{
-    ApprovalPolicy, DriveKind, Lifecycle, OrganizationKind, PolicyKind, PolicySetting, TraitKind,
+    ApprovalPolicy, AutonomyLevel, DriveKind, Lifecycle, OrganizationKind, PolicyKind,
+    PolicySetting, TraitKind,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -145,6 +149,8 @@ pub enum RecruitmentError {
     History(#[from] HistoryError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    Report(#[from] ReportError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -256,6 +262,85 @@ pub fn find_recruitment_candidates(
         candidates.push(candidate);
     }
     Ok(candidates)
+}
+
+pub(crate) fn resolve_due_autonomous_recruitment(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<RecruitmentAttemptId>, RecruitmentError> {
+    let cadence = u64::from(
+        registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes(),
+    );
+    if state.now() == SimTime::ZERO || !state.now().as_minutes().is_multiple_of(cadence) {
+        return Ok(Vec::new());
+    }
+
+    let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
+    let authorities: Vec<_> = state
+        .delegation()
+        .active_for_scope(personnel_scope)
+        .map(|mandate| (mandate.id(), mandate.organization(), mandate.manager()))
+        .collect();
+    let mut attempts = Vec::new();
+    for (mandate, organization, manager) in authorities {
+        let Some(manager_record) = state.world().get_character(manager) else {
+            continue;
+        };
+        if !matches!(
+            manager_record.autonomy(),
+            AutonomyLevel::Delegated | AutonomyLevel::Broad
+        ) {
+            continue;
+        }
+        let policy =
+            resolve_policy_for_manager(state, manager, PolicyKind::IndependentRecruitment)?;
+        if policy.setting != PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated) {
+            continue;
+        }
+        let approach = autonomous_recruitment_approach(manager_record);
+        let Some(candidate) = find_recruitment_candidates(registry, state, organization, manager)?
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let authority = MandateAuthority {
+            mandate,
+            manager,
+            scope: personnel_scope,
+        };
+        let attempt = validate_delegated_recruitment_attempt(
+            registry,
+            state,
+            authority,
+            RecruitmentDraft {
+                target_organization: organization,
+                recruiter: manager,
+                candidate,
+                approach,
+            },
+        )?
+        .commit(state)?;
+        attempts.push(attempt);
+    }
+    Ok(attempts)
+}
+
+fn autonomous_recruitment_approach(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {
+    if manager.has_trait(TraitKind::Charismatic) {
+        RecruitmentApproach::PersonalAppeal
+    } else if manager.has_trait(TraitKind::Ambitious) || manager.has_trait(TraitKind::Proud) {
+        RecruitmentApproach::Advancement
+    } else if manager.has_trait(TraitKind::Cautious) {
+        RecruitmentApproach::Protection
+    } else if manager.has_trait(TraitKind::Greedy) {
+        RecruitmentApproach::FinancialOpportunity
+    } else {
+        RecruitmentApproach::PersonalAppeal
+    }
 }
 
 pub(crate) fn decide_recruitment_attempt(
@@ -559,6 +644,37 @@ fn validate_recruitment_plan_with_authority(
             },
         },
     )?;
+    let departure_report = match (plan.context.outcome, plan.context.previous_organization) {
+        (RecruitmentOutcome::Accepted, Some(previous_organization)) => {
+            let previous = state
+                .world
+                .get_organization(previous_organization)
+                .expect("valid previous membership must reference an organization");
+            Some(validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: previous_organization,
+                    kind: ReportKind::AfterAction,
+                    title: "Personnel change".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Notable,
+                        summary: format!(
+                            "{} left {} and is no longer available for assignments.",
+                            candidate.name(),
+                            previous.name()
+                        ),
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([
+                            EntityRef::Character(plan.draft.candidate),
+                            EntityRef::Organization(previous_organization),
+                        ]),
+                        decision: None,
+                    }],
+                },
+            )?)
+        }
+        (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, _) => None,
+    };
     Ok(ValidatedRecruitmentAttempt {
         plan,
         authority,
@@ -566,6 +682,7 @@ fn validate_recruitment_plan_with_authority(
         reassignment,
         history,
         outcome_information,
+        departure_report,
     })
 }
 
@@ -576,6 +693,7 @@ pub struct ValidatedRecruitmentAttempt {
     reassignment: Option<ValidatedCharacterReassignment>,
     history: Option<ValidatedHistoryEvent>,
     outcome_information: ValidatedInformation,
+    departure_report: Option<ValidatedReport>,
 }
 
 impl ValidatedRecruitmentAttempt {
@@ -615,6 +733,9 @@ impl ValidatedRecruitmentAttempt {
             }
         };
         let outcome_information = self.outcome_information.commit(state);
+        if let Some(report) = self.departure_report {
+            report.commit(state);
+        }
         let id = state.ids.next_recruitment_attempt();
         state
             .recruitment
@@ -1197,6 +1318,7 @@ mod tests {
     use crate::build_registry;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::core::time::SimDuration;
     use crate::decisions::decision_system::{
         validate_request_recruitment_approval, validate_resolve_decision, DecisionError,
     };
@@ -1207,6 +1329,7 @@ mod tests {
     use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
+    use crate::reports::ReportKind;
     use crate::social::relationship_system::validate_set_relationship;
     use crate::social::{RelationshipDimensions, RelationshipLevel};
     use crate::world::world_system::{insert_character, insert_organization, set_policy};
@@ -1422,6 +1545,52 @@ mod tests {
         )
         .expect("candidate discovery should validate");
         assert_eq!(candidates, vec![fixture.candidate]);
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let mandate =
+            assign_personnel_mandate(&registry, &mut fixture, Some(ApprovalPolicy::Delegated));
+
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_439));
+        assert!(
+            resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+                .expect("autonomous recruitment before cadence should be a no-op")
+                .is_empty()
+        );
+        fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+        let attempts = resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+            .expect("delegated broad recruiter should act at the authored cadence");
+        assert_eq!(attempts.len(), 1);
+        let attempt = fixture
+            .state
+            .recruitment()
+            .get_attempt(attempts[0])
+            .expect("autonomous attempt should persist");
+        assert_eq!(attempt.recruiter(), fixture.recruiter);
+        assert_eq!(attempt.candidate(), fixture.candidate);
+        assert_eq!(attempt.approach(), RecruitmentApproach::PersonalAppeal);
+        assert!(matches!(
+            attempt.authority(),
+            RecruitmentAuthority::Delegated {
+                mandate: found_mandate,
+                manager,
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+                policy: ApprovalPolicy::Delegated,
+                ..
+            } if found_mandate == mandate && manager == fixture.recruiter
+        ));
+        assert!(
+            resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+                .expect("same-minute repeat should be blocked by recruitment history")
+                .is_empty()
+        );
+        validate_state(&fixture.state).expect("autonomous recruitment state should validate");
         validate_invariants(&fixture.state);
     }
 
@@ -1982,6 +2151,24 @@ mod tests {
             .contains(&EntityRef::Character(fixture.recruiter)));
         assert!(history
             .entities()
+            .contains(&EntityRef::Organization(fixture.target)));
+        let departure_reports: Vec<_> = fixture
+            .state
+            .reports()
+            .reports_for(fixture.source)
+            .filter(|report| report.kind() == ReportKind::AfterAction)
+            .filter(|report| report.title() == "Personnel change")
+            .collect();
+        assert_eq!(departure_reports.len(), 1);
+        assert_eq!(departure_reports[0].entries().len(), 1);
+        assert!(departure_reports[0].entries()[0]
+            .summary
+            .contains("Frightened Associate left North Crew"));
+        assert!(departure_reports[0].entries()[0]
+            .entities
+            .contains(&EntityRef::Character(fixture.candidate)));
+        assert!(!departure_reports[0].entries()[0]
+            .entities
             .contains(&EntityRef::Organization(fixture.target)));
         validate_state(&fixture.state).expect("accepted recruitment state should validate");
         validate_invariants(&fixture.state);

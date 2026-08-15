@@ -32,6 +32,7 @@ define_id!(OrganizationId, "org");
 define_id!(CharacterId, "char");
 define_id!(NeighborhoodId, "neighborhood");
 define_id!(BusinessId, "business");
+define_id!(BusinessOwnershipChangeId, "business-ownership");
 define_id!(OperationId, "operation");
 define_id!(OpportunityId, "opportunity");
 define_id!(InformationId, "information");
@@ -63,6 +64,7 @@ pub(crate) struct IdCounters {
     character: u32,
     neighborhood: u32,
     business: u32,
+    business_ownership_change: u32,
     operation: u32,
     opportunity: u32,
     information: u32,
@@ -96,6 +98,7 @@ impl IdCounters {
             character: 1,
             neighborhood: 1,
             business: 1,
+            business_ownership_change: 1,
             operation: 1,
             opportunity: 1,
             information: 1,
@@ -145,6 +148,13 @@ impl IdCounters {
 
     pub(crate) fn next_business(&mut self) -> BusinessId {
         BusinessId::from_raw(Self::take(&mut self.business, "business"))
+    }
+
+    pub(crate) fn next_business_ownership_change(&mut self) -> BusinessOwnershipChangeId {
+        BusinessOwnershipChangeId::from_raw(Self::take(
+            &mut self.business_ownership_change,
+            "business ownership change",
+        ))
     }
 
     pub(crate) fn next_operation(&mut self) -> OperationId {

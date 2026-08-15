@@ -9,6 +9,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
+use crate::world::BusinessOwner;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,6 +63,8 @@ impl BusinessEconomyRecord {
 pub struct BusinessCycleRecord {
     id: BusinessCycleId,
     business: BusinessId,
+    business_version: u32,
+    owner: BusinessOwner,
     occurred_at: SimTime,
     gross_revenue: Money,
     operating_cost: Money,
@@ -78,6 +81,12 @@ impl BusinessCycleRecord {
     }
     pub fn business(&self) -> BusinessId {
         self.business
+    }
+    pub fn business_version(&self) -> u32 {
+        self.business_version
+    }
+    pub fn owner(&self) -> BusinessOwner {
+        self.owner
     }
     pub fn occurred_at(&self) -> SimTime {
         self.occurred_at

@@ -5,6 +5,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, NeighborhoodId, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::economy::business_economy_system::{
+    estimate_business_gross_potential, BusinessEconomyError,
+};
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
@@ -18,7 +21,10 @@ use crate::legal::investigation_system::{
     validate_incident_intake, InvestigationError, ValidatedIncidentIntake,
 };
 use crate::legal::jurisdiction_system::resolve_case_intake_authority;
-use crate::legal::patrol_system::{resolve_patrol_presence_snapshot, PatrolPresenceSnapshot};
+use crate::legal::patrol_system::{
+    resolve_patrol_presence_interval_snapshot, resolve_patrol_presence_snapshot,
+    PatrolPresenceSnapshot,
+};
 use crate::legal::{
     Admissibility, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
     IncidentIntakeDraft,
@@ -29,9 +35,9 @@ use crate::operations::surveillance_integration::{
     SurveillanceIntelligencePlan,
 };
 use crate::operations::{
-    OperationExposureFactors, OperationExposureLevel, OperationExposureRecord,
-    OperationObjectiveOutcome, OperationResolutionFactors, OperationResolutionRecord,
-    OperationStatus,
+    OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationObjective,
+    OperationObjectiveOutcome, OperationPropertyProceedsRecord, OperationResolutionFactors,
+    OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
@@ -55,6 +61,10 @@ pub(crate) enum OperationResolutionError {
     VarianceOutOfRange { variance: i8, limit: u8 },
     #[error("operation exposure variance {variance} exceeds authored limit {limit}")]
     ExposureVarianceOutOfRange { variance: i8, limit: u8 },
+    #[error("operation {operation} property-proceeds arithmetic overflowed")]
+    PropertyProceedsOverflow { operation: OperationId },
+    #[error("operation {operation} property-proceeds context changed after resolution planning")]
+    StalePropertyProceedsContext { operation: OperationId },
     #[error("operation {operation} changed after resolution planning; expected version {expected}, found {found}")]
     StaleOperation {
         operation: OperationId,
@@ -96,6 +106,8 @@ pub(crate) enum OperationResolutionError {
     Report(#[from] ReportError),
     #[error(transparent)]
     Surveillance(#[from] SurveillanceError),
+    #[error(transparent)]
+    BusinessEconomy(#[from] BusinessEconomyError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +187,7 @@ pub(crate) struct OperationResolutionPlan {
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
+    property_proceeds: Option<OperationPropertyProceedsRecord>,
     police_snapshot: TargetPoliceSnapshot,
     police_response: Option<PoliceResponseResolutionSnapshot>,
     surveillance: Option<SurveillanceIntelligencePlan>,
@@ -222,11 +235,19 @@ pub(crate) fn decide_operation_resolution(
         .world
         .get_character(record.leader())
         .and_then(|leader| leader.capability(CapabilityKind::Management));
-    let (intelligence_quality, intelligence_adjustment) =
-        calculate_intelligence_factors(registry, state, operation);
-    let police_snapshot = resolve_target_police_snapshot(
+    let (
+        intelligence_quality,
+        intelligence_adjustment,
+        intelligence_topics_covered,
+        intelligence_topics_relevant,
+    ) = calculate_intelligence_factors(registry, state, operation);
+    let started_at = record
+        .started_at()
+        .expect("in-progress operation must have a start time");
+    let police_snapshot = resolve_target_police_interval_snapshot(
         state,
         record.objective().referenced_entities(),
+        started_at,
         state.now(),
     );
     let target_police_presence = police_snapshot.target_presence;
@@ -245,19 +266,16 @@ pub(crate) fn decide_operation_resolution(
     let approach_adjustment = execution
         .approach_difficulty_adjustment(record.approach())
         .expect("validated operation approach must have an authored execution adjustment");
-    let time_pressure = resolve_time_pressure(
-        record
-            .started_at()
-            .expect("in-progress operation must have a start time"),
-        due_at,
-        execution.duration().as_minutes(),
-    );
+    let time_pressure =
+        resolve_time_pressure(started_at, due_at, execution.duration().as_minutes());
 
     let factors = OperationResolutionFactors {
         role_capability_average,
         leader_management,
         intelligence_quality,
         intelligence_adjustment,
+        intelligence_topics_covered,
+        intelligence_topics_relevant,
         target_police_presence,
         police_response_arrived,
         approach_adjustment,
@@ -275,8 +293,17 @@ pub(crate) fn decide_operation_resolution(
         &police_snapshot,
         police_response_arrived,
     );
+    let property_proceeds =
+        calculate_property_proceeds(registry, state, record, objective_outcome)?;
     let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
     let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
+    if let Some(proceeds) = property_proceeds {
+        summary.push(' ');
+        summary.push_str(&format!(
+            "The crew secured property with an estimated held value of {} cents; it remains unliquidated.",
+            proceeds.estimated_value().cents()
+        ));
+    }
     if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
     {
         summary.push(' ');
@@ -307,6 +334,7 @@ pub(crate) fn decide_operation_resolution(
         execution_margin,
         factors,
         exposure,
+        property_proceeds,
         police_snapshot,
         police_response,
         surveillance,
@@ -398,6 +426,7 @@ impl ValidatedOperationResolution {
                 execution_margin: self.plan.execution_margin,
                 factors: self.plan.factors,
                 exposure,
+                property_proceeds: self.plan.property_proceeds,
                 discovered_information,
                 after_action_information,
                 after_action_report,
@@ -418,6 +447,13 @@ pub(crate) fn validate_operation_resolution_plan(
         .operations
         .get_operation(plan.operation)
         .expect("validated resolution operation must exist");
+    let expected_property_proceeds =
+        calculate_property_proceeds(registry, state, record, plan.objective_outcome)?;
+    if plan.property_proceeds != expected_property_proceeds {
+        return Err(OperationResolutionError::StalePropertyProceedsContext {
+            operation: plan.operation,
+        });
+    }
     let surveillance_information = match &plan.surveillance {
         Some(surveillance) => validate_surveillance_information(
             state,
@@ -606,9 +642,12 @@ fn validate_plan_snapshot(
             found: state.now(),
         });
     }
-    let current_police_snapshot = resolve_target_police_snapshot(
+    let current_police_snapshot = resolve_target_police_interval_snapshot(
         state,
         record.objective().referenced_entities(),
+        record
+            .started_at()
+            .expect("in-progress operation must have a start time"),
         plan.resolved_at,
     );
     if current_police_snapshot != plan.police_snapshot
@@ -687,6 +726,44 @@ fn resolve_target_police_snapshot(
     let mut strongest: Option<(NeighborhoodId, Rating)> = None;
     for neighborhood in neighborhoods {
         let patrol = resolve_patrol_presence_snapshot(state, neighborhood, at);
+        let effective_presence = patrol.presence().or_else(|| {
+            state
+                .world
+                .get_neighborhood(neighborhood)
+                .map(|record| record.profile().institutions.police_presence)
+        });
+        patrol_by_neighborhood.insert(neighborhood, patrol);
+        let Some(effective_presence) = effective_presence else {
+            continue;
+        };
+        match strongest {
+            None => strongest = Some((neighborhood, effective_presence)),
+            Some((_current_neighborhood, current_presence))
+                if effective_presence.value() > current_presence.value() =>
+            {
+                strongest = Some((neighborhood, effective_presence));
+            }
+            Some(_) => {}
+        }
+    }
+    TargetPoliceSnapshot {
+        patrol_by_neighborhood,
+        target_presence: strongest.map(|(_, presence)| presence),
+        exposure_neighborhood: strongest.map(|(neighborhood, _)| neighborhood),
+    }
+}
+
+fn resolve_target_police_interval_snapshot(
+    state: &AppState,
+    entities: Vec<EntityRef>,
+    start: SimTime,
+    end: SimTime,
+) -> TargetPoliceSnapshot {
+    let neighborhoods = resolve_target_neighborhoods(state, entities);
+    let mut patrol_by_neighborhood = BTreeMap::new();
+    let mut strongest: Option<(NeighborhoodId, Rating)> = None;
+    for neighborhood in neighborhoods {
+        let patrol = resolve_patrol_presence_interval_snapshot(state, neighborhood, start, end);
         let effective_presence = patrol.presence().or_else(|| {
             state
                 .world
@@ -875,7 +952,8 @@ pub(crate) fn calculate_operation_police_alert_context(
     let police_snapshot =
         resolve_target_police_snapshot(state, record.objective().referenced_entities(), at);
     let stealth_average = resolve_stealth_average(state, record);
-    let (intelligence_quality, _) = calculate_intelligence_factors(registry, state, operation);
+    let (intelligence_quality, _, _, _) =
+        calculate_intelligence_factors(registry, state, operation);
     let intelligence_mitigation = u16::from(intelligence_quality.value())
         .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
         / 100;
@@ -948,7 +1026,7 @@ pub(crate) fn calculate_intelligence_factors(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
-) -> (Rating, i8) {
+) -> (Rating, i8, u8, u8) {
     let record = state
         .operations
         .get_operation(operation)
@@ -972,6 +1050,10 @@ pub(crate) fn calculate_intelligence_factors(
     }
 
     let relevant_topics = execution.relevant_intelligence_topics();
+    let covered = relevant_topics
+        .iter()
+        .filter(|topic| best_by_topic.contains_key(topic))
+        .count();
     let total = relevant_topics.iter().fold(0_u32, |total, topic| {
         total + u32::from(best_by_topic.get(topic).copied().unwrap_or(0))
     });
@@ -989,7 +1071,12 @@ pub(crate) fn calculate_intelligence_factors(
         / 100;
     let adjustment =
         -i8::try_from(reduction).expect("authored intelligence difficulty reduction must fit i8");
-    (quality, adjustment)
+    (
+        quality,
+        adjustment,
+        u8::try_from(covered).expect("authored intelligence topic count must fit u8"),
+        u8::try_from(relevant_topics.len()).expect("authored intelligence topic count must fit u8"),
+    )
 }
 
 fn information_score(
@@ -1074,6 +1161,63 @@ pub(crate) fn classify_objective_outcome(
     }
 }
 
+pub(crate) fn calculate_property_proceeds(
+    registry: &Registry,
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    outcome: OperationObjectiveOutcome,
+) -> Result<Option<OperationPropertyProceedsRecord>, OperationResolutionError> {
+    let Some(definition) = registry
+        .get_operation(operation.kind())
+        .execution()
+        .property_proceeds()
+    else {
+        return Ok(None);
+    };
+    let OperationObjective::AcquireProperty {
+        target: EntityRef::Business(business),
+    } = operation.objective()
+    else {
+        return Ok(None);
+    };
+    if outcome == OperationObjectiveOutcome::Failed {
+        return Ok(None);
+    }
+
+    let gross = estimate_business_gross_potential(registry, state, *business)?;
+    let full_value = i128::from(gross.cents())
+        .checked_mul(i128::from(definition.business_gross_basis_points()))
+        .ok_or(OperationResolutionError::PropertyProceedsOverflow {
+            operation: operation.id(),
+        })?
+        / 10_000_i128;
+    let value = match outcome {
+        OperationObjectiveOutcome::Achieved => full_value,
+        OperationObjectiveOutcome::Partial => {
+            full_value
+                .checked_mul(i128::from(definition.partial_recovery_basis_points()))
+                .ok_or(OperationResolutionError::PropertyProceedsOverflow {
+                    operation: operation.id(),
+                })?
+                / 10_000_i128
+        }
+        OperationObjectiveOutcome::Failed => {
+            unreachable!("failed property operations return early")
+        }
+    };
+    let cents =
+        i64::try_from(value).map_err(|_| OperationResolutionError::PropertyProceedsOverflow {
+            operation: operation.id(),
+        })?;
+    if cents <= 0 {
+        return Ok(None);
+    }
+    Ok(Some(OperationPropertyProceedsRecord::new(
+        EntityRef::Business(*business),
+        crate::finance::Money::from_cents(cents),
+    )))
+}
+
 fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
@@ -1105,15 +1249,20 @@ fn build_after_action_summary(
     } else {
         "No law-enforcement response reached the target before the operation ended."
     };
+    let covered = factors.intelligence_topics_covered();
+    let relevant = factors.intelligence_topics_relevant();
+    let coverage = if covered == 0 {
+        format!("Planning intelligence covered 0 of {relevant} relevant areas")
+    } else if covered == relevant {
+        format!("Planning intelligence covered all {relevant} relevant areas")
+    } else {
+        format!("Planning intelligence covered {covered} of {relevant} relevant areas")
+    };
     let intelligence = match factors.intelligence_adjustment() {
-        value if value < 0 => format!(
-            "Planning intelligence was {} and reduced execution uncertainty.",
-            band_label(factors.intelligence_quality().qualitative_band())
-        ),
-        0 => format!(
-            "Planning intelligence was {} and provided no material execution advantage.",
-            band_label(factors.intelligence_quality().qualitative_band())
-        ),
+        value if value < 0 => {
+            format!("{coverage}; the available reports reduced execution uncertainty.")
+        }
+        0 => format!("{coverage} and provided no material execution advantage."),
         _ => unreachable!("operation intelligence never increases authored difficulty"),
     };
     let approach = match factors.approach_adjustment() {
@@ -1179,7 +1328,7 @@ mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::attention::AttentionClass;
-    use crate::core::id::OrganizationId;
+    use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
     use crate::core::invariants::{
         validate_invariants, validate_state, validate_state_against_registry,
     };
@@ -1192,6 +1341,8 @@ mod tests {
     use crate::decisions::{
         DecisionContext, DecisionRequestDraft, DecisionResponse, OperationExceptionReason,
     };
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{InformationDraft, InformationTopic};
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
@@ -1200,10 +1351,14 @@ mod tests {
     };
     use crate::legal::{DayMinute, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow};
     use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::property_disposition::{
+        validate_dispose_property, PropertyDispositionDraft, PropertyDispositionError,
+    };
     use crate::operations::{
         OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
         OperationDraft, OperationKind, OperationObjective, OperationStatus, RoleKind,
     };
+    use crate::reports::organization_financial_report::validate_organization_financial_report;
     use crate::world::world_system::{
         designate_player_organization, insert_business, insert_character, insert_neighborhood,
         insert_organization, validate_reassign_character,
@@ -1214,6 +1369,49 @@ mod tests {
         NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
     };
     use std::collections::{BTreeMap, BTreeSet};
+
+    fn insert_property_disposition_fixture(
+        registry: &Registry,
+        state: &mut AppState,
+        neighborhood: NeighborhoodId,
+        organization: OrganizationId,
+    ) -> (BusinessId, FinancialAccountId, FinancialAccountId) {
+        let resale_venue = insert_business(
+            registry,
+            state,
+            BusinessDraft {
+                name: "Fixture Pawn Exchange".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                    BusinessFunction::ResaleMarket,
+                ]),
+                neighborhood,
+                owner: BusinessOwner::Organization(organization),
+            },
+        )
+        .expect("resale venue should validate");
+        let cash_account = insert_account(
+            state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::StreetCash,
+                label: "Fixture liquidation cash".to_owned(),
+            },
+        )
+        .expect("liquidation cash account should validate");
+        let settlement_account = insert_account(
+            state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::Settlement,
+                label: "Fixture liquidation settlement".to_owned(),
+            },
+        )
+        .expect("liquidation settlement account should validate");
+        (resale_venue, cash_account, settlement_account)
+    }
 
     fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId) {
         let registry = build_registry();
@@ -2294,7 +2492,7 @@ mod tests {
 
     #[test]
     fn police_arrival_before_entry_executes_standing_abort_contingency() {
-        let (registry, mut state, _police, _neighborhood, operation) =
+        let (registry, mut state, police, _neighborhood, operation) =
             make_exposed_business_operation_fixture_with_contingencies(
                 true,
                 vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
@@ -2343,6 +2541,34 @@ mod tests {
                 .and_then(|response| response.arrived_at()),
             Some(arrived_at)
         );
+        let mut participants = operation_record
+            .roles()
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        participants.insert(operation_record.leader());
+        for participant in participants {
+            let pressure: Vec<_> = state
+                .intelligence()
+                .information_for_holder_by_topic(
+                    KnowledgeHolder::Character(participant),
+                    InformationTopic::PoliceActivity,
+                )
+                .collect();
+            assert_eq!(pressure.len(), 1);
+            assert_eq!(
+                pressure[0].source_kind(),
+                InformationSourceKind::DirectObservation
+            );
+            assert_eq!(
+                pressure[0].source_entity(),
+                Some(EntityRef::Organization(police))
+            );
+            assert_eq!(pressure[0].subject(), EntityRef::Character(participant));
+            assert_eq!(pressure[0].observed_at(), arrived_at);
+            assert_eq!(pressure[0].reliability(), Reliability::DirectAccess);
+            assert_eq!(pressure[0].specificity(), Specificity::Precise);
+        }
         validate_state(&state).expect("police-contingency abort state should remain valid");
         validate_state_against_registry(&registry, &state)
             .expect("police-contingency abort should match authored content");
@@ -2854,6 +3080,396 @@ mod tests {
             .expect("fresh patrol-aware resolution should commit");
         validate_state(&state).expect("patrol-aware operation resolution should remain valid");
         validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_window() {
+        let (registry, mut state, police, neighborhood, operation) =
+            make_exposed_business_operation_fixture(true);
+        validate_establish_patrol_deployment(
+            &state,
+            PatrolDeploymentDraft {
+                organization: police,
+                neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(45).expect("fixture patrol minute should validate"),
+                    60,
+                    Rating::try_new(90).expect("fixture patrol rating should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("patrol deployment should validate")
+        .commit(&mut state)
+        .expect("patrol deployment should commit");
+
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.now, SimTime::from_minutes(1));
+        assert_eq!(start.started_operations, vec![operation]);
+        state.advance_clock(SimDuration::from_minutes(45));
+
+        let plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("due operation should resolve across its whole execution window");
+        assert_eq!(
+            plan.factors.target_police_presence().map(Rating::value),
+            Some(2)
+        );
+        assert_eq!(
+            plan.exposure
+                .factors
+                .target_police_presence()
+                .map(Rating::value),
+            Some(2)
+        );
+        assert!(!plan
+            .summary
+            .contains("High local police presence materially increased execution pressure."));
+        validate_operation_resolution_plan(&registry, &state, plan)
+            .expect("time-weighted patrol plan should validate")
+            .commit(&mut state)
+            .expect("time-weighted patrol resolution should commit");
+        validate_state(&state).expect("time-weighted patrol state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
+        let (registry, mut achieved_state, _police, neighborhood, operation) =
+            make_exposed_business_operation_fixture(false);
+        let start = run_tick(&registry, &mut achieved_state);
+        assert_eq!(start.started_operations, vec![operation]);
+        achieved_state.advance_clock(SimDuration::from_minutes(45));
+        let mut partial_state = achieved_state.clone();
+
+        let achieved_plan = decide_operation_resolution(
+            &registry,
+            &achieved_state,
+            operation,
+            OperationResolutionRandomness::new(12, 0),
+        )
+        .expect("favorable property operation should resolve");
+        assert_eq!(
+            achieved_plan.objective_outcome,
+            OperationObjectiveOutcome::Achieved
+        );
+        let achieved_proceeds = achieved_plan
+            .property_proceeds
+            .expect("achieved property acquisition should create held proceeds");
+        assert_eq!(achieved_proceeds.estimated_value().cents(), 56_400);
+        assert!(achieved_plan
+            .summary
+            .contains("estimated held value of 56400 cents"));
+        assert!(achieved_plan.summary.contains("remains unliquidated"));
+        validate_operation_resolution_plan(&registry, &achieved_state, achieved_plan)
+            .expect("achieved property proceeds should validate")
+            .commit(&mut achieved_state)
+            .expect("achieved property proceeds should commit");
+        assert_eq!(
+            achieved_state
+                .operations()
+                .get_operation(operation)
+                .and_then(|record| record.resolution())
+                .and_then(|resolution| resolution.property_proceeds())
+                .map(|proceeds| proceeds.estimated_value().cents()),
+            Some(56_400)
+        );
+        let organization = achieved_state
+            .operations()
+            .get_operation(operation)
+            .expect("completed property operation should persist")
+            .responsible_organization();
+        let financial_report = validate_organization_financial_report(
+            &achieved_state,
+            organization,
+            SimTime::ZERO,
+            achieved_state.now(),
+        )
+        .expect("held property should integrate into organization financial reporting")
+        .commit(&mut achieved_state);
+        let report = achieved_state
+            .reports()
+            .get_report(financial_report)
+            .expect("organization financial report should persist");
+        assert!(report.entries()[0].summary.contains(
+            "Held operation property at period end: 1 operation(s), estimated value 56400 cents"
+        ));
+        assert!(report.entries().iter().any(|entry| {
+            entry.entities.contains(&EntityRef::Operation(operation))
+                && entry
+                    .summary
+                    .contains("estimated held value of 56400 cents")
+        }));
+
+        let (resale_venue, cash_account, settlement_account) = insert_property_disposition_fixture(
+            &registry,
+            &mut achieved_state,
+            neighborhood,
+            organization,
+        );
+        let disposition = validate_dispose_property(
+            &registry,
+            &achieved_state,
+            PropertyDispositionDraft {
+                operation,
+                venue: resale_venue,
+                cash_account,
+                settlement_account,
+            },
+        )
+        .expect("held burglary property should be disposable through a resale venue");
+        assert_eq!(disposition.realized_value().cents(), 36_660);
+        let disposition_outcome = disposition
+            .commit(&mut achieved_state)
+            .expect("property disposition should commit atomically");
+        assert_eq!(disposition_outcome.realized_value.cents(), 36_660);
+        assert_eq!(
+            achieved_state
+                .finance()
+                .get_account(cash_account)
+                .expect("cash account should persist")
+                .balance()
+                .cents(),
+            36_660
+        );
+        assert_eq!(
+            achieved_state
+                .finance()
+                .get_account(settlement_account)
+                .expect("settlement account should persist")
+                .balance()
+                .cents(),
+            -36_660
+        );
+        assert!(matches!(
+            validate_dispose_property(
+                &registry,
+                &achieved_state,
+                PropertyDispositionDraft {
+                    operation,
+                    venue: resale_venue,
+                    cash_account,
+                    settlement_account,
+                },
+            ),
+            Err(PropertyDispositionError::AlreadyDisposed(found)) if found == operation
+        ));
+        let liquidated_report = validate_organization_financial_report(
+            &achieved_state,
+            organization,
+            SimTime::ZERO,
+            achieved_state.now(),
+        )
+        .expect("liquidated property should integrate into organization financial reporting")
+        .commit(&mut achieved_state);
+        let liquidated_report = achieved_state
+            .reports()
+            .get_report(liquidated_report)
+            .expect("liquidation financial report should persist");
+        assert!(liquidated_report.entries()[0].summary.contains(
+            "Held operation property at period end: 0 operation(s), estimated value 0 cents"
+        ));
+        assert!(liquidated_report.entries()[0]
+            .summary
+            .contains("Liquidated operation property during period: 1 disposition(s), realized cash 36660 cents"));
+        assert!(liquidated_report.entries().iter().any(|entry| {
+            entry.entities.contains(&EntityRef::Operation(operation))
+                && entry
+                    .summary
+                    .contains("liquidated through Fixture Pawn Exchange")
+                && entry.summary.contains("36660 cents")
+        }));
+        let restored = restore_save(
+            &registry,
+            build_save(&registry, &achieved_state).expect("property disposition state should save"),
+        )
+        .expect("property disposition state should restore");
+        let restored_disposition = restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.property_disposition())
+            .expect("property disposition should survive save restoration");
+        assert_eq!(restored_disposition.realized_value().cents(), 36_660);
+        assert_eq!(restored_disposition.venue(), resale_venue);
+        validate_state_against_registry(&registry, &restored)
+            .expect("restored property disposition should remain registry-valid");
+        validate_invariants(&restored);
+
+        let partial_plan = decide_operation_resolution(
+            &registry,
+            &partial_state,
+            operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("neutral property operation should resolve");
+        assert_eq!(
+            partial_plan.objective_outcome,
+            OperationObjectiveOutcome::Partial
+        );
+        assert_eq!(
+            partial_plan
+                .property_proceeds
+                .expect("partial property acquisition should create reduced held proceeds")
+                .estimated_value()
+                .cents(),
+            22_560
+        );
+        validate_operation_resolution_plan(&registry, &partial_state, partial_plan)
+            .expect("partial property proceeds should validate")
+            .commit(&mut partial_state)
+            .expect("partial property proceeds should commit");
+        validate_state_against_registry(&registry, &achieved_state)
+            .expect("achieved property proceeds should remain registry-valid");
+        validate_state_against_registry(&registry, &partial_state)
+            .expect("partial property proceeds should remain registry-valid");
+        validate_invariants(&achieved_state);
+        validate_invariants(&partial_state);
+    }
+
+    #[test]
+    fn property_disposition_reporting_respects_executive_brief_window() {
+        let (registry, mut state, _police, neighborhood, operation) =
+            make_exposed_business_operation_fixture(false);
+        let organization = state
+            .operations()
+            .get_operation(operation)
+            .expect("authorized operation should persist")
+            .responsible_organization();
+        designate_player_organization(&mut state, organization)
+            .expect("test organization should be designatable as player");
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        state.advance_clock(SimDuration::from_minutes(45));
+        let plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(12, 0),
+        )
+        .expect("favorable property operation should resolve");
+        assert_eq!(plan.objective_outcome, OperationObjectiveOutcome::Achieved);
+        validate_operation_resolution_plan(&registry, &state, plan)
+            .expect("property acquisition should validate")
+            .commit(&mut state)
+            .expect("property acquisition should commit");
+
+        let (venue, cash_account, settlement_account) =
+            insert_property_disposition_fixture(&registry, &mut state, neighborhood, organization);
+        let mut same_window = state.clone();
+        let mut later_window = state;
+
+        validate_dispose_property(
+            &registry,
+            &same_window,
+            PropertyDispositionDraft {
+                operation,
+                venue,
+                cash_account,
+                settlement_account,
+            },
+        )
+        .expect("same-window property disposition should validate")
+        .commit(&mut same_window)
+        .expect("same-window property disposition should commit");
+        let delta = 1_439_u64
+            .checked_sub(same_window.now().as_minutes())
+            .expect("fixture should resolve before first daily brief");
+        same_window.advance_clock(SimDuration::from_minutes(
+            u32::try_from(delta).expect("first brief delta should fit SimDuration"),
+        ));
+        let same_window_tick = run_tick(&registry, &mut same_window);
+        let same_window_brief = same_window_tick
+            .executive_brief
+            .expect("first daily brief should be generated");
+        let same_window_report = same_window
+            .reports()
+            .get_report(same_window_brief)
+            .expect("same-window executive brief should persist");
+        let operation_entries = same_window_report
+            .entries()
+            .iter()
+            .filter(|entry| entry.entities.contains(&EntityRef::Operation(operation)))
+            .collect::<Vec<_>>();
+        assert_eq!(operation_entries.len(), 1);
+        assert!(operation_entries[0]
+            .summary
+            .contains("it was later liquidated through Fixture Pawn Exchange for 36660 cents"));
+        assert!(!same_window_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.starts_with("Property from ")));
+        assert!(!same_window_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated")));
+
+        let delta = 1_439_u64
+            .checked_sub(later_window.now().as_minutes())
+            .expect("fixture should resolve before first daily brief");
+        later_window.advance_clock(SimDuration::from_minutes(
+            u32::try_from(delta).expect("first brief delta should fit SimDuration"),
+        ));
+        let first_tick = run_tick(&registry, &mut later_window);
+        let first_brief = first_tick
+            .executive_brief
+            .expect("first daily brief should be generated");
+        let first_report = later_window
+            .reports()
+            .get_report(first_brief)
+            .expect("first executive brief should persist");
+        assert!(first_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated")));
+
+        validate_dispose_property(
+            &registry,
+            &later_window,
+            PropertyDispositionDraft {
+                operation,
+                venue,
+                cash_account,
+                settlement_account,
+            },
+        )
+        .expect("later-window property disposition should validate")
+        .commit(&mut later_window)
+        .expect("later-window property disposition should commit");
+        let delta = 2_879_u64
+            .checked_sub(later_window.now().as_minutes())
+            .expect("disposition should precede the second daily brief");
+        later_window.advance_clock(SimDuration::from_minutes(
+            u32::try_from(delta).expect("second brief delta should fit SimDuration"),
+        ));
+        let second_tick = run_tick(&registry, &mut later_window);
+        let second_brief = second_tick
+            .executive_brief
+            .expect("second daily brief should be generated");
+        let second_report = later_window
+            .reports()
+            .get_report(second_brief)
+            .expect("second executive brief should persist");
+        assert!(second_report.entries().iter().any(|entry| {
+            entry.summary.starts_with("Property from ")
+                && entry
+                    .summary
+                    .contains("liquidated through Fixture Pawn Exchange for 36660 cents")
+        }));
+        assert!(!second_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated")));
+
+        validate_state_against_registry(&registry, &same_window)
+            .expect("same-window brief state should remain registry-valid");
+        validate_state_against_registry(&registry, &later_window)
+            .expect("later-window brief state should remain registry-valid");
+        validate_invariants(&same_window);
+        validate_invariants(&later_window);
     }
 
     #[test]

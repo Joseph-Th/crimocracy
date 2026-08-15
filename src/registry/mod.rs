@@ -95,6 +95,7 @@ pub struct RecruitmentWeightsDefinition {
 #[derive(Clone, Copy, Debug)]
 pub struct RecruitmentTimingDefinition {
     pub cooldown: SimDuration,
+    pub autonomous_attempt_cadence: SimDuration,
     pub perceived_legal_pressure_max_age: SimDuration,
 }
 
@@ -140,6 +141,10 @@ pub struct RecruitmentDefinition {
 impl RecruitmentDefinition {
     pub fn cooldown(&self) -> SimDuration {
         self.timing.cooldown
+    }
+
+    pub fn autonomous_attempt_cadence(&self) -> SimDuration {
+        self.timing.autonomous_attempt_cadence
     }
 
     pub fn base_willingness(&self) -> i16 {
@@ -318,6 +323,7 @@ pub struct OperationExecutionDefinition {
     pub(crate) intelligence: OperationIntelligenceDefinition,
     pub(crate) exposure: OperationExposureDefinition,
     pub(crate) police_response: OperationPoliceResponseDefinition,
+    pub(crate) property_proceeds: Option<OperationPropertyProceedsDefinition>,
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +368,13 @@ pub struct OperationPoliceResponseDefinition {
     pub(crate) entry_offset: Option<SimDuration>,
     pub(crate) arrival_difficulty_penalty: u8,
     pub(crate) arrival_exposure_penalty: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OperationPropertyProceedsDefinition {
+    pub(crate) business_gross_basis_points: u32,
+    pub(crate) partial_recovery_basis_points: u16,
+    pub(crate) liquidation_recovery_basis_points: u16,
 }
 
 impl OperationExecutionDefinition {
@@ -451,6 +464,23 @@ impl OperationExecutionDefinition {
     }
     pub fn police_arrival_exposure_penalty(&self) -> u8 {
         self.police_response.arrival_exposure_penalty
+    }
+    pub fn property_proceeds(&self) -> Option<OperationPropertyProceedsDefinition> {
+        self.property_proceeds
+    }
+}
+
+impl OperationPropertyProceedsDefinition {
+    pub fn business_gross_basis_points(self) -> u32 {
+        self.business_gross_basis_points
+    }
+
+    pub fn partial_recovery_basis_points(self) -> u16 {
+        self.partial_recovery_basis_points
+    }
+
+    pub fn liquidation_recovery_basis_points(self) -> u16 {
+        self.liquidation_recovery_basis_points
     }
 }
 
@@ -800,6 +830,14 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationEntryOffset(OperationKind),
     #[error("operation {0:?} police arrival penalties must be in 0..=100")]
     InvalidOperationResponsePenalty(OperationKind),
+    #[error(
+        "operation {0:?} property-proceeds business multiplier must be in 1..=100000 basis points"
+    )]
+    InvalidOperationPropertyValueMultiplier(OperationKind),
+    #[error("operation {0:?} partial property recovery must be in 1..=10000 basis points")]
+    InvalidOperationPartialPropertyRecovery(OperationKind),
+    #[error("operation {0:?} property liquidation recovery must be in 1..=10000 basis points")]
+    InvalidOperationPropertyLiquidationRecovery(OperationKind),
     #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
     MissingOperationRoleCapability {
         operation: OperationKind,
@@ -924,6 +962,7 @@ impl RegistryBuilder {
         } = spec;
         let RecruitmentTimingDefinition {
             cooldown,
+            autonomous_attempt_cadence,
             perceived_legal_pressure_max_age,
         } = timing;
         let RecruitmentScoringDefinition {
@@ -953,7 +992,10 @@ impl RegistryBuilder {
             dependence_weight: attachment_dependence_weight,
             divisor: attachment_divisor,
         } = incumbent_attachment;
-        if cooldown.as_minutes() == 0 || perceived_legal_pressure_max_age.as_minutes() == 0 {
+        if cooldown.as_minutes() == 0
+            || autonomous_attempt_cadence.as_minutes() == 0
+            || perceived_legal_pressure_max_age.as_minutes() == 0
+        {
             return Err(RegistryBuildError::InvalidRecruitmentDuration);
         }
         if [
@@ -1041,6 +1083,7 @@ impl RegistryBuilder {
         self.recruitment = Some(RecruitmentDefinition {
             timing: RecruitmentTimingDefinition {
                 cooldown,
+                autonomous_attempt_cadence,
                 perceived_legal_pressure_max_age,
             },
             scoring: RecruitmentScoringDefinition {
@@ -1248,6 +1291,21 @@ impl RegistryBuilder {
             || execution.police_response.arrival_exposure_penalty > 100
         {
             return Err(RegistryBuildError::InvalidOperationResponsePenalty(kind));
+        }
+        if let Some(property) = execution.property_proceeds {
+            if !(1..=100_000).contains(&property.business_gross_basis_points) {
+                return Err(RegistryBuildError::InvalidOperationPropertyValueMultiplier(
+                    kind,
+                ));
+            }
+            if !(1..=10_000).contains(&property.partial_recovery_basis_points) {
+                return Err(RegistryBuildError::InvalidOperationPartialPropertyRecovery(
+                    kind,
+                ));
+            }
+            if !(1..=10_000).contains(&property.liquidation_recovery_basis_points) {
+                return Err(RegistryBuildError::InvalidOperationPropertyLiquidationRecovery(kind));
+            }
         }
         for role in &required_roles {
             if !execution.difficulty.role_capabilities.contains_key(role) {
@@ -1476,6 +1534,7 @@ mod tests {
         RecruitmentDefinitionSpec {
             timing: RecruitmentTimingDefinition {
                 cooldown: SimDuration::from_minutes(60),
+                autonomous_attempt_cadence: SimDuration::from_minutes(1_440),
                 perceived_legal_pressure_max_age: SimDuration::from_minutes(1_440),
             },
             scoring: RecruitmentScoringDefinition {
@@ -1554,6 +1613,10 @@ mod tests {
         let registry = build_registry();
         let definition = registry.recruitment();
         assert_eq!(definition.cooldown(), SimDuration::from_minutes(10_080));
+        assert_eq!(
+            definition.autonomous_attempt_cadence(),
+            SimDuration::from_minutes(1_440)
+        );
         assert_eq!(
             definition.recruiter_capabilities(),
             &BTreeSet::from([CapabilityKind::Negotiation, CapabilityKind::SocialAccess])
