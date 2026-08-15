@@ -1,8 +1,8 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    BusinessId, CharacterId, InformantId, InvestigationId, MandateId, NeighborhoodId, OperationId,
-    OrganizationId,
+    BusinessId, CharacterId, ContactId, InformantId, InvestigationId, MandateId, NeighborhoodId,
+    OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::operations::OperationStatus;
@@ -56,6 +56,16 @@ pub enum WorldError {
         character: CharacterId,
         handler: OrganizationId,
         informant: InformantId,
+    },
+    #[error("character {character} handles active institutional contact {contact}")]
+    ActiveInstitutionalContactHandler {
+        character: CharacterId,
+        contact: ContactId,
+    },
+    #[error("character {character} is active institutional contact {contact}")]
+    ActiveInstitutionalContactAssignment {
+        character: CharacterId,
+        contact: ContactId,
     },
     #[error("character {character} still supervises direct report {direct_report}")]
     DirectReportAssignment {
@@ -241,6 +251,22 @@ fn validate_reassignment_preconditions(
     validate_membership(state, organization, supervisor)?;
 
     if organization != record.organization() {
+        if let Some(contact) = state.contacts.active_contacts_for_handler(character).next() {
+            return Err(WorldError::ActiveInstitutionalContactHandler {
+                character,
+                contact: contact.id(),
+            });
+        }
+        if let Some(contact) = state
+            .contacts
+            .active_contacts_for_character(character)
+            .next()
+        {
+            return Err(WorldError::ActiveInstitutionalContactAssignment {
+                character,
+                contact: contact.id(),
+            });
+        }
         if let Some(handler) = organization {
             if let Some(informant) = state.legal.active_informant_for(character, handler) {
                 return Err(WorldError::ActiveInformantHandlerAssignment {

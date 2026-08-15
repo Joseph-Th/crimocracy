@@ -2,7 +2,7 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, NeighborhoodId, OperationId};
+use crate::core::id::{CharacterId, NeighborhoodId, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
@@ -18,9 +18,15 @@ use crate::legal::investigation_system::{
     validate_incident_intake, InvestigationError, ValidatedIncidentIntake,
 };
 use crate::legal::jurisdiction_system::resolve_case_intake_authority;
+use crate::legal::patrol_system::{resolve_patrol_presence_snapshot, PatrolPresenceSnapshot};
 use crate::legal::{
     Admissibility, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
     IncidentIntakeDraft,
+};
+use crate::operations::surveillance_integration::{
+    decide_surveillance_intelligence, surveillance_after_action_clause,
+    validate_surveillance_information, validate_surveillance_plan_snapshot, SurveillanceError,
+    SurveillanceIntelligencePlan,
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationExposureRecord,
@@ -31,7 +37,7 @@ use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, QualitativeBand, Rating};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -57,6 +63,12 @@ pub(crate) enum OperationResolutionError {
     },
     #[error("operation resolution plan was resolved at {expected:?}, but simulation time is now {found:?}")]
     StaleResolutionTime { expected: SimTime, found: SimTime },
+    #[error("police deployment context affecting operation {operation} changed after resolution planning")]
+    StalePoliceDeploymentContext { operation: OperationId },
+    #[error(
+        "police response context affecting operation {operation} changed after resolution planning"
+    )]
+    StalePoliceResponseContext { operation: OperationId },
     #[error(
         "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
     )]
@@ -82,6 +94,38 @@ pub(crate) enum OperationResolutionError {
     Investigation(#[from] InvestigationError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    Surveillance(#[from] SurveillanceError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetPoliceSnapshot {
+    patrol_by_neighborhood: BTreeMap<NeighborhoodId, PatrolPresenceSnapshot>,
+    target_presence: Option<Rating>,
+    exposure_neighborhood: Option<NeighborhoodId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PoliceResponseResolutionSnapshot {
+    response: PoliceResponseId,
+    version: u32,
+    arrived_at: Option<SimTime>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OperationPoliceAlertContext {
+    score: i16,
+    neighborhood: Option<NeighborhoodId>,
+}
+
+impl OperationPoliceAlertContext {
+    pub(crate) fn score(self) -> i16 {
+        self.score
+    }
+
+    pub(crate) fn neighborhood(self) -> Option<NeighborhoodId> {
+        self.neighborhood
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +175,9 @@ pub(crate) struct OperationResolutionPlan {
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
+    police_snapshot: TargetPoliceSnapshot,
+    police_response: Option<PoliceResponseResolutionSnapshot>,
+    surveillance: Option<SurveillanceIntelligencePlan>,
     summary: String,
     history_entities: BTreeSet<EntityRef>,
 }
@@ -177,8 +224,24 @@ pub(crate) fn decide_operation_resolution(
         .and_then(|leader| leader.capability(CapabilityKind::Management));
     let (intelligence_quality, intelligence_adjustment) =
         calculate_intelligence_factors(registry, state, operation);
-    let target_police_presence =
-        resolve_target_police_presence(state, record.objective().referenced_entities());
+    let police_snapshot = resolve_target_police_snapshot(
+        state,
+        record.objective().referenced_entities(),
+        state.now(),
+    );
+    let target_police_presence = police_snapshot.target_presence;
+    let police_response_arrived = did_police_response_arrive_by(state, record, state.now());
+    let police_response = record.police_response().map(|response_id| {
+        let response = state
+            .legal
+            .get_police_response(response_id)
+            .expect("operation police-response link must reference a persisted response");
+        PoliceResponseResolutionSnapshot {
+            response: response_id,
+            version: response.version(),
+            arrived_at: response.arrived_at(),
+        }
+    });
     let approach_adjustment = execution
         .approach_difficulty_adjustment(record.approach())
         .expect("validated operation approach must have an authored execution adjustment");
@@ -196,6 +259,7 @@ pub(crate) fn decide_operation_resolution(
         intelligence_quality,
         intelligence_adjustment,
         target_police_presence,
+        police_response_arrived,
         approach_adjustment,
         time_pressure,
         variance: randomness.execution_variance(),
@@ -208,8 +272,16 @@ pub(crate) fn decide_operation_resolution(
         operation,
         randomness.exposure_variance(),
         intelligence_quality,
+        &police_snapshot,
+        police_response_arrived,
     );
-    let summary = build_after_action_summary(objective_outcome, factors, exposure.level());
+    let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
+    let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
+    if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
+    {
+        summary.push(' ');
+        summary.push_str(&clause);
+    }
     let mut history_entities = BTreeSet::from([
         EntityRef::Operation(operation),
         EntityRef::Organization(record.responsible_organization()),
@@ -217,6 +289,15 @@ pub(crate) fn decide_operation_resolution(
     ]);
     history_entities.extend(record.objective().referenced_entities());
     history_entities.extend(record.roles().values().copied().map(EntityRef::Character));
+    if police_response_arrived {
+        if let Some(response) = record
+            .police_response()
+            .and_then(|id| state.legal.get_police_response(id))
+        {
+            history_entities.insert(EntityRef::Organization(response.authority()));
+            history_entities.insert(EntityRef::Neighborhood(response.neighborhood()));
+        }
+    }
 
     Ok(OperationResolutionPlan {
         operation,
@@ -226,6 +307,9 @@ pub(crate) fn decide_operation_resolution(
         execution_margin,
         factors,
         exposure,
+        police_snapshot,
+        police_response,
+        surveillance,
         summary,
         history_entities,
     })
@@ -235,6 +319,7 @@ pub(crate) struct ValidatedOperationResolution {
     plan: OperationResolutionPlan,
     incident: Option<ValidatedIncidentIntake>,
     incident_authority: Option<IncidentAuthoritySnapshot>,
+    surveillance_information: Vec<ValidatedInformation>,
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
@@ -297,6 +382,11 @@ impl ValidatedOperationResolution {
             investigation,
             evidence,
         };
+        let discovered_information = self
+            .surveillance_information
+            .into_iter()
+            .map(|information| information.commit(state))
+            .collect();
         let after_action_information = self.information.commit(state);
         let history_event = self.history.commit(state);
         let after_action_report = self.report.commit(state);
@@ -308,6 +398,7 @@ impl ValidatedOperationResolution {
                 execution_margin: self.plan.execution_margin,
                 factors: self.plan.factors,
                 exposure,
+                discovered_information,
                 after_action_information,
                 after_action_report,
                 history_event,
@@ -327,6 +418,15 @@ pub(crate) fn validate_operation_resolution_plan(
         .operations
         .get_operation(plan.operation)
         .expect("validated resolution operation must exist");
+    let surveillance_information = match &plan.surveillance {
+        Some(surveillance) => validate_surveillance_information(
+            state,
+            record.responsible_organization(),
+            record.id(),
+            surveillance,
+        )?,
+        None => Vec::new(),
+    };
     let information = validate_record_information(
         state,
         InformationDraft {
@@ -375,6 +475,7 @@ pub(crate) fn validate_operation_resolution_plan(
         plan,
         incident,
         incident_authority,
+        surveillance_information,
         information,
         history,
         report,
@@ -505,6 +606,43 @@ fn validate_plan_snapshot(
             found: state.now(),
         });
     }
+    let current_police_snapshot = resolve_target_police_snapshot(
+        state,
+        record.objective().referenced_entities(),
+        plan.resolved_at,
+    );
+    if current_police_snapshot != plan.police_snapshot
+        || plan.factors.target_police_presence() != plan.police_snapshot.target_presence
+        || plan.exposure.neighborhood != plan.police_snapshot.exposure_neighborhood
+        || plan.exposure.factors.target_police_presence() != plan.police_snapshot.target_presence
+    {
+        return Err(OperationResolutionError::StalePoliceDeploymentContext {
+            operation: plan.operation,
+        });
+    }
+    let current_police_response = record.police_response().map(|response_id| {
+        let response = state
+            .legal
+            .get_police_response(response_id)
+            .expect("operation police-response link must reference a persisted response");
+        PoliceResponseResolutionSnapshot {
+            response: response_id,
+            version: response.version(),
+            arrived_at: response.arrived_at(),
+        }
+    });
+    if current_police_response != plan.police_response
+        || did_police_response_arrive_by(state, record, plan.resolved_at)
+            != plan.factors.police_response_arrived()
+        || plan.exposure.factors.police_response_arrived() != plan.factors.police_response_arrived()
+    {
+        return Err(OperationResolutionError::StalePoliceResponseContext {
+            operation: plan.operation,
+        });
+    }
+    if let Some(surveillance) = &plan.surveillance {
+        validate_surveillance_plan_snapshot(state, surveillance)?;
+    }
     Ok(())
 }
 
@@ -539,20 +677,58 @@ fn resolve_role_capability_average(
         .expect("rating average must remain within rating bounds")
 }
 
-fn resolve_target_police_presence(state: &AppState, entities: Vec<EntityRef>) -> Option<Rating> {
-    entities
-        .into_iter()
-        .filter_map(|entity| match entity {
-            EntityRef::Neighborhood(id) => state
+fn resolve_target_police_snapshot(
+    state: &AppState,
+    entities: Vec<EntityRef>,
+    at: SimTime,
+) -> TargetPoliceSnapshot {
+    let neighborhoods = resolve_target_neighborhoods(state, entities);
+    let mut patrol_by_neighborhood = BTreeMap::new();
+    let mut strongest: Option<(NeighborhoodId, Rating)> = None;
+    for neighborhood in neighborhoods {
+        let patrol = resolve_patrol_presence_snapshot(state, neighborhood, at);
+        let effective_presence = patrol.presence().or_else(|| {
+            state
                 .world
-                .get_neighborhood(id)
-                .map(|record| record.profile().institutions.police_presence),
-            EntityRef::Business(id) => state.world.get_business(id).and_then(|business| {
-                state
-                    .world
-                    .get_neighborhood(business.neighborhood())
-                    .map(|record| record.profile().institutions.police_presence)
-            }),
+                .get_neighborhood(neighborhood)
+                .map(|record| record.profile().institutions.police_presence)
+        });
+        patrol_by_neighborhood.insert(neighborhood, patrol);
+        let Some(effective_presence) = effective_presence else {
+            continue;
+        };
+        match strongest {
+            None => strongest = Some((neighborhood, effective_presence)),
+            Some((_current_neighborhood, current_presence))
+                if effective_presence.value() > current_presence.value() =>
+            {
+                strongest = Some((neighborhood, effective_presence));
+            }
+            Some(_) => {}
+        }
+    }
+    TargetPoliceSnapshot {
+        patrol_by_neighborhood,
+        target_presence: strongest.map(|(_, presence)| presence),
+        exposure_neighborhood: strongest.map(|(neighborhood, _)| neighborhood),
+    }
+}
+
+fn resolve_target_neighborhoods(
+    state: &AppState,
+    entities: Vec<EntityRef>,
+) -> BTreeSet<NeighborhoodId> {
+    let mut neighborhoods = BTreeSet::new();
+    for entity in entities {
+        match entity {
+            EntityRef::Neighborhood(id) => {
+                neighborhoods.insert(id);
+            }
+            EntityRef::Business(id) => {
+                if let Some(business) = state.world.get_business(id) {
+                    neighborhoods.insert(business.neighborhood());
+                }
+            }
             EntityRef::Organization(_)
             | EntityRef::Character(_)
             | EntityRef::Operation(_)
@@ -561,9 +737,10 @@ fn resolve_target_police_presence(state: &AppState, entities: Vec<EntityRef>) ->
             | EntityRef::FinancialAccount(_)
             | EntityRef::DecisionRequest(_)
             | EntityRef::Mandate(_)
-            | EntityRef::Enterprise(_) => None,
-        })
-        .max_by_key(|rating| rating.value())
+            | EntityRef::Enterprise(_) => {}
+        }
+    }
+    neighborhoods
 }
 
 fn calculate_exposure_plan(
@@ -572,20 +749,16 @@ fn calculate_exposure_plan(
     operation: OperationId,
     variance: i8,
     intelligence_quality: Rating,
+    police_snapshot: &TargetPoliceSnapshot,
+    police_response_arrived: bool,
 ) -> OperationExposurePlan {
     let record = state
         .operations
         .get_operation(operation)
         .expect("operation exposure must reference an existing operation");
     let execution = registry.get_operation(record.kind()).execution();
-    let neighborhood =
-        resolve_exposure_neighborhood(state, record.objective().referenced_entities());
-    let target_police_presence = neighborhood.and_then(|id| {
-        state
-            .world
-            .get_neighborhood(id)
-            .map(|record| record.profile().institutions.police_presence)
-    });
+    let neighborhood = police_snapshot.exposure_neighborhood;
+    let target_police_presence = police_snapshot.target_presence;
     let stealth_average = resolve_stealth_average(state, record);
     let approach_adjustment = execution
         .exposure_approach_adjustment(record.approach())
@@ -596,6 +769,7 @@ fn calculate_exposure_plan(
     let factors = OperationExposureFactors {
         stealth_average,
         target_police_presence,
+        police_response_arrived,
         approach_adjustment,
         intelligence_mitigation: u8::try_from(intelligence_mitigation)
             .expect("bounded intelligence exposure mitigation must fit u8"),
@@ -632,6 +806,11 @@ pub(crate) fn calculate_exposure_score(
         / 100;
     i16::from(execution.base_exposure())
         + police_observation
+        + if factors.police_response_arrived() {
+            i16::from(execution.police_arrival_exposure_penalty())
+        } else {
+            0
+        }
         + i16::from(factors.approach_adjustment())
         - stealth_mitigation
         - i16::from(factors.intelligence_mitigation())
@@ -651,51 +830,6 @@ pub(crate) fn classify_exposure_level(
     } else {
         OperationExposureLevel::None
     }
-}
-
-fn resolve_exposure_neighborhood(
-    state: &AppState,
-    entities: Vec<EntityRef>,
-) -> Option<NeighborhoodId> {
-    let mut neighborhoods = BTreeSet::new();
-    for entity in entities {
-        match entity {
-            EntityRef::Neighborhood(id) => {
-                neighborhoods.insert(id);
-            }
-            EntityRef::Business(id) => {
-                if let Some(business) = state.world.get_business(id) {
-                    neighborhoods.insert(business.neighborhood());
-                }
-            }
-            EntityRef::Organization(_)
-            | EntityRef::Character(_)
-            | EntityRef::Operation(_)
-            | EntityRef::Investigation(_)
-            | EntityRef::Evidence(_)
-            | EntityRef::FinancialAccount(_)
-            | EntityRef::DecisionRequest(_)
-            | EntityRef::Mandate(_)
-            | EntityRef::Enterprise(_) => {}
-        }
-    }
-    neighborhoods
-        .into_iter()
-        .fold(None, |best, neighborhood| {
-            let police = state
-                .world
-                .get_neighborhood(neighborhood)
-                .map(|record| record.profile().institutions.police_presence.value())
-                .unwrap_or(0);
-            match best {
-                None => Some((neighborhood, police)),
-                Some((_current, current_police)) if police > current_police => {
-                    Some((neighborhood, police))
-                }
-                Some(current) => Some(current),
-            }
-        })
-        .map(|(neighborhood, _)| neighborhood)
 }
 
 fn operation_participants(record: &crate::operations::OperationRecord) -> BTreeSet<CharacterId> {
@@ -725,6 +859,53 @@ fn resolve_stealth_average(
         .expect("operation always has at least its leader as a participant");
     Rating::try_new(u8::try_from(average).expect("stealth average must fit u8"))
         .expect("stealth average must remain within rating bounds")
+}
+
+pub(crate) fn calculate_operation_police_alert_context(
+    registry: &Registry,
+    state: &AppState,
+    operation: OperationId,
+    at: SimTime,
+) -> OperationPoliceAlertContext {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .expect("police alert planning must reference an existing operation");
+    let execution = registry.get_operation(record.kind()).execution();
+    let police_snapshot =
+        resolve_target_police_snapshot(state, record.objective().referenced_entities(), at);
+    let stealth_average = resolve_stealth_average(state, record);
+    let (intelligence_quality, _) = calculate_intelligence_factors(registry, state, operation);
+    let intelligence_mitigation = u16::from(intelligence_quality.value())
+        .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
+        / 100;
+    let factors = OperationExposureFactors {
+        stealth_average,
+        target_police_presence: police_snapshot.target_presence,
+        police_response_arrived: false,
+        approach_adjustment: execution
+            .exposure_approach_adjustment(record.approach())
+            .expect("validated operation approach must have an authored exposure adjustment"),
+        intelligence_mitigation: u8::try_from(intelligence_mitigation)
+            .expect("bounded intelligence exposure mitigation must fit u8"),
+        variance: 0,
+    };
+    OperationPoliceAlertContext {
+        score: calculate_exposure_score(execution, factors),
+        neighborhood: police_snapshot.exposure_neighborhood,
+    }
+}
+
+pub(crate) fn did_police_response_arrive_by(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    at: SimTime,
+) -> bool {
+    operation
+        .police_response()
+        .and_then(|response| state.legal.get_police_response(response))
+        .and_then(|response| response.arrived_at())
+        .is_some_and(|arrived_at| arrived_at <= at)
 }
 
 fn most_exposed_participant(
@@ -869,6 +1050,11 @@ pub(crate) fn calculate_execution_margin(
         .unwrap_or(0);
     let difficulty = i16::from(execution.base_difficulty())
         + police_pressure
+        + if factors.police_response_arrived() {
+            i16::from(execution.police_arrival_difficulty_penalty())
+        } else {
+            0
+        }
         + i16::from(factors.intelligence_adjustment())
         + i16::from(factors.approach_adjustment())
         + i16::from(factors.time_pressure());
@@ -914,6 +1100,11 @@ fn build_after_action_summary(
         Some(_) => "Local police presence created limited execution pressure.",
         None => "No location-based police pressure could be established from the operation target.",
     };
+    let response = if factors.police_response_arrived() {
+        "Law-enforcement response reached the target before the operation ended."
+    } else {
+        "No law-enforcement response reached the target before the operation ended."
+    };
     let intelligence = match factors.intelligence_adjustment() {
         value if value < 0 => format!(
             "Planning intelligence was {} and reduced execution uncertainty.",
@@ -951,12 +1142,13 @@ fn build_after_action_summary(
         }
     };
     format!(
-        "Objective {}. Assigned-role competence was {}. {} {} {} {} {} {} {}",
+        "Objective {}. Assigned-role competence was {}. {} {} {} {} {} {} {} {}",
         outcome_label(outcome),
         band_label(factors.role_capability_average().qualitative_band()),
         management,
         intelligence,
         police,
+        response,
         approach,
         deadline,
         circumstances,
@@ -988,22 +1180,29 @@ mod tests {
     use crate::build_registry;
     use crate::core::attention::AttentionClass;
     use crate::core::id::OrganizationId;
-    use crate::core::invariants::{validate_invariants, validate_state};
+    use crate::core::invariants::{
+        validate_invariants, validate_state, validate_state_against_registry,
+    };
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::simulation::run_tick;
     use crate::core::time::SimDuration;
-    use crate::decisions::decision_system::{validate_request_decision, validate_resolve_decision};
+    use crate::decisions::decision_system::{
+        validate_request_decision, validate_resolve_decision, DecisionError,
+    };
     use crate::decisions::{
         DecisionContext, DecisionRequestDraft, DecisionResponse, OperationExceptionReason,
     };
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{InformationDraft, InformationTopic};
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
-    use crate::legal::JurisdictionDraft;
+    use crate::legal::patrol_system::{
+        validate_establish_patrol_deployment, validate_revise_patrol_deployment,
+    };
+    use crate::legal::{DayMinute, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow};
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{
         OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
-        OperationDraft, OperationKind, OperationObjective, RoleKind,
+        OperationDraft, OperationKind, OperationObjective, OperationStatus, RoleKind,
     };
     use crate::world::world_system::{
         designate_player_organization, insert_business, insert_character, insert_neighborhood,
@@ -1184,6 +1383,19 @@ mod tests {
         NeighborhoodId,
         OperationId,
     ) {
+        make_exposed_business_operation_fixture_with_contingencies(assign_jurisdiction, Vec::new())
+    }
+
+    fn make_exposed_business_operation_fixture_with_contingencies(
+        assign_jurisdiction: bool,
+        contingencies: Vec<OperationContingency>,
+    ) -> (
+        Registry,
+        AppState,
+        OrganizationId,
+        NeighborhoodId,
+        OperationId,
+    ) {
         let registry = build_registry();
         let mut state = AppState::new(0xE710_1933);
         let organization = insert_organization(
@@ -1323,7 +1535,7 @@ mod tests {
                 ]),
                 intelligence: BTreeSet::new(),
                 constraints: Vec::new(),
-                contingencies: Vec::new(),
+                contingencies,
                 scheduled_for: SimTime::from_minutes(1),
             },
         )
@@ -1469,6 +1681,125 @@ mod tests {
         assert_eq!(outcome.now, SimTime::from_minutes(31));
         assert_eq!(outcome.resolved_operations, vec![operation]);
         validate_state(&state).expect("resumed operation state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn police_response_arrives_during_decision_pause_and_continue_honors_standing_abort() {
+        let (registry, mut state, _police, _neighborhood, operation) =
+            make_exposed_business_operation_fixture_with_contingencies(
+                true,
+                vec![
+                    OperationContingency::AbortOnPoliceArrivalBeforeEntry,
+                    OperationContingency::RequestDecisionOnUnexpectedCondition,
+                ],
+            );
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started operation should persist");
+        let response_id = operation_record
+            .police_response()
+            .expect("observable burglary should dispatch police response");
+        let organization = operation_record.responsible_organization();
+        let leader = operation_record.leader();
+
+        let second_tick = run_tick(&registry, &mut state);
+        assert!(second_tick.arrived_police_responses.is_empty());
+        let decision = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: leader,
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::UnexpectedCondition,
+                },
+                attention: AttentionClass::Exception,
+                summary: "Entry team encountered an unexpected security condition.".to_owned(),
+            },
+        )
+        .expect("operation exception should validate")
+        .commit(&mut state)
+        .expect("operation exception should commit");
+        let paused_at = state.now();
+        assert_eq!(paused_at, SimTime::from_minutes(2));
+
+        let response_due = state
+            .legal()
+            .get_police_response(response_id)
+            .expect("response should persist")
+            .arrival_due_at();
+        while state.now() < response_due {
+            let outcome = run_tick(&registry, &mut state);
+            assert_eq!(
+                state
+                    .operations()
+                    .get_operation(operation)
+                    .expect("decision-blocked operation should persist")
+                    .status(),
+                OperationStatus::AwaitingDecision
+            );
+            if outcome.now < response_due {
+                assert!(outcome.arrived_police_responses.is_empty());
+            }
+        }
+        assert_eq!(
+            state
+                .legal()
+                .get_police_response(response_id)
+                .and_then(|response| response.arrived_at()),
+            Some(response_due)
+        );
+        assert!(state
+            .decisions()
+            .get_decision(decision.decision)
+            .expect("pending decision should persist")
+            .resolution()
+            .is_none());
+
+        for _ in 0..2 {
+            let outcome = run_tick(&registry, &mut state);
+            assert!(outcome.resolved_operations.is_empty());
+        }
+        let resolved_at = state.now();
+        validate_resolve_decision(
+            &registry,
+            &state,
+            decision.decision,
+            organization,
+            DecisionResponse::Continue,
+        )
+        .expect("continue should validate while preserving standing contingencies")
+        .commit(&mut state)
+        .expect("continue resolution should atomically honor the police contingency");
+
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("aborted operation should persist");
+        assert_eq!(operation_record.status(), OperationStatus::Aborted);
+        assert_eq!(operation_record.awaiting_decision_since(), Some(paused_at));
+        let abort = operation_record
+            .abort_record()
+            .expect("standing contingency should persist abort history");
+        assert_eq!(abort.phase(), OperationAbortPhase::AwaitingDecision);
+        assert_eq!(
+            abort.cause(),
+            OperationAbortCause::PoliceArrival(response_id)
+        );
+        assert_eq!(abort.aborted_at(), resolved_at);
+        let decision_resolution = state
+            .decisions()
+            .get_decision(decision.decision)
+            .and_then(|decision| decision.resolution())
+            .expect("continue decision should remain historical");
+        assert_eq!(decision_resolution.response(), DecisionResponse::Continue);
+        assert_eq!(decision_resolution.resolved_at(), resolved_at);
+        validate_state(&state).expect("continuous-time police response state should validate");
+        validate_state_against_registry(&registry, &state)
+            .expect("continuous-time response state should match authored content");
         validate_invariants(&state);
     }
 
@@ -1877,6 +2208,651 @@ mod tests {
             0
         );
         validate_state(&state).expect("unrouted exposure should remain structurally valid");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn patrol_presence_controls_persisted_police_response_delay() {
+        let (low_registry, mut low_state, low_police, low_neighborhood, low_operation) =
+            make_exposed_business_operation_fixture(true);
+        validate_establish_patrol_deployment(
+            &low_state,
+            PatrolDeploymentDraft {
+                organization: low_police,
+                neighborhood: low_neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("zero-presence patrol should validate")
+        .commit(&mut low_state)
+        .expect("zero-presence patrol should commit");
+        let low_start = run_tick(&low_registry, &mut low_state);
+        assert_eq!(low_start.started_operations, vec![low_operation]);
+        let low_response_id = low_state
+            .operations()
+            .get_operation(low_operation)
+            .and_then(|record| record.police_response())
+            .expect("observable burglary should dispatch a response");
+        let low_response = low_state
+            .legal()
+            .get_police_response(low_response_id)
+            .expect("low-presence response should persist");
+        assert_eq!(low_response.response_presence().value(), 0);
+        assert_eq!(
+            low_response.arrival_due_at().as_minutes() - low_response.dispatched_at().as_minutes(),
+            12
+        );
+
+        let (high_registry, mut high_state, high_police, high_neighborhood, high_operation) =
+            make_exposed_business_operation_fixture(true);
+        validate_establish_patrol_deployment(
+            &high_state,
+            PatrolDeploymentDraft {
+                organization: high_police,
+                neighborhood: high_neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(100).expect("full patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("full-presence patrol should validate")
+        .commit(&mut high_state)
+        .expect("full-presence patrol should commit");
+        let high_start = run_tick(&high_registry, &mut high_state);
+        assert_eq!(high_start.started_operations, vec![high_operation]);
+        let high_response_id = high_state
+            .operations()
+            .get_operation(high_operation)
+            .and_then(|record| record.police_response())
+            .expect("observable burglary should dispatch a response");
+        let high_response = high_state
+            .legal()
+            .get_police_response(high_response_id)
+            .expect("high-presence response should persist");
+        assert_eq!(high_response.response_presence().value(), 100);
+        assert_eq!(
+            high_response.arrival_due_at().as_minutes()
+                - high_response.dispatched_at().as_minutes(),
+            3
+        );
+
+        validate_state_against_registry(&low_registry, &low_state)
+            .expect("low-presence response state should match authored content");
+        validate_state_against_registry(&high_registry, &high_state)
+            .expect("high-presence response state should match authored content");
+        validate_invariants(&low_state);
+        validate_invariants(&high_state);
+    }
+
+    #[test]
+    fn police_arrival_before_entry_executes_standing_abort_contingency() {
+        let (registry, mut state, _police, _neighborhood, operation) =
+            make_exposed_business_operation_fixture_with_contingencies(
+                true,
+                vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+            );
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started operation should persist");
+        let response_id = operation_record
+            .police_response()
+            .expect("high-observation burglary should dispatch police response");
+        let entry_at = operation_record
+            .entry_at()
+            .expect("burglary should have an authored entry milestone");
+
+        let mut arrival_tick = None;
+        while state.now() < entry_at {
+            let outcome = run_tick(&registry, &mut state);
+            if outcome.arrived_police_responses.contains(&response_id) {
+                arrival_tick = Some(outcome.now);
+                break;
+            }
+        }
+        let arrived_at = arrival_tick.expect("police response should arrive before burglary entry");
+        assert!(arrived_at < entry_at);
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("aborted operation should persist");
+        assert_eq!(operation_record.status(), OperationStatus::Aborted);
+        let abort = operation_record
+            .abort_record()
+            .expect("standing police contingency should create abort history");
+        assert_eq!(abort.phase(), OperationAbortPhase::InProgress);
+        assert_eq!(
+            abort.cause(),
+            OperationAbortCause::PoliceArrival(response_id)
+        );
+        assert!(operation_record.resolution().is_none());
+        assert_eq!(
+            state
+                .legal()
+                .get_police_response(response_id)
+                .and_then(|response| response.arrived_at()),
+            Some(arrived_at)
+        );
+        validate_state(&state).expect("police-contingency abort state should remain valid");
+        validate_state_against_registry(&registry, &state)
+            .expect("police-contingency abort should match authored content");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn post_entry_police_arrival_raises_provenance_backed_decision() {
+        let (registry, mut state, police, neighborhood, operation) =
+            make_exposed_business_operation_fixture_with_contingencies(
+                true,
+                vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+            );
+        validate_establish_patrol_deployment(
+            &state,
+            PatrolDeploymentDraft {
+                organization: police,
+                neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("zero-presence patrol should validate")
+        .commit(&mut state)
+        .expect("zero-presence patrol should commit");
+
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started operation should persist");
+        let response_id = operation_record
+            .police_response()
+            .expect("observable burglary should dispatch police response");
+        let entry_at = operation_record
+            .entry_at()
+            .expect("burglary should have an authored entry milestone");
+        let response_due = state
+            .legal()
+            .get_police_response(response_id)
+            .expect("response should persist")
+            .arrival_due_at();
+        assert!(response_due > entry_at);
+
+        let arrival_outcome = loop {
+            let outcome = run_tick(&registry, &mut state);
+            if outcome.arrived_police_responses.contains(&response_id) {
+                break outcome;
+            }
+        };
+        assert_eq!(arrival_outcome.now, response_due);
+        assert_eq!(arrival_outcome.arrived_police_responses, vec![response_id]);
+        assert_eq!(arrival_outcome.decision_requests.len(), 1);
+        assert!(arrival_outcome.resolved_operations.is_empty());
+
+        let decision_id = arrival_outcome.decision_requests[0].decision;
+        let decision = state
+            .decisions()
+            .get_decision(decision_id)
+            .expect("response decision should persist");
+        assert_eq!(decision.requested_at(), response_due);
+        assert!(matches!(
+            decision.context(),
+            DecisionContext::OperationException {
+                operation: decision_operation,
+                reason: OperationExceptionReason::PoliceArrival(decision_response),
+            } if decision_operation == operation && decision_response == response_id
+        ));
+        assert!(decision.summary().contains("response reached"));
+        let operation_record = state
+            .operations()
+            .get_operation(operation)
+            .expect("decision-blocked operation should persist");
+        assert_eq!(operation_record.status(), OperationStatus::AwaitingDecision);
+        assert_eq!(
+            operation_record.awaiting_decision_since(),
+            Some(response_due)
+        );
+
+        let organization = operation_record.responsible_organization();
+        let envelope = build_save(&registry, &state)
+            .expect("pending police-arrival decision should survive save validation");
+        let bytes =
+            bincode::serialize(&envelope).expect("police-arrival decision save should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("police-arrival decision save should deserialize");
+        state = restore_save(&registry, decoded)
+            .expect("pending police-arrival decision should restore with provenance indexes");
+        assert_eq!(
+            state
+                .decisions()
+                .decisions_for_operation(operation)
+                .filter(|candidate| candidate.id() == decision_id)
+                .count(),
+            1
+        );
+        validate_resolve_decision(
+            &registry,
+            &state,
+            decision_id,
+            organization,
+            DecisionResponse::Continue,
+        )
+        .expect("post-entry police response should allow leadership to continue")
+        .commit(&mut state)
+        .expect("post-entry continue should resume operation");
+        let resumed = state
+            .operations()
+            .get_operation(operation)
+            .expect("resumed operation should persist");
+        assert_eq!(resumed.status(), OperationStatus::InProgress);
+        assert_eq!(resumed.awaiting_decision_since(), None);
+        assert_eq!(
+            state
+                .legal()
+                .get_police_response(response_id)
+                .and_then(|response| response.arrived_at()),
+            Some(response_due)
+        );
+        let duplicate = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: resumed.leader(),
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::PoliceArrival(response_id),
+                },
+                attention: AttentionClass::Exception,
+                summary: "Police arrival should not be raised twice.".to_owned(),
+            },
+        )
+        .expect_err("one police response must not create duplicate leadership decisions");
+        assert_eq!(
+            duplicate,
+            DecisionError::DuplicatePoliceResponseDecision {
+                response: response_id,
+                decision: decision_id,
+            }
+        );
+        validate_state(&state).expect("post-entry response decision state should validate");
+        validate_state_against_registry(&registry, &state)
+            .expect("post-entry response decision should match authored content");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn police_arrival_during_another_decision_becomes_deferred_follow_up() {
+        let (registry, mut state, police, neighborhood, operation) =
+            make_exposed_business_operation_fixture_with_contingencies(
+                true,
+                vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+            );
+        validate_establish_patrol_deployment(
+            &state,
+            PatrolDeploymentDraft {
+                organization: police,
+                neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("zero-presence patrol should validate")
+        .commit(&mut state)
+        .expect("zero-presence patrol should commit");
+
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        let response_id = state
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.police_response())
+            .expect("observable burglary should dispatch response");
+        let response_due = state
+            .legal()
+            .get_police_response(response_id)
+            .expect("response should persist")
+            .arrival_due_at();
+        while state.now() < SimTime::from_minutes(5) {
+            run_tick(&registry, &mut state);
+        }
+
+        let leader = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should persist")
+            .leader();
+        let first = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: leader,
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::UnexpectedCondition,
+                },
+                attention: AttentionClass::Exception,
+                summary: "A separate execution exception requires leadership direction.".to_owned(),
+            },
+        )
+        .expect("initial exception decision should validate")
+        .commit(&mut state)
+        .expect("initial exception decision should commit");
+
+        let arrival_outcome = loop {
+            let outcome = run_tick(&registry, &mut state);
+            if outcome.arrived_police_responses.contains(&response_id) {
+                break outcome;
+            }
+        };
+        assert_eq!(arrival_outcome.now, response_due);
+        assert!(arrival_outcome.decision_requests.is_empty());
+        assert_eq!(
+            state.decisions().pending_for_operation(operation),
+            Some(first.decision)
+        );
+
+        let organization = state
+            .operations()
+            .get_operation(operation)
+            .expect("decision-blocked operation should persist")
+            .responsible_organization();
+        let resolution = validate_resolve_decision(
+            &registry,
+            &state,
+            first.decision,
+            organization,
+            DecisionResponse::Continue,
+        )
+        .expect("continuing the first exception should validate")
+        .commit(&mut state)
+        .expect("continuing the first exception should atomically create any deferred work");
+        let follow_up = resolution
+            .decision_request
+            .expect("arrived police response should become the next leadership decision");
+        assert!(follow_up.requests_pause);
+        let follow_up_record = state
+            .decisions()
+            .get_decision(follow_up.decision)
+            .expect("deferred response decision should persist");
+        assert!(matches!(
+            follow_up_record.context(),
+            DecisionContext::OperationException {
+                operation: decision_operation,
+                reason: OperationExceptionReason::PoliceArrival(decision_response),
+            } if decision_operation == operation && decision_response == response_id
+        ));
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("follow-up blocked operation should persist")
+                .status(),
+            OperationStatus::AwaitingDecision
+        );
+
+        let final_resolution = validate_resolve_decision(
+            &registry,
+            &state,
+            follow_up.decision,
+            organization,
+            DecisionResponse::Continue,
+        )
+        .expect("deferred response decision should be resolvable")
+        .commit(&mut state)
+        .expect("deferred response continue should resume operation");
+        assert!(final_resolution.decision_request.is_none());
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("resumed operation should persist")
+                .status(),
+            OperationStatus::InProgress
+        );
+        assert_eq!(
+            state
+                .decisions()
+                .decisions_for_operation(operation)
+                .filter(|decision| matches!(
+                    decision.context(),
+                    DecisionContext::OperationException {
+                        reason: OperationExceptionReason::PoliceArrival(candidate),
+                        ..
+                    } if candidate == response_id
+                ))
+                .count(),
+            1
+        );
+        validate_state(&state).expect("deferred response-decision state should validate");
+        validate_state_against_registry(&registry, &state)
+            .expect("deferred response decision should match authored content");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn arrived_response_penalizes_continuing_operation_and_stales_prearrival_plan() {
+        let (registry, mut response_state, _police, _neighborhood, response_operation) =
+            make_exposed_business_operation_fixture(true);
+        let (_, mut control_state, _control_police, _control_neighborhood, control_operation) =
+            make_exposed_business_operation_fixture(false);
+        run_tick(&registry, &mut response_state);
+        run_tick(&registry, &mut control_state);
+
+        let response_id = response_state
+            .operations()
+            .get_operation(response_operation)
+            .and_then(|record| record.police_response())
+            .expect("jurisdictional burglary should dispatch response");
+        response_state.advance_clock(SimDuration::from_minutes(45));
+        control_state.advance_clock(SimDuration::from_minutes(45));
+        let stale_plan = decide_operation_resolution(
+            &registry,
+            &response_state,
+            response_operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("due operation should be plannable before response processing");
+        assert!(!stale_plan.factors.police_response_arrived());
+        let response_outcome =
+            crate::operations::police_response_integration::process_due_police_responses(
+                &mut response_state,
+            )
+            .expect("due response should process");
+        assert_eq!(response_outcome.arrived, vec![response_id]);
+        assert!(response_outcome.decisions.is_empty());
+        let stale_error =
+            match validate_operation_resolution_plan(&registry, &response_state, stale_plan) {
+                Ok(_) => panic!("response arrival must invalidate a pre-arrival resolution plan"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            stale_error,
+            OperationResolutionError::StalePoliceResponseContext {
+                operation: response_operation,
+            }
+        );
+
+        let response_plan = decide_operation_resolution(
+            &registry,
+            &response_state,
+            response_operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("arrived-response operation should re-plan");
+        let control_plan = decide_operation_resolution(
+            &registry,
+            &control_state,
+            control_operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("unrouted control operation should plan");
+        assert!(response_plan.factors.police_response_arrived());
+        assert!(!control_plan.factors.police_response_arrived());
+        let execution = registry.get_operation(OperationKind::Burglary).execution();
+        assert_eq!(
+            control_plan.execution_margin - response_plan.execution_margin,
+            i16::from(execution.police_arrival_difficulty_penalty())
+        );
+        assert_eq!(
+            response_plan.exposure.score - control_plan.exposure.score,
+            i16::from(execution.police_arrival_exposure_penalty())
+        );
+        validate_operation_resolution_plan(&registry, &response_state, response_plan)
+            .expect("response-aware resolution should validate")
+            .commit(&mut response_state)
+            .expect("response-aware resolution should commit");
+        validate_state_against_registry(&registry, &response_state)
+            .expect("response-aware completion should validate against registry");
+        validate_invariants(&response_state);
+    }
+
+    #[test]
+    fn police_response_arrival_is_deterministic_across_save_round_trip() {
+        let (registry, mut original, _police, _neighborhood, operation) =
+            make_exposed_business_operation_fixture(true);
+        run_tick(&registry, &mut original);
+        let response_id = original
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.police_response())
+            .expect("jurisdictional burglary should dispatch response");
+        let due_at = original
+            .legal()
+            .get_police_response(response_id)
+            .expect("response should persist")
+            .arrival_due_at();
+        while original.now() + SimDuration::ONE_MINUTE < due_at {
+            let outcome = run_tick(&registry, &mut original);
+            assert!(outcome.arrived_police_responses.is_empty());
+        }
+        let envelope = build_save(&registry, &original)
+            .expect("pre-arrival police response state should save");
+        let bytes = bincode::serialize(&envelope).expect("response save should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("response save should deserialize");
+        let mut restored = restore_save(&registry, decoded).expect("response save should restore");
+
+        let original_tick = run_tick(&registry, &mut original);
+        let restored_tick = run_tick(&registry, &mut restored);
+        assert_eq!(original_tick.arrived_police_responses, vec![response_id]);
+        assert_eq!(restored_tick.arrived_police_responses, vec![response_id]);
+        assert_eq!(
+            original
+                .legal()
+                .get_police_response(response_id)
+                .and_then(|record| record.arrived_at()),
+            restored
+                .legal()
+                .get_police_response(response_id)
+                .and_then(|record| record.arrived_at())
+        );
+        validate_state(&restored).expect("restored police-response state should validate");
+        validate_invariants(&restored);
+    }
+
+    #[test]
+    fn resolution_plan_snapshots_patrol_versions_and_uses_explicit_schedule_gaps() {
+        let (registry, mut state, police, neighborhood, operation) =
+            make_exposed_business_operation_fixture(true);
+        let start = run_tick(&registry, &mut state);
+        assert_eq!(start.started_operations, vec![operation]);
+        state.advance_clock(SimDuration::from_minutes(45));
+        let deployment = validate_establish_patrol_deployment(
+            &state,
+            PatrolDeploymentDraft {
+                organization: police,
+                neighborhood,
+                windows: vec![PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(70).expect("fixture patrol rating should validate"),
+                )
+                .expect("fixture patrol window should validate")],
+            },
+        )
+        .expect("patrol deployment should validate")
+        .commit(&mut state)
+        .expect("patrol deployment should commit");
+        let stale_plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("due operation should resolve against active patrol state");
+        assert_eq!(
+            stale_plan
+                .factors
+                .target_police_presence()
+                .map(Rating::value),
+            Some(70)
+        );
+
+        validate_revise_patrol_deployment(
+            &state,
+            deployment,
+            vec![PatrolWindow::try_new(
+                DayMinute::try_new(600).expect("fixture minute should validate"),
+                120,
+                Rating::try_new(80).expect("fixture patrol rating should validate"),
+            )
+            .expect("fixture patrol window should validate")],
+        )
+        .expect("patrol revision should validate")
+        .commit(&mut state)
+        .expect("patrol revision should commit");
+
+        let error = validate_operation_resolution_plan(&registry, &state, stale_plan)
+            .err()
+            .expect("patrol revision must stale an operation resolution plan");
+        assert_eq!(
+            error,
+            OperationResolutionError::StalePoliceDeploymentContext { operation }
+        );
+
+        let fresh_plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("operation should re-plan against revised patrol schedule");
+        assert_eq!(
+            fresh_plan
+                .factors
+                .target_police_presence()
+                .map(Rating::value),
+            Some(0)
+        );
+        assert_eq!(
+            fresh_plan
+                .exposure
+                .factors
+                .target_police_presence()
+                .map(Rating::value),
+            Some(0)
+        );
+        validate_operation_resolution_plan(&registry, &state, fresh_plan)
+            .expect("fresh patrol-aware resolution plan should validate")
+            .commit(&mut state)
+            .expect("fresh patrol-aware resolution should commit");
+        validate_state(&state).expect("patrol-aware operation resolution should remain valid");
         validate_invariants(&state);
     }
 

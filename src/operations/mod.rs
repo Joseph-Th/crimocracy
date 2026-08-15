@@ -2,11 +2,13 @@
 
 pub(crate) mod operation_execution;
 pub mod operation_system;
+pub(crate) mod police_response_integration;
+pub(crate) mod surveillance_integration;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     CharacterId, DecisionRequestId, EvidenceId, HistoryEventId, InformationId, InvestigationId,
-    NeighborhoodId, OperationId, OrganizationId, ReportId,
+    NeighborhoodId, OperationId, OrganizationId, PoliceResponseId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::world::Rating;
@@ -165,6 +167,7 @@ pub enum OperationAbortPhase {
 pub enum OperationAbortCause {
     AuthorityOrder,
     Decision(DecisionRequestId),
+    PoliceArrival(PoliceResponseId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +236,7 @@ pub enum OperationExposureLevel {
 pub struct OperationExposureFactors {
     stealth_average: Rating,
     target_police_presence: Option<Rating>,
+    police_response_arrived: bool,
     approach_adjustment: i8,
     intelligence_mitigation: u8,
     variance: i8,
@@ -245,6 +249,10 @@ impl OperationExposureFactors {
 
     pub fn target_police_presence(self) -> Option<Rating> {
         self.target_police_presence
+    }
+
+    pub fn police_response_arrived(self) -> bool {
+        self.police_response_arrived
     }
 
     pub fn approach_adjustment(self) -> i8 {
@@ -308,6 +316,7 @@ pub struct OperationResolutionFactors {
     intelligence_quality: Rating,
     intelligence_adjustment: i8,
     target_police_presence: Option<Rating>,
+    police_response_arrived: bool,
     approach_adjustment: i8,
     time_pressure: u8,
     variance: i8,
@@ -334,6 +343,10 @@ impl OperationResolutionFactors {
         self.target_police_presence
     }
 
+    pub fn police_response_arrived(self) -> bool {
+        self.police_response_arrived
+    }
+
     pub fn approach_adjustment(self) -> i8 {
         self.approach_adjustment
     }
@@ -354,6 +367,7 @@ pub struct OperationResolutionRecord {
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposureRecord,
+    discovered_information: BTreeSet<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
     history_event: HistoryEventId,
@@ -378,6 +392,10 @@ impl OperationResolutionRecord {
 
     pub fn exposure(&self) -> &OperationExposureRecord {
         &self.exposure
+    }
+
+    pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
+        &self.discovered_information
     }
 
     pub fn after_action_information(&self) -> InformationId {
@@ -418,6 +436,8 @@ struct OperationRuntime {
     status: OperationStatus,
     started_at: Option<SimTime>,
     resolution_due_at: Option<SimTime>,
+    entry_at: Option<SimTime>,
+    police_response: Option<PoliceResponseId>,
     awaiting_decision_since: Option<SimTime>,
     resolution: Option<OperationResolutionRecord>,
     abort: Option<OperationAbortRecord>,
@@ -492,6 +512,14 @@ impl OperationRecord {
         self.runtime.resolution_due_at
     }
 
+    pub fn entry_at(&self) -> Option<SimTime> {
+        self.runtime.entry_at
+    }
+
+    pub fn police_response(&self) -> Option<PoliceResponseId> {
+        self.runtime.police_response
+    }
+
     pub fn awaiting_decision_since(&self) -> Option<SimTime> {
         self.runtime.awaiting_decision_since
     }
@@ -514,6 +542,7 @@ pub struct OperationState {
     records: BTreeMap<OperationId, OperationRecord>,
     by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
     by_status: BTreeMap<OperationStatus, BTreeSet<OperationId>>,
+    by_discovered_information: BTreeMap<InformationId, OperationId>,
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
     in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
 }
@@ -536,6 +565,15 @@ impl OperationState {
             .into_iter()
             .flatten()
             .filter_map(|operation_id| self.records.get(operation_id))
+    }
+
+    pub fn operation_for_discovered_information(
+        &self,
+        information: InformationId,
+    ) -> Option<&OperationRecord> {
+        self.by_discovered_information
+            .get(&information)
+            .and_then(|operation| self.records.get(operation))
     }
 
     pub fn operations_with_status(
@@ -598,6 +636,8 @@ impl OperationState {
         id: OperationId,
         started_at: SimTime,
         resolution_due_at: SimTime,
+        entry_at: Option<SimTime>,
+        police_response: Option<PoliceResponseId>,
     ) {
         let record = self
             .records
@@ -617,6 +657,8 @@ impl OperationState {
                 .expect("validated operation disappeared before begin commit");
             record.runtime.started_at = Some(started_at);
             record.runtime.resolution_due_at = Some(resolution_due_at);
+            record.runtime.entry_at = entry_at;
+            record.runtime.police_response = police_response;
             record.runtime.awaiting_decision_since = None;
         }
         self.change_status(id, OperationStatus::InProgress);
@@ -649,7 +691,7 @@ impl OperationState {
     }
 
     pub(crate) fn resume(&mut self, id: OperationId, resumed_at: SimTime) {
-        let (due_at, paused_at) = {
+        let (due_at, entry_at, paused_at) = {
             let record = self
                 .records
                 .get(&id)
@@ -663,6 +705,7 @@ impl OperationState {
                 record
                     .resolution_due_at()
                     .expect("awaiting operation must retain its resolution due time"),
+                record.entry_at(),
                 record
                     .awaiting_decision_since()
                     .expect("awaiting operation must retain its pause time"),
@@ -678,12 +721,25 @@ impl OperationState {
                 .checked_add(paused_minutes)
                 .expect("operation resolution time overflowed u64 minutes"),
         );
+        let shifted_entry_at = entry_at.map(|entry_at| {
+            if entry_at > paused_at {
+                SimTime::from_minutes(
+                    entry_at
+                        .as_minutes()
+                        .checked_add(paused_minutes)
+                        .expect("operation entry time overflowed u64 minutes"),
+                )
+            } else {
+                entry_at
+            }
+        });
         {
             let record = self
                 .records
                 .get_mut(&id)
                 .expect("validated operation disappeared before resume commit");
             record.runtime.resolution_due_at = Some(shifted_due_at);
+            record.runtime.entry_at = shifted_entry_at;
             record.runtime.awaiting_decision_since = None;
         }
         self.change_status(id, OperationStatus::InProgress);
@@ -726,11 +782,13 @@ impl OperationState {
             | OperationStatus::Completed
             | OperationStatus::Aborted => {}
         }
-        self.records
-            .get_mut(&id)
-            .expect("validated operation disappeared before abort commit")
-            .runtime
-            .awaiting_decision_since = None;
+        if abort.phase() != OperationAbortPhase::AwaitingDecision {
+            self.records
+                .get_mut(&id)
+                .expect("validated operation disappeared before abort commit")
+                .runtime
+                .awaiting_decision_since = None;
+        }
         self.records
             .get_mut(&id)
             .expect("validated operation disappeared before abort commit")
@@ -756,6 +814,13 @@ impl OperationState {
         let due_at = record
             .resolution_due_at()
             .expect("in-progress operation must have a resolution due time");
+        for information in resolution.discovered_information() {
+            let previous = self.by_discovered_information.insert(*information, id);
+            debug_assert!(
+                previous.is_none(),
+                "Ownership Exclusivity: discovered information is linked to multiple operations"
+            );
+        }
         Self::remove_schedule_index(&mut self.in_progress_by_resolution_due, due_at, id);
         {
             let record = self
@@ -837,6 +902,13 @@ impl OperationState {
             if resolution_indexed != (record.status() == OperationStatus::InProgress) {
                 return false;
             }
+            if let Some(resolution) = record.resolution() {
+                for information in resolution.discovered_information() {
+                    if self.by_discovered_information.get(information) != Some(&record.id()) {
+                        return false;
+                    }
+                }
+            }
         }
         for (organization, ids) in &self.by_organization {
             for id in ids {
@@ -847,6 +919,15 @@ impl OperationState {
                 {
                     return false;
                 }
+            }
+        }
+        for (information, operation) in &self.by_discovered_information {
+            if !self.records.get(operation).is_some_and(|record| {
+                record.resolution().is_some_and(|resolution| {
+                    resolution.discovered_information().contains(information)
+                })
+            }) {
+                return false;
             }
         }
         for (status, ids) in &self.by_status {
@@ -901,6 +982,15 @@ impl OperationState {
                     .is_some_and(|ids| ids.contains(&record.id())),
                 "Index Completeness: operation status index is missing an operation"
             );
+            if let Some(resolution) = record.resolution() {
+                for information in resolution.discovered_information() {
+                    debug_assert_eq!(
+                        self.by_discovered_information.get(information),
+                        Some(&record.id()),
+                        "Index Completeness: operation discovery index is missing information"
+                    );
+                }
+            }
         }
         for (status, ids) in &self.by_status {
             for id in ids {

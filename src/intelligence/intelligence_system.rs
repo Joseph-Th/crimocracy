@@ -31,6 +31,15 @@ pub enum IntelligenceError {
     InternalReportMissingProvenance,
     #[error("internal-report source entity does not match its sole source information holder")]
     InternalReportSourceMismatch,
+    #[error(
+        "information source kind {0:?} cannot be created as an institutional-contact derivation"
+    )]
+    InvalidContactSourceKind(InformationSourceKind),
+    #[error("institutional-contact source information {information} is not personally held by character {contact}")]
+    InvalidContactInformationSource {
+        information: InformationId,
+        contact: CharacterId,
+    },
     #[error("information holder {0:?} is not currently active")]
     InactiveHolder(KnowledgeHolder),
     #[error("source and recipient knowledge holders are identical")]
@@ -46,6 +55,58 @@ pub enum IntelligenceError {
         expected: u32,
         found: u32,
     },
+}
+
+pub(crate) fn validate_contact_information_derivation(
+    state: &AppState,
+    source: InformationId,
+    contact: CharacterId,
+    recipient: OrganizationId,
+    source_kind: InformationSourceKind,
+) -> Result<ValidatedInformation, IntelligenceError> {
+    match source_kind {
+        InformationSourceKind::PoliceContact
+        | InformationSourceKind::Lawyer
+        | InformationSourceKind::PoliticalContact
+        | InformationSourceKind::ProfessionalContact
+        | InformationSourceKind::Press => {}
+        InformationSourceKind::DirectObservation
+        | InformationSourceKind::Informant
+        | InformationSourceKind::Accountant
+        | InformationSourceKind::Surveillance
+        | InformationSourceKind::StreetRumor
+        | InformationSourceKind::Intercept
+        | InformationSourceKind::AfterAction
+        | InformationSourceKind::InternalReport => {
+            return Err(IntelligenceError::InvalidContactSourceKind(source_kind));
+        }
+    }
+    let source_record = state
+        .intelligence
+        .get_information(source)
+        .ok_or(IntelligenceError::MissingInformation(source))?;
+    if source_record.holder() != KnowledgeHolder::Character(contact) {
+        return Err(IntelligenceError::InvalidContactInformationSource {
+            information: source,
+            contact,
+        });
+    }
+    let draft = InformationDraft {
+        holder: KnowledgeHolder::Organization(recipient),
+        source_kind,
+        topic: source_record.topic(),
+        source_entity: Some(EntityRef::Character(contact)),
+        subject: source_record.subject(),
+        observed_at: source_record.observed_at(),
+        reliability: source_record.reliability(),
+        specificity: source_record.specificity(),
+        summary: source_record.summary().to_owned(),
+    };
+    validate_information_draft(state, &draft)?;
+    Ok(ValidatedInformation {
+        draft,
+        derived_from: BTreeSet::from([source]),
+    })
 }
 
 pub struct ValidatedInformation {

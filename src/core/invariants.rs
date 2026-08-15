@@ -1,15 +1,21 @@
 //! Runtime invariant enforcement and release-safe structural state validation.
 
+use crate::contacts::contact_system::{expected_contact_kind, information_source_kind};
+use crate::contacts::{ContactRelationshipSnapshot, ContactStatus};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, DecisionRequestId, EnterpriseCycleId,
-    EnterpriseId, InformantDisclosureId, InformantId, InformationId, InvestigationId,
-    InvestigationWorkId, LedgerTransactionId, MandateId, OperationId, OpportunityId,
-    OrganizationId, RecruitmentAttemptId, ReportId, WitnessStatementId,
+    BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId, ContactId,
+    DecisionRequestId, EnterpriseCycleId, EnterpriseId, InformantDisclosureId, InformantId,
+    InformationId, InvestigationId, InvestigationWorkId, LedgerTransactionId, MandateId,
+    OperationId, OpportunityId, OrganizationId, PatrolDeploymentId, PoliceResponseId,
+    RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
-use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
+use crate::core::time::SimTime;
+use crate::decisions::{
+    DecisionContext, DecisionResponse, DecisionStatus, OperationExceptionReason,
+};
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
@@ -23,19 +29,26 @@ use crate::legal::investigation_work_execution::{
     calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
     minimum_source_reliability, source_evidence_forms_simple_path,
 };
+use crate::legal::patrol_system::is_canonical_patrol_schedule;
 use crate::legal::witness_system::{witness_reliability, witness_strength};
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InformantStatus,
-    InvestigationStatus, InvestigationWorkOutcome, InvestigationWorkStatus, WitnessCooperation,
+    InvestigationStatus, InvestigationWorkOutcome, InvestigationWorkStatus, PatrolDeploymentStatus,
+    PoliceResponseStatus, WitnessCooperation,
 };
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
-    classify_exposure_level, classify_objective_outcome,
+    classify_exposure_level, classify_objective_outcome, did_police_response_arrive_by,
 };
 use crate::operations::operation_system::is_information_subject_relevant;
+use crate::operations::surveillance_integration::{
+    expected_persisted_surveillance_signatures, is_supported_surveillance_target,
+    is_valid_persisted_surveillance_information,
+};
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
-    OperationExposureLevel, OperationStatus,
+    OperationExposureLevel, OperationKind, OperationObjective, OperationObjectiveOutcome,
+    OperationStatus,
 };
 use crate::opportunities::OpportunityResolution;
 use crate::recruitment::recruitment_system::{
@@ -88,6 +101,10 @@ pub enum StateValidationError {
         information: InformationId,
         source_information: InformationId,
     },
+    #[error("institutional contact {contact} has invalid persisted state")]
+    InvalidInstitutionalContact { contact: ContactId },
+    #[error("institutional contact disclosure {disclosure} has invalid persisted provenance")]
+    InvalidContactDisclosure { disclosure: ContactDisclosureId },
     #[error("active operation {operation} belongs to an inactive organization")]
     ActiveOperationInactiveOrganization { operation: OperationId },
     #[error("active operation {operation} has an inactive or foreign leader")]
@@ -109,6 +126,8 @@ pub enum StateValidationError {
     InvalidOperationAbort { operation: OperationId },
     #[error("completed operation {operation} has an invalid campaign-history link")]
     InvalidOperationHistory { operation: OperationId },
+    #[error("completed operation {operation} has invalid discovered-information provenance")]
+    InvalidOperationDiscovery { operation: OperationId },
     #[error("operation {operation} is incompatible with its authored definition")]
     InvalidOperationDefinition { operation: OperationId },
     #[error("operation {operation} has invalid persisted exposure or legal consequences")]
@@ -117,6 +136,10 @@ pub enum StateValidationError {
     InvalidOpportunity { opportunity: OpportunityId },
     #[error("organization {organization} has invalid legal jurisdiction state")]
     InvalidLegalJurisdiction { organization: OrganizationId },
+    #[error("patrol deployment {deployment} has invalid persisted state")]
+    InvalidPatrolDeployment { deployment: PatrolDeploymentId },
+    #[error("police response {response} has invalid persisted state")]
+    InvalidPoliceResponse { response: PoliceResponseId },
     #[error("investigation {investigation} has invalid investigator staffing")]
     InvalidInvestigationStaffing { investigation: InvestigationId },
     #[error("investigation work {work} has invalid persisted state")]
@@ -278,6 +301,7 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_indexes(state)?;
     validate_world_state(state)?;
     validate_social_and_intelligence(state)?;
+    validate_contacts(state)?;
     validate_recruitment(state)?;
     validate_operations(state)?;
     validate_opportunities(state)?;
@@ -296,6 +320,30 @@ pub fn validate_state_against_registry(
     for operation in state.operations.operations() {
         let definition = registry.get_operation(operation.kind());
         let execution = definition.execution();
+        let has_police_entry_contingency = operation
+            .contingencies()
+            .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry);
+        let police_response_matches_authorship =
+            operation.police_response().is_none_or(|response| {
+                state
+                    .legal
+                    .get_police_response(response)
+                    .is_some_and(|response| {
+                        let reduction =
+                            u32::from(response.response_presence().value()).saturating_mul(
+                                u32::from(execution.patrol_response_reduction_minutes()),
+                            ) / 100;
+                        let delay = execution
+                            .base_police_response_delay()
+                            .as_minutes()
+                            .saturating_sub(reduction)
+                            .max(execution.minimum_police_response_delay().as_minutes());
+                        response.alert_score() >= execution.police_dispatch_threshold()
+                            && response.arrival_due_at()
+                                == response.dispatched_at()
+                                    + crate::core::time::SimDuration::from_minutes(delay)
+                    })
+            });
         if !definition
             .supported_approaches()
             .contains(&operation.approach())
@@ -317,6 +365,12 @@ pub fn validate_state_against_registry(
                             .contains(&record.topic())
                     })
             })
+            || (has_police_entry_contingency && execution.operation_entry_offset().is_none())
+            || (execution.operation_entry_offset().is_none() && operation.entry_at().is_some())
+            || (operation.started_at().is_some()
+                && execution.operation_entry_offset().is_some()
+                && operation.entry_at().is_none())
+            || !police_response_matches_authorship
         {
             return Err(StateValidationError::InvalidOperationDefinition {
                 operation: operation.id(),
@@ -328,6 +382,8 @@ pub fn validate_state_against_registry(
             let expected_outcome = classify_objective_outcome(execution, expected_margin);
             let (expected_intelligence_quality, expected_intelligence_adjustment) =
                 calculate_intelligence_factors(registry, state, operation.id());
+            let expected_police_response_arrived =
+                did_police_response_arrive_by(state, operation, resolution.resolved_at());
             if factors.variance().unsigned_abs() > execution.variance_limit()
                 || factors.time_pressure() > 30
                 || factors.approach_adjustment()
@@ -336,6 +392,7 @@ pub fn validate_state_against_registry(
                         .expect("validated operation approach must have an execution adjustment")
                 || factors.intelligence_quality() != expected_intelligence_quality
                 || factors.intelligence_adjustment() != expected_intelligence_adjustment
+                || factors.police_response_arrived() != expected_police_response_arrived
                 || resolution.execution_margin() != expected_margin
                 || resolution.objective_outcome() != expected_outcome
             {
@@ -361,6 +418,7 @@ pub fn validate_state_against_registry(
                 || exposure_factors.intelligence_mitigation()
                     != u8::try_from(expected_intelligence_mitigation)
                         .expect("bounded exposure intelligence mitigation must fit u8")
+                || exposure_factors.police_response_arrived() != expected_police_response_arrived
                 || exposure.score() != expected_exposure_score
                 || exposure.level() != expected_exposure_level
             {
@@ -540,6 +598,7 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("finance", state.finance.has_consistent_indexes()),
         ("social", state.social.has_consistent_indexes()),
         ("intelligence", state.intelligence.has_consistent_indexes()),
+        ("contacts", state.contacts.has_consistent_indexes()),
         ("recruitment", state.recruitment.has_consistent_indexes()),
         ("operations", state.operations.has_consistent_indexes()),
         (
@@ -839,14 +898,46 @@ fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidat
                 });
             }
         } else if !information.derived_from().is_empty() {
-            return Err(StateValidationError::InvalidInformationProvenance {
-                information: information.id(),
-                source_information: *information
-                    .derived_from()
-                    .iter()
-                    .next()
-                    .expect("non-empty provenance must contain a source"),
-            });
+            let valid_contact_kind = matches!(
+                information.source_kind(),
+                InformationSourceKind::PoliceContact
+                    | InformationSourceKind::Lawyer
+                    | InformationSourceKind::PoliticalContact
+                    | InformationSourceKind::ProfessionalContact
+                    | InformationSourceKind::Press
+            );
+            let source = information.derived_from().iter().next().copied().ok_or(
+                StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: information.id(),
+                },
+            )?;
+            let source_record = state.intelligence.get_information(source).ok_or(
+                StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: source,
+                },
+            )?;
+            if !valid_contact_kind
+                || information.derived_from().len() != 1
+                || state
+                    .contacts
+                    .disclosure_for_information(information.id())
+                    .is_none()
+                || information.source_entity() != Some(source_record.holder().entity())
+                || !matches!(source_record.holder(), KnowledgeHolder::Character(_))
+                || information.topic() != source_record.topic()
+                || information.subject() != source_record.subject()
+                || information.observed_at() != source_record.observed_at()
+                || information.reliability() != source_record.reliability()
+                || information.specificity() != source_record.specificity()
+                || information.summary() != source_record.summary()
+            {
+                return Err(StateValidationError::InvalidInformationProvenance {
+                    information: information.id(),
+                    source_information: source,
+                });
+            }
         }
         for source in information.derived_from() {
             let source_record = state.intelligence.get_information(*source).ok_or(
@@ -866,6 +957,163 @@ fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidat
         }
     }
     Ok(())
+}
+
+fn validate_contacts(state: &AppState) -> Result<(), StateValidationError> {
+    for contact in state.contacts.contacts() {
+        let sponsor = state.world.get_organization(contact.sponsor()).ok_or(
+            StateValidationError::InvalidInstitutionalContact {
+                contact: contact.id(),
+            },
+        )?;
+        let handler = state.world.get_character(contact.handler()).ok_or(
+            StateValidationError::InvalidInstitutionalContact {
+                contact: contact.id(),
+            },
+        )?;
+        let source = state.world.get_character(contact.contact()).ok_or(
+            StateValidationError::InvalidInstitutionalContact {
+                contact: contact.id(),
+            },
+        )?;
+        let institution = state.world.get_organization(contact.institution()).ok_or(
+            StateValidationError::InvalidInstitutionalContact {
+                contact: contact.id(),
+            },
+        )?;
+        if sponsor.kind() != OrganizationKind::Criminal
+            || expected_contact_kind(institution.kind()) != Some(contact.kind())
+            || contact.handler() == contact.contact()
+            || contact.version() == 0
+            || contact.established_at() > state.now()
+            || !contact_relationship_basis_is_valid(
+                contact.handler(),
+                contact.contact(),
+                contact.handler_to_contact(),
+                contact.contact_to_handler(),
+            )
+        {
+            return Err(StateValidationError::InvalidInstitutionalContact {
+                contact: contact.id(),
+            });
+        }
+        match contact.status() {
+            ContactStatus::Active => {
+                if contact.terminated_at().is_some()
+                    || sponsor.lifecycle() != Lifecycle::Active
+                    || handler.lifecycle() != Lifecycle::Active
+                    || handler.organization() != Some(contact.sponsor())
+                    || source.lifecycle() != Lifecycle::Active
+                    || source.organization() != Some(contact.institution())
+                    || institution.lifecycle() != Lifecycle::Active
+                    || state
+                        .contacts
+                        .active_contact_for(contact.sponsor(), contact.contact())
+                        .is_none_or(|current| current.id() != contact.id())
+                {
+                    return Err(StateValidationError::InvalidInstitutionalContact {
+                        contact: contact.id(),
+                    });
+                }
+            }
+            ContactStatus::Terminated => {
+                let terminated_at = contact.terminated_at().ok_or(
+                    StateValidationError::InvalidInstitutionalContact {
+                        contact: contact.id(),
+                    },
+                )?;
+                if terminated_at < contact.established_at() || terminated_at > state.now() {
+                    return Err(StateValidationError::InvalidInstitutionalContact {
+                        contact: contact.id(),
+                    });
+                }
+            }
+        }
+    }
+
+    for disclosure in state.contacts.disclosures() {
+        let contact = state.contacts.get_contact(disclosure.contact()).ok_or(
+            StateValidationError::InvalidContactDisclosure {
+                disclosure: disclosure.id(),
+            },
+        )?;
+        let source = state
+            .intelligence
+            .get_information(disclosure.source_information())
+            .ok_or(StateValidationError::InvalidContactDisclosure {
+                disclosure: disclosure.id(),
+            })?;
+        let disclosed = state
+            .intelligence
+            .get_information(disclosure.disclosed_information())
+            .ok_or(StateValidationError::InvalidContactDisclosure {
+                disclosure: disclosure.id(),
+            })?;
+        if disclosure.disclosed_at() < contact.established_at()
+            || disclosure.disclosed_at() > state.now()
+            || contact
+                .terminated_at()
+                .is_some_and(|terminated_at| disclosure.disclosed_at() > terminated_at)
+            || source.holder() != KnowledgeHolder::Character(contact.contact())
+            || source.recorded_at() > disclosure.disclosed_at()
+            || source.observed_at() > disclosure.disclosed_at()
+            || disclosed.holder() != KnowledgeHolder::Organization(contact.sponsor())
+            || disclosed.source_kind() != information_source_kind(contact.kind())
+            || disclosed.source_entity() != Some(EntityRef::Character(contact.contact()))
+            || disclosed.topic() != source.topic()
+            || disclosed.subject() != source.subject()
+            || disclosed.observed_at() != source.observed_at()
+            || disclosed.recorded_at() != disclosure.disclosed_at()
+            || disclosed.reliability() != source.reliability()
+            || disclosed.specificity() != source.specificity()
+            || disclosed.summary() != source.summary()
+            || disclosed.derived_from() != &BTreeSet::from([source.id()])
+            || state
+                .contacts
+                .disclosure_for_information(disclosed.id())
+                .is_none_or(|record| record.id() != disclosure.id())
+        {
+            return Err(StateValidationError::InvalidContactDisclosure {
+                disclosure: disclosure.id(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn contact_relationship_basis_is_valid(
+    handler: CharacterId,
+    contact: CharacterId,
+    handler_to_contact: Option<ContactRelationshipSnapshot>,
+    contact_to_handler: Option<ContactRelationshipSnapshot>,
+) -> bool {
+    let valid_snapshot = |snapshot: ContactRelationshipSnapshot, from, to| {
+        snapshot.from() == from
+            && snapshot.to() == to
+            && snapshot.version() > 0
+            && relationship_dimensions_have_basis(snapshot.dimensions())
+    };
+    let forward =
+        handler_to_contact.is_some_and(|snapshot| valid_snapshot(snapshot, handler, contact));
+    let reverse =
+        contact_to_handler.is_some_and(|snapshot| valid_snapshot(snapshot, contact, handler));
+    (forward || reverse)
+        && handler_to_contact.is_none_or(|snapshot| valid_snapshot(snapshot, handler, contact))
+        && contact_to_handler.is_none_or(|snapshot| valid_snapshot(snapshot, contact, handler))
+}
+
+fn relationship_dimensions_have_basis(dimensions: crate::social::RelationshipDimensions) -> bool {
+    [
+        dimensions.trust,
+        dimensions.respect,
+        dimensions.fear,
+        dimensions.affection,
+        dimensions.dependence,
+        dimensions.resentment,
+        dimensions.debt,
+    ]
+    .into_iter()
+    .any(|level| level.value() > 0)
 }
 
 fn validate_recruitment(state: &AppState) -> Result<(), StateValidationError> {
@@ -1283,6 +1531,7 @@ fn validate_recruitment_against_registry(
 
 fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
     let mut operation_after_action_information = BTreeSet::new();
+    let mut operation_discovered_information = BTreeSet::new();
     let mut operation_after_action_reports = BTreeSet::new();
     let mut operation_history_events = BTreeSet::new();
     for operation in state.operations.operations() {
@@ -1376,6 +1625,26 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 }
             }
         }
+        if operation.entry_at().is_some_and(|entry_at| {
+            operation
+                .started_at()
+                .is_none_or(|started_at| entry_at <= started_at)
+        }) {
+            return Err(StateValidationError::InvalidOperationRuntime {
+                operation: operation.id(),
+            });
+        }
+        if let Some(response_id) = operation.police_response() {
+            if state
+                .legal
+                .get_police_response(response_id)
+                .is_none_or(|response| response.source_operation() != operation.id())
+            {
+                return Err(StateValidationError::InvalidOperationRuntime {
+                    operation: operation.id(),
+                });
+            }
+        }
         match operation.status() {
             OperationStatus::Authorized
             | OperationStatus::InProgress
@@ -1402,6 +1671,8 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
             OperationStatus::Authorized => {
                 if operation.started_at().is_some()
                     || operation.resolution_due_at().is_some()
+                    || operation.entry_at().is_some()
+                    || operation.police_response().is_some()
                     || operation.awaiting_decision_since().is_some()
                     || operation.resolution().is_some()
                     || operation.abort_record().is_some()
@@ -1545,20 +1816,33 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                         operation: operation.id(),
                     });
                 }
+                validate_operation_discoveries(
+                    state,
+                    operation,
+                    resolution,
+                    &mut operation_discovered_information,
+                )?;
                 validate_operation_exposure_links(state, operation, resolution)?;
             }
             OperationStatus::Aborted => {
-                if operation.awaiting_decision_since().is_some() || operation.resolution().is_some()
-                {
-                    return Err(StateValidationError::InvalidOperationRuntime {
-                        operation: operation.id(),
-                    });
-                }
                 let abort = operation.abort_record().ok_or(
                     StateValidationError::InvalidOperationAbort {
                         operation: operation.id(),
                     },
                 )?;
+                let pause_shape_valid = match abort.phase() {
+                    OperationAbortPhase::AwaitingDecision => operation
+                        .awaiting_decision_since()
+                        .is_some_and(|paused_at| paused_at <= abort.aborted_at()),
+                    OperationAbortPhase::BeforeStart | OperationAbortPhase::InProgress => {
+                        operation.awaiting_decision_since().is_none()
+                    }
+                };
+                if !pause_shape_valid || operation.resolution().is_some() {
+                    return Err(StateValidationError::InvalidOperationRuntime {
+                        operation: operation.id(),
+                    });
+                }
                 validate_operation_abort_links(
                     state,
                     operation,
@@ -1569,6 +1853,98 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_operation_discoveries(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    discovered_information: &mut BTreeSet<InformationId>,
+) -> Result<(), StateValidationError> {
+    match operation.kind() {
+        OperationKind::Surveillance => {
+            let OperationObjective::GatherInformation { target } = operation.objective() else {
+                return Err(StateValidationError::InvalidOperationDiscovery {
+                    operation: operation.id(),
+                });
+            };
+            if !is_supported_surveillance_target(*target) {
+                return Err(StateValidationError::InvalidOperationDiscovery {
+                    operation: operation.id(),
+                });
+            }
+            match resolution.objective_outcome() {
+                OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
+                    if resolution.discovered_information().is_empty() =>
+                {
+                    return Err(StateValidationError::InvalidOperationDiscovery {
+                        operation: operation.id(),
+                    });
+                }
+                OperationObjectiveOutcome::Failed
+                    if !resolution.discovered_information().is_empty() =>
+                {
+                    return Err(StateValidationError::InvalidOperationDiscovery {
+                        operation: operation.id(),
+                    });
+                }
+                OperationObjectiveOutcome::Achieved
+                | OperationObjectiveOutcome::Partial
+                | OperationObjectiveOutcome::Failed => {}
+            }
+        }
+        OperationKind::Burglary
+        | OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Intimidation
+        | OperationKind::Kidnapping
+        | OperationKind::Sabotage
+        | OperationKind::Bribery
+        | OperationKind::WitnessPressure
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::CovertTransfer
+        | OperationKind::Extraction
+        | OperationKind::RivalInfiltration => {
+            if !resolution.discovered_information().is_empty() {
+                return Err(StateValidationError::InvalidOperationDiscovery {
+                    operation: operation.id(),
+                });
+            }
+        }
+    }
+
+    let expected_signatures = expected_persisted_surveillance_signatures(state, operation);
+    let mut actual_signatures = BTreeSet::new();
+    for information_id in resolution.discovered_information() {
+        let information = state.intelligence.get_information(*information_id).ok_or(
+            StateValidationError::InvalidOperationDiscovery {
+                operation: operation.id(),
+            },
+        )?;
+        if !discovered_information.insert(*information_id)
+            || !actual_signatures.insert((information.topic(), information.subject()))
+            || state
+                .operations
+                .operation_for_discovered_information(*information_id)
+                .is_none_or(|source| source.id() != operation.id())
+            || information.recorded_at() != resolution.resolved_at()
+            || !is_valid_persisted_surveillance_information(state, operation, information)
+        {
+            return Err(StateValidationError::InvalidOperationDiscovery {
+                operation: operation.id(),
+            });
+        }
+    }
+    if operation.kind() == OperationKind::Surveillance
+        && expected_signatures.as_ref() != Some(&actual_signatures)
+    {
+        return Err(StateValidationError::InvalidOperationDiscovery {
+            operation: operation.id(),
+        });
     }
     Ok(())
 }
@@ -1605,6 +1981,128 @@ fn validate_operation_abort_links(
                 });
             };
             if started_at > due_at || abort.aborted_at() < started_at {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
+        (
+            OperationAbortPhase::InProgress,
+            OperationAbortCause::PoliceArrival(response_id),
+            Some(artifacts),
+        ) => {
+            let (Some(started_at), Some(due_at), Some(entry_at)) = (
+                operation.started_at(),
+                operation.resolution_due_at(),
+                operation.entry_at(),
+            ) else {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            };
+            let response = state.legal.get_police_response(response_id).ok_or(
+                StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                },
+            )?;
+            if started_at > due_at
+                || abort.aborted_at() < started_at
+                || operation.police_response() != Some(response_id)
+                || response.source_operation() != operation.id()
+                || response.arrived_at().is_none_or(|arrived_at| {
+                    arrived_at > abort.aborted_at() || arrived_at >= entry_at
+                })
+                || !operation
+                    .contingencies()
+                    .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
+        (
+            OperationAbortPhase::AwaitingDecision,
+            OperationAbortCause::PoliceArrival(response_id),
+            Some(artifacts),
+        ) => {
+            let (Some(started_at), Some(due_at), Some(entry_at), Some(paused_at)) = (
+                operation.started_at(),
+                operation.resolution_due_at(),
+                operation.entry_at(),
+                operation.awaiting_decision_since(),
+            ) else {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            };
+            let response = state.legal.get_police_response(response_id).ok_or(
+                StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                },
+            )?;
+            let paused_minutes = abort
+                .aborted_at()
+                .as_minutes()
+                .checked_sub(paused_at.as_minutes())
+                .ok_or(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                })?;
+            let projected_entry = if entry_at > paused_at {
+                SimTime::from_minutes(entry_at.as_minutes().checked_add(paused_minutes).ok_or(
+                    StateValidationError::InvalidOperationAbort {
+                        operation: operation.id(),
+                    },
+                )?)
+            } else {
+                entry_at
+            };
+            let matching_continue_decisions = state
+                .decisions
+                .decisions()
+                .filter(|decision| {
+                    matches!(
+                        decision.context(),
+                        DecisionContext::OperationException {
+                            operation: decision_operation,
+                            reason: _,
+                        } if decision_operation == operation.id()
+                    ) && decision.resolution().is_some_and(|resolution| {
+                        resolution.response() == DecisionResponse::Continue
+                            && resolution.resolved_at() == abort.aborted_at()
+                    })
+                })
+                .count();
+            if started_at > due_at
+                || started_at > paused_at
+                || operation.police_response() != Some(response_id)
+                || response.source_operation() != operation.id()
+                || response.arrived_at().is_none_or(|arrived_at| {
+                    arrived_at > abort.aborted_at() || arrived_at >= projected_entry
+                })
+                || !operation
+                    .contingencies()
+                    .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+                || matching_continue_decisions != 1
+            {
                 return Err(StateValidationError::InvalidOperationAbort {
                     operation: operation.id(),
                 });
@@ -1674,6 +2172,7 @@ fn validate_operation_abort_links(
         }
         (OperationAbortPhase::BeforeStart, _, Some(_))
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_), None)
+        | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_), None)
         | (OperationAbortPhase::InProgress, _, None)
         | (OperationAbortPhase::InProgress, OperationAbortCause::Decision(_), Some(_))
         | (OperationAbortPhase::AwaitingDecision, _, None)
@@ -1747,6 +2246,17 @@ fn validate_operation_abort_artifacts(
                     OperationAbortCause::Decision(decision) => entry
                         .entities
                         .contains(&EntityRef::DecisionRequest(decision)),
+                    OperationAbortCause::PoliceArrival(response) => state
+                        .legal
+                        .get_police_response(response)
+                        .is_some_and(|response| {
+                            entry
+                                .entities
+                                .contains(&EntityRef::Organization(response.authority()))
+                                && entry
+                                    .entities
+                                    .contains(&EntityRef::Neighborhood(response.neighborhood()))
+                        }),
                 }
         })
     {
@@ -1778,6 +2288,17 @@ fn validate_operation_abort_artifacts(
             OperationAbortCause::Decision(decision) => !history
                 .entities()
                 .contains(&EntityRef::DecisionRequest(decision)),
+            OperationAbortCause::PoliceArrival(response) => state
+                .legal
+                .get_police_response(response)
+                .is_none_or(|response| {
+                    !history
+                        .entities()
+                        .contains(&EntityRef::Organization(response.authority()))
+                        || !history
+                            .entities()
+                            .contains(&EntityRef::Neighborhood(response.neighborhood()))
+                }),
         }
     {
         return Err(StateValidationError::InvalidOperationAbort {
@@ -2160,10 +2681,9 @@ fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
         }
 
         match decision.context() {
-            DecisionContext::OperationException {
-                operation,
-                reason: _,
-            } => validate_operation_decision(state, decision, operation)?,
+            DecisionContext::OperationException { operation, reason } => {
+                validate_operation_decision(state, decision, operation, reason)?
+            }
             DecisionContext::RecruitmentApproval(context) => {
                 validate_recruitment_approval_decision(state, decision, context)?
             }
@@ -2191,6 +2711,7 @@ fn validate_operation_decision(
     state: &AppState,
     decision: &crate::decisions::DecisionRequestRecord,
     operation_id: OperationId,
+    reason: OperationExceptionReason,
 ) -> Result<(), StateValidationError> {
     let operation = state.operations.get_operation(operation_id).ok_or(
         StateValidationError::MissingEntity {
@@ -2220,6 +2741,59 @@ fn validate_operation_decision(
             operation: operation_id,
         });
     }
+    if !operation
+        .contingencies()
+        .contains(&OperationContingency::RequestDecisionOnUnexpectedCondition)
+    {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
+    }
+    match reason {
+        OperationExceptionReason::UnexpectedCondition => {}
+        OperationExceptionReason::PoliceArrival(response_id) => {
+            let response = state.legal.get_police_response(response_id).ok_or(
+                StateValidationError::InvalidDecisionContext {
+                    decision: decision.id(),
+                },
+            )?;
+            let Some(arrived_at) = response.arrived_at() else {
+                return Err(StateValidationError::InvalidDecisionContext {
+                    decision: decision.id(),
+                });
+            };
+            let matching_decisions = state
+                .decisions
+                .decisions_for_operation(operation_id)
+                .filter(|candidate| {
+                    matches!(
+                        candidate.context(),
+                        DecisionContext::OperationException {
+                            reason: OperationExceptionReason::PoliceArrival(candidate_response),
+                            ..
+                        } if candidate_response == response_id
+                    )
+                })
+                .count();
+            let standing_abort_should_have_applied = operation
+                .contingencies()
+                .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+                && operation
+                    .entry_at()
+                    .is_some_and(|entry_at| arrived_at < entry_at);
+            if operation.police_response() != Some(response_id)
+                || response.source_operation() != operation_id
+                || response.status() != PoliceResponseStatus::Arrived
+                || arrived_at > decision.requested_at()
+                || matching_decisions != 1
+                || standing_abort_should_have_applied
+            {
+                return Err(StateValidationError::InvalidDecisionContext {
+                    decision: decision.id(),
+                });
+            }
+        }
+    }
 
     match decision.status() {
         DecisionStatus::Pending => {
@@ -2235,6 +2809,13 @@ fn validate_operation_decision(
                     subsystem: "decisions",
                 });
             }
+            if operation.awaiting_decision_since() != Some(decision.requested_at()) {
+                return Err(StateValidationError::PendingDecisionOperationMismatch {
+                    decision: decision.id(),
+                    operation: operation_id,
+                    status: operation.status(),
+                });
+            }
         }
         DecisionStatus::Resolved => {
             let resolution = decision
@@ -2243,11 +2824,24 @@ fn validate_operation_decision(
             match resolution.response() {
                 DecisionResponse::Continue => {
                     if operation.status() == OperationStatus::AwaitingDecision {
-                        return Err(StateValidationError::PendingDecisionOperationMismatch {
-                            decision: decision.id(),
-                            operation: operation_id,
-                            status: operation.status(),
-                        });
+                        let newer_pending = state
+                            .decisions
+                            .pending_for_operation(operation_id)
+                            .and_then(|pending| state.decisions.get_decision(pending))
+                            .is_some_and(|pending| {
+                                pending.id() != decision.id()
+                                    && pending.status() == DecisionStatus::Pending
+                                    && pending.requested_at() >= resolution.resolved_at()
+                                    && operation.awaiting_decision_since()
+                                        == Some(pending.requested_at())
+                            });
+                        if !newer_pending {
+                            return Err(StateValidationError::PendingDecisionOperationMismatch {
+                                decision: decision.id(),
+                                operation: operation_id,
+                                status: operation.status(),
+                            });
+                        }
                     }
                 }
                 DecisionResponse::Abort => {
@@ -2952,6 +3546,128 @@ fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValid
         }
     }
 
+    for response in state.legal.police_responses() {
+        let authority = state.world.get_organization(response.authority()).ok_or(
+            StateValidationError::InvalidPoliceResponse {
+                response: response.id(),
+            },
+        )?;
+        if authority.kind() != OrganizationKind::LawEnforcement
+            || state
+                .world
+                .get_neighborhood(response.neighborhood())
+                .is_none()
+            || response.version() == 0
+            || response.dispatched_at() >= response.arrival_due_at()
+            || response.dispatched_at() > state.now()
+        {
+            return Err(StateValidationError::InvalidPoliceResponse {
+                response: response.id(),
+            });
+        }
+        let operation = state
+            .operations
+            .get_operation(response.source_operation())
+            .ok_or(StateValidationError::InvalidPoliceResponse {
+                response: response.id(),
+            })?;
+        let jurisdiction = state.legal.get_jurisdiction(response.authority()).ok_or(
+            StateValidationError::InvalidPoliceResponse {
+                response: response.id(),
+            },
+        )?;
+        if operation.police_response() != Some(response.id())
+            || operation.started_at() != Some(response.dispatched_at())
+            || response.jurisdiction_version() == 0
+            || response.jurisdiction_version() > jurisdiction.version()
+        {
+            return Err(StateValidationError::InvalidPoliceResponse {
+                response: response.id(),
+            });
+        }
+        if let Some(patrol) = response.patrol() {
+            let deployment = state
+                .legal
+                .get_patrol_deployment(patrol.deployment())
+                .ok_or(StateValidationError::InvalidPoliceResponse {
+                    response: response.id(),
+                })?;
+            if patrol.version() == 0
+                || patrol.version() > deployment.version()
+                || deployment.organization() != response.authority()
+                || deployment.neighborhood() != response.neighborhood()
+            {
+                return Err(StateValidationError::InvalidPoliceResponse {
+                    response: response.id(),
+                });
+            }
+        }
+        match response.status() {
+            PoliceResponseStatus::Dispatched => {
+                if response.arrived_at().is_some() || response.version() != 1 {
+                    return Err(StateValidationError::InvalidPoliceResponse {
+                        response: response.id(),
+                    });
+                }
+            }
+            PoliceResponseStatus::Arrived => {
+                if response.arrived_at().is_none_or(|arrived_at| {
+                    arrived_at < response.arrival_due_at() || arrived_at > state.now()
+                }) || response.version() < 2
+                {
+                    return Err(StateValidationError::InvalidPoliceResponse {
+                        response: response.id(),
+                    });
+                }
+            }
+        }
+    }
+
+    for deployment in state.legal.patrol_deployments() {
+        let authority = state
+            .world
+            .get_organization(deployment.organization())
+            .ok_or(StateValidationError::InvalidPatrolDeployment {
+                deployment: deployment.id(),
+            })?;
+        let neighborhood = state
+            .world
+            .get_neighborhood(deployment.neighborhood())
+            .ok_or(StateValidationError::InvalidPatrolDeployment {
+                deployment: deployment.id(),
+            })?;
+        if authority.kind() != OrganizationKind::LawEnforcement
+            || deployment.version() == 0
+            || deployment.established_at() > deployment.last_changed_at()
+            || deployment.last_changed_at() > state.now()
+            || !is_canonical_patrol_schedule(deployment.windows())
+        {
+            return Err(StateValidationError::InvalidPatrolDeployment {
+                deployment: deployment.id(),
+            });
+        }
+        match deployment.status() {
+            PatrolDeploymentStatus::Active => {
+                let jurisdiction = state.legal.get_jurisdiction(deployment.organization());
+                if authority.lifecycle() != Lifecycle::Active
+                    || neighborhood.lifecycle() != Lifecycle::Active
+                    || jurisdiction.is_none_or(|record| {
+                        !record.neighborhoods().contains(&deployment.neighborhood())
+                    })
+                    || state
+                        .legal
+                        .active_patrol_for(deployment.organization(), deployment.neighborhood())
+                        .is_none_or(|record| record.id() != deployment.id())
+                {
+                    return Err(StateValidationError::InvalidPatrolDeployment {
+                        deployment: deployment.id(),
+                    });
+                }
+            }
+            PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired => {}
+        }
+    }
+
     for investigation in state.legal.investigations() {
         let owner = state.world.get_organization(investigation.owner()).ok_or(
             StateValidationError::MissingEntity {
@@ -3534,6 +4250,7 @@ pub fn validate_invariants(state: &AppState) {
     state.finance.debug_validate_indexes();
     state.social.debug_validate_indexes();
     state.intelligence.debug_validate_indexes();
+    state.contacts.debug_validate_indexes();
     state.recruitment.debug_validate_indexes();
     state.operations.debug_validate_indexes();
     state.opportunities.debug_validate_indexes();
@@ -3555,6 +4272,10 @@ pub fn validate_invariants(state: &AppState) {
     debug_assert!(
         validate_operations(state).is_ok(),
         "Operation Runtime Validity: operation lifecycle, schedules, after-action knowledge, or history are inconsistent"
+    );
+    debug_assert!(
+        validate_contacts(state).is_ok(),
+        "Contact Runtime Validity: institutional contact ownership, lifecycle, or disclosure provenance is inconsistent"
     );
     debug_assert!(
         validate_opportunities(state).is_ok(),
@@ -3806,11 +4527,57 @@ pub fn validate_invariants(state: &AppState) {
                 source_record.summary(),
                 "Knowledge Provenance: internal report summary disagrees with source information"
             );
+        } else if information.derived_from().is_empty() {
+            debug_assert!(
+                state
+                    .contacts
+                    .disclosure_for_information(information.id())
+                    .is_none(),
+                "Knowledge Provenance: original information must not be owned by a contact disclosure"
+            );
         } else {
             debug_assert!(
-                information.derived_from().is_empty(),
-                "Knowledge Provenance: original information must not contain derived lineage"
+                matches!(
+                    information.source_kind(),
+                    InformationSourceKind::PoliceContact
+                        | InformationSourceKind::Lawyer
+                        | InformationSourceKind::PoliticalContact
+                        | InformationSourceKind::ProfessionalContact
+                        | InformationSourceKind::Press
+                ),
+                "Knowledge Provenance: non-internal derived information must use a contact source kind"
             );
+            debug_assert!(
+                information.derived_from().len() == 1
+                    && state
+                        .contacts
+                        .disclosure_for_information(information.id())
+                        .is_some(),
+                "Knowledge Provenance: contact-derived information must have one source and a disclosure record"
+            );
+            let source = *information
+                .derived_from()
+                .iter()
+                .next()
+                .expect("contact-derived information must have one provenance record");
+            let source_record = state
+                .intelligence
+                .get_information(source)
+                .expect("Knowledge Provenance: contact source information is missing");
+            debug_assert!(matches!(
+                source_record.holder(),
+                KnowledgeHolder::Character(_)
+            ));
+            debug_assert_eq!(
+                information.source_entity(),
+                Some(source_record.holder().entity())
+            );
+            debug_assert_eq!(information.topic(), source_record.topic());
+            debug_assert_eq!(information.subject(), source_record.subject());
+            debug_assert_eq!(information.observed_at(), source_record.observed_at());
+            debug_assert_eq!(information.reliability(), source_record.reliability());
+            debug_assert_eq!(information.specificity(), source_record.specificity());
+            debug_assert_eq!(information.summary(), source_record.summary());
         }
         for source in information.derived_from() {
             let source_record = state
@@ -3912,9 +4679,10 @@ pub fn validate_invariants(state: &AppState) {
         }
     }
 
+    let decision_validation = validate_decisions(state);
     debug_assert!(
-        validate_decisions(state).is_ok(),
-        "Lifecycle Validity: decision subsystem failed release-safe validation"
+        decision_validation.is_ok(),
+        "Lifecycle Validity: decision subsystem failed release-safe validation: {decision_validation:?}"
     );
 
     for operation in state
@@ -4148,6 +4916,52 @@ pub fn validate_invariants(state: &AppState) {
                 state.world.get_neighborhood(*neighborhood).is_some(),
                 "Record Reference Validity: legal jurisdiction neighborhood does not exist"
             );
+        }
+    }
+    for deployment in state.legal.patrol_deployments() {
+        let authority = state
+            .world
+            .get_organization(deployment.organization())
+            .expect("Record Reference Validity: patrol authority does not exist");
+        let neighborhood = state
+            .world
+            .get_neighborhood(deployment.neighborhood())
+            .expect("Record Reference Validity: patrol neighborhood does not exist");
+        debug_assert_eq!(
+            authority.kind(),
+            OrganizationKind::LawEnforcement,
+            "Ownership Exclusivity: patrol deployment belongs to non-law-enforcement organization"
+        );
+        debug_assert!(
+            deployment.version() > 0
+                && deployment.established_at() <= deployment.last_changed_at()
+                && deployment.last_changed_at() <= state.now()
+                && is_canonical_patrol_schedule(deployment.windows()),
+            "Lifecycle Validity: patrol deployment has invalid schedule, chronology, or version"
+        );
+        match deployment.status() {
+            PatrolDeploymentStatus::Active => {
+                debug_assert_eq!(authority.lifecycle(), Lifecycle::Active);
+                debug_assert_eq!(neighborhood.lifecycle(), Lifecycle::Active);
+                debug_assert!(
+                    state
+                        .legal
+                        .get_jurisdiction(deployment.organization())
+                        .is_some_and(|jurisdiction| jurisdiction
+                            .neighborhoods()
+                            .contains(&deployment.neighborhood())),
+                    "Ownership Exclusivity: active patrol is outside its authority's jurisdiction"
+                );
+                debug_assert_eq!(
+                    state
+                        .legal
+                        .active_patrol_for(deployment.organization(), deployment.neighborhood())
+                        .map(|record| record.id()),
+                    Some(deployment.id()),
+                    "Derived Data Consistency: active patrol uniqueness index disagrees with source record"
+                );
+            }
+            PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired => {}
         }
     }
     for evidence in state.legal.all_evidence() {

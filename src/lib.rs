@@ -1,5 +1,6 @@
 //! Core simulation library for Crimocracy.
 
+pub mod contacts;
 pub mod content;
 pub mod core;
 pub mod decisions;

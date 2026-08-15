@@ -28,6 +28,8 @@ pub enum InformationSourceKind {
     DirectObservation,
     Informant,
     PoliceContact,
+    PoliticalContact,
+    ProfessionalContact,
     Press,
     Lawyer,
     Accountant,

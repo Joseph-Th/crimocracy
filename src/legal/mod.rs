@@ -1,21 +1,25 @@
-//! Specific investigations, staffing, and evidence graphs; sibling systems own case transactions and derived graph queries.
+//! Legal institutions, patrol deployment, investigations, evidence graphs, witnesses, and informants.
 
 pub mod case_graph;
 pub mod informant_system;
 pub mod investigation_system;
 pub mod investigation_work_execution;
 pub mod jurisdiction_system;
+pub mod patrol_system;
+pub mod police_response_system;
 pub mod witness_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     CaseWitnessId, CharacterId, EvidenceId, InformantDisclosureId, InformantId, InformationId,
-    InvestigationId, InvestigationWorkId, NeighborhoodId, OrganizationId, WitnessStatementId,
+    InvestigationId, InvestigationWorkId, NeighborhoodId, OperationId, OrganizationId,
+    PatrolDeploymentId, PoliceResponseId, WitnessStatementId,
 };
 use crate::core::time::SimTime;
 use crate::world::Rating;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvestigationStatus {
@@ -607,6 +611,257 @@ impl JurisdictionRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct DayMinute(u16);
+
+impl DayMinute {
+    pub const MIN: u16 = 0;
+    pub const MAX: u16 = 1_439;
+
+    pub fn try_new(value: u16) -> Result<Self, DayMinuteError> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(DayMinuteError { value })
+        }
+    }
+
+    pub const fn value(self) -> u16 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DayMinute {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u16::deserialize(deserializer)?;
+        Self::try_new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("minute of day {value} is outside the inclusive range 0..=1439")]
+pub struct DayMinuteError {
+    value: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PatrolWindow {
+    start: DayMinute,
+    duration_minutes: u16,
+    presence: Rating,
+}
+
+impl PatrolWindow {
+    pub const MIN_DURATION_MINUTES: u16 = 1;
+    pub const MAX_DURATION_MINUTES: u16 = 1_440;
+
+    pub fn try_new(
+        start: DayMinute,
+        duration_minutes: u16,
+        presence: Rating,
+    ) -> Result<Self, PatrolWindowError> {
+        if !(Self::MIN_DURATION_MINUTES..=Self::MAX_DURATION_MINUTES).contains(&duration_minutes) {
+            return Err(PatrolWindowError { duration_minutes });
+        }
+        Ok(Self {
+            start,
+            duration_minutes,
+            presence,
+        })
+    }
+
+    pub const fn start(self) -> DayMinute {
+        self.start
+    }
+
+    pub const fn duration_minutes(self) -> u16 {
+        self.duration_minutes
+    }
+
+    pub const fn presence(self) -> Rating {
+        self.presence
+    }
+}
+
+impl<'de> Deserialize<'de> for PatrolWindow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedPatrolWindow {
+            start: DayMinute,
+            duration_minutes: u16,
+            presence: Rating,
+        }
+
+        let serialized = SerializedPatrolWindow::deserialize(deserializer)?;
+        Self::try_new(
+            serialized.start,
+            serialized.duration_minutes,
+            serialized.presence,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("patrol window duration {duration_minutes} is outside the inclusive range 1..=1440")]
+pub struct PatrolWindowError {
+    duration_minutes: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatrolDeploymentStatus {
+    Active,
+    Suspended,
+    Retired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PatrolDeploymentRecord {
+    id: PatrolDeploymentId,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    windows: Vec<PatrolWindow>,
+    status: PatrolDeploymentStatus,
+    established_at: SimTime,
+    last_changed_at: SimTime,
+    version: u32,
+}
+
+impl PatrolDeploymentRecord {
+    pub fn id(&self) -> PatrolDeploymentId {
+        self.id
+    }
+
+    pub fn organization(&self) -> OrganizationId {
+        self.organization
+    }
+
+    pub fn neighborhood(&self) -> NeighborhoodId {
+        self.neighborhood
+    }
+
+    pub fn windows(&self) -> &[PatrolWindow] {
+        &self.windows
+    }
+
+    pub fn status(&self) -> PatrolDeploymentStatus {
+        self.status
+    }
+
+    pub fn established_at(&self) -> SimTime {
+        self.established_at
+    }
+
+    pub fn last_changed_at(&self) -> SimTime {
+        self.last_changed_at
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PatrolDeploymentDraft {
+    pub organization: OrganizationId,
+    pub neighborhood: NeighborhoodId,
+    pub windows: Vec<PatrolWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoliceResponseStatus {
+    Dispatched,
+    Arrived,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoliceResponsePatrolSnapshot {
+    deployment: PatrolDeploymentId,
+    version: u32,
+}
+
+impl PoliceResponsePatrolSnapshot {
+    pub(crate) fn new(deployment: PatrolDeploymentId, version: u32) -> Self {
+        Self {
+            deployment,
+            version,
+        }
+    }
+
+    pub fn deployment(self) -> PatrolDeploymentId {
+        self.deployment
+    }
+
+    pub fn version(self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoliceResponseRecord {
+    id: PoliceResponseId,
+    authority: OrganizationId,
+    neighborhood: NeighborhoodId,
+    source_operation: OperationId,
+    dispatched_at: SimTime,
+    arrival_due_at: SimTime,
+    arrived_at: Option<SimTime>,
+    alert_score: i16,
+    response_presence: Rating,
+    jurisdiction_version: u32,
+    patrol: Option<PoliceResponsePatrolSnapshot>,
+    status: PoliceResponseStatus,
+    version: u32,
+}
+
+impl PoliceResponseRecord {
+    pub fn id(&self) -> PoliceResponseId {
+        self.id
+    }
+    pub fn authority(&self) -> OrganizationId {
+        self.authority
+    }
+    pub fn neighborhood(&self) -> NeighborhoodId {
+        self.neighborhood
+    }
+    pub fn source_operation(&self) -> OperationId {
+        self.source_operation
+    }
+    pub fn dispatched_at(&self) -> SimTime {
+        self.dispatched_at
+    }
+    pub fn arrival_due_at(&self) -> SimTime {
+        self.arrival_due_at
+    }
+    pub fn arrived_at(&self) -> Option<SimTime> {
+        self.arrived_at
+    }
+    pub fn alert_score(&self) -> i16 {
+        self.alert_score
+    }
+    pub fn response_presence(&self) -> Rating {
+        self.response_presence
+    }
+    pub fn jurisdiction_version(&self) -> u32 {
+        self.jurisdiction_version
+    }
+    pub fn patrol(&self) -> Option<PoliceResponsePatrolSnapshot> {
+        self.patrol
+    }
+    pub fn status(&self) -> PoliceResponseStatus {
+        self.status
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct InvestigationIndexes {
     by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
@@ -664,6 +919,23 @@ struct JurisdictionIndexes {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PatrolIndexes {
+    by_organization: BTreeMap<OrganizationId, BTreeSet<PatrolDeploymentId>>,
+    by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,
+    active_by_organization_neighborhood:
+        BTreeMap<(OrganizationId, NeighborhoodId), PatrolDeploymentId>,
+    active_by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PoliceResponseIndexes {
+    by_authority: BTreeMap<OrganizationId, BTreeSet<PoliceResponseId>>,
+    by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PoliceResponseId>>,
+    by_source_operation: BTreeMap<OperationId, PoliceResponseId>,
+    dispatched_by_arrival_due: BTreeMap<SimTime, BTreeSet<PoliceResponseId>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct LegalIndexes {
     investigations: InvestigationIndexes,
     evidence: EvidenceIndexes,
@@ -671,6 +943,8 @@ struct LegalIndexes {
     informants: InformantIndexes,
     work: InvestigationWorkIndexes,
     jurisdictions: JurisdictionIndexes,
+    patrols: PatrolIndexes,
+    police_responses: PoliceResponseIndexes,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -683,6 +957,8 @@ pub struct LegalState {
     informant_disclosures: BTreeMap<InformantDisclosureId, InformantDisclosureRecord>,
     evidence: BTreeMap<EvidenceId, EvidenceRecord>,
     jurisdictions: BTreeMap<OrganizationId, JurisdictionRecord>,
+    patrol_deployments: BTreeMap<PatrolDeploymentId, PatrolDeploymentRecord>,
+    police_responses: BTreeMap<PoliceResponseId, PoliceResponseRecord>,
     indexes: LegalIndexes,
 }
 
@@ -799,6 +1075,101 @@ impl LegalState {
     }
     pub fn get_jurisdiction(&self, organization: OrganizationId) -> Option<&JurisdictionRecord> {
         self.jurisdictions.get(&organization)
+    }
+    pub fn get_patrol_deployment(&self, id: PatrolDeploymentId) -> Option<&PatrolDeploymentRecord> {
+        self.patrol_deployments.get(&id)
+    }
+    pub fn get_police_response(&self, id: PoliceResponseId) -> Option<&PoliceResponseRecord> {
+        self.police_responses.get(&id)
+    }
+    pub fn police_response_for_operation(
+        &self,
+        operation: OperationId,
+    ) -> Option<&PoliceResponseRecord> {
+        self.indexes
+            .police_responses
+            .by_source_operation
+            .get(&operation)
+            .and_then(|id| self.police_responses.get(id))
+    }
+    pub fn police_responses_for_authority(
+        &self,
+        authority: OrganizationId,
+    ) -> impl Iterator<Item = &PoliceResponseRecord> {
+        self.indexes
+            .police_responses
+            .by_authority
+            .get(&authority)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.police_responses.get(id))
+    }
+    pub fn police_responses_for_neighborhood(
+        &self,
+        neighborhood: NeighborhoodId,
+    ) -> impl Iterator<Item = &PoliceResponseRecord> {
+        self.indexes
+            .police_responses
+            .by_neighborhood
+            .get(&neighborhood)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.police_responses.get(id))
+    }
+    pub(crate) fn due_police_responses_at_or_before(&self, now: SimTime) -> Vec<PoliceResponseId> {
+        self.indexes
+            .police_responses
+            .dispatched_by_arrival_due
+            .range(..=now)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
+    }
+    pub fn patrol_deployments_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &PatrolDeploymentRecord> {
+        self.indexes
+            .patrols
+            .by_organization
+            .get(&organization)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.patrol_deployments.get(id))
+    }
+    pub fn patrol_deployments_for_neighborhood(
+        &self,
+        neighborhood: NeighborhoodId,
+    ) -> impl Iterator<Item = &PatrolDeploymentRecord> {
+        self.indexes
+            .patrols
+            .by_neighborhood
+            .get(&neighborhood)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.patrol_deployments.get(id))
+    }
+    pub fn active_patrol_deployments_for_neighborhood(
+        &self,
+        neighborhood: NeighborhoodId,
+    ) -> impl Iterator<Item = &PatrolDeploymentRecord> {
+        self.indexes
+            .patrols
+            .active_by_neighborhood
+            .get(&neighborhood)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.patrol_deployments.get(id))
+    }
+    pub(crate) fn active_patrol_for(
+        &self,
+        organization: OrganizationId,
+        neighborhood: NeighborhoodId,
+    ) -> Option<&PatrolDeploymentRecord> {
+        self.indexes
+            .patrols
+            .active_by_organization_neighborhood
+            .get(&(organization, neighborhood))
+            .and_then(|id| self.patrol_deployments.get(id))
     }
     pub fn jurisdictions_for_neighborhood(
         &self,
@@ -1007,6 +1378,12 @@ impl LegalState {
     }
     pub(crate) fn jurisdictions(&self) -> impl Iterator<Item = &JurisdictionRecord> {
         self.jurisdictions.values()
+    }
+    pub(crate) fn patrol_deployments(&self) -> impl Iterator<Item = &PatrolDeploymentRecord> {
+        self.patrol_deployments.values()
+    }
+    pub(crate) fn police_responses(&self) -> impl Iterator<Item = &PoliceResponseRecord> {
+        self.police_responses.values()
     }
     pub(crate) fn insert_investigation(&mut self, record: InvestigationRecord) {
         self.indexes
@@ -1504,7 +1881,289 @@ impl LegalState {
         }
         self.jurisdictions.insert(organization, record);
     }
+    pub(crate) fn insert_patrol_deployment(&mut self, record: PatrolDeploymentRecord) {
+        let id = record.id();
+        let organization = record.organization();
+        let neighborhood = record.neighborhood();
+        debug_assert_eq!(
+            record.status(),
+            PatrolDeploymentStatus::Active,
+            "Lifecycle Validity: new patrol deployments must be active"
+        );
+        self.indexes
+            .patrols
+            .by_organization
+            .entry(organization)
+            .or_default()
+            .insert(id);
+        self.indexes
+            .patrols
+            .by_neighborhood
+            .entry(neighborhood)
+            .or_default()
+            .insert(id);
+        let previous_active = self
+            .indexes
+            .patrols
+            .active_by_organization_neighborhood
+            .insert((organization, neighborhood), id);
+        debug_assert!(
+            previous_active.is_none(),
+            "Ownership Exclusivity: duplicate active patrol deployment inserted"
+        );
+        self.indexes
+            .patrols
+            .active_by_neighborhood
+            .entry(neighborhood)
+            .or_default()
+            .insert(id);
+        let previous = self.patrol_deployments.insert(id, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate patrol deployment ID inserted"
+        );
+    }
+    pub(crate) fn revise_patrol_deployment(
+        &mut self,
+        id: PatrolDeploymentId,
+        windows: Vec<PatrolWindow>,
+        changed_at: SimTime,
+    ) {
+        let record = self
+            .patrol_deployments
+            .get_mut(&id)
+            .expect("validated patrol deployment disappeared before revision commit");
+        record.windows = windows;
+        record.last_changed_at = changed_at;
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("patrol deployment version counter exhausted");
+    }
+    pub(crate) fn set_patrol_deployment_status(
+        &mut self,
+        id: PatrolDeploymentId,
+        status: PatrolDeploymentStatus,
+        changed_at: SimTime,
+    ) {
+        let (organization, neighborhood, previous_status) = {
+            let record = self
+                .patrol_deployments
+                .get(&id)
+                .expect("validated patrol deployment disappeared before lifecycle commit");
+            (
+                record.organization(),
+                record.neighborhood(),
+                record.status(),
+            )
+        };
+        debug_assert_ne!(
+            previous_status, status,
+            "Lifecycle Validity: patrol transition must change status"
+        );
+        if previous_status == PatrolDeploymentStatus::Active {
+            let removed = self
+                .indexes
+                .patrols
+                .active_by_organization_neighborhood
+                .remove(&(organization, neighborhood));
+            debug_assert_eq!(
+                removed,
+                Some(id),
+                "Derived Data Consistency: active patrol index changed before lifecycle commit"
+            );
+            if let Some(ids) = self
+                .indexes
+                .patrols
+                .active_by_neighborhood
+                .get_mut(&neighborhood)
+            {
+                let removed = ids.remove(&id);
+                debug_assert!(
+                    removed,
+                    "Derived Data Consistency: neighborhood active patrol index changed before lifecycle commit"
+                );
+                if ids.is_empty() {
+                    self.indexes
+                        .patrols
+                        .active_by_neighborhood
+                        .remove(&neighborhood);
+                }
+            }
+        }
+        if status == PatrolDeploymentStatus::Active {
+            let previous = self
+                .indexes
+                .patrols
+                .active_by_organization_neighborhood
+                .insert((organization, neighborhood), id);
+            debug_assert!(
+                previous.is_none(),
+                "Ownership Exclusivity: patrol resume collided with another active deployment"
+            );
+            self.indexes
+                .patrols
+                .active_by_neighborhood
+                .entry(neighborhood)
+                .or_default()
+                .insert(id);
+        }
+        let record = self
+            .patrol_deployments
+            .get_mut(&id)
+            .expect("validated patrol deployment disappeared before lifecycle commit");
+        record.status = status;
+        record.last_changed_at = changed_at;
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("patrol deployment version counter exhausted");
+    }
+    pub(crate) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
+        let id = record.id();
+        self.indexes
+            .police_responses
+            .by_authority
+            .entry(record.authority())
+            .or_default()
+            .insert(id);
+        self.indexes
+            .police_responses
+            .by_neighborhood
+            .entry(record.neighborhood())
+            .or_default()
+            .insert(id);
+        let previous_operation = self
+            .indexes
+            .police_responses
+            .by_source_operation
+            .insert(record.source_operation(), id);
+        debug_assert!(
+            previous_operation.is_none(),
+            "Ownership Exclusivity: operation has multiple police responses"
+        );
+        self.indexes
+            .police_responses
+            .dispatched_by_arrival_due
+            .entry(record.arrival_due_at())
+            .or_default()
+            .insert(id);
+        let previous = self.police_responses.insert(id, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate police response ID inserted"
+        );
+    }
+    pub(crate) fn mark_police_response_arrived(&mut self, id: PoliceResponseId, at: SimTime) {
+        let due_at = self
+            .police_responses
+            .get(&id)
+            .expect("validated police response disappeared before arrival commit")
+            .arrival_due_at();
+        if let Some(ids) = self
+            .indexes
+            .police_responses
+            .dispatched_by_arrival_due
+            .get_mut(&due_at)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.indexes
+                    .police_responses
+                    .dispatched_by_arrival_due
+                    .remove(&due_at);
+            }
+        }
+        let record = self
+            .police_responses
+            .get_mut(&id)
+            .expect("validated police response disappeared before arrival commit");
+        record.status = PoliceResponseStatus::Arrived;
+        record.arrived_at = Some(at);
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("police response version counter exhausted");
+    }
+    fn has_consistent_police_response_indexes(&self) -> bool {
+        for response in self.police_responses.values() {
+            let id = response.id();
+            if !self
+                .indexes
+                .police_responses
+                .by_authority
+                .get(&response.authority())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .police_responses
+                    .by_neighborhood
+                    .get(&response.neighborhood())
+                    .is_some_and(|ids| ids.contains(&id))
+                || self
+                    .indexes
+                    .police_responses
+                    .by_source_operation
+                    .get(&response.source_operation())
+                    != Some(&id)
+            {
+                return false;
+            }
+            let due_indexed = self
+                .indexes
+                .police_responses
+                .dispatched_by_arrival_due
+                .get(&response.arrival_due_at())
+                .is_some_and(|ids| ids.contains(&id));
+            if due_indexed != (response.status() == PoliceResponseStatus::Dispatched) {
+                return false;
+            }
+        }
+        for (authority, ids) in &self.indexes.police_responses.by_authority {
+            if ids.iter().any(|id| {
+                !self
+                    .police_responses
+                    .get(id)
+                    .is_some_and(|record| record.authority() == *authority)
+            }) {
+                return false;
+            }
+        }
+        for (neighborhood, ids) in &self.indexes.police_responses.by_neighborhood {
+            if ids.iter().any(|id| {
+                !self
+                    .police_responses
+                    .get(id)
+                    .is_some_and(|record| record.neighborhood() == *neighborhood)
+            }) {
+                return false;
+            }
+        }
+        for (operation, id) in &self.indexes.police_responses.by_source_operation {
+            if !self
+                .police_responses
+                .get(id)
+                .is_some_and(|record| record.source_operation() == *operation)
+            {
+                return false;
+            }
+        }
+        for (due_at, ids) in &self.indexes.police_responses.dispatched_by_arrival_due {
+            if ids.iter().any(|id| {
+                !self.police_responses.get(id).is_some_and(|record| {
+                    record.status() == PoliceResponseStatus::Dispatched
+                        && record.arrival_due_at() == *due_at
+                })
+            }) {
+                return false;
+            }
+        }
+        true
+    }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        if !self.has_consistent_police_response_indexes() {
+            return false;
+        }
         for investigation in self.investigations.values() {
             if !self
                 .indexes
@@ -2025,9 +2684,97 @@ impl LegalState {
                 }
             }
         }
+        for deployment in self.patrol_deployments.values() {
+            let id = deployment.id();
+            if !self
+                .indexes
+                .patrols
+                .by_organization
+                .get(&deployment.organization())
+                .is_some_and(|ids| ids.contains(&id))
+                || !self
+                    .indexes
+                    .patrols
+                    .by_neighborhood
+                    .get(&deployment.neighborhood())
+                    .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
+            let active_pair = self
+                .indexes
+                .patrols
+                .active_by_organization_neighborhood
+                .get(&(deployment.organization(), deployment.neighborhood()));
+            let active_neighborhood = self
+                .indexes
+                .patrols
+                .active_by_neighborhood
+                .get(&deployment.neighborhood())
+                .is_some_and(|ids| ids.contains(&id));
+            match deployment.status() {
+                PatrolDeploymentStatus::Active
+                    if active_pair != Some(&id) || !active_neighborhood =>
+                {
+                    return false;
+                }
+                PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired
+                    if active_pair == Some(&id) || active_neighborhood =>
+                {
+                    return false;
+                }
+                PatrolDeploymentStatus::Active
+                | PatrolDeploymentStatus::Suspended
+                | PatrolDeploymentStatus::Retired => {}
+            }
+        }
+        for (organization, ids) in &self.indexes.patrols.by_organization {
+            for id in ids {
+                if !self
+                    .patrol_deployments
+                    .get(id)
+                    .is_some_and(|record| record.organization() == *organization)
+                {
+                    return false;
+                }
+            }
+        }
+        for (neighborhood, ids) in &self.indexes.patrols.by_neighborhood {
+            for id in ids {
+                if !self
+                    .patrol_deployments
+                    .get(id)
+                    .is_some_and(|record| record.neighborhood() == *neighborhood)
+                {
+                    return false;
+                }
+            }
+        }
+        for (key, id) in &self.indexes.patrols.active_by_organization_neighborhood {
+            if !self.patrol_deployments.get(id).is_some_and(|record| {
+                record.status() == PatrolDeploymentStatus::Active
+                    && (record.organization(), record.neighborhood()) == *key
+            }) {
+                return false;
+            }
+        }
+        for (neighborhood, ids) in &self.indexes.patrols.active_by_neighborhood {
+            for id in ids {
+                if !self.patrol_deployments.get(id).is_some_and(|record| {
+                    record.status() == PatrolDeploymentStatus::Active
+                        && record.neighborhood() == *neighborhood
+                }) {
+                    return false;
+                }
+            }
+        }
         true
     }
     pub(crate) fn debug_validate_indexes(&self) {
+        debug_assert!(
+            self.has_consistent_police_response_indexes(),
+            "Derived Data Consistency: police response indexes disagree with source records"
+        );
         debug_assert!(
             self.has_consistent_indexes(),
             "Derived Data Consistency: legal indexes disagree with source records"
@@ -2279,6 +3026,43 @@ impl LegalState {
                         }),
                     "Index Completeness: legal jurisdiction neighborhood index is missing authority"
                 );
+            }
+        }
+        for deployment in self.patrol_deployments.values() {
+            debug_assert!(
+                self.indexes
+                    .patrols
+                    .by_organization
+                    .get(&deployment.organization())
+                    .is_some_and(|ids| ids.contains(&deployment.id())),
+                "Index Completeness: patrol organization index is missing deployment"
+            );
+            debug_assert!(
+                self.indexes
+                    .patrols
+                    .by_neighborhood
+                    .get(&deployment.neighborhood())
+                    .is_some_and(|ids| ids.contains(&deployment.id())),
+                "Index Completeness: patrol neighborhood index is missing deployment"
+            );
+            let active = self
+                .indexes
+                .patrols
+                .active_by_organization_neighborhood
+                .get(&(deployment.organization(), deployment.neighborhood()));
+            match deployment.status() {
+                PatrolDeploymentStatus::Active => {
+                    debug_assert_eq!(active, Some(&deployment.id()));
+                    debug_assert!(self
+                        .indexes
+                        .patrols
+                        .active_by_neighborhood
+                        .get(&deployment.neighborhood())
+                        .is_some_and(|ids| ids.contains(&deployment.id())));
+                }
+                PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired => {
+                    debug_assert_ne!(active, Some(&deployment.id()));
+                }
             }
         }
     }

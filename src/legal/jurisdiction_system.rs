@@ -1,6 +1,6 @@
 //! Geographic legal authority assignments and deterministic incident intake routing.
 
-use crate::core::id::{NeighborhoodId, OrganizationId};
+use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
 use crate::legal::{JurisdictionDraft, JurisdictionRecord};
 use crate::world::{Lifecycle, OrganizationKind};
@@ -18,6 +18,14 @@ pub enum JurisdictionError {
     EmptyJurisdiction,
     #[error("neighborhood {0} does not exist or is not active")]
     MissingNeighborhood(NeighborhoodId),
+    #[error(
+        "organization {organization} cannot remove neighborhood {neighborhood} from jurisdiction while patrol deployment {deployment} is active"
+    )]
+    ActivePatrolDeployment {
+        organization: OrganizationId,
+        neighborhood: NeighborhoodId,
+        deployment: PatrolDeploymentId,
+    },
     #[error(
         "jurisdiction for organization {organization} changed after validation; expected version {expected:?}, found {found:?}"
     )]
@@ -113,6 +121,37 @@ pub fn resolve_case_intake_authority(
         .map(JurisdictionRecord::organization)
 }
 
+pub fn resolve_police_response_authority(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+) -> Option<OrganizationId> {
+    state
+        .legal
+        .jurisdictions_for_neighborhood(neighborhood)
+        .filter(|jurisdiction| {
+            state
+                .world
+                .get_organization(jurisdiction.organization())
+                .is_some_and(|organization| {
+                    organization.lifecycle() == Lifecycle::Active
+                        && organization.kind() == OrganizationKind::LawEnforcement
+                })
+        })
+        .fold(None, |best, jurisdiction| match best {
+            None => Some(jurisdiction),
+            Some(current)
+                if jurisdiction.case_intake_priority().value()
+                    > current.case_intake_priority().value()
+                    || (jurisdiction.case_intake_priority() == current.case_intake_priority()
+                        && jurisdiction.organization() < current.organization()) =>
+            {
+                Some(jurisdiction)
+            }
+            Some(current) => Some(current),
+        })
+        .map(JurisdictionRecord::organization)
+}
+
 fn validate_jurisdiction_dependencies(
     state: &AppState,
     draft: &JurisdictionDraft,
@@ -145,6 +184,20 @@ fn validate_jurisdiction_dependencies(
             .is_some_and(|record| record.lifecycle() == Lifecycle::Active)
         {
             return Err(JurisdictionError::MissingNeighborhood(*neighborhood));
+        }
+    }
+    if let Some(current) = state.legal.get_jurisdiction(draft.organization) {
+        for neighborhood in current.neighborhoods().difference(&draft.neighborhoods) {
+            if let Some(deployment) = state
+                .legal
+                .active_patrol_for(draft.organization, *neighborhood)
+            {
+                return Err(JurisdictionError::ActivePatrolDeployment {
+                    organization: draft.organization,
+                    neighborhood: *neighborhood,
+                    deployment: deployment.id(),
+                });
+            }
         }
     }
     Ok(())

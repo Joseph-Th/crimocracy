@@ -2,7 +2,9 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId};
+use crate::core::id::{
+    CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId, PoliceResponseId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::history::history_system::{validate_record_event, ValidatedHistoryEvent};
@@ -12,6 +14,10 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::operations::police_response_integration::{
+    decide_operation_police_response_start, OperationPoliceResponseStartPlan,
+};
+use crate::operations::surveillance_integration::validate_surveillance_request;
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationCommand, OperationDraft, OperationIdentity, OperationRecord, OperationRuntime,
@@ -72,6 +78,10 @@ pub enum OperationError {
     AuthorizationExpired { scheduled_for: u64, now: u64 },
     #[error("operation approach is not supported by the operation definition")]
     UnsupportedApproach,
+    #[error("surveillance operations require a gather-information objective")]
+    InvalidSurveillanceObjective,
+    #[error("entity {0:?} cannot be directly observed by a surveillance operation")]
+    UnsupportedSurveillanceTarget(EntityRef),
     #[error("operation is missing required role {0:?}")]
     MissingRequiredRole(RoleKind),
     #[error("operation is scheduled in the past")]
@@ -84,6 +94,12 @@ pub enum OperationError {
     MissingOperation(OperationId),
     #[error("operation {0} cannot begin before its scheduled time")]
     StartBeforeScheduled(OperationId),
+    #[error("police response context for operation {0} could not be validated")]
+    InvalidPoliceResponseContext(OperationId),
+    #[error(
+        "operation {0:?} does not define an entry milestone for the police-arrival contingency"
+    )]
+    UnsupportedPoliceEntryContingency(crate::operations::OperationKind),
     #[error("transition {transition:?} is invalid from status {status:?}")]
     InvalidTransition {
         status: OperationStatus,
@@ -198,6 +214,8 @@ impl ValidatedOperation {
                 status: OperationStatus::Authorized,
                 started_at: None,
                 resolution_due_at: None,
+                entry_at: None,
+                police_response: None,
                 awaiting_decision_since: None,
                 resolution: None,
                 abort: None,
@@ -242,6 +260,18 @@ pub fn validate_authorize_operation(
     if draft.scheduled_for < state.now() {
         return Err(OperationError::ScheduledInPast);
     }
+    validate_surveillance_request(draft.kind, &draft.objective).map_err(|error| match error {
+        crate::operations::surveillance_integration::SurveillanceError::InvalidObjective => {
+            OperationError::InvalidSurveillanceObjective
+        }
+        crate::operations::surveillance_integration::SurveillanceError::UnsupportedTarget(
+            target,
+        ) => OperationError::UnsupportedSurveillanceTarget(target),
+        crate::operations::surveillance_integration::SurveillanceError::MissingTarget(_)
+        | crate::operations::surveillance_integration::SurveillanceError::StaleTarget(_) => {
+            unreachable!("authorization validates target existence through the operation objective")
+        }
+    })?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -311,10 +341,23 @@ pub fn validate_authorize_operation(
         }
     }
     for contingency in &draft.contingencies {
-        if let crate::operations::OperationContingency::ContactIfDetained(character) = contingency {
-            if state.world.get_character(*character).is_none() {
-                return Err(OperationError::MissingCharacter(*character));
+        match contingency {
+            crate::operations::OperationContingency::ContactIfDetained(character) => {
+                if state.world.get_character(*character).is_none() {
+                    return Err(OperationError::MissingCharacter(*character));
+                }
             }
+            crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
+                if definition.execution().operation_entry_offset().is_none() =>
+            {
+                return Err(OperationError::UnsupportedPoliceEntryContingency(
+                    draft.kind,
+                ));
+            }
+            crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
+            | crate::operations::OperationContingency::UseForceOnResistance
+            | crate::operations::OperationContingency::UseSecondaryExitIfBlocked
+            | crate::operations::OperationContingency::RequestDecisionOnUnexpectedCondition => {}
         }
     }
 
@@ -374,23 +417,11 @@ pub fn apply_transition(
     }
     match (status, transition) {
         (OperationStatus::Authorized, OperationTransition::Begin) => {
-            let duration = registry.get_operation(record.kind()).execution().duration();
-            let mut resolution_due_at = state.now() + duration;
-            for constraint in record.constraints() {
-                if let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint
-                {
-                    if *deadline < resolution_due_at {
-                        resolution_due_at = *deadline;
-                    }
-                }
-            }
-            state
-                .operations
-                .begin(operation, state.now(), resolution_due_at);
+            validate_begin_operation(registry, state, operation)?.commit(state)
         }
         (OperationStatus::Authorized, OperationTransition::Abort)
         | (OperationStatus::InProgress, OperationTransition::Abort) => {
-            return validate_authority_abort_operation(state, operation)?.commit(state);
+            validate_authority_abort_operation(state, operation)?.commit(state)
         }
         (OperationStatus::InProgress, OperationTransition::Begin)
         | (OperationStatus::AwaitingDecision, OperationTransition::Begin)
@@ -399,10 +430,83 @@ pub fn apply_transition(
         | (OperationStatus::Completed, OperationTransition::Abort)
         | (OperationStatus::Aborted, OperationTransition::Begin)
         | (OperationStatus::Aborted, OperationTransition::Abort) => {
-            return Err(OperationError::InvalidTransition { status, transition });
+            Err(OperationError::InvalidTransition { status, transition })
         }
     }
-    Ok(())
+}
+
+pub(crate) struct ValidatedOperationStart {
+    operation: OperationId,
+    expected_version: u32,
+    started_at: SimTime,
+    resolution_due_at: SimTime,
+    police_response: OperationPoliceResponseStartPlan,
+}
+
+impl ValidatedOperationStart {
+    pub(crate) fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
+        let record = state
+            .operations
+            .get_operation(self.operation)
+            .ok_or(OperationError::MissingOperation(self.operation))?;
+        if record.version() != self.expected_version
+            || record.status() != OperationStatus::Authorized
+            || state.now() != self.started_at
+        {
+            return Err(OperationError::InvalidPoliceResponseContext(self.operation));
+        }
+        let entry_at = self.police_response.entry_at();
+        let response = self
+            .police_response
+            .commit_dispatch(state)
+            .map_err(|_| OperationError::InvalidPoliceResponseContext(self.operation))?;
+        state.operations.begin(
+            self.operation,
+            self.started_at,
+            self.resolution_due_at,
+            entry_at,
+            response,
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_begin_operation(
+    registry: &Registry,
+    state: &AppState,
+    operation: OperationId,
+) -> Result<ValidatedOperationStart, OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(OperationError::MissingOperation(operation))?;
+    if record.status() != OperationStatus::Authorized {
+        return Err(OperationError::InvalidTransition {
+            status: record.status(),
+            transition: OperationTransition::Begin,
+        });
+    }
+    if state.now() < record.scheduled_for() {
+        return Err(OperationError::StartBeforeScheduled(operation));
+    }
+    let duration = registry.get_operation(record.kind()).execution().duration();
+    let mut resolution_due_at = state.now() + duration;
+    for constraint in record.constraints() {
+        if let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint {
+            if *deadline < resolution_due_at {
+                resolution_due_at = *deadline;
+            }
+        }
+    }
+    let police_response = decide_operation_police_response_start(registry, state, operation)
+        .map_err(|_| OperationError::InvalidPoliceResponseContext(operation))?;
+    Ok(ValidatedOperationStart {
+        operation,
+        expected_version: record.version(),
+        started_at: state.now(),
+        resolution_due_at,
+        police_response,
+    })
 }
 
 pub struct ValidatedOperationAbort {
@@ -446,6 +550,15 @@ impl ValidatedOperationAbort {
         }
         if let OperationAbortCause::Decision(decision) = self.cause {
             if state.decisions.pending_for_operation(self.operation) != Some(decision) {
+                return Err(OperationError::InvalidAbortCause {
+                    operation: self.operation,
+                    status: record.status(),
+                    cause: self.cause,
+                });
+            }
+        }
+        if let OperationAbortCause::PoliceArrival(response) = self.cause {
+            if !police_arrival_can_abort(state, record, response) {
                 return Err(OperationError::InvalidAbortCause {
                     operation: self.operation,
                     status: record.status(),
@@ -498,6 +611,57 @@ pub(crate) fn validate_decision_abort_operation(
     validate_operation_abort(state, operation, OperationAbortCause::Decision(decision))
 }
 
+pub(crate) fn validate_police_arrival_abort_operation(
+    state: &AppState,
+    operation: OperationId,
+    response: PoliceResponseId,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    validate_operation_abort(
+        state,
+        operation,
+        OperationAbortCause::PoliceArrival(response),
+    )
+}
+
+pub(crate) fn validate_police_arrival_abort_if_applicable(
+    state: &AppState,
+    operation: OperationId,
+) -> Result<Option<ValidatedOperationAbort>, OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(OperationError::MissingOperation(operation))?;
+    let Some(response) = record.police_response() else {
+        return Ok(None);
+    };
+    if police_arrival_can_abort(state, record, response) {
+        validate_police_arrival_abort_operation(state, operation, response).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn projected_resume_entry_at(
+    operation: &OperationRecord,
+    resumed_at: SimTime,
+) -> Option<SimTime> {
+    let entry_at = operation.entry_at()?;
+    let paused_at = operation.awaiting_decision_since()?;
+    if entry_at <= paused_at {
+        return Some(entry_at);
+    }
+    let paused_minutes = resumed_at
+        .as_minutes()
+        .checked_sub(paused_at.as_minutes())
+        .expect("operation cannot resume before its decision pause began");
+    Some(SimTime::from_minutes(
+        entry_at
+            .as_minutes()
+            .checked_add(paused_minutes)
+            .expect("operation entry time overflowed u64 minutes"),
+    ))
+}
+
 fn validate_operation_abort(
     state: &AppState,
     operation: OperationId,
@@ -519,6 +683,16 @@ fn validate_operation_abort(
         {
             OperationAbortPhase::AwaitingDecision
         }
+        (OperationStatus::InProgress, OperationAbortCause::PoliceArrival(response))
+            if police_arrival_can_abort(state, record, response) =>
+        {
+            OperationAbortPhase::InProgress
+        }
+        (OperationStatus::AwaitingDecision, OperationAbortCause::PoliceArrival(response))
+            if police_arrival_can_abort(state, record, response) =>
+        {
+            OperationAbortPhase::AwaitingDecision
+        }
         (status, cause) => {
             return Err(OperationError::InvalidAbortCause {
                 operation,
@@ -532,7 +706,7 @@ fn validate_operation_abort(
         OperationAbortPhase::BeforeStart => (None, None, None),
         OperationAbortPhase::InProgress | OperationAbortPhase::AwaitingDecision => {
             let summary = build_abort_summary(state, record, cause)?;
-            let entities = abort_entities(record, cause);
+            let entities = abort_entities(state, record, cause);
             let information = validate_record_information(
                 state,
                 InformationDraft {
@@ -614,10 +788,33 @@ fn build_abort_summary(
                 decision.summary()
             ))
         }
+        OperationAbortCause::PoliceArrival(response) => {
+            let response = state
+                .legal
+                .get_police_response(response)
+                .ok_or(OperationError::InvalidAbortArtifacts {
+                    operation: operation.id(),
+                })?;
+            let authority = state
+                .world
+                .get_organization(response.authority())
+                .ok_or(OperationError::InvalidAbortArtifacts {
+                    operation: operation.id(),
+                })?;
+            Ok(format!(
+                "{} was aborted under its standing contingency when {} response reached the target before entry. Objective resolution was not completed.",
+                operation.title(),
+                authority.name()
+            ))
+        }
     }
 }
 
-fn abort_entities(record: &OperationRecord, cause: OperationAbortCause) -> BTreeSet<EntityRef> {
+fn abort_entities(
+    state: &AppState,
+    record: &OperationRecord,
+    cause: OperationAbortCause,
+) -> BTreeSet<EntityRef> {
     let mut entities = BTreeSet::from([
         EntityRef::Operation(record.id()),
         EntityRef::Organization(record.responsible_organization()),
@@ -630,8 +827,50 @@ fn abort_entities(record: &OperationRecord, cause: OperationAbortCause) -> BTree
         OperationAbortCause::Decision(decision) => {
             entities.insert(EntityRef::DecisionRequest(decision));
         }
+        OperationAbortCause::PoliceArrival(response) => {
+            if let Some(response) = state.legal.get_police_response(response) {
+                entities.insert(EntityRef::Organization(response.authority()));
+                entities.insert(EntityRef::Neighborhood(response.neighborhood()));
+            }
+        }
     }
     entities
+}
+
+fn police_arrival_can_abort(
+    state: &AppState,
+    operation: &OperationRecord,
+    response: PoliceResponseId,
+) -> bool {
+    if operation.police_response() != Some(response)
+        || !operation
+            .contingencies()
+            .contains(&crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+    {
+        return false;
+    }
+    let Some(response) = state.legal.get_police_response(response) else {
+        return false;
+    };
+    let effective_arrival = match response.status() {
+        crate::legal::PoliceResponseStatus::Dispatched
+            if operation.status() == OperationStatus::InProgress
+                && response.arrival_due_at() <= state.now() =>
+        {
+            state.now()
+        }
+        crate::legal::PoliceResponseStatus::Arrived => match response.arrived_at() {
+            Some(arrived_at) => arrived_at,
+            None => return false,
+        },
+        crate::legal::PoliceResponseStatus::Dispatched => return false,
+    };
+    let entry_at = match operation.status() {
+        OperationStatus::InProgress => operation.entry_at(),
+        OperationStatus::AwaitingDecision => projected_resume_entry_at(operation, state.now()),
+        OperationStatus::Authorized | OperationStatus::Completed | OperationStatus::Aborted => None,
+    };
+    entry_at.is_some_and(|entry_at| effective_arrival < entry_at)
 }
 
 #[cfg(test)]

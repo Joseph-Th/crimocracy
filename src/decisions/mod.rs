@@ -3,7 +3,9 @@
 pub mod decision_system;
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{CharacterId, DecisionRequestId, OperationId, OrganizationId};
+use crate::core::id::{
+    CharacterId, DecisionRequestId, OperationId, OrganizationId, PoliceResponseId,
+};
 use crate::core::time::SimTime;
 use crate::delegation::MandateAuthority;
 use crate::recruitment::{RecruitmentApproach, RecruitmentPolicySource};
@@ -13,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationExceptionReason {
     UnexpectedCondition,
+    PoliceArrival(PoliceResponseId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +221,7 @@ impl DecisionRequestRecord {
 pub struct DecisionState {
     records: BTreeMap<DecisionRequestId, DecisionRequestRecord>,
     by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
+    by_operation: BTreeMap<OperationId, BTreeSet<DecisionRequestId>>,
     pending_by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
     pending_by_context: BTreeMap<DecisionPendingKey, DecisionRequestId>,
 }
@@ -269,6 +273,17 @@ impl DecisionState {
             .copied()
     }
 
+    pub fn decisions_for_operation(
+        &self,
+        operation: OperationId,
+    ) -> impl Iterator<Item = &DecisionRequestRecord> {
+        self.by_operation
+            .get(&operation)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.records.get(id))
+    }
+
     pub fn pending_for_recruitment_approval(
         &self,
         target_organization: OrganizationId,
@@ -291,8 +306,12 @@ impl DecisionState {
     pub(crate) fn insert(&mut self, record: DecisionRequestRecord) {
         let id = record.id();
         let recipient = record.recipient();
+        let operation = record.context().operation();
         let pending_key = record.context().pending_key();
         self.by_recipient.entry(recipient).or_default().insert(id);
+        if let Some(operation) = operation {
+            self.by_operation.entry(operation).or_default().insert(id);
+        }
         self.pending_by_recipient
             .entry(recipient)
             .or_default()
@@ -351,6 +370,15 @@ impl DecisionState {
             {
                 return false;
             }
+            if let Some(operation) = record.context().operation() {
+                if !self
+                    .by_operation
+                    .get(&operation)
+                    .is_some_and(|ids| ids.contains(&record.id()))
+                {
+                    return false;
+                }
+            }
             match record.status() {
                 DecisionStatus::Pending => {
                     if !self
@@ -386,6 +414,17 @@ impl DecisionState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.recipient() == *recipient)
+                {
+                    return false;
+                }
+            }
+        }
+        for (operation, ids) in &self.by_operation {
+            for id in ids {
+                if !self
+                    .records
+                    .get(id)
+                    .is_some_and(|record| record.context().operation() == Some(*operation))
                 {
                     return false;
                 }

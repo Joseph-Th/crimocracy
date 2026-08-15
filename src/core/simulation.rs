@@ -1,11 +1,13 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
 
 use crate::core::id::{
-    BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId, OpportunityId, ReportId,
+    BusinessCycleId, EnterpriseCycleId, InvestigationWorkId, OperationId, OpportunityId,
+    PoliceResponseId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::decisions::decision_system::DecisionRequestOutcome;
 use crate::economy::business_economy_system::{
     decide_business_cycle, due_active_businesses, validate_business_cycle_plan,
 };
@@ -23,6 +25,7 @@ use crate::operations::operation_execution::{
 use crate::operations::operation_system::{
     apply_transition, due_authorized_operations, OperationTransition,
 };
+use crate::operations::police_response_integration::process_due_police_responses;
 use crate::opportunities::opportunity_system::expire_due_opportunities;
 use crate::registry::Registry;
 use crate::reports::executive_brief::{
@@ -35,6 +38,8 @@ use thiserror::Error;
 pub struct TickOutcome {
     pub now: SimTime,
     pub started_operations: Vec<OperationId>,
+    pub arrived_police_responses: Vec<PoliceResponseId>,
+    pub decision_requests: Vec<DecisionRequestOutcome>,
     pub resolved_operations: Vec<OperationId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub business_cycles: Vec<BusinessCycleId>,
@@ -55,6 +60,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         apply_transition(registry, state, *operation, OperationTransition::Begin)
             .expect("due authorized operation must support the begin transition");
     }
+    let police_response_outcome = process_due_police_responses(state)
+        .expect("due police responses must commit through canonical arrival processing");
+    let arrived_police_responses = police_response_outcome.arrived;
+    let decision_requests = police_response_outcome.decisions;
     let due_operations = due_in_progress_operations(state);
     let mut resolved_operations = Vec::with_capacity(due_operations.len());
     for operation in due_operations {
@@ -162,6 +171,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     TickOutcome {
         now: state.now(),
         started_operations,
+        arrived_police_responses,
+        decision_requests,
         resolved_operations,
         resolved_investigation_work,
         business_cycles,

@@ -1,0 +1,180 @@
+//! Operation-facing police dispatch planning and deterministic response-arrival processing.
+
+use crate::core::id::{OperationId, PoliceResponseId};
+use crate::core::state::AppState;
+use crate::core::time::{SimDuration, SimTime};
+use crate::decisions::decision_system::{
+    validate_request_police_arrival_decision_on_arrival, DecisionError, DecisionRequestOutcome,
+};
+use crate::legal::jurisdiction_system::resolve_police_response_authority;
+use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
+use crate::legal::police_response_system::{
+    due_dispatched_police_responses, validate_dispatch_police_response,
+    validate_police_response_arrival, PoliceResponseDispatchDraft, PoliceResponseError,
+    ValidatedPoliceResponseDispatch,
+};
+use crate::operations::operation_execution::calculate_operation_police_alert_context;
+use crate::operations::operation_system::validate_police_arrival_abort_operation;
+use crate::operations::{OperationContingency, OperationStatus};
+use crate::registry::Registry;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub(crate) enum PoliceResponseIntegrationError {
+    #[error("operation {0} does not exist")]
+    MissingOperation(OperationId),
+    #[error(transparent)]
+    PoliceResponse(#[from] PoliceResponseError),
+    #[error(transparent)]
+    Decision(#[from] DecisionError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PoliceResponseProcessingOutcome {
+    pub(crate) arrived: Vec<PoliceResponseId>,
+    pub(crate) decisions: Vec<DecisionRequestOutcome>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OperationPoliceResponseStartPlan {
+    entry_at: Option<SimTime>,
+    dispatch: Option<ValidatedPoliceResponseDispatch>,
+}
+
+impl OperationPoliceResponseStartPlan {
+    pub(crate) fn entry_at(&self) -> Option<SimTime> {
+        self.entry_at
+    }
+
+    pub(crate) fn commit_dispatch(
+        self,
+        state: &mut AppState,
+    ) -> Result<Option<PoliceResponseId>, PoliceResponseIntegrationError> {
+        self.dispatch
+            .map(|dispatch| dispatch.commit(state))
+            .transpose()
+            .map_err(Into::into)
+    }
+}
+
+pub(crate) fn decide_operation_police_response_start(
+    registry: &Registry,
+    state: &AppState,
+    operation: OperationId,
+) -> Result<OperationPoliceResponseStartPlan, PoliceResponseIntegrationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(PoliceResponseIntegrationError::MissingOperation(operation))?;
+    let execution = registry.get_operation(record.kind()).execution();
+    let entry_at = execution
+        .operation_entry_offset()
+        .map(|offset| state.now() + offset);
+    let alert = calculate_operation_police_alert_context(registry, state, operation, state.now());
+    let Some(neighborhood) = alert.neighborhood() else {
+        return Ok(OperationPoliceResponseStartPlan {
+            entry_at,
+            dispatch: None,
+        });
+    };
+    if alert.score() < execution.police_dispatch_threshold() {
+        return Ok(OperationPoliceResponseStartPlan {
+            entry_at,
+            dispatch: None,
+        });
+    }
+    let Some(authority) = resolve_police_response_authority(state, neighborhood) else {
+        return Ok(OperationPoliceResponseStartPlan {
+            entry_at,
+            dispatch: None,
+        });
+    };
+    let patrol =
+        resolve_authority_patrol_presence_snapshot(state, authority, neighborhood, state.now());
+    let reduction = u32::from(patrol.presence.value())
+        .saturating_mul(u32::from(execution.patrol_response_reduction_minutes()))
+        / 100;
+    let base = execution.base_police_response_delay().as_minutes();
+    let minimum = execution.minimum_police_response_delay().as_minutes();
+    let delay = base.saturating_sub(reduction).max(minimum);
+    let arrival_due_at = state.now() + SimDuration::from_minutes(delay);
+    let dispatch = validate_dispatch_police_response(
+        state,
+        PoliceResponseDispatchDraft {
+            authority,
+            neighborhood,
+            source_operation: operation,
+            arrival_due_at,
+            alert_score: alert.score(),
+        },
+    )?;
+    Ok(OperationPoliceResponseStartPlan {
+        entry_at,
+        dispatch: Some(dispatch),
+    })
+}
+
+pub(crate) fn process_due_police_responses(
+    state: &mut AppState,
+) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
+    let due = due_dispatched_police_responses(state);
+    let mut arrived = Vec::with_capacity(due.len());
+    let mut decisions = Vec::new();
+    for response_id in due {
+        let (operation_id, should_abort_before_entry, decision) = {
+            let response = state
+                .legal
+                .get_police_response(response_id)
+                .expect("due police response must still exist");
+            let operation = state
+                .operations
+                .get_operation(response.source_operation())
+                .expect("police response source operation must exist");
+            let should_abort = operation.status() == OperationStatus::InProgress
+                && operation
+                    .contingencies()
+                    .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+                && operation
+                    .entry_at()
+                    .is_some_and(|entry_at| state.now() < entry_at);
+            let decision = if !should_abort
+                && operation.status() == OperationStatus::InProgress
+                && operation
+                    .contingencies()
+                    .contains(&OperationContingency::RequestDecisionOnUnexpectedCondition)
+            {
+                Some(validate_request_police_arrival_decision_on_arrival(
+                    state,
+                    response_id,
+                )?)
+            } else {
+                None
+            };
+            (operation.id(), should_abort, decision)
+        };
+
+        let arrival = validate_police_response_arrival(state, response_id)?;
+        let abort = if should_abort_before_entry {
+            Some(
+                validate_police_arrival_abort_operation(state, operation_id, response_id)
+                    .expect("due pre-entry response must satisfy the authored abort contingency"),
+            )
+        } else {
+            None
+        };
+        arrival.commit(state)?;
+        if let Some(abort) = abort {
+            abort
+                .commit(state)
+                .expect("fresh police-arrival abort token must commit atomically");
+        } else if let Some(decision) = decision {
+            decisions.push(
+                decision
+                    .commit(state)
+                    .expect("prevalidated police-response decision request must remain current"),
+            );
+        }
+        arrived.push(response_id);
+    }
+    Ok(PoliceResponseProcessingOutcome { arrived, decisions })
+}

@@ -35,8 +35,12 @@ define_id!(BusinessId, "business");
 define_id!(OperationId, "operation");
 define_id!(OpportunityId, "opportunity");
 define_id!(InformationId, "information");
+define_id!(ContactId, "contact");
+define_id!(ContactDisclosureId, "contact-disclosure");
 define_id!(InvestigationId, "investigation");
 define_id!(InvestigationWorkId, "investigation-work");
+define_id!(PatrolDeploymentId, "patrol-deployment");
+define_id!(PoliceResponseId, "police-response");
 define_id!(CaseWitnessId, "case-witness");
 define_id!(WitnessStatementId, "witness-statement");
 define_id!(InformantId, "informant");
@@ -62,8 +66,12 @@ pub(crate) struct IdCounters {
     operation: u32,
     opportunity: u32,
     information: u32,
+    contact: u32,
+    contact_disclosure: u32,
     investigation: u32,
     investigation_work: u32,
+    patrol_deployment: u32,
+    police_response: u32,
     case_witness: u32,
     witness_statement: u32,
     informant: u32,
@@ -91,8 +99,12 @@ impl IdCounters {
             operation: 1,
             opportunity: 1,
             information: 1,
+            contact: 1,
+            contact_disclosure: 1,
             investigation: 1,
             investigation_work: 1,
+            patrol_deployment: 1,
+            police_response: 1,
             case_witness: 1,
             witness_statement: 1,
             informant: 1,
@@ -147,6 +159,17 @@ impl IdCounters {
         InformationId::from_raw(Self::take(&mut self.information, "information"))
     }
 
+    pub(crate) fn next_contact(&mut self) -> ContactId {
+        ContactId::from_raw(Self::take(&mut self.contact, "contact"))
+    }
+
+    pub(crate) fn next_contact_disclosure(&mut self) -> ContactDisclosureId {
+        ContactDisclosureId::from_raw(Self::take(
+            &mut self.contact_disclosure,
+            "contact disclosure",
+        ))
+    }
+
     pub(crate) fn next_investigation(&mut self) -> InvestigationId {
         InvestigationId::from_raw(Self::take(&mut self.investigation, "investigation"))
     }
@@ -156,6 +179,14 @@ impl IdCounters {
             &mut self.investigation_work,
             "investigation work",
         ))
+    }
+
+    pub(crate) fn next_patrol_deployment(&mut self) -> PatrolDeploymentId {
+        PatrolDeploymentId::from_raw(Self::take(&mut self.patrol_deployment, "patrol deployment"))
+    }
+
+    pub(crate) fn next_police_response(&mut self) -> PoliceResponseId {
+        PoliceResponseId::from_raw(Self::take(&mut self.police_response, "police response"))
     }
 
     pub(crate) fn next_case_witness(&mut self) -> CaseWitnessId {

@@ -12,7 +12,8 @@ use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, ExecutiveBriefDefinitionSpec,
     InvestigationWorkDefinitionSpec, OperationDifficultyDefinition, OperationExecutionDefinition,
-    OperationExposureDefinition, OperationIntelligenceDefinition, RecruitmentDefinitionSpec,
+    OperationExposureDefinition, OperationIntelligenceDefinition,
+    OperationPoliceResponseDefinition, RecruitmentDefinitionSpec,
     RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
     RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
     RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
@@ -25,7 +26,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 7;
+pub const CURRENT_CONTENT_REVISION: u32 = 8;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -624,6 +625,29 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             (approach, adjustment)
         })
         .collect();
+    let (
+        dispatch_threshold,
+        base_response_minutes,
+        entry_minutes,
+        response_difficulty,
+        response_exposure,
+    ) = match kind {
+        OperationKind::Burglary => (20, 12, Some(10), 14, 18),
+        OperationKind::Robbery => (12, 8, Some(3), 18, 24),
+        OperationKind::Hijacking => (18, 10, Some(5), 16, 22),
+        OperationKind::Smuggling => (28, 15, None, 12, 18),
+        OperationKind::Intimidation => (24, 10, None, 12, 18),
+        OperationKind::Kidnapping => (16, 10, Some(8), 20, 26),
+        OperationKind::Surveillance => (45, 18, None, 10, 14),
+        OperationKind::Sabotage => (22, 12, Some(10), 16, 20),
+        OperationKind::Bribery => (48, 20, None, 8, 12),
+        OperationKind::WitnessPressure => (24, 12, None, 14, 20),
+        OperationKind::DocumentTheft => (20, 12, Some(8), 14, 18),
+        OperationKind::GamblingEvent => (35, 15, None, 10, 16),
+        OperationKind::CovertTransfer => (32, 15, None, 12, 16),
+        OperationKind::Extraction => (18, 10, Some(8), 18, 24),
+        OperationKind::RivalInfiltration => (48, 20, None, 10, 14),
+    };
     OperationExecutionDefinition {
         difficulty: OperationDifficultyDefinition {
             duration: SimDuration::from_minutes(duration_minutes),
@@ -651,6 +675,16 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             witnessed_threshold: 45,
             identifying_threshold: 65,
             evidence_kind: operation_exposure_evidence_kind(kind),
+        },
+        police_response: OperationPoliceResponseDefinition {
+            dispatch_threshold,
+            base_response_delay: SimDuration::from_minutes(base_response_minutes),
+            minimum_response_delay: SimDuration::from_minutes(3),
+            patrol_reduction_minutes: u16::try_from(base_response_minutes - 3)
+                .expect("authored police response delay range must fit u16"),
+            entry_offset: entry_minutes.map(SimDuration::from_minutes),
+            arrival_difficulty_penalty: response_difficulty,
+            arrival_exposure_penalty: response_exposure,
         },
     }
 }

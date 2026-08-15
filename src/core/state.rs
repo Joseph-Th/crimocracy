@@ -1,5 +1,6 @@
 //! Serializable application state; subsystem state is owned here and mutated through systems.
 
+use crate::contacts::ContactState;
 use crate::core::attention::{AttentionClass, AttentionSettings};
 use crate::core::id::{IdCounters, OrganizationId};
 use crate::core::time::{SimDuration, SimTime};
@@ -21,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 21;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 26;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -47,6 +48,7 @@ pub struct AppState {
     campaign: CampaignRuntime,
     pub(crate) ids: IdCounters,
     pub(crate) world: WorldState,
+    pub(crate) contacts: ContactState,
     pub(crate) decisions: DecisionState,
     pub(crate) delegation: DelegationState,
     pub(crate) economy: EconomyState,
@@ -75,6 +77,7 @@ impl AppState {
             campaign: CampaignRuntime::default(),
             ids: IdCounters::new(),
             world: WorldState::new(),
+            contacts: ContactState::new(),
             decisions: DecisionState::new(),
             delegation: DelegationState::new(),
             economy: EconomyState::new(),
@@ -101,6 +104,10 @@ impl AppState {
 
     pub fn world(&self) -> &WorldState {
         &self.world
+    }
+
+    pub fn contacts(&self) -> &ContactState {
+        &self.contacts
     }
 
     pub fn decisions(&self) -> &DecisionState {
@@ -927,6 +934,28 @@ mod tests {
                     assert_eq!(outcome.enterprise_cycles.len(), 1);
                 }
                 _ => {}
+            }
+
+            for request in outcome.decision_requests {
+                assert!(
+                    request.requests_pause,
+                    "automatic operation decisions must surface the existing auto-pause contract"
+                );
+                let recipient = state
+                    .decisions()
+                    .get_decision(request.decision)
+                    .expect("tick-generated decision should persist before resolution")
+                    .recipient();
+                validate_resolve_decision(
+                    &registry,
+                    &state,
+                    request.decision,
+                    recipient,
+                    DecisionResponse::Continue,
+                )
+                .expect("soak adapter should be able to continue a surfaced operation decision")
+                .commit(&mut state)
+                .expect("surfaced operation decision should resolve through the canonical path");
             }
         }
 

@@ -317,6 +317,7 @@ pub struct OperationExecutionDefinition {
     pub(crate) difficulty: OperationDifficultyDefinition,
     pub(crate) intelligence: OperationIntelligenceDefinition,
     pub(crate) exposure: OperationExposureDefinition,
+    pub(crate) police_response: OperationPoliceResponseDefinition,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +351,17 @@ pub struct OperationExposureDefinition {
     pub(crate) witnessed_threshold: i16,
     pub(crate) identifying_threshold: i16,
     pub(crate) evidence_kind: EvidenceKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationPoliceResponseDefinition {
+    pub(crate) dispatch_threshold: i16,
+    pub(crate) base_response_delay: SimDuration,
+    pub(crate) minimum_response_delay: SimDuration,
+    pub(crate) patrol_reduction_minutes: u16,
+    pub(crate) entry_offset: Option<SimDuration>,
+    pub(crate) arrival_difficulty_penalty: u8,
+    pub(crate) arrival_exposure_penalty: u8,
 }
 
 impl OperationExecutionDefinition {
@@ -418,6 +430,27 @@ impl OperationExecutionDefinition {
     }
     pub fn exposure_evidence_kind(&self) -> EvidenceKind {
         self.exposure.evidence_kind
+    }
+    pub fn police_dispatch_threshold(&self) -> i16 {
+        self.police_response.dispatch_threshold
+    }
+    pub fn base_police_response_delay(&self) -> SimDuration {
+        self.police_response.base_response_delay
+    }
+    pub fn minimum_police_response_delay(&self) -> SimDuration {
+        self.police_response.minimum_response_delay
+    }
+    pub fn patrol_response_reduction_minutes(&self) -> u16 {
+        self.police_response.patrol_reduction_minutes
+    }
+    pub fn operation_entry_offset(&self) -> Option<SimDuration> {
+        self.police_response.entry_offset
+    }
+    pub fn police_arrival_difficulty_penalty(&self) -> u8 {
+        self.police_response.arrival_difficulty_penalty
+    }
+    pub fn police_arrival_exposure_penalty(&self) -> u8 {
+        self.police_response.arrival_exposure_penalty
     }
 }
 
@@ -757,6 +790,16 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationExposureVariance(OperationKind),
     #[error("operation {0:?} exposure thresholds are ordered incorrectly")]
     InvalidOperationExposureThresholds(OperationKind),
+    #[error("operation {0:?} police response dispatch threshold must be in 0..=100")]
+    InvalidOperationResponseThreshold(OperationKind),
+    #[error("operation {0:?} police response delays are invalid")]
+    InvalidOperationResponseDelay(OperationKind),
+    #[error("operation {0:?} patrol response reduction exceeds the authored delay range")]
+    InvalidOperationResponseReduction(OperationKind),
+    #[error("operation {0:?} entry milestone must fall strictly inside execution duration")]
+    InvalidOperationEntryOffset(OperationKind),
+    #[error("operation {0:?} police arrival penalties must be in 0..=100")]
+    InvalidOperationResponsePenalty(OperationKind),
     #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
     MissingOperationRoleCapability {
         operation: OperationKind,
@@ -1175,6 +1218,37 @@ impl RegistryBuilder {
         {
             return Err(RegistryBuildError::InvalidOperationExposureThresholds(kind));
         }
+        if !(0..=100).contains(&execution.police_response.dispatch_threshold) {
+            return Err(RegistryBuildError::InvalidOperationResponseThreshold(kind));
+        }
+        let base_delay = execution.police_response.base_response_delay.as_minutes();
+        let minimum_delay = execution
+            .police_response
+            .minimum_response_delay
+            .as_minutes();
+        if base_delay == 0 || minimum_delay == 0 || minimum_delay > base_delay {
+            return Err(RegistryBuildError::InvalidOperationResponseDelay(kind));
+        }
+        if u32::from(execution.police_response.patrol_reduction_minutes)
+            > base_delay.saturating_sub(minimum_delay)
+        {
+            return Err(RegistryBuildError::InvalidOperationResponseReduction(kind));
+        }
+        if execution
+            .police_response
+            .entry_offset
+            .is_some_and(|offset| {
+                offset.as_minutes() == 0
+                    || offset.as_minutes() >= execution.difficulty.duration.as_minutes()
+            })
+        {
+            return Err(RegistryBuildError::InvalidOperationEntryOffset(kind));
+        }
+        if execution.police_response.arrival_difficulty_penalty > 100
+            || execution.police_response.arrival_exposure_penalty > 100
+        {
+            return Err(RegistryBuildError::InvalidOperationResponsePenalty(kind));
+        }
         for role in &required_roles {
             if !execution.difficulty.role_capabilities.contains_key(role) {
                 return Err(RegistryBuildError::MissingOperationRoleCapability {
@@ -1384,6 +1458,20 @@ mod tests {
     use super::*;
     use crate::build_registry;
 
+    fn burglary_operation_parts() -> (
+        BTreeSet<OperationApproach>,
+        BTreeSet<RoleKind>,
+        OperationExecutionDefinition,
+    ) {
+        let registry = build_registry();
+        let definition = registry.get_operation(OperationKind::Burglary);
+        (
+            definition.supported_approaches().clone(),
+            definition.required_roles().clone(),
+            definition.execution().clone(),
+        )
+    }
+
     fn recruitment_spec() -> RecruitmentDefinitionSpec {
         RecruitmentDefinitionSpec {
             timing: RecruitmentTimingDefinition {
@@ -1491,6 +1579,109 @@ mod tests {
             AttentionClass::Notable
         );
         assert_eq!(definition.max_source_entries(), 8);
+    }
+
+    #[test]
+    fn authored_police_response_definitions_are_bounded_and_queryable() {
+        let registry = build_registry();
+        let burglary = registry.get_operation(OperationKind::Burglary).execution();
+        assert_eq!(burglary.police_dispatch_threshold(), 20);
+        assert_eq!(
+            burglary.base_police_response_delay(),
+            SimDuration::from_minutes(12)
+        );
+        assert_eq!(
+            burglary.minimum_police_response_delay(),
+            SimDuration::from_minutes(3)
+        );
+        assert_eq!(burglary.patrol_response_reduction_minutes(), 9);
+        assert_eq!(
+            burglary.operation_entry_offset(),
+            Some(SimDuration::from_minutes(10))
+        );
+        assert_eq!(burglary.police_arrival_difficulty_penalty(), 14);
+        assert_eq!(burglary.police_arrival_exposure_penalty(), 18);
+
+        let surveillance = registry
+            .get_operation(OperationKind::Surveillance)
+            .execution();
+        assert_eq!(surveillance.operation_entry_offset(), None);
+        assert!(surveillance.police_dispatch_threshold() > burglary.police_dispatch_threshold());
+        for kind in ALL_OPERATION_KINDS {
+            let response = registry.get_operation(kind).execution();
+            assert!(response.police_dispatch_threshold() >= 0);
+            assert!(response.police_dispatch_threshold() <= 100);
+            assert!(response.minimum_police_response_delay().as_minutes() > 0);
+            assert!(
+                response.minimum_police_response_delay().as_minutes()
+                    <= response.base_police_response_delay().as_minutes()
+            );
+            assert!(response.police_arrival_difficulty_penalty() <= 100);
+            assert!(response.police_arrival_exposure_penalty() <= 100);
+        }
+    }
+
+    #[test]
+    fn operation_response_definition_rejects_invalid_timing_thresholds_and_penalties() {
+        let (approaches, roles, execution) = burglary_operation_parts();
+        let cases = [
+            (
+                {
+                    let mut execution = execution.clone();
+                    execution.police_response.dispatch_threshold = 101;
+                    execution
+                },
+                RegistryBuildError::InvalidOperationResponseThreshold(OperationKind::Burglary),
+            ),
+            (
+                {
+                    let mut execution = execution.clone();
+                    execution.police_response.minimum_response_delay = SimDuration::from_minutes(0);
+                    execution
+                },
+                RegistryBuildError::InvalidOperationResponseDelay(OperationKind::Burglary),
+            ),
+            (
+                {
+                    let mut execution = execution.clone();
+                    execution.police_response.patrol_reduction_minutes = 10;
+                    execution
+                },
+                RegistryBuildError::InvalidOperationResponseReduction(OperationKind::Burglary),
+            ),
+            (
+                {
+                    let mut execution = execution.clone();
+                    execution.police_response.entry_offset = Some(execution.duration());
+                    execution
+                },
+                RegistryBuildError::InvalidOperationEntryOffset(OperationKind::Burglary),
+            ),
+            (
+                {
+                    let mut execution = execution.clone();
+                    execution.police_response.arrival_exposure_penalty = 101;
+                    execution
+                },
+                RegistryBuildError::InvalidOperationResponsePenalty(OperationKind::Burglary),
+            ),
+        ];
+        for (execution, expected_error) in cases {
+            let mut builder = RegistryBuilder::default();
+            let error = builder
+                .register_operation(
+                    OperationKind::Burglary,
+                    "Burglary",
+                    approaches.clone(),
+                    roles.clone(),
+                    execution,
+                )
+                .expect_err("invalid police response authorship must be rejected");
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&expected_error)
+            );
+        }
     }
 
     #[test]
