@@ -10,6 +10,8 @@ This repository follows [`../STANDARDS.md`](../STANDARDS.md). The applicable pro
 
 Before implementation, a cold agent must be able to identify the current scope, state/behavior owner, canonical operation, persistence or observation boundary when applicable, narrowest proving test, and completion gate. If that route is unclear, improve the owning documentation as part of the change.
 
+When multiple agents may be active in this workspace, read [`../COORDINATION.md`](../COORDINATION.md) and the live [`../COORDINATION_STATUS.md`](../COORDINATION_STATUS.md) before the first consequential write. Coordination claims reserve active write scope only; they do not override Crimocracy's architecture law, current-status authority, game-design authority, or gameplay-evidence boundary.
+
 ### Authority map
 
 - `AGENTS.md` owns repository-local architecture law, mutation/validation conventions, test conventions, and the completion gate.
