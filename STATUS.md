@@ -5,16 +5,20 @@ This file records the architectural foundation currently present in the reposito
 ## Verification Surface
 
 - `.github/workflows/ci.yml` is the single cached verification job for pushes and pull requests. It
-  checks formatting, all-target compilation, Clippy, the unit/doc-test suite, and the targeted smoke
-  harness test. Superseded runs on the same branch are cancelled; release builds and long-form
-  gameplay reports remain deliberate local checks rather than part of every change gate.
+  checks formatting, Clippy, the all-target unit/doc-test/example suite, and the targeted smoke
+  harness test. The all-target test pass owns compilation verification so CI does not repeat a
+  separate all-target `cargo check`. Superseded runs on the same branch are cancelled; release
+  builds and long-form gameplay reports remain deliberate local checks rather than part of every
+  change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
   and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
   player-knowledge, standing-contingency, decision, surveillance, and legal-consequence contracts.
   Full mode retains the narrative, matched-seed batch, property liquidation, legal foundation, and
   bounded scenario-sensitivity evidence. Narrative sessions observe two simulated days; batch runs
-  observe one day so repeated routine ticks do not dominate the evidence or runtime. `--seed`
-  selects the matched simulation seed and `--samples` remains bounded to 1..=64.
+  observe one day so repeated routine ticks do not dominate the evidence or runtime. Operation
+  waits have an explicit 1,440-minute harness guard so a broken terminal transition fails with
+  context instead of hanging iteration. `--seed` selects the matched simulation seed and
+  `--samples` remains bounded to 1..=64.
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
   reuses one compiled target instead of launching a second untracked verification path.
 

@@ -85,6 +85,7 @@ use std::error::Error;
 const DEFAULT_BATCH_SAMPLES: u64 = 8;
 const MAX_BATCH_SAMPLES: u64 = 64;
 const DEFAULT_SEED: u64 = 0x1933_0514;
+const MAX_OPERATION_WAIT_MINUTES: u32 = 1_440;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HarnessMode {
@@ -175,6 +176,14 @@ enum HarnessContractError {
     FinancialBranchMismatch {
         legitimate: [Option<i64>; 3],
         enterprise: [Option<i64>; 3],
+    },
+    #[error(
+        "operation {operation:?} did not reach terminal state between minute {started_at} and guard deadline {deadline}"
+    )]
+    OperationDidNotTerminate {
+        operation: OperationId,
+        started_at: u64,
+        deadline: u64,
     },
 }
 
@@ -419,7 +428,8 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  samples {:>2}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  rival attempts {:>3}  departures {:>3}",
+            self.samples,
             self.percent(self.achieved),
             self.percent(self.partial),
             self.percent(self.failed),
@@ -535,8 +545,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     run_legal_foundation_check()?;
 
     println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
+    println!("[BATCH] Running matched seeds for NIGHT TRAP...");
     let (rush_aggregate, press_aggregate, recon_aggregate) =
         run_strategy_batch(ScenarioProfile::NightTrap, samples, seed)?;
+    println!("[BATCH PASS] NIGHT TRAP matched-seed checks passed.");
     rush_aggregate.print("RUSH");
     press_aggregate.print("PRESS");
     recon_aggregate.print("RECON");
@@ -552,11 +564,16 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("\n--- SCENARIO SENSITIVITY ({samples} seeds per strategy/profile) ---");
     for profile in ScenarioProfile::SENSITIVITY_SET {
+        println!("[BATCH] Running matched seeds for {}...", profile.label());
         let (rush, press, recon) = run_strategy_batch(profile, samples, seed)?;
         println!("\n[{}]", profile.label());
         rush.print("RUSH");
         press.print("PRESS");
         recon.print("RECON");
+        println!(
+            "[BATCH PASS] {} matched-seed checks passed.",
+            profile.label()
+        );
     }
 
     Ok(())
@@ -601,7 +618,10 @@ fn parse_options(
                 let value = arguments
                     .next()
                     .ok_or(HarnessCliError::MissingValue { flag: "--seed" })?;
-                let normalized = value.strip_prefix("0x").unwrap_or(&value);
+                let normalized = value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                    .unwrap_or(&value);
                 seed = u64::from_str_radix(normalized, 16).map_err(|_| {
                     HarnessCliError::InvalidValue {
                         flag: "--seed",
@@ -1844,9 +1864,9 @@ fn run_until_operation_terminal(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
+    let started_at = scenario.state.now();
+    let deadline = started_at + SimDuration::from_minutes(MAX_OPERATION_WAIT_MINUTES);
     loop {
-        let outcome = run_tick(&scenario.registry, &mut scenario.state);
-        observe_tick(scenario, &outcome, narrative, metrics)?;
         let status = scenario
             .state
             .operations()
@@ -1859,6 +1879,16 @@ fn run_until_operation_terminal(
         ) {
             return Ok(());
         }
+        if scenario.state.now() >= deadline {
+            return Err(HarnessContractError::OperationDidNotTerminate {
+                operation,
+                started_at: started_at.as_minutes(),
+                deadline: deadline.as_minutes(),
+            }
+            .into());
+        }
+        let outcome = run_tick(&scenario.registry, &mut scenario.state);
+        observe_tick(scenario, &outcome, narrative, metrics)?;
     }
 }
 
@@ -2615,6 +2645,26 @@ mod tests {
                 seed: 42,
             }
         );
+    }
+
+    #[test]
+    fn accepts_uppercase_hex_prefix() {
+        let options = parse_options(["--seed", "0X2A"].into_iter().map(str::to_owned))
+            .expect("uppercase hexadecimal prefixes should parse")
+            .expect("non-help arguments should request a run");
+
+        assert_eq!(options.seed, 42);
+    }
+
+    #[test]
+    fn uses_bounded_full_mode_defaults() {
+        let options = parse_options(std::iter::empty())
+            .expect("default arguments should parse")
+            .expect("default arguments should request a run");
+
+        assert_eq!(options.mode, HarnessMode::Full);
+        assert_eq!(options.samples, super::DEFAULT_BATCH_SAMPLES);
+        assert_eq!(options.seed, DEFAULT_SEED);
     }
 
     #[test]

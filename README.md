@@ -36,14 +36,14 @@ Use the smallest focused test while editing. The fast Rust completion gate is:
 
 ```text
 cargo fmt --check
-cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --quiet -j 2
+cargo test --locked --all-targets --quiet -j 2
 cargo test --locked --example gameplay_harness smoke_mode_covers_canonical_paths -- --nocapture
 ```
 
-The GitHub Actions gate runs those checks in one cached job and cancels superseded runs on the
-same branch. It does not run the long-form narrative batch or an optimized build on every change.
+The GitHub Actions gate runs those checks in one cached job, compiles every target through the
+all-target test pass, and cancels superseded runs on the same branch. It does not run the long-form
+narrative batch or an optimized build on every change.
 Use the smoke harness for normal iteration:
 
 ```text
