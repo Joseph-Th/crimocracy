@@ -32,13 +32,22 @@ If these current authorities disagree about the same subject, treat the disagree
 
 ## Verification
 
-Use the smallest focused test while editing. The normal Rust completion checks are:
+Use the smallest focused test while editing. The fast Rust completion gate is:
 
 ```text
 cargo fmt --check
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked -j 2
+cargo test --locked --quiet -j 2
+cargo test --locked --example gameplay_harness smoke_mode_covers_canonical_paths -- --nocapture
+```
+
+The GitHub Actions gate runs those checks in one cached job and cancels superseded runs on the
+same branch. It does not run the long-form narrative batch or an optimized build on every change.
+Use the smoke harness for normal iteration:
+
+```text
+cargo run --locked --example gameplay_harness -- --mode smoke
 ```
 
 When a change can differ under optimized compilation, especially assertions, indexing, arithmetic, or persistence-sensitive runtime behavior, also run:
@@ -50,7 +59,12 @@ cargo test --release --locked -j 2
 The explicit gameplay/integration lane is the controlled/calibration harness:
 
 ```text
-cargo run --locked --example gameplay_harness -- --samples 24
+cargo run --locked --example gameplay_harness -- --mode full --samples 8
 ```
 
-`--samples` must be between 1 and 64. The harness uses synthetic authored scenarios through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]` diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a natural-play or human-UX verdict.
+`--samples` must be between 1 and 64. `--seed` accepts a hexadecimal value and keeps matched
+strategy branches on the same simulation seed. The harness uses synthetic authored scenarios
+through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]`
+diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a
+natural-play or human-UX verdict. Full mode is deliberately more verbose and expensive; smoke mode
+is the CI/local fast path.

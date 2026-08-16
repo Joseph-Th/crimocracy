@@ -81,9 +81,50 @@ use crimocracy::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
-const NARRATIVE_SEED: u64 = 0x1933_0514;
-const DEFAULT_BATCH_SAMPLES: u64 = 24;
+const DEFAULT_BATCH_SAMPLES: u64 = 8;
 const MAX_BATCH_SAMPLES: u64 = 64;
+const DEFAULT_SEED: u64 = 0x1933_0514;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HarnessMode {
+    Smoke,
+    Full,
+}
+
+impl HarnessMode {
+    fn parse(value: &str) -> Result<Self, HarnessCliError> {
+        match value {
+            "smoke" => Ok(Self::Smoke),
+            "full" => Ok(Self::Full),
+            _ => Err(HarnessCliError::InvalidMode {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HarnessOptions {
+    mode: HarnessMode,
+    samples: u64,
+    seed: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HarnessCliError {
+    #[error("{flag} requires a value")]
+    MissingValue { flag: &'static str },
+    #[error("invalid {flag} value '{value}'")]
+    InvalidValue { flag: &'static str, value: String },
+    #[error("unsupported gameplay_harness argument '{argument}'")]
+    UnsupportedArgument { argument: String },
+    #[error("unsupported harness mode '{value}'; expected 'smoke' or 'full'")]
+    InvalidMode { value: String },
+    #[error("--samples must be between 1 and {MAX_BATCH_SAMPLES}, found {value}")]
+    SampleCountOutOfRange { value: u64 },
+    #[error("smoke mode accepts only --samples 1, found {value}")]
+    SmokeSampleCount { value: u64 },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Strategy {
@@ -100,6 +141,33 @@ impl Strategy {
             Self::Recon => "RECON",
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HarnessContractError {
+    #[error("harness run did not record its strategy")]
+    MissingStrategy,
+    #[error("{strategy:?} run did not authorize a burglary")]
+    MissingBurglary { strategy: Strategy },
+    #[error("{strategy:?} run did not reach a terminal burglary state")]
+    MissingTerminalState { strategy: Strategy },
+    #[error(
+        "{strategy:?} run has inconsistent terminal state: aborted={aborted}, outcome={outcome:?}"
+    )]
+    InconsistentTerminalState {
+        strategy: Strategy,
+        aborted: bool,
+        outcome: Option<OperationObjectiveOutcome>,
+    },
+    #[error("{strategy:?} run did not complete its financial observation window")]
+    MissingFinancialObservation { strategy: Strategy },
+    #[error(
+        "unrelated financial variance changed across strategy branches: legitimate {legitimate:?}; enterprise {enterprise:?}"
+    )]
+    FinancialBranchMismatch {
+        legitimate: [Option<i64>; 3],
+        enterprise: [Option<i64>; 3],
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,7 +420,46 @@ impl Aggregate {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let samples = parse_sample_count()?;
+    let Some(options) = parse_options(std::env::args().skip(1))? else {
+        return Ok(());
+    };
+
+    match options.mode {
+        HarnessMode::Smoke => run_smoke(options.seed),
+        HarnessMode::Full => run_full(options),
+    }
+}
+
+fn run_smoke(seed: u64) -> Result<(), Box<dyn Error>> {
+    println!("CRIMOCRACY GAMEPLAY HARNESS");
+    println!("mode: smoke | seed {seed:#x}");
+    println!("contract: canonical strategy paths reach terminal state; legal foundation persists");
+
+    run_legal_foundation_check()?;
+    for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
+        let metrics = play_session(strategy, ScenarioProfile::NightTrap, seed, false, false)?;
+        validate_run_metrics(&metrics, false)?;
+        println!(
+            "[SMOKE] {:<5} terminal {:>4}m; outcome {:?}; police {}; evidence {}; intelligence {:?}",
+            strategy.label(),
+            metrics.burglary_terminal_minute.unwrap_or_default(),
+            metrics.outcome,
+            if metrics.police_arrived { "arrived" } else { "none" },
+            metrics.evidence_count,
+            metrics.burglary_information_quality,
+        );
+    }
+    println!("[SMOKE PASS] all canonical harness contracts passed");
+    Ok(())
+}
+
+fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
+    let HarnessOptions {
+        mode,
+        samples,
+        seed,
+    } = options;
+    debug_assert_eq!(mode, HarnessMode::Full);
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
@@ -360,21 +467,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Evidence boundary: synthetic setup through production paths; policy inputs are player-visible, while [DEV AUDIT] is diagnostic only.\n"
     );
-    println!("Narrative comparison uses seed {NARRATIVE_SEED:#x}.\n");
+    println!("Narrative comparison uses seed {seed:#x}.\n");
 
     println!("--- CONTROLLED SESSION: RUSH ---");
-    let rush = play_session(
-        Strategy::Rush,
-        ScenarioProfile::NightTrap,
-        NARRATIVE_SEED,
-        true,
-        true,
-    )?;
+    let rush = play_session(Strategy::Rush, ScenarioProfile::NightTrap, seed, true, true)?;
     println!("\n--- CONTROLLED SESSION: PRESS ---");
     let press = play_session(
         Strategy::Press,
         ScenarioProfile::NightTrap,
-        NARRATIVE_SEED,
+        seed,
         true,
         true,
     )?;
@@ -382,12 +483,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let recon = play_session(
         Strategy::Recon,
         ScenarioProfile::NightTrap,
-        NARRATIVE_SEED,
+        seed,
         true,
         true,
     )?;
 
     println!("\n--- SAME-SCENARIO READOUT ---");
+    validate_run_metrics(&rush, true)?;
+    validate_run_metrics(&press, true)?;
+    validate_run_metrics(&recon, true)?;
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
@@ -401,7 +505,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
     let (rush_aggregate, press_aggregate, recon_aggregate) =
-        run_strategy_batch(ScenarioProfile::NightTrap, samples)?;
+        run_strategy_batch(ScenarioProfile::NightTrap, samples, seed)?;
     rush_aggregate.print("RUSH");
     press_aggregate.print("PRESS");
     recon_aggregate.print("RECON");
@@ -417,7 +521,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n--- SCENARIO SENSITIVITY ({samples} seeds per strategy/profile) ---");
     for profile in ScenarioProfile::SENSITIVITY_SET {
-        let (rush, press, recon) = run_strategy_batch(profile, samples)?;
+        let (rush, press, recon) = run_strategy_batch(profile, samples, seed)?;
         println!("\n[{}]", profile.label());
         rush.print("RUSH");
         press.print("PRESS");
@@ -427,29 +531,107 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_sample_count() -> Result<u64, Box<dyn Error>> {
-    let mut arguments = std::env::args().skip(1);
+fn parse_options(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<Option<HarnessOptions>, HarnessCliError> {
+    let mut arguments = arguments.into_iter();
+    let mut mode = HarnessMode::Full;
     let mut samples = DEFAULT_BATCH_SAMPLES;
+    let mut seed = DEFAULT_SEED;
+    let mut samples_were_explicit = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--samples" => {
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(None);
+            }
+            "--mode" => {
                 let value = arguments
                     .next()
-                    .ok_or("--samples requires an integer value")?;
+                    .ok_or(HarnessCliError::MissingValue { flag: "--mode" })?;
+                mode = HarnessMode::parse(&value)?;
+            }
+            "--samples" => {
+                samples_were_explicit = true;
+                let value = arguments
+                    .next()
+                    .ok_or(HarnessCliError::MissingValue { flag: "--samples" })?;
                 samples = value
                     .parse::<u64>()
-                    .map_err(|_| format!("invalid --samples value '{value}'"))?;
+                    .map_err(|_| HarnessCliError::InvalidValue {
+                        flag: "--samples",
+                        value,
+                    })?;
                 if !(1..=MAX_BATCH_SAMPLES).contains(&samples) {
-                    return Err(format!(
-                        "--samples must be between 1 and {MAX_BATCH_SAMPLES}, found {samples}"
-                    )
-                    .into());
+                    return Err(HarnessCliError::SampleCountOutOfRange { value: samples });
                 }
             }
-            _ => return Err(format!("unsupported gameplay_harness argument '{argument}'").into()),
+            "--seed" => {
+                let value = arguments
+                    .next()
+                    .ok_or(HarnessCliError::MissingValue { flag: "--seed" })?;
+                let normalized = value.strip_prefix("0x").unwrap_or(&value);
+                seed = u64::from_str_radix(normalized, 16).map_err(|_| {
+                    HarnessCliError::InvalidValue {
+                        flag: "--seed",
+                        value,
+                    }
+                })?;
+            }
+            _ => {
+                return Err(HarnessCliError::UnsupportedArgument { argument });
+            }
         }
     }
-    Ok(samples)
+    if mode == HarnessMode::Smoke {
+        if samples_were_explicit && samples != 1 {
+            return Err(HarnessCliError::SmokeSampleCount { value: samples });
+        }
+        samples = 1;
+    }
+    Ok(Some(HarnessOptions {
+        mode,
+        samples,
+        seed,
+    }))
+}
+
+fn print_usage() {
+    println!(
+        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX]"
+    );
+    println!("  smoke  Fast canonical-path check for CI and local iteration.");
+    println!(
+        "  full   Narrative session, legal check, matched batch, and sensitivity report (default)."
+    );
+}
+
+fn validate_run_metrics(
+    metrics: &RunMetrics,
+    require_financials: bool,
+) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    if metrics.burglary.is_none() {
+        return Err(HarnessContractError::MissingBurglary { strategy });
+    }
+    if metrics.burglary_terminal_minute.is_none() {
+        return Err(HarnessContractError::MissingTerminalState { strategy });
+    }
+    if metrics.aborted == metrics.outcome.is_some() {
+        return Err(HarnessContractError::InconsistentTerminalState {
+            strategy,
+            aborted: metrics.aborted,
+            outcome: metrics.outcome,
+        });
+    }
+    if require_financials
+        && (metrics.legitimate_net_cents.is_none() || metrics.enterprise_net_cents.is_none())
+    {
+        return Err(HarnessContractError::MissingFinancialObservation { strategy });
+    }
+    Ok(())
 }
 
 fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
@@ -712,7 +894,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "[HARNESS CHECK] Arrest {arrest} retained counsel {representation} for 5000c, referred evidence to prosecution case {prosecution_case} without transferring police custody, then recorded a provenance-backed prosecution decline."
+        "[LEGAL PASS] arrest -> paid counsel -> police custody-preserving referral -> terminal prosecution decline"
     );
     Ok(())
 }
@@ -720,15 +902,19 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
 fn run_strategy_batch(
     profile: ScenarioProfile,
     samples: u64,
+    seed: u64,
 ) -> Result<(Aggregate, Aggregate, Aggregate), Box<dyn Error>> {
     let mut rush_aggregate = Aggregate::default();
     let mut press_aggregate = Aggregate::default();
     let mut recon_aggregate = Aggregate::default();
     for offset in 0..samples {
-        let seed = NARRATIVE_SEED.wrapping_add(offset + 1);
-        let rush = play_session(Strategy::Rush, profile, seed, false, true)?;
-        let press = play_session(Strategy::Press, profile, seed, false, true)?;
-        let recon = play_session(Strategy::Recon, profile, seed, false, true)?;
+        let sample_seed = seed.wrapping_add(offset + 1);
+        let rush = play_session(Strategy::Rush, profile, sample_seed, false, true)?;
+        let press = play_session(Strategy::Press, profile, sample_seed, false, true)?;
+        let recon = play_session(Strategy::Recon, profile, sample_seed, false, true)?;
+        validate_run_metrics(&rush, true)?;
+        validate_run_metrics(&press, true)?;
+        validate_run_metrics(&recon, true)?;
         validate_branch_financial_isolation(&rush, &press, &recon)?;
         rush_aggregate.add(&rush);
         press_aggregate.add(&press);
@@ -741,22 +927,24 @@ fn validate_branch_financial_isolation(
     rush: &RunMetrics,
     press: &RunMetrics,
     recon: &RunMetrics,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), HarnessContractError> {
     let same_legitimate_cashflow = rush.legitimate_net_cents == press.legitimate_net_cents
         && press.legitimate_net_cents == recon.legitimate_net_cents;
     let same_enterprise_cashflow = rush.enterprise_net_cents == press.enterprise_net_cents
         && press.enterprise_net_cents == recon.enterprise_net_cents;
     if !same_legitimate_cashflow || !same_enterprise_cashflow {
-        return Err(format!(
-            "unrelated financial variance changed across strategy branches: legitimate {:?}/{:?}/{:?}, enterprise {:?}/{:?}/{:?}",
-            rush.legitimate_net_cents,
-            press.legitimate_net_cents,
-            recon.legitimate_net_cents,
-            rush.enterprise_net_cents,
-            press.enterprise_net_cents,
-            recon.enterprise_net_cents,
-        )
-        .into());
+        return Err(HarnessContractError::FinancialBranchMismatch {
+            legitimate: [
+                rush.legitimate_net_cents,
+                press.legitimate_net_cents,
+                recon.legitimate_net_cents,
+            ],
+            enterprise: [
+                rush.enterprise_net_cents,
+                press.enterprise_net_cents,
+                recon.enterprise_net_cents,
+            ],
+        });
     }
     Ok(())
 }
@@ -2261,4 +2449,62 @@ fn rating(value: u8) -> Rating {
 fn level(value: u8) -> RelationshipLevel {
     RelationshipLevel::try_new(value)
         .expect("gameplay harness relationship levels are authored within 0..=100")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_options, run_smoke, HarnessCliError, HarnessMode, HarnessOptions, DEFAULT_SEED,
+    };
+
+    #[test]
+    fn parses_explicit_smoke_mode_and_hex_seed() {
+        let options = parse_options(
+            ["--mode", "smoke", "--samples", "1", "--seed", "0x2a"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("valid harness arguments should parse")
+        .expect("non-help arguments should request a run");
+
+        assert_eq!(
+            options,
+            HarnessOptions {
+                mode: HarnessMode::Smoke,
+                samples: 1,
+                seed: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_sample_count() {
+        let error = parse_options(["--samples", "0"].into_iter().map(str::to_owned))
+            .expect_err("zero samples must be rejected");
+
+        assert!(matches!(
+            error,
+            HarnessCliError::SampleCountOutOfRange { value: 0 }
+        ));
+    }
+
+    #[test]
+    fn rejects_multi_sample_smoke_mode() {
+        let error = parse_options(
+            ["--mode", "smoke", "--samples", "2"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("smoke mode must not silently ignore a larger batch request");
+
+        assert!(matches!(
+            error,
+            HarnessCliError::SmokeSampleCount { value: 2 }
+        ));
+    }
+
+    #[test]
+    fn smoke_mode_covers_canonical_paths() {
+        run_smoke(DEFAULT_SEED).expect("smoke harness should pass its canonical-path contract");
+    }
 }

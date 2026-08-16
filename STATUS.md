@@ -2,6 +2,20 @@
 
 This file records the architectural foundation currently present in the repository. It is not a feature roadmap and does not override `AGENTS.md` or `GAME_DESIGN.md`.
 
+## Verification Surface
+
+- `.github/workflows/ci.yml` is the single cached verification job for pushes and pull requests. It
+  checks formatting, all-target compilation, Clippy, the unit/doc-test suite, and the targeted smoke
+  harness test. Superseded runs on the same branch are cancelled; release builds and long-form
+  gameplay reports remain deliberate local checks rather than part of every change gate.
+- `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
+  and RECON through terminal state plus the legal-foundation path and validates per-run terminal
+  contracts. Full mode retains the narrative, matched-seed batch, property liquidation, legal
+  foundation, and bounded scenario-sensitivity evidence. `--seed` selects the matched simulation
+  seed and `--samples` remains bounded to 1..=64.
+- Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
+  reuses one compiled target instead of launching a second untracked verification path.
+
 ## Current Foundation
 
 - Deterministic, serializable `AppState` owns all mutable campaign state and persisted domain-separated RNG streams. Generic, operation, investigation, legitimate-business, and enterprise randomness advance independently, so extra work in one simulation domain cannot perturb unrelated outcomes while save/load still preserves exact deterministic continuation.

@@ -2,15 +2,16 @@
 
 Read before changing code. Current work is in STATUS.md.
 
-## Portfolio standard
+## Repository standard
 
-This repository follows [`../STANDARDS.md`](../STANDARDS.md). The applicable profiles are Universal, Stateful Application, Deterministic System, and Automated Behavior-Evaluation.
-
-`STANDARDS.md` supplies portfolio defaults; this file owns Crimocracy's repository-local coding law. `STATUS.md` owns current implemented scope and `GAME_DESIGN.md` owns product intent. Do not use design intent as proof of implementation, and do not resolve contradictions among current documentation, tests, and source by choosing the convenient version. Reconcile the owning contract when a contradiction is found.
+This file owns Crimocracy's repository-local coding law. `STATUS.md` owns current implemented scope
+and `GAME_DESIGN.md` owns product intent. Do not use design intent as proof of implementation, and do
+not resolve contradictions among current documentation, tests, and source by choosing the convenient
+version. Reconcile the owning contract when a contradiction is found.
 
 Before implementation, a cold agent must be able to identify the current scope, state/behavior owner, canonical operation, persistence or observation boundary when applicable, narrowest proving test, and completion gate. If that route is unclear, improve the owning documentation as part of the change.
 
-When multiple agents may be active in this workspace, read [`../COORDINATION.md`](../COORDINATION.md) and the live [`../COORDINATION_STATUS.md`](../COORDINATION_STATUS.md) before the first consequential write. Coordination claims reserve active write scope only; they do not override Crimocracy's architecture law, current-status authority, game-design authority, or gameplay-evidence boundary.
+When multiple agents may be active, follow [`../AGENTS.md`](../AGENTS.md): prefer Git Wizard `summon_agent` worktree isolation for independent parallel implementation, preserve unrelated working-tree state, and serialize only genuinely scarce shared external resources. Project-local authorities below remain controlling for architecture and behavior.
 
 ### Authority map
 
@@ -36,7 +37,7 @@ When multiple agents may be active in this workspace, read [`../COORDINATION.md`
 
 `examples/gameplay_harness.rs` uses synthetic, explicitly authored scenario fixtures and production validators/commit paths. Its RUSH, PRESS, and RECON branches are deterministic policy treatments within the same scenario seed, not a natural-play proxy. The acting policy may use only organization/player-visible information, persisted reports and outcomes, and surfaced decision requests. Hidden investigation/evidence state is read only by `[DEV AUDIT]` diagnostics after decisions and must never feed action selection.
 
-`--samples` varies the `AppState` world/simulation seed while each strategy remains deterministic; there is no separate stochastic behavior seed. The same seed is used across strategy branches for matched comparisons. Narrative event output and per-run `RunMetrics` are the raw in-process evidence from which aggregates are derived; aggregate batch output is a reproducible diagnostic summary, not a durable research archive. Missing required acting information and canonical validation rejection fail the controlled run explicitly; event absence remains an observed absence rather than being converted into a quality verdict. The harness does not produce a universal game-quality score, and insufficient scenario evidence must remain insufficient rather than being forced positive or negative. Any future persisted evaluation artifact must retain per-run seeds and raw metrics beneath its derived findings.
+`--mode smoke` runs the canonical RUSH, PRESS, and RECON paths to terminal state plus the legal-foundation check without the long financial-day and sensitivity expansion; it is the fast CI/local iteration lane. `--mode full` runs the narrative comparison and bounded batch/sensitivity report. `--samples` varies the `AppState` world/simulation seed while each strategy remains deterministic; there is no separate stochastic behavior seed. The same seed is used across strategy branches for matched comparisons. Narrative event output and per-run `RunMetrics` are the raw in-process evidence from which aggregates are derived; aggregate batch output is a reproducible diagnostic summary, not a durable research archive. Missing required acting information and canonical validation rejection fail the controlled run explicitly; event absence remains an observed absence rather than being converted into a quality verdict. The harness does not produce a universal game-quality score, and insufficient scenario evidence must remain insufficient rather than being forced positive or negative. Any future persisted evaluation artifact must retain per-run seeds and raw metrics beneath its derived findings.
 
 ## Coding Design Law
 
