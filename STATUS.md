@@ -7,9 +7,11 @@ This file records the architectural foundation currently present in the reposito
 - `.github/workflows/ci.yml` is the single cached verification job for pushes and pull requests. It
   checks formatting, Clippy, the all-target unit/doc-test/example suite, and the targeted smoke
   harness test. The all-target test pass owns compilation verification so CI does not repeat a
-  separate all-target `cargo check`. Superseded runs on the same branch are cancelled; release
-  builds and long-form gameplay reports remain deliberate local checks rather than part of every
-  change gate.
+  separate all-target `cargo check`; its test filter excludes the smoke case so that expensive
+  controlled path is run exactly once with focused output. Superseded runs on the same branch are
+  cancelled, and CI disables incremental artifacts to keep clean-run compilation and cache uploads
+  small. Release builds and long-form gameplay reports remain deliberate local checks rather than
+  part of every change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
   and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
   player-knowledge, standing-contingency, decision, surveillance, follow-up, and legal-consequence
@@ -30,7 +32,9 @@ This file records the architectural foundation currently present in the reposito
   against both structural and registry-aware contracts after setup and at each observation
   boundary, and full-mode batches enforce the same strategy-specific evidence contracts as smoke.
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
-  reuses one compiled target instead of launching a second untracked verification path.
+  reuses one compiled target instead of launching a second untracked verification path. The
+  harness builds one shared immutable registry per process and shares it across legal, narrative,
+  and matched-batch sessions; each session still owns a fresh mutable `AppState`.
 
 ## Current Foundation
 

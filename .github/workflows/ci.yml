@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 10
     env:
       CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
       RUST_BACKTRACE: '1'
     steps:
       - name: Check out source
@@ -40,7 +41,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run unit, documentation, and example tests
-        run: cargo test --locked --all-targets --quiet -j 2
+        run: cargo test --locked --all-targets --quiet -j 2 -- --skip smoke_mode_covers_canonical_paths
 
       - name: Run gameplay smoke harness
         run: cargo test --locked --example gameplay_harness smoke_mode_covers_canonical_paths -- --nocapture

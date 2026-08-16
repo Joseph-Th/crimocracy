@@ -402,8 +402,8 @@ impl ScenarioProfile {
     }
 }
 
-struct Scenario {
-    registry: Registry,
+struct Scenario<'registry> {
+    registry: &'registry Registry,
     state: AppState,
     player: OrganizationId,
     rival: OrganizationId,
@@ -632,13 +632,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_smoke(seed: u64) -> Result<(), Box<dyn Error>> {
+    let registry = build_registry();
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("mode: smoke | seed {seed:#x}");
     println!("contract: canonical strategy paths reach terminal state; legal foundation persists");
 
-    run_legal_foundation_check()?;
+    run_legal_foundation_check(&registry)?;
     for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
-        let metrics = play_session(strategy, ScenarioProfile::NightTrap, seed, false, false)?;
+        let metrics = play_session(
+            &registry,
+            strategy,
+            ScenarioProfile::NightTrap,
+            seed,
+            false,
+            false,
+        )?;
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
@@ -665,6 +673,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         seed,
     } = options;
     debug_assert_eq!(mode, HarnessMode::Full);
+    let registry = build_registry();
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
@@ -678,9 +687,17 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("Narrative comparison uses seed {seed:#x}.\n");
 
     println!("--- CONTROLLED SESSION: RUSH ---");
-    let rush = play_session(Strategy::Rush, ScenarioProfile::NightTrap, seed, true, true)?;
+    let rush = play_session(
+        &registry,
+        Strategy::Rush,
+        ScenarioProfile::NightTrap,
+        seed,
+        true,
+        true,
+    )?;
     println!("\n--- CONTROLLED SESSION: PRESS ---");
     let press = play_session(
+        &registry,
         Strategy::Press,
         ScenarioProfile::NightTrap,
         seed,
@@ -689,6 +706,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     )?;
     println!("\n--- CONTROLLED SESSION: RECON ---");
     let recon = play_session(
+        &registry,
         Strategy::Recon,
         ScenarioProfile::NightTrap,
         seed,
@@ -713,12 +731,12 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     );
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
-    run_legal_foundation_check()?;
+    run_legal_foundation_check(&registry)?;
 
     println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
     println!("[BATCH] Running matched seeds for NIGHT TRAP...");
     let (rush_aggregate, press_aggregate, recon_aggregate) =
-        run_strategy_batch(ScenarioProfile::NightTrap, samples, seed)?;
+        run_strategy_batch(&registry, ScenarioProfile::NightTrap, samples, seed)?;
     println!("[BATCH PASS] NIGHT TRAP matched-seed checks passed.");
     rush_aggregate.print("RUSH");
     press_aggregate.print("PRESS");
@@ -736,7 +754,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("\n--- SCENARIO SENSITIVITY ({samples} seeds per strategy/profile) ---");
     for profile in ScenarioProfile::SENSITIVITY_SET {
         println!("[BATCH] Running matched seeds for {}...", profile.label());
-        let (rush, press, recon) = run_strategy_batch(profile, samples, seed)?;
+        let (rush, press, recon) = run_strategy_batch(&registry, profile, samples, seed)?;
         println!("\n[{}]", profile.label());
         rush.print("RUSH");
         press.print("PRESS");
@@ -926,12 +944,11 @@ fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), B
     Ok(())
 }
 
-fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
-    let registry = build_registry();
+fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>> {
     let mut state = AppState::new(0x1E6A_1933);
 
     let sponsor = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Harbor Crew".to_owned(),
@@ -939,7 +956,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let police = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Harbor Precinct".to_owned(),
@@ -947,7 +964,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let firm = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Vale & Mercer".to_owned(),
@@ -955,7 +972,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let prosecutor_office = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Harbor District Prosecutor".to_owned(),
@@ -964,7 +981,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     )?;
 
     let handler = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Harbor Legal Liaison".to_owned(),
@@ -977,7 +994,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let defendant = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Harbor Associate".to_owned(),
@@ -990,7 +1007,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let counsel = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Elena Vale".to_owned(),
@@ -1003,7 +1020,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let prosecutor = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Ada Mercer".to_owned(),
@@ -1143,7 +1160,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     )?
     .commit(&mut state)?;
 
-    validate_harness_state(&registry, &state)?;
+    validate_harness_state(registry, &state)?;
     let representation_record = state
         .legal()
         .get_legal_representation(representation)
@@ -1168,7 +1185,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     }
 
     validate_decline_prosecution_case(&state, prosecution_case)?.commit(&mut state)?;
-    validate_harness_state(&registry, &state)?;
+    validate_harness_state(registry, &state)?;
     let resolved_case = state
         .legal()
         .get_prosecution_case(prosecution_case)
@@ -1192,6 +1209,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_strategy_batch(
+    registry: &Registry,
     profile: ScenarioProfile,
     samples: u64,
     seed: u64,
@@ -1201,9 +1219,9 @@ fn run_strategy_batch(
     let mut recon_aggregate = Aggregate::default();
     for offset in 0..samples {
         let sample_seed = seed.wrapping_add(offset + 1);
-        let rush = play_session(Strategy::Rush, profile, sample_seed, false, true)?;
-        let press = play_session(Strategy::Press, profile, sample_seed, false, true)?;
-        let recon = play_session(Strategy::Recon, profile, sample_seed, false, true)?;
+        let rush = play_session(registry, Strategy::Rush, profile, sample_seed, false, true)?;
+        let press = play_session(registry, Strategy::Press, profile, sample_seed, false, true)?;
+        let recon = play_session(registry, Strategy::Recon, profile, sample_seed, false, true)?;
         validate_run_metrics(&rush, true)?;
         validate_run_metrics(&press, true)?;
         validate_run_metrics(&recon, true)?;
@@ -1256,13 +1274,14 @@ fn validate_branch_financial_isolation(
 }
 
 fn play_session(
+    registry: &Registry,
     strategy: Strategy,
     profile: ScenarioProfile,
     seed: u64,
     narrative: bool,
     continue_for_financial_day: bool,
 ) -> Result<RunMetrics, Box<dyn Error>> {
-    let mut scenario = build_scenario(seed, profile)?;
+    let mut scenario = build_scenario(registry, seed, profile)?;
     let mut metrics = RunMetrics {
         strategy: Some(strategy),
         variation: Some(scenario.variation),
@@ -1278,7 +1297,7 @@ fn play_session(
     }
 
     let opportunity = validate_discover_operation_opportunity(
-        &scenario.registry,
+        scenario.registry,
         &scenario.state,
         OperationOpportunityDraft {
             organization: scenario.player,
@@ -1515,7 +1534,7 @@ fn play_session(
             );
         }
         let disposition = validate_dispose_property(
-            &scenario.registry,
+            scenario.registry,
             &scenario.state,
             PropertyDispositionDraft {
                 operation: burglary,
@@ -1641,13 +1660,16 @@ fn play_session(
     Ok(metrics)
 }
 
-fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<dyn Error>> {
-    let registry = build_registry();
+fn build_scenario(
+    registry: &Registry,
+    seed: u64,
+    profile: ScenarioProfile,
+) -> Result<Scenario<'_>, Box<dyn Error>> {
     let mut state = AppState::new(seed);
     let variation = FixtureVariation::from_seed(seed);
 
     let player = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Marrow Organization".to_owned(),
@@ -1655,7 +1677,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let rival = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Rosetti Organization".to_owned(),
@@ -1663,7 +1685,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let second_rival = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "D'Amato Crew".to_owned(),
@@ -1671,7 +1693,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let police = insert_organization(
-        &registry,
+        registry,
         &mut state,
         OrganizationDraft {
             name: "Central Precinct".to_owned(),
@@ -1679,7 +1701,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let detective = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Harlan Pike".to_owned(),
@@ -1743,7 +1765,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
     .commit(&mut state)?;
 
     let boss = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Joseph Marrow".to_owned(),
@@ -1759,7 +1781,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let lieutenant = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Carlo Venn".to_owned(),
@@ -1778,7 +1800,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let burglar = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Frank Dello".to_owned(),
@@ -1794,7 +1816,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let scout = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Mara Vale".to_owned(),
@@ -1813,7 +1835,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let bartender = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Lena Orr".to_owned(),
@@ -1826,7 +1848,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let rival_recruiter = insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Maria Rosetti".to_owned(),
@@ -1839,7 +1861,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     insert_character(
-        &registry,
+        registry,
         &mut state,
         CharacterDraft {
             name: "Victor D'Amato".to_owned(),
@@ -1885,7 +1907,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
     .commit(&mut state);
 
     validate_assign_mandate(
-        &registry,
+        registry,
         &state,
         MandateDraft {
             organization: rival,
@@ -1903,7 +1925,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
     .commit(&mut state)?;
 
     let target = insert_business(
-        &registry,
+        registry,
         &mut state,
         BusinessDraft {
             name: variation.target_name().to_owned(),
@@ -1917,7 +1939,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let front = insert_business(
-        &registry,
+        registry,
         &mut state,
         BusinessDraft {
             name: variation.front_name().to_owned(),
@@ -1932,7 +1954,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let resale_venue = insert_business(
-        &registry,
+        registry,
         &mut state,
         BusinessDraft {
             name: variation.resale_name().to_owned(),
@@ -1965,7 +1987,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     validate_establish_business_economy(
-        &registry,
+        registry,
         &state,
         BusinessEconomyDraft {
             business: front,
@@ -2008,7 +2030,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?;
     let mandate = validate_assign_mandate(
-        &registry,
+        registry,
         &state,
         MandateDraft {
             organization: player,
@@ -2024,7 +2046,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
     )?
     .commit(&mut state)?;
     let enterprise = validate_establish_enterprise(
-        &registry,
+        registry,
         &state,
         EnterpriseDraft {
             kind: EnterpriseKind::Gambling,
@@ -2080,7 +2102,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         enterprise,
         variation,
     };
-    validate_harness_state(&scenario.registry, &scenario.state)?;
+    validate_harness_state(scenario.registry, &scenario.state)?;
     Ok(scenario)
 }
 
@@ -2095,7 +2117,7 @@ fn authorize_surveillance_target(
     title: &str,
 ) -> Result<OperationId, Box<dyn Error>> {
     Ok(validate_authorize_operation(
-        &scenario.registry,
+        scenario.registry,
         &scenario.state,
         OperationDraft {
             title: title.to_owned(),
@@ -2128,7 +2150,7 @@ fn authorize_burglary(
         Strategy::Press => vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
     };
     Ok(validate_authorize_operation(
-        &scenario.registry,
+        scenario.registry,
         &scenario.state,
         OperationDraft {
             title: format!("{} burglary", scenario.variation.target_name()),
@@ -2184,7 +2206,7 @@ fn run_until_operation_terminal(
             }
             .into());
         }
-        let outcome = run_tick(&scenario.registry, &mut scenario.state);
+        let outcome = run_tick(scenario.registry, &mut scenario.state);
         observe_tick(scenario, &outcome, narrative, metrics)?;
     }
 }
@@ -2196,7 +2218,7 @@ fn run_until(
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     while scenario.state.now() < until {
-        let outcome = run_tick(&scenario.registry, &mut scenario.state);
+        let outcome = run_tick(scenario.registry, &mut scenario.state);
         observe_tick(scenario, &outcome, narrative, metrics)?;
     }
     Ok(())
@@ -2291,7 +2313,7 @@ fn observe_tick(
             println!("[DECIDE]  Leadership response: {response:?}.");
         }
         let resolution = validate_resolve_decision(
-            &scenario.registry,
+            scenario.registry,
             &scenario.state,
             request.decision,
             decision.recipient(),
@@ -2311,7 +2333,7 @@ fn observe_tick(
                 println!("[DECIDE]  Leadership response: {follow_up_response:?}.");
             }
             validate_resolve_decision(
-                &scenario.registry,
+                scenario.registry,
                 &scenario.state,
                 follow_up.decision,
                 follow_up_record.recipient(),
@@ -2506,7 +2528,7 @@ fn observe_tick(
             print_report("BRIEF GENERATED", report, scenario);
         }
     }
-    validate_harness_state(&scenario.registry, &scenario.state)?;
+    validate_harness_state(scenario.registry, &scenario.state)?;
     Ok(())
 }
 
