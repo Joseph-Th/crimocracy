@@ -12,13 +12,18 @@ This file records the architectural foundation currently present in the reposito
   change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
   and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
-  player-knowledge, standing-contingency, decision, surveillance, and legal-consequence contracts.
-  Full mode retains the narrative, matched-seed batch, property liquidation, legal foundation, and
-  bounded scenario-sensitivity evidence. Narrative sessions observe two simulated days; batch runs
-  observe one day so repeated routine ticks do not dominate the evidence or runtime. Operation
-  waits have an explicit 1,440-minute harness guard so a broken terminal transition fails with
-  context instead of hanging iteration. `--seed` selects the matched simulation seed and
-  `--samples` remains bounded to 1..=64.
+  player-knowledge, standing-contingency, decision, surveillance, follow-up, and legal-consequence
+  contracts. Press reports direct police experience back to the organization through canonical
+  information transfer, then uses only surfaced legal activity, known neighborhood state, and
+  player-held police information to authorize a South Ward counter-surveillance operation; hidden
+  investigation evidence, lead, and internal IDs never feed action selection. Full mode retains the
+  narrative, matched-seed batch, property liquidation, legal foundation, and bounded
+  scenario-sensitivity evidence, and adds a player-loop readout covering learning, planning,
+  delegation, response, consequences, follow-up, organization change, and routine continuity.
+  Narrative sessions observe two simulated days; batch runs observe one day so repeated routine
+  ticks do not dominate the evidence or runtime. Operation waits have an explicit 1,440-minute
+  harness guard so a broken terminal transition fails with context instead of hanging iteration.
+  `--seed` selects the matched simulation seed and `--samples` remains bounded to 1..=64.
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
   reuses one compiled target instead of launching a second untracked verification path.
 

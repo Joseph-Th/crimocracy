@@ -31,10 +31,12 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crimocracy::intelligence::intelligence_system::validate_record_information;
+use crimocracy::intelligence::intelligence_system::{
+    validate_information_transfer, validate_record_information,
+};
 use crimocracy::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationDraft, InformationSourceKind, InformationTopic, InformationTransferDraft,
+    KnowledgeHolder, Reliability, Specificity,
 };
 use crimocracy::legal::jurisdiction_system::validate_set_jurisdiction;
 use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
@@ -290,6 +292,10 @@ struct RunMetrics {
     police_dispatched: bool,
     police_arrived: bool,
     decision_requests: u32,
+    player_police_activity_information: u32,
+    planning_information_count: usize,
+    counterintelligence_outcome: Option<OperationObjectiveOutcome>,
+    counterintelligence_information: usize,
     exposure_score: Option<i16>,
     exposure_level: Option<crimocracy::operations::OperationExposureLevel>,
     investigation_created: bool,
@@ -305,6 +311,8 @@ struct RunMetrics {
     enterprise_net_cents: Option<i64>,
     discovered_surveillance_information: usize,
     player_legal_activity_information: usize,
+    player_report_count: usize,
+    executive_brief_count: usize,
     autonomous_recruitment_attempts: u32,
     player_personnel_departures: u32,
 }
@@ -334,6 +342,9 @@ struct Aggregate {
     liquidation_samples: u64,
     standing_contingency_aborts: u64,
     legal_activity_information_sessions: u64,
+    police_activity_information_sessions: u64,
+    player_report_total: u64,
+    executive_brief_total: u64,
     autonomous_recruitment_attempts: u64,
     player_personnel_departures: u64,
 }
@@ -384,6 +395,10 @@ impl Aggregate {
         }
         self.legal_activity_information_sessions +=
             u64::from(metrics.player_legal_activity_information > 0);
+        self.police_activity_information_sessions +=
+            u64::from(metrics.player_police_activity_information > 0);
+        self.player_report_total += metrics.player_report_count as u64;
+        self.executive_brief_total += metrics.executive_brief_count as u64;
         self.autonomous_recruitment_attempts += u64::from(metrics.autonomous_recruitment_attempts);
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
     }
@@ -428,7 +443,7 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  samples {:>2}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  samples {:>2}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
             self.samples,
             self.percent(self.achieved),
             self.percent(self.partial),
@@ -438,6 +453,7 @@ impl Aggregate {
             self.percent(self.police_dispatched),
             self.percent(self.investigations),
             self.percent(self.legal_activity_information_sessions),
+            self.percent(self.police_activity_information_sessions),
             self.investigation_work_scheduled,
             self.investigation_work_resolved,
             avg_exposure,
@@ -446,6 +462,8 @@ impl Aggregate {
             avg_acquired_property,
             avg_realized_property,
             avg_liquidation_minute,
+            self.player_report_total,
+            self.executive_brief_total,
             self.autonomous_recruitment_attempts,
             self.player_personnel_departures,
         );
@@ -474,13 +492,15 @@ fn run_smoke(seed: u64) -> Result<(), Box<dyn Error>> {
         validate_run_metrics(&metrics, false)?;
         validate_night_trap_evidence(&metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; intelligence {:?}",
+            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; intelligence {:?}",
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
             terminal_label(&metrics),
             if metrics.police_arrived { "arrived" } else { "none" },
             metrics.evidence_count,
             metrics.player_legal_activity_information,
+            metrics.player_police_activity_information,
+            metrics.counterintelligence_outcome,
             metrics.burglary_information_quality,
         );
     }
@@ -536,6 +556,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
+    print_experience_readout(&rush, &press, &recon);
     validate_branch_financial_isolation(&rush, &press, &recon)?;
     println!(
         "[HARNESS CHECK] Unchanged legitimate and delegated-enterprise systems produced identical cashflow across strategy branches."
@@ -710,10 +731,13 @@ fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
             if metrics.decision_requests > 0
                 && metrics.investigation_created
                 && metrics.player_legal_activity_information > 0
+                && metrics.player_police_activity_information > 0
+                && metrics.counterintelligence_outcome.is_some()
+                && metrics.counterintelligence_information > 0
             {
                 None
             } else {
-                Some("police-arrival decision plus player-visible legal activity")
+                Some("police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up")
             }
         }
         Strategy::Recon => {
@@ -1204,6 +1228,13 @@ fn play_session(
                 .len(),
         );
     }
+    metrics.planning_information_count = scenario
+        .state
+        .operations()
+        .get_operation(burglary)
+        .expect("burglary must exist")
+        .intelligence()
+        .len();
 
     run_until_operation_terminal(&mut scenario, burglary, narrative, &mut metrics)?;
     metrics.burglary_terminal_minute = Some(scenario.state.now().as_minutes());
@@ -1326,6 +1357,43 @@ fn play_session(
         print_player_knowledge_gap(&scenario, burglary);
     }
 
+    // The Press branch now exercises a real player follow-up: the organization uses only the
+    // surfaced legal-activity report, the known neighborhood, and the field report to authorize
+    // counter-surveillance. The investigation's evidence and internal ID remain hidden.
+    if strategy == Strategy::Press
+        && metrics.player_legal_activity_information > 0
+        && metrics.player_police_activity_information > 0
+    {
+        if narrative {
+            println!(
+                "[DECIDE]  Use the surfaced case existence and field report to quietly watch South Ward, without reading hidden case state."
+            );
+        }
+        let neighborhood = scenario.neighborhood;
+        let counterintelligence = authorize_surveillance_target(
+            &mut scenario,
+            EntityRef::Neighborhood(neighborhood),
+            "South Ward counter-surveillance",
+        )?;
+        run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
+        let operation = scenario
+            .state
+            .operations()
+            .get_operation(counterintelligence)
+            .expect("counterintelligence operation must persist");
+        if let Some(resolution) = operation.resolution() {
+            metrics.counterintelligence_outcome = Some(resolution.objective_outcome());
+            metrics.counterintelligence_information = resolution.discovered_information().len();
+        }
+        if narrative {
+            println!(
+                "[FOLLOW-UP] South Ward counter-surveillance -> {:?}; organization gained {} additional police-activity record(s).",
+                metrics.counterintelligence_outcome,
+                metrics.counterintelligence_information,
+            );
+        }
+    }
+
     if continue_for_financial_day {
         let observation_end = if narrative {
             SimTime::from_minutes(2_880)
@@ -1350,6 +1418,19 @@ fn play_session(
             }
         }
     }
+
+    metrics.player_report_count = scenario
+        .state
+        .reports()
+        .reports_for(scenario.player)
+        .filter(|report| report.kind() != ReportKind::ExecutiveBrief)
+        .count();
+    metrics.executive_brief_count = scenario
+        .state
+        .reports()
+        .reports_for(scenario.player)
+        .filter(|report| report.kind() == ReportKind::ExecutiveBrief)
+        .count();
 
     Ok(metrics)
 }
@@ -1795,17 +1876,27 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
 }
 
 fn authorize_surveillance(scenario: &mut Scenario) -> Result<OperationId, Box<dyn Error>> {
+    authorize_surveillance_target(
+        scenario,
+        EntityRef::Business(scenario.target),
+        "Bellmore surveillance",
+    )
+}
+
+fn authorize_surveillance_target(
+    scenario: &mut Scenario,
+    target: EntityRef,
+    title: &str,
+) -> Result<OperationId, Box<dyn Error>> {
     Ok(validate_authorize_operation(
         &scenario.registry,
         &scenario.state,
         OperationDraft {
-            title: "Bellmore surveillance".to_owned(),
+            title: title.to_owned(),
             kind: OperationKind::Surveillance,
             responsible_organization: scenario.player,
             leader: scenario.scout,
-            objective: OperationObjective::GatherInformation {
-                target: EntityRef::Business(scenario.target),
-            },
+            objective: OperationObjective::GatherInformation { target },
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([(RoleKind::Surveillance, scenario.scout)]),
             intelligence: BTreeSet::new(),
@@ -2021,6 +2112,51 @@ fn observe_tick(
                 follow_up_response,
             )?
             .commit(&mut scenario.state)?;
+        }
+    }
+
+    // Press is the branch where the leader chooses to continue after police arrival. The
+    // response also creates direct observations for the participating people; report those
+    // observations through the canonical transfer path so the player-facing organization view
+    // contains the lived consequence without reading hidden case state.
+    if metrics.strategy == Some(Strategy::Press) && metrics.police_arrived {
+        let sources: Vec<_> = scenario
+            .state
+            .intelligence()
+            .information_for_holder_by_topic(
+                KnowledgeHolder::Character(scenario.burglar),
+                InformationTopic::PoliceActivity,
+            )
+            .filter(|information| information.observed_at() == outcome.now)
+            .map(|information| information.id())
+            .collect();
+        for source in sources {
+            let already_reported = scenario
+                .state
+                .intelligence()
+                .information_derived_from(source)
+                .any(|information| {
+                    information.holder() == KnowledgeHolder::Organization(scenario.player)
+                });
+            if already_reported {
+                continue;
+            }
+            validate_information_transfer(
+                &scenario.state,
+                InformationTransferDraft {
+                    source,
+                    recipient: KnowledgeHolder::Organization(scenario.player),
+                },
+            )?
+            .commit(&mut scenario.state)?;
+            metrics.player_police_activity_information =
+                metrics.player_police_activity_information.saturating_add(1);
+            if narrative {
+                println!(
+                    "[PLAYER ACTION] minute {:>4}: the crew reported the police response back to Marrow Organization; the organization now knows what the burglar directly experienced.",
+                    outcome.now.as_minutes(),
+                );
+            }
         }
     }
 
@@ -2500,13 +2636,14 @@ fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
 
 fn print_metrics(metrics: &RunMetrics) {
     println!(
-        "{:<6}: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, case work {}/{}, surveillance discoveries {}, autonomous recruitment {}, player departures {}",
+        "{:<6}: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
         terminal_label(metrics),
         metrics.burglary_terminal_minute,
         metrics.police_dispatched,
         metrics.police_arrived,
         metrics.decision_requests,
+        metrics.planning_information_count,
         metrics.burglary_information_quality,
         metrics.exposure_level,
         metrics.exposure_score,
@@ -2516,11 +2653,88 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.investigation_created,
         metrics.evidence_count,
         metrics.player_legal_activity_information,
+        metrics.player_police_activity_information,
+        metrics.counterintelligence_outcome,
+        metrics.counterintelligence_information,
         metrics.investigation_work_scheduled,
         metrics.investigation_work_resolved,
         metrics.discovered_surveillance_information,
+        metrics.player_report_count,
+        metrics.executive_brief_count,
         metrics.autonomous_recruitment_attempts,
         metrics.player_personnel_departures,
+    );
+}
+
+fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMetrics) {
+    println!("\n--- PLAYER LOOP READOUT ---");
+    println!(
+        "The core fantasy tested here is: learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
+    );
+    println!("Evidence coverage (not a game-quality score):");
+    print_loop_checkpoint(
+        "learn",
+        recon.discovered_surveillance_information > 0,
+        "surveillance produces actionable patrol and target information",
+    );
+    print_loop_checkpoint(
+        "plan",
+        recon.planning_information_count > rush.planning_information_count
+            && recon.burglary_information_quality.unwrap_or_default()
+                > rush.burglary_information_quality.unwrap_or_default(),
+        "the player can make a better plan from organization-held intelligence",
+    );
+    print_loop_checkpoint(
+        "delegate",
+        recon.burglary.is_some() && recon.outcome.is_some(),
+        "the plan resolves through assigned people and authored capabilities",
+    );
+    print_loop_checkpoint(
+        "respond",
+        press.decision_requests > 0 && press.player_police_activity_information > 0,
+        "an exception pauses the plan and a field report returns to the organization",
+    );
+    print_loop_checkpoint(
+        "consequences",
+        press.investigation_created && recon.property_realized_cash_cents.is_some(),
+        "the same operation system can create legal pressure or recover value into cash",
+    );
+    print_loop_checkpoint(
+        "follow-up",
+        press.counterintelligence_outcome.is_some() && press.counterintelligence_information > 0,
+        "a player-visible legal report can seed a new surveillance plan without hidden case access",
+    );
+    print_loop_checkpoint(
+        "organization",
+        rush.autonomous_recruitment_attempts > 0 && rush.player_personnel_departures > 0,
+        "pressure changes personnel relationships without a scripted player event",
+    );
+    print_loop_checkpoint(
+        "routine",
+        rush.legitimate_net_cents == press.legitimate_net_cents
+            && press.legitimate_net_cents == recon.legitimate_net_cents
+            && rush.enterprise_net_cents == press.enterprise_net_cents
+            && press.enterprise_net_cents == recon.enterprise_net_cents,
+        "delegated legitimate and illicit enterprises continue while leadership focuses on exceptions",
+    );
+    println!("Current experience gaps exposed by this fixture:");
+    println!(
+        "  - The fixture now proves a bounded counter-surveillance response, but it still does not model disrupting evidence, influencing counsel, or changing a prosecution outcome."
+    );
+    println!(
+        "  - The harness exercises one opportunity and one operation type, so it proves the planning loop but not a broader portfolio of competing organizational priorities."
+    );
+    println!(
+        "  - The fixed RUSH/PRESS/RECON policies are calibration treatments; they expose causal differences but are not evidence that an actual player would choose the same policies."
+    );
+}
+
+fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) {
+    println!(
+        "  [{:>12}] {:<5} - {}",
+        label,
+        if present { "shown" } else { "missing" },
+        evidence,
     );
 }
 
