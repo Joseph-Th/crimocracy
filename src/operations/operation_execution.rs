@@ -369,6 +369,7 @@ pub(crate) struct ValidatedOperationResolution {
     incident: Option<ValidatedIncidentIntake>,
     incident_authority: Option<IncidentAuthoritySnapshot>,
     surveillance_information: Vec<ValidatedInformation>,
+    legal_activity_information: Option<ValidatedInformation>,
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
@@ -431,6 +432,9 @@ impl ValidatedOperationResolution {
             investigation,
             evidence,
         };
+        let legal_activity_information = self
+            .legal_activity_information
+            .map(|information| information.commit(state));
         let discovered_information = self
             .surveillance_information
             .into_iter()
@@ -449,6 +453,7 @@ impl ValidatedOperationResolution {
                 exposure,
                 property_proceeds: self.plan.outcome.property_proceeds,
                 discovered_information,
+                legal_activity_information,
                 after_action_information,
                 after_action_report,
                 history_event,
@@ -484,6 +489,46 @@ pub(crate) fn validate_operation_resolution_plan(
         )?,
         None => Vec::new(),
     };
+    let (incident, incident_authority) = validate_exposure_incident(
+        registry,
+        state,
+        record,
+        &plan.outcome.exposure,
+        plan.snapshot.resolved_at,
+    )?;
+    let legal_activity_summary = if incident.is_some() {
+        let snapshot = incident_authority.expect("a validated incident must have a snapshot");
+        Some(build_legal_activity_summary(
+            state,
+            record,
+            snapshot
+                .organization
+                .expect("a validated incident must have an intake authority"),
+        ))
+    } else {
+        None
+    };
+    let legal_activity_information = legal_activity_summary.as_ref().map(|summary| {
+        validate_record_information(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(record.responsible_organization()),
+                source_kind: InformationSourceKind::AfterAction,
+                topic: crate::intelligence::InformationTopic::LegalActivity,
+                source_entity: Some(EntityRef::Character(record.leader())),
+                subject: EntityRef::Operation(record.id()),
+                observed_at: plan.snapshot.resolved_at,
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary: summary.clone(),
+            },
+        )
+    });
+    let legal_activity_information = legal_activity_information.transpose()?;
+    let after_action_summary = legal_activity_summary.map_or_else(
+        || plan.narrative.summary.clone(),
+        |summary| format!("{} {}", plan.narrative.summary, summary),
+    );
     let information = validate_record_information(
         state,
         InformationDraft {
@@ -495,7 +540,7 @@ pub(crate) fn validate_operation_resolution_plan(
             observed_at: plan.snapshot.resolved_at,
             reliability: Reliability::DirectAccess,
             specificity: Specificity::Precise,
-            summary: plan.narrative.summary.clone(),
+            summary: after_action_summary.clone(),
         },
     )?;
     let history = validate_record_event(
@@ -519,29 +564,40 @@ pub(crate) fn validate_operation_resolution_plan(
             title: format!("{} after-action report", record.title()),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
-                summary: plan.narrative.summary.clone(),
+                summary: after_action_summary,
                 sources: Vec::new(),
                 entities: plan.narrative.history_entities.clone(),
                 decision: None,
             }],
         },
     )?;
-    let (incident, incident_authority) = validate_exposure_incident(
-        registry,
-        state,
-        record,
-        &plan.outcome.exposure,
-        plan.snapshot.resolved_at,
-    )?;
     Ok(ValidatedOperationResolution {
         plan,
         incident,
         incident_authority,
         surveillance_information,
+        legal_activity_information,
         information,
         history,
         report,
     })
+}
+
+pub(crate) fn build_legal_activity_summary(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    authority: crate::core::id::OrganizationId,
+) -> String {
+    let authority_name = state
+        .world
+        .get_organization(authority)
+        .expect("validated incident authority must exist")
+        .name();
+    format!(
+        "The exposure from {} produced a police investigation opened by {}. The organization does not know the case's evidence, lead, or detective work.",
+        operation.title(),
+        authority_name
+    )
 }
 
 fn validate_exposure_incident(
@@ -2366,6 +2422,18 @@ mod tests {
                 .expect("operation investigation should persist");
             assert_eq!(investigation.owner(), police);
             assert_eq!(resolution.exposure().evidence().len(), 1);
+            let legal_activity_information = resolution
+                .legal_activity_information()
+                .expect("jurisdictional exposure should create player legal-activity knowledge");
+            let legal_activity = state
+                .intelligence()
+                .get_information(legal_activity_information)
+                .expect("player legal-activity information should persist");
+            assert_eq!(legal_activity.topic(), InformationTopic::LegalActivity);
+            assert_eq!(legal_activity.subject(), EntityRef::Operation(operation));
+            assert!(legal_activity
+                .summary()
+                .contains("produced a police investigation"));
             let evidence_id = *resolution
                 .exposure()
                 .evidence()
@@ -2408,6 +2476,18 @@ mod tests {
             restored_exposure.investigation()
         );
         assert_eq!(original_exposure.evidence(), restored_exposure.evidence());
+        assert_eq!(
+            original
+                .operations()
+                .get_operation(operation)
+                .and_then(|record| record.resolution())
+                .and_then(|resolution| resolution.legal_activity_information()),
+            restored
+                .operations()
+                .get_operation(operation)
+                .and_then(|record| record.resolution())
+                .and_then(|resolution| resolution.legal_activity_information())
+        );
     }
 
     #[test]
@@ -2428,6 +2508,14 @@ mod tests {
             OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
         ));
         assert_eq!(exposure.investigation(), None);
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .and_then(|record| record.resolution())
+                .and_then(|resolution| resolution.legal_activity_information()),
+            None
+        );
         assert!(exposure.evidence().is_empty());
         assert_eq!(
             state

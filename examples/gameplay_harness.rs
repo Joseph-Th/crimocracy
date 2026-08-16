@@ -52,8 +52,9 @@ use crimocracy::operations::property_disposition::{
     validate_dispose_property, PropertyDispositionDraft,
 };
 use crimocracy::operations::{
-    OperationApproach, OperationConstraint, OperationContingency, OperationDraft, OperationKind,
-    OperationObjective, OperationObjectiveOutcome, OperationStatus, RoleKind,
+    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationConstraint,
+    OperationContingency, OperationDraft, OperationKind, OperationObjective,
+    OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
@@ -152,15 +153,22 @@ enum HarnessContractError {
     #[error("{strategy:?} run did not reach a terminal burglary state")]
     MissingTerminalState { strategy: Strategy },
     #[error(
-        "{strategy:?} run has inconsistent terminal state: aborted={aborted}, outcome={outcome:?}"
+        "{strategy:?} run has inconsistent terminal state: aborted={aborted}, outcome={outcome:?}, abort_phase={abort_phase:?}, abort_cause={abort_cause:?}"
     )]
     InconsistentTerminalState {
         strategy: Strategy,
         aborted: bool,
         outcome: Option<OperationObjectiveOutcome>,
+        abort_phase: Option<OperationAbortPhase>,
+        abort_cause: Option<OperationAbortCause>,
     },
     #[error("{strategy:?} run did not complete its financial observation window")]
     MissingFinancialObservation { strategy: Strategy },
+    #[error("{strategy:?} night-trap run did not expose expected evidence: {evidence}")]
+    MissingStrategyEvidence {
+        strategy: Strategy,
+        evidence: &'static str,
+    },
     #[error(
         "unrelated financial variance changed across strategy branches: legitimate {legitimate:?}; enterprise {enterprise:?}"
     )]
@@ -268,6 +276,8 @@ struct RunMetrics {
     burglary: Option<OperationId>,
     outcome: Option<OperationObjectiveOutcome>,
     aborted: bool,
+    abort_phase: Option<OperationAbortPhase>,
+    abort_cause: Option<OperationAbortCause>,
     police_dispatched: bool,
     police_arrived: bool,
     decision_requests: u32,
@@ -285,6 +295,7 @@ struct RunMetrics {
     legitimate_net_cents: Option<i64>,
     enterprise_net_cents: Option<i64>,
     discovered_surveillance_information: usize,
+    player_legal_activity_information: usize,
     autonomous_recruitment_attempts: u32,
     player_personnel_departures: u32,
 }
@@ -312,6 +323,8 @@ struct Aggregate {
     burglary_terminal_samples: u64,
     liquidation_minute_total: u128,
     liquidation_samples: u64,
+    standing_contingency_aborts: u64,
+    legal_activity_information_sessions: u64,
     autonomous_recruitment_attempts: u64,
     player_personnel_departures: u64,
 }
@@ -354,6 +367,14 @@ impl Aggregate {
             self.liquidation_minute_total += u128::from(minute);
             self.liquidation_samples += 1;
         }
+        if matches!(
+            metrics.abort_cause,
+            Some(OperationAbortCause::PoliceArrival(_))
+        ) {
+            self.standing_contingency_aborts += 1;
+        }
+        self.legal_activity_information_sessions +=
+            u64::from(metrics.player_legal_activity_information > 0);
         self.autonomous_recruitment_attempts += u64::from(metrics.autonomous_recruitment_attempts);
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
     }
@@ -398,13 +419,15 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  rival attempts {:>3}  departures {:>3}",
             self.percent(self.achieved),
             self.percent(self.partial),
             self.percent(self.failed),
             self.percent(self.aborted),
+            self.percent(self.standing_contingency_aborts),
             self.percent(self.police_dispatched),
             self.percent(self.investigations),
+            self.percent(self.legal_activity_information_sessions),
             self.investigation_work_scheduled,
             self.investigation_work_resolved,
             avg_exposure,
@@ -439,13 +462,15 @@ fn run_smoke(seed: u64) -> Result<(), Box<dyn Error>> {
     for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
         let metrics = play_session(strategy, ScenarioProfile::NightTrap, seed, false, false)?;
         validate_run_metrics(&metrics, false)?;
+        validate_night_trap_evidence(&metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m; outcome {:?}; police {}; evidence {}; intelligence {:?}",
+            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; intelligence {:?}",
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
-            metrics.outcome,
+            terminal_label(&metrics),
             if metrics.police_arrived { "arrived" } else { "none" },
             metrics.evidence_count,
+            metrics.player_legal_activity_information,
             metrics.burglary_information_quality,
         );
     }
@@ -466,6 +491,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("Mode: controlled/calibration strategy comparison with bounded scenario sensitivity.");
     println!(
         "Evidence boundary: synthetic setup through production paths; policy inputs are player-visible, while [DEV AUDIT] is diagnostic only.\n"
+    );
+    println!(
+        "Observation windows: narrative sessions run for two simulated days; matched batches run for one day to keep sensitivity evidence bounded.\n"
     );
     println!("Narrative comparison uses seed {seed:#x}.\n");
 
@@ -492,6 +520,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_run_metrics(&rush, true)?;
     validate_run_metrics(&press, true)?;
     validate_run_metrics(&recon, true)?;
+    validate_night_trap_evidence(&rush)?;
+    validate_night_trap_evidence(&press)?;
+    validate_night_trap_evidence(&recon)?;
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
@@ -619,11 +650,16 @@ fn validate_run_metrics(
     if metrics.burglary_terminal_minute.is_none() {
         return Err(HarnessContractError::MissingTerminalState { strategy });
     }
-    if metrics.aborted == metrics.outcome.is_some() {
+    if metrics.aborted == metrics.outcome.is_some()
+        || metrics.aborted != (metrics.abort_phase.is_some() && metrics.abort_cause.is_some())
+        || (!metrics.aborted && (metrics.abort_phase.is_some() || metrics.abort_cause.is_some()))
+    {
         return Err(HarnessContractError::InconsistentTerminalState {
             strategy,
             aborted: metrics.aborted,
             outcome: metrics.outcome,
+            abort_phase: metrics.abort_phase,
+            abort_cause: metrics.abort_cause,
         });
     }
     if require_financials
@@ -632,6 +668,45 @@ fn validate_run_metrics(
         return Err(HarnessContractError::MissingFinancialObservation { strategy });
     }
     Ok(())
+}
+
+fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    let evidence = match strategy {
+        Strategy::Rush => {
+            if matches!(
+                metrics.abort_cause,
+                Some(OperationAbortCause::PoliceArrival(_))
+            ) && metrics.abort_phase == Some(OperationAbortPhase::InProgress)
+            {
+                None
+            } else {
+                Some("pre-entry police arrival triggers the standing abort contingency")
+            }
+        }
+        Strategy::Press => {
+            if metrics.decision_requests > 0
+                && metrics.investigation_created
+                && metrics.player_legal_activity_information > 0
+            {
+                None
+            } else {
+                Some("police-arrival decision plus player-visible legal activity")
+            }
+        }
+        Strategy::Recon => {
+            if metrics.discovered_surveillance_information > 0 && metrics.outcome.is_some() {
+                None
+            } else {
+                Some("surveillance information plus a terminal burglary outcome")
+            }
+        }
+    };
+    evidence.map_or(Ok(()), |evidence| {
+        Err(HarnessContractError::MissingStrategyEvidence { strategy, evidence })
+    })
 }
 
 fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
@@ -1118,6 +1193,13 @@ fn play_session(
         .get_operation(burglary)
         .expect("burglary must remain queryable");
     metrics.aborted = burglary_record.status() == OperationStatus::Aborted;
+    if metrics.aborted {
+        let abort = burglary_record
+            .abort_record()
+            .expect("aborted burglary must persist its abort provenance");
+        metrics.abort_phase = Some(abort.phase());
+        metrics.abort_cause = Some(abort.cause());
+    }
     if let Some(resolution) = burglary_record.resolution() {
         metrics.outcome = Some(resolution.objective_outcome());
         metrics.exposure_score = Some(resolution.exposure().score());
@@ -1136,7 +1218,7 @@ fn play_session(
                 .reports()
                 .get_report(resolution.after_action_report())
                 .expect("after-action report must persist");
-            print_report("AFTER-ACTION", report);
+            print_report("AFTER-ACTION", report, &scenario);
             println!(
                 "[CONSEQUENCE] Exposure {:?} (score {}); police case created: {}; evidence records: {}.",
                 resolution.exposure().level(),
@@ -1152,7 +1234,22 @@ fn play_session(
             }
         }
     } else if narrative {
-        println!("[CONSEQUENCE] Operation aborted before objective resolution.");
+        let abort = burglary_record
+            .abort_record()
+            .expect("aborted burglary must persist its abort provenance");
+        println!(
+            "[ABORT] phase {:?}, cause {:?}; objective resolution was not completed.",
+            abort.phase(),
+            abort.cause(),
+        );
+        if let Some(artifacts) = abort.artifacts() {
+            let report = scenario
+                .state
+                .reports()
+                .get_report(artifacts.report())
+                .expect("started abort must persist its after-action report");
+            print_report("ABORT REPORT", report, &scenario);
+        }
     }
 
     let acquired_property_value = scenario
@@ -1196,17 +1293,26 @@ fn play_session(
         }
     }
 
+    metrics.player_legal_activity_information = scenario
+        .state
+        .intelligence()
+        .information_for_holder_by_topic(
+            KnowledgeHolder::Organization(scenario.player),
+            InformationTopic::LegalActivity,
+        )
+        .filter(|information| information.subject() == EntityRef::Operation(burglary))
+        .count();
     if narrative {
         print_player_knowledge_gap(&scenario, burglary);
     }
 
     if continue_for_financial_day {
-        run_until(
-            &mut scenario,
-            SimTime::from_minutes(2_880),
-            narrative,
-            &mut metrics,
-        )?;
+        let observation_end = if narrative {
+            SimTime::from_minutes(2_880)
+        } else {
+            SimTime::from_minutes(1_440)
+        };
+        run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
         let financials = resolve_financial_view(&scenario)?;
         metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
@@ -1220,7 +1326,7 @@ fn play_session(
                 .reports_for(scenario.player)
                 .filter(|report| report.kind() == ReportKind::ExecutiveBrief)
             {
-                print_report("BRIEF", report);
+                print_report("BRIEF", report, &scenario);
             }
         }
     }
@@ -2025,7 +2131,7 @@ fn observe_tick(
                 .reports()
                 .get_report(report)
                 .expect("executive brief must persist");
-            print_report("BRIEF GENERATED", report);
+            print_report("BRIEF GENERATED", report, scenario);
         }
     }
     Ok(())
@@ -2124,17 +2230,22 @@ fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
         .get_operation(burglary)
         .expect("burglary must persist");
     if let Some(resolution) = operation.resolution() {
-        let known_legal = scenario
+        let legal_information: Vec<_> = scenario
             .state
             .intelligence()
             .information_for_holder_by_topic(
                 KnowledgeHolder::Organization(scenario.player),
                 InformationTopic::LegalActivity,
             )
-            .count();
+            .filter(|information| information.subject() == EntityRef::Operation(burglary))
+            .collect();
         println!(
-            "[KNOWLEDGE] Player organization has {known_legal} LegalActivity information record(s) after the burglary."
+            "[KNOWLEDGE] Player organization has {} LegalActivity information record(s) about this burglary after resolution.",
+            legal_information.len(),
         );
+        for information in legal_information {
+            println!("  - [PLAYER] {}", information.summary());
+        }
         if let Some(investigation) = resolution.exposure().investigation() {
             let hidden = scenario
                 .state
@@ -2326,7 +2437,7 @@ fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     );
 }
 
-fn print_report(label: &str, report: &ReportRecord) {
+fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
     println!(
         "[{label}] minute {}: {}",
         report.generated_at().as_minutes(),
@@ -2339,16 +2450,29 @@ fn print_report(label: &str, report: &ReportRecord) {
             AttentionClass::Exception => "EXCEPTION",
             AttentionClass::Crisis => "CRISIS",
         };
-        println!("  - [{marker}] {}", entry.summary);
+        let context = entry.entities.iter().find_map(|entity| {
+            if let EntityRef::Operation(operation) = entity {
+                return scenario
+                    .state
+                    .operations()
+                    .get_operation(*operation)
+                    .map(|record| format!("operation: {}", record.title()));
+            }
+            None
+        });
+        if let Some(context) = context {
+            println!("  - [{marker}] [{context}] {}", entry.summary);
+        } else {
+            println!("  - [{marker}] {}", entry.summary);
+        }
     }
 }
 
 fn print_metrics(metrics: &RunMetrics) {
     println!(
-        "{:<6}: outcome {:?}, aborted {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, case work {}/{}, surveillance discoveries {}, autonomous recruitment {}, player departures {}",
+        "{:<6}: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, case work {}/{}, surveillance discoveries {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
-        metrics.outcome,
-        metrics.aborted,
+        terminal_label(metrics),
         metrics.burglary_terminal_minute,
         metrics.police_dispatched,
         metrics.police_arrived,
@@ -2361,12 +2485,24 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.liquidation_minute,
         metrics.investigation_created,
         metrics.evidence_count,
+        metrics.player_legal_activity_information,
         metrics.investigation_work_scheduled,
         metrics.investigation_work_resolved,
         metrics.discovered_surveillance_information,
         metrics.autonomous_recruitment_attempts,
         metrics.player_personnel_departures,
     );
+}
+
+fn terminal_label(metrics: &RunMetrics) -> String {
+    if metrics.aborted {
+        format!(
+            "aborted {:?} / {:?}",
+            metrics.abort_phase, metrics.abort_cause
+        )
+    } else {
+        format!("completed {:?}", metrics.outcome)
+    }
 }
 
 fn choose_safe_start_from_patrol_report(
@@ -2422,7 +2558,9 @@ fn parse_patrol_windows(report: &str) -> Vec<(u64, u64)> {
             windows.push((start, end));
         } else if start > end {
             windows.push((start, 1_440));
-            windows.push((0, end));
+            if end > 0 {
+                windows.push((0, end));
+            }
         } else {
             windows.push((0, 1_440));
         }
@@ -2454,8 +2592,10 @@ fn level(value: u8) -> RelationshipLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_options, run_smoke, HarnessCliError, HarnessMode, HarnessOptions, DEFAULT_SEED,
+        choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows, run_smoke,
+        HarnessCliError, HarnessMode, HarnessOptions, DEFAULT_SEED,
     };
+    use crimocracy::core::time::{SimDuration, SimTime};
 
     #[test]
     fn parses_explicit_smoke_mode_and_hex_seed() {
@@ -2501,6 +2641,44 @@ mod tests {
             error,
             HarnessCliError::SmokeSampleCount { value: 2 }
         ));
+    }
+
+    #[test]
+    fn parses_wrapped_patrol_windows_without_empty_intervals() {
+        assert_eq!(
+            parse_patrol_windows(
+                "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy)."
+            ),
+            vec![(120, 240), (1_320, 1_440)]
+        );
+    }
+
+    #[test]
+    fn chooses_a_buffered_window_from_player_visible_patrol_text() {
+        let chosen = choose_safe_start_from_patrol_report(
+            SimTime::from_minutes(1),
+            "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy).",
+            SimDuration::from_minutes(45),
+            SimDuration::from_minutes(60),
+        )
+        .expect("actionable patrol text should produce a safe candidate");
+
+        assert_eq!(chosen, SimTime::from_minutes(300));
+    }
+
+    #[test]
+    fn rejects_patrol_text_without_actionable_windows() {
+        let error = choose_safe_start_from_patrol_report(
+            SimTime::ZERO,
+            "Patrol activity was observed, but no recurring window was established.",
+            SimDuration::from_minutes(45),
+            SimDuration::from_minutes(60),
+        )
+        .expect_err("the harness must not infer a safe time from vague surveillance");
+
+        assert!(error
+            .to_string()
+            .contains("did not contain actionable recurring patrol windows"));
     }
 
     #[test]

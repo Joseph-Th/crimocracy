@@ -40,9 +40,9 @@ use crate::legal::{
     PatrolDeploymentStatus, PoliceResponseStatus, ProsecutionCaseStatus, WitnessCooperation,
 };
 use crate::operations::operation_execution::{
-    calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
-    calculate_property_proceeds, classify_exposure_level, classify_objective_outcome,
-    did_police_response_arrive_by,
+    build_legal_activity_summary, calculate_execution_margin, calculate_exposure_score,
+    calculate_intelligence_factors, calculate_property_proceeds, classify_exposure_level,
+    classify_objective_outcome, did_police_response_arrive_by,
 };
 use crate::operations::operation_system::is_information_subject_relevant;
 use crate::operations::property_disposition::{
@@ -145,6 +145,8 @@ pub enum StateValidationError {
     InvalidOperationHistory { operation: OperationId },
     #[error("completed operation {operation} has invalid discovered-information provenance")]
     InvalidOperationDiscovery { operation: OperationId },
+    #[error("completed operation {operation} has invalid player legal-activity information")]
+    InvalidOperationLegalActivity { operation: OperationId },
     #[error("operation {operation} is incompatible with its authored definition")]
     InvalidOperationDefinition { operation: OperationId },
     #[error("operation {operation} has invalid persisted exposure or legal consequences")]
@@ -1938,6 +1940,7 @@ fn validate_recruitment_against_registry(
 
 fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
     let mut operation_after_action_information = BTreeSet::new();
+    let mut operation_legal_activity_information = BTreeSet::new();
     let mut operation_discovered_information = BTreeSet::new();
     let mut operation_after_action_reports = BTreeSet::new();
     let mut operation_history_events = BTreeSet::new();
@@ -2233,6 +2236,57 @@ fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
                     return Err(StateValidationError::InvalidOperationAfterActionReport {
                         operation: operation.id(),
                     });
+                }
+                match resolution.legal_activity_information() {
+                    Some(information_id) => {
+                        let investigation_id = resolution.exposure().investigation().ok_or(
+                            StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            },
+                        )?;
+                        let investigation = state.legal.get_investigation(investigation_id).ok_or(
+                            StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            },
+                        )?;
+                        let legal_information = state
+                            .intelligence
+                            .get_information(information_id)
+                            .ok_or(StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            })?;
+                        if !operation_legal_activity_information.insert(information_id)
+                            || legal_information.holder()
+                                != KnowledgeHolder::Organization(
+                                    operation.responsible_organization(),
+                                )
+                            || legal_information.source_kind() != InformationSourceKind::AfterAction
+                            || legal_information.topic() != InformationTopic::LegalActivity
+                            || legal_information.source_entity()
+                                != Some(EntityRef::Character(operation.leader()))
+                            || legal_information.subject() != EntityRef::Operation(operation.id())
+                            || legal_information.observed_at() != resolution.resolved_at()
+                            || legal_information.recorded_at() != resolution.resolved_at()
+                            || legal_information.reliability() != Reliability::GenerallyReliable
+                            || legal_information.specificity() != Specificity::Specific
+                            || legal_information.summary()
+                                != build_legal_activity_summary(
+                                    state,
+                                    operation,
+                                    investigation.owner(),
+                                )
+                        {
+                            return Err(StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            });
+                        }
+                    }
+                    None if resolution.exposure().investigation().is_some() => {
+                        return Err(StateValidationError::InvalidOperationLegalActivity {
+                            operation: operation.id(),
+                        });
+                    }
+                    None => {}
                 }
                 let valid_history = state
                     .history

@@ -67,4 +67,5 @@ strategy branches on the same simulation seed. The harness uses synthetic author
 through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]`
 diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a
 natural-play or human-UX verdict. Full mode is deliberately more verbose and expensive; smoke mode
-is the CI/local fast path.
+is the CI/local fast path. Narrative sessions observe two simulated days; batch sensitivity runs
+observe one day so repeated routine ticks do not dominate the evidence or runtime.

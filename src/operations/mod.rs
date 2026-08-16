@@ -456,6 +456,7 @@ pub struct OperationResolutionRecord {
     exposure: OperationExposureRecord,
     property_proceeds: Option<OperationPropertyProceedsRecord>,
     discovered_information: BTreeSet<InformationId>,
+    legal_activity_information: Option<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
     history_event: HistoryEventId,
@@ -488,6 +489,10 @@ impl OperationResolutionRecord {
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
         &self.discovered_information
+    }
+
+    pub fn legal_activity_information(&self) -> Option<InformationId> {
+        self.legal_activity_information
     }
 
     pub fn after_action_information(&self) -> InformationId {
