@@ -300,6 +300,7 @@ mod tests {
         NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
         OrganizationDraft, OrganizationKind, PolicyKind, PolicySetting, Rating, TraitKind,
     };
+    use rand_core::RngCore;
     use std::collections::{BTreeMap, BTreeSet};
 
     struct TestScenario {
@@ -1381,6 +1382,11 @@ mod tests {
             .get_character(manager)
             .expect("manager should exist")
             .version();
+        validate_state(&state)
+            .expect("fixture state should be structurally valid before rejection");
+        crate::core::invariants::validate_invariants(&state);
+        let state_before =
+            bincode::serialize(&state).expect("fixture state should serialize before rejection");
 
         let error = validate_reassign_character(&state, manager, None, None)
             .expect_err("active mandate must prevent organization reassignment");
@@ -1399,6 +1405,12 @@ mod tests {
                 .version(),
             version
         );
+        assert_eq!(
+            bincode::serialize(&state).expect("rejected state should still serialize"),
+            state_before,
+            "rejected reassignment must leave the complete persisted state unchanged"
+        );
+        validate_state(&state).expect("rejected operation must preserve structural validity");
         crate::core::invariants::validate_invariants(&state);
     }
 
@@ -1574,6 +1586,10 @@ mod tests {
         for _ in 0..16 {
             decide_index(&mut state, 23).expect("non-empty random choice should resolve");
         }
+        validate_state(&state).expect("pre-save state should be structurally valid");
+        crate::core::invariants::validate_invariants(&state);
+        let state_before =
+            bincode::serialize(&state).expect("pre-save application state should serialize");
 
         let envelope = build_save(&registry, &state).expect("valid state should build a save");
         let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
@@ -1582,10 +1598,37 @@ mod tests {
         let mut restored = restore_save(&registry, decoded).expect("current save should restore");
 
         assert_eq!(restored.now(), state.now());
+        assert_eq!(
+            bincode::serialize(&restored).expect("restored application state should serialize"),
+            state_before,
+            "save/load must reproduce the complete persisted application state"
+        );
+        validate_state(&restored).expect("restored state should remain structurally valid");
+        crate::core::invariants::validate_invariants(&restored);
         for _ in 0..256 {
             assert_eq!(
                 decide_index(&mut state, 97).expect("choice should resolve"),
                 decide_index(&mut restored, 97).expect("restored choice should resolve")
+            );
+            assert_eq!(
+                state.operation_rng_mut().next_u64(),
+                restored.operation_rng_mut().next_u64(),
+                "operation RNG stream must continue identically after restore"
+            );
+            assert_eq!(
+                state.investigation_rng_mut().next_u64(),
+                restored.investigation_rng_mut().next_u64(),
+                "investigation RNG stream must continue identically after restore"
+            );
+            assert_eq!(
+                state.business_rng_mut().next_u64(),
+                restored.business_rng_mut().next_u64(),
+                "business RNG stream must continue identically after restore"
+            );
+            assert_eq!(
+                state.enterprise_rng_mut().next_u64(),
+                restored.enterprise_rng_mut().next_u64(),
+                "enterprise RNG stream must continue identically after restore"
             );
         }
     }
