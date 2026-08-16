@@ -11,7 +11,7 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
     BusinessId, CharacterId, EnterpriseId, InformationId, OperationId, OrganizationId,
 };
-use crimocracy::core::invariants::validate_state;
+use crimocracy::core::invariants::{validate_state, validate_state_against_registry};
 use crimocracy::core::simulation::{run_tick, TickOutcome};
 use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
@@ -187,6 +187,14 @@ enum HarnessContractError {
         started_at: u64,
         deadline: u64,
     },
+    #[error(
+        "{profile:?} batch observed only {observed} fixture variation(s); expected at least {required}"
+    )]
+    InsufficientFixtureVariation {
+        profile: ScenarioProfile,
+        observed: usize,
+        required: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +203,150 @@ enum ScenarioProfile {
     LatePatrol,
     VeteranCrew,
     ThinCrew,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FixtureVariation {
+    Clockwork,
+    Crowded,
+    Quiet,
+}
+
+impl FixtureVariation {
+    fn from_seed(seed: u64) -> Self {
+        match seed % 3 {
+            0 => Self::Clockwork,
+            1 => Self::Crowded,
+            2 => Self::Quiet,
+            _ => unreachable!("seed remainder modulo three is bounded"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Clockwork => "CLOCKWORK",
+            Self::Crowded => "CROWDED",
+            Self::Quiet => "QUIET",
+        }
+    }
+
+    fn neighborhood_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "South Ward",
+            Self::Crowded => "Market Row",
+            Self::Quiet => "Canal District",
+        }
+    }
+
+    fn target_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "Bellmore Jewelry",
+            Self::Crowded => "Calder's Jewelers",
+            Self::Quiet => "Vesper Gold",
+        }
+    }
+
+    fn front_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "Fulton Social Club",
+            Self::Crowded => "Lantern Room",
+            Self::Quiet => "Marlowe Club",
+        }
+    }
+
+    fn resale_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "Mercer Pawn & Exchange",
+            Self::Crowded => "Redline Exchange",
+            Self::Quiet => "Northline Exchange",
+        }
+    }
+
+    fn opportunity_summary(self) -> &'static str {
+        match self {
+            Self::Clockwork => {
+                "Bellmore Jewelry closes with valuable stock still on site; the rear service access may be workable."
+            }
+            Self::Crowded => {
+                "Calder's Jewelers closes with valuable stock still on site; a loading-bay access may be workable."
+            }
+            Self::Quiet => {
+                "Vesper Gold closes with valuable stock still on site; a side-street access may be workable."
+            }
+        }
+    }
+
+    fn source_summary(self) -> &'static str {
+        match self {
+            Self::Clockwork => {
+                "Lena Orr says Bellmore keeps valuable stock overnight and uses a rear service entrance; she does not know the alarm or patrol pattern."
+            }
+            Self::Crowded => {
+                "Lena Orr says Calder's keeps valuable stock overnight and uses a loading bay; she does not know the alarm or patrol pattern."
+            }
+            Self::Quiet => {
+                "Lena Orr says Vesper keeps valuable stock overnight and uses a side street; she does not know the alarm or patrol pattern."
+            }
+        }
+    }
+
+    fn source_reliability(self) -> Reliability {
+        match self {
+            Self::Clockwork => Reliability::Mixed,
+            Self::Crowded => Reliability::GenerallyReliable,
+            Self::Quiet => Reliability::GenerallyReliable,
+        }
+    }
+
+    fn source_specificity(self) -> Specificity {
+        match self {
+            Self::Clockwork => Specificity::General,
+            Self::Crowded => Specificity::Specific,
+            Self::Quiet => Specificity::General,
+        }
+    }
+
+    fn neighborhood_police_presence(self) -> u8 {
+        match self {
+            Self::Clockwork => 58,
+            Self::Crowded => 72,
+            Self::Quiet => 42,
+        }
+    }
+
+    fn neighborhood_economy(self) -> (u8, u8, u8) {
+        match self {
+            Self::Clockwork => (62, 78, 72),
+            Self::Crowded => (74, 91, 84),
+            Self::Quiet => (48, 61, 56),
+        }
+    }
+
+    fn patrol_windows(self, profile: ScenarioProfile) -> [(u16, u16, u8); 2] {
+        match (profile, self) {
+            (ScenarioProfile::LatePatrol, Self::Clockwork) => [(180, 120, 90), (1_320, 120, 70)],
+            (ScenarioProfile::LatePatrol, Self::Crowded) => [(240, 120, 84), (1_260, 150, 76)],
+            (ScenarioProfile::LatePatrol, Self::Quiet) => [(300, 120, 76), (1_200, 150, 64)],
+            (
+                ScenarioProfile::NightTrap
+                | ScenarioProfile::VeteranCrew
+                | ScenarioProfile::ThinCrew,
+                Self::Clockwork,
+            ) => [(120, 120, 90), (1_320, 120, 70)],
+            (
+                ScenarioProfile::NightTrap
+                | ScenarioProfile::VeteranCrew
+                | ScenarioProfile::ThinCrew,
+                Self::Crowded,
+            ) => [(90, 150, 84), (1_260, 150, 76)],
+            (
+                ScenarioProfile::NightTrap
+                | ScenarioProfile::VeteranCrew
+                | ScenarioProfile::ThinCrew,
+                Self::Quiet,
+            ) => [(60, 180, 76), (1_200, 150, 64)],
+        }
+    }
 }
 
 impl ScenarioProfile {
@@ -206,15 +358,6 @@ impl ScenarioProfile {
             Self::LatePatrol => "LATE PATROL",
             Self::VeteranCrew => "VETERAN CREW",
             Self::ThinCrew => "THIN CREW",
-        }
-    }
-
-    fn patrol_windows(self) -> [(u16, u16, u8); 2] {
-        match self {
-            Self::LatePatrol => [(180, 120, 90), (1_320, 120, 70)],
-            Self::NightTrap | Self::VeteranCrew | Self::ThinCrew => {
-                [(120, 120, 90), (1_320, 120, 70)]
-            }
         }
     }
 
@@ -279,11 +422,13 @@ struct Scenario {
     detective: CharacterId,
     opportunity_information: InformationId,
     enterprise: EnterpriseId,
+    variation: FixtureVariation,
 }
 
 #[derive(Clone, Debug, Default)]
 struct RunMetrics {
     strategy: Option<Strategy>,
+    variation: Option<FixtureVariation>,
     burglary: Option<OperationId>,
     outcome: Option<OperationObjectiveOutcome>,
     aborted: bool,
@@ -320,6 +465,7 @@ struct RunMetrics {
 #[derive(Default)]
 struct Aggregate {
     samples: u64,
+    fixture_variations: BTreeSet<FixtureVariation>,
     achieved: u64,
     partial: u64,
     failed: u64,
@@ -352,6 +498,9 @@ struct Aggregate {
 impl Aggregate {
     fn add(&mut self, metrics: &RunMetrics) {
         self.samples += 1;
+        if let Some(variation) = metrics.variation {
+            self.fixture_variations.insert(variation);
+        }
         match metrics.outcome {
             Some(OperationObjectiveOutcome::Achieved) => self.achieved += 1,
             Some(OperationObjectiveOutcome::Partial) => self.partial += 1,
@@ -443,8 +592,9 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  samples {:>2}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
             self.samples,
+            self.fixture_variations,
             self.percent(self.achieved),
             self.percent(self.partial),
             self.percent(self.failed),
@@ -490,7 +640,7 @@ fn run_smoke(seed: u64) -> Result<(), Box<dyn Error>> {
     for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
         let metrics = play_session(strategy, ScenarioProfile::NightTrap, seed, false, false)?;
         validate_run_metrics(&metrics, false)?;
-        validate_night_trap_evidence(&metrics)?;
+        validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
             "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; intelligence {:?}",
             strategy.label(),
@@ -753,6 +903,29 @@ fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
     })
 }
 
+fn validate_strategy_evidence(
+    profile: ScenarioProfile,
+    metrics: &RunMetrics,
+) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    match strategy {
+        Strategy::Rush if profile != ScenarioProfile::LatePatrol => {
+            validate_night_trap_evidence(metrics)
+        }
+        Strategy::Press if metrics.police_arrived => validate_night_trap_evidence(metrics),
+        Strategy::Recon => validate_night_trap_evidence(metrics),
+        Strategy::Rush | Strategy::Press => Ok(()),
+    }
+}
+
+fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
+    validate_state(state)?;
+    validate_state_against_registry(registry, state)?;
+    Ok(())
+}
+
 fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     let registry = build_registry();
     let mut state = AppState::new(0x1E6A_1933);
@@ -970,7 +1143,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     )?
     .commit(&mut state)?;
 
-    validate_state(&state)?;
+    validate_harness_state(&registry, &state)?;
     let representation_record = state
         .legal()
         .get_legal_representation(representation)
@@ -995,7 +1168,7 @@ fn run_legal_foundation_check() -> Result<(), Box<dyn Error>> {
     }
 
     validate_decline_prosecution_case(&state, prosecution_case)?.commit(&mut state)?;
-    validate_state(&state)?;
+    validate_harness_state(&registry, &state)?;
     let resolved_case = state
         .legal()
         .get_prosecution_case(prosecution_case)
@@ -1034,10 +1207,24 @@ fn run_strategy_batch(
         validate_run_metrics(&rush, true)?;
         validate_run_metrics(&press, true)?;
         validate_run_metrics(&recon, true)?;
+        validate_strategy_evidence(profile, &rush)?;
+        validate_strategy_evidence(profile, &press)?;
+        validate_strategy_evidence(profile, &recon)?;
         validate_branch_financial_isolation(&rush, &press, &recon)?;
         rush_aggregate.add(&rush);
         press_aggregate.add(&press);
         recon_aggregate.add(&recon);
+    }
+    if samples >= 3 {
+        let observed = rush_aggregate.fixture_variations.len();
+        if observed < 3 {
+            return Err(HarnessContractError::InsufficientFixtureVariation {
+                profile,
+                observed,
+                required: 3,
+            }
+            .into());
+        }
     }
     Ok((rush_aggregate, press_aggregate, recon_aggregate))
 }
@@ -1078,10 +1265,15 @@ fn play_session(
     let mut scenario = build_scenario(seed, profile)?;
     let mut metrics = RunMetrics {
         strategy: Some(strategy),
+        variation: Some(scenario.variation),
         ..RunMetrics::default()
     };
 
     if narrative {
+        println!(
+            "[FIXTURE] {} authored variation selected by simulation seed.",
+            scenario.variation.label(),
+        );
         print_starting_player_view(&scenario);
     }
 
@@ -1093,8 +1285,7 @@ fn play_session(
             operation_kind: OperationKind::Burglary,
             targets: BTreeSet::from([EntityRef::Business(scenario.target)]),
             source_information: BTreeSet::from([scenario.opportunity_information]),
-            summary: "Bellmore Jewelry closes with valuable stock still on site; the rear service access may be workable."
-                .to_owned(),
+            summary: scenario.variation.opportunity_summary().to_owned(),
             valid_until: Some(SimTime::from_minutes(720)),
         },
     )?
@@ -1161,7 +1352,8 @@ fn play_session(
         );
     } else if narrative {
         println!(
-            "[DECIDE]  Hit Bellmore at 02:10 and press on through a police response unless leadership later orders otherwise."
+            "[DECIDE]  Hit {} at 02:10 and press on through a police response unless leadership later orders otherwise.",
+            scenario.variation.target_name(),
         );
     }
 
@@ -1184,7 +1376,7 @@ fn play_session(
             )?;
             if narrative {
                 println!(
-                    "[INTERPRET] Parsed the reported recurring patrol windows and chose minute {} so the 45-minute burglary stays outside them with a one-hour uncertainty buffer.",
+                    "[INTERPRET] Parsed the reported recurring patrol windows and chose minute {} so the authored burglary window stays outside them with a one-hour uncertainty buffer.",
                     chosen.as_minutes()
                 );
             }
@@ -1365,15 +1557,29 @@ fn play_session(
         && metrics.player_police_activity_information > 0
     {
         if narrative {
+            let neighborhood_name = scenario
+                .state
+                .world()
+                .get_neighborhood(scenario.neighborhood)
+                .expect("counter-surveillance neighborhood must persist")
+                .name();
             println!(
-                "[DECIDE]  Use the surfaced case existence and field report to quietly watch South Ward, without reading hidden case state."
+                "[DECIDE]  Use the surfaced case existence and field report to quietly watch {neighborhood_name}, without reading hidden case state."
             );
         }
         let neighborhood = scenario.neighborhood;
+        let neighborhood_name = scenario
+            .state
+            .world()
+            .get_neighborhood(neighborhood)
+            .expect("counter-surveillance neighborhood must persist")
+            .name()
+            .to_owned();
+        let counterintelligence_title = format!("{neighborhood_name} counter-surveillance");
         let counterintelligence = authorize_surveillance_target(
             &mut scenario,
             EntityRef::Neighborhood(neighborhood),
-            "South Ward counter-surveillance",
+            &counterintelligence_title,
         )?;
         run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
         let operation = scenario
@@ -1387,7 +1593,7 @@ fn play_session(
         }
         if narrative {
             println!(
-                "[FOLLOW-UP] South Ward counter-surveillance -> {:?}; organization gained {} additional police-activity record(s).",
+                "[FOLLOW-UP] {counterintelligence_title} -> {:?}; organization gained {} additional police-activity record(s).",
                 metrics.counterintelligence_outcome,
                 metrics.counterintelligence_information,
             );
@@ -1438,6 +1644,7 @@ fn play_session(
 fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<dyn Error>> {
     let registry = build_registry();
     let mut state = AppState::new(seed);
+    let variation = FixtureVariation::from_seed(seed);
 
     let player = insert_organization(
         &registry,
@@ -1489,15 +1696,15 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
     let neighborhood = insert_neighborhood(
         &mut state,
         NeighborhoodDraft {
-            name: "South Ward".to_owned(),
+            name: variation.neighborhood_name().to_owned(),
             profile: NeighborhoodProfile {
                 economy: NeighborhoodEconomyProfile {
-                    wealth: rating(62),
-                    commercial_activity: rating(78),
-                    illicit_demand: rating(72),
+                    wealth: rating(variation.neighborhood_economy().0),
+                    commercial_activity: rating(variation.neighborhood_economy().1),
+                    illicit_demand: rating(variation.neighborhood_economy().2),
                 },
                 institutions: NeighborhoodInstitutionProfile {
-                    police_presence: rating(58),
+                    police_presence: rating(variation.neighborhood_police_presence()),
                     political_influence: rating(65),
                     social_cohesion: rating(63),
                     visible_violence_tolerance: rating(24),
@@ -1514,8 +1721,8 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         },
     )?
     .commit(&mut state)?;
-    let patrol_windows = profile
-        .patrol_windows()
+    let patrol_windows = variation
+        .patrol_windows(profile)
         .into_iter()
         .map(|(start, duration, presence)| {
             Ok(PatrolWindow::try_new(
@@ -1699,7 +1906,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         &registry,
         &mut state,
         BusinessDraft {
-            name: "Bellmore Jewelry".to_owned(),
+            name: variation.target_name().to_owned(),
             kind: BusinessKind::Retail,
             functions: BTreeSet::from([
                 BusinessFunction::CustomerAccess,
@@ -1713,7 +1920,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         &registry,
         &mut state,
         BusinessDraft {
-            name: "Fulton Social Club".to_owned(),
+            name: variation.front_name().to_owned(),
             kind: BusinessKind::Hospitality,
             functions: BTreeSet::from([
                 BusinessFunction::CashIntensive,
@@ -1728,7 +1935,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         &registry,
         &mut state,
         BusinessDraft {
-            name: "Mercer Pawn & Exchange".to_owned(),
+            name: variation.resale_name().to_owned(),
             kind: BusinessKind::Retail,
             functions: BTreeSet::from([
                 BusinessFunction::CashIntensive,
@@ -1773,7 +1980,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
-            label: "South Ward street cash".to_owned(),
+            label: format!("{} street cash", variation.neighborhood_name()),
         },
     )?;
     let enterprise_settlement = insert_account(
@@ -1781,7 +1988,7 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
-            label: "South Ward gambling settlement".to_owned(),
+            label: format!("{} gambling settlement", variation.neighborhood_name()),
         },
     )?;
     let liquidation_cash = insert_account(
@@ -1844,15 +2051,14 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
             source_entity: Some(EntityRef::Character(bartender)),
             subject: EntityRef::Business(target),
             observed_at: state.now(),
-            reliability: Reliability::Mixed,
-            specificity: Specificity::General,
-            summary: "Lena Orr says Bellmore keeps valuable stock overnight and uses a rear service entrance; she does not know the alarm or patrol pattern."
-                .to_owned(),
+            reliability: variation.source_reliability(),
+            specificity: variation.source_specificity(),
+            summary: variation.source_summary().to_owned(),
         },
     )?
     .commit(&mut state);
 
-    Ok(Scenario {
+    let scenario = Scenario {
         registry,
         state,
         player,
@@ -1872,15 +2078,15 @@ fn build_scenario(seed: u64, profile: ScenarioProfile) -> Result<Scenario, Box<d
         detective,
         opportunity_information,
         enterprise,
-    })
+        variation,
+    };
+    validate_harness_state(&scenario.registry, &scenario.state)?;
+    Ok(scenario)
 }
 
 fn authorize_surveillance(scenario: &mut Scenario) -> Result<OperationId, Box<dyn Error>> {
-    authorize_surveillance_target(
-        scenario,
-        EntityRef::Business(scenario.target),
-        "Bellmore surveillance",
-    )
+    let title = format!("{} surveillance", scenario.variation.target_name());
+    authorize_surveillance_target(scenario, EntityRef::Business(scenario.target), &title)
 }
 
 fn authorize_surveillance_target(
@@ -1925,7 +2131,7 @@ fn authorize_burglary(
         &scenario.registry,
         &scenario.state,
         OperationDraft {
-            title: "Bellmore burglary".to_owned(),
+            title: format!("{} burglary", scenario.variation.target_name()),
             kind: OperationKind::Burglary,
             responsible_organization: scenario.player,
             leader: scenario.lieutenant,
@@ -2300,6 +2506,7 @@ fn observe_tick(
             print_report("BRIEF GENERATED", report, scenario);
         }
     }
+    validate_harness_state(&scenario.registry, &scenario.state)?;
     Ok(())
 }
 
@@ -2372,7 +2579,13 @@ fn print_starting_player_view(scenario: &Scenario) {
             .name(),
     );
     println!(
-        "[DELEGATION] Carlo manages a gambling enterprise at Fulton Social Club; routine cycles are delegated."
+        "[DELEGATION] Carlo manages a gambling enterprise at {}; routine cycles are delegated.",
+        scenario
+            .state
+            .world()
+            .get_business(scenario.front)
+            .expect("front must exist")
+            .name(),
     );
     let detective = scenario
         .state
@@ -2636,8 +2849,9 @@ fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
 
 fn print_metrics(metrics: &RunMetrics) {
     println!(
-        "{:<6}: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
+        metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
         metrics.burglary_terminal_minute,
         metrics.police_dispatched,
@@ -2837,7 +3051,8 @@ fn level(value: u8) -> RelationshipLevel {
 mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows, run_smoke,
-        HarnessCliError, HarnessMode, HarnessOptions, DEFAULT_SEED,
+        FixtureVariation, HarnessCliError, HarnessMode, HarnessOptions, ScenarioProfile,
+        DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
 
@@ -2943,6 +3158,27 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not contain actionable recurring patrol windows"));
+    }
+
+    #[test]
+    fn seed_selects_distinct_authored_fixture_variations() {
+        let clockwork = FixtureVariation::from_seed(0);
+        let crowded = FixtureVariation::from_seed(1);
+        let quiet = FixtureVariation::from_seed(2);
+
+        assert_ne!(clockwork, crowded);
+        assert_ne!(crowded, quiet);
+        assert_ne!(clockwork, quiet);
+        assert_ne!(
+            clockwork.patrol_windows(ScenarioProfile::NightTrap),
+            crowded.patrol_windows(ScenarioProfile::NightTrap),
+        );
+        assert_ne!(clockwork.target_name(), crowded.target_name());
+        assert_ne!(crowded.source_specificity(), quiet.source_specificity());
+        assert_ne!(
+            clockwork.neighborhood_economy(),
+            quiet.neighborhood_economy(),
+        );
     }
 
     #[test]

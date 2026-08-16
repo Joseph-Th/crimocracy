@@ -24,6 +24,11 @@ This file records the architectural foundation currently present in the reposito
   ticks do not dominate the evidence or runtime. Operation waits have an explicit 1,440-minute
   harness guard so a broken terminal transition fails with context instead of hanging iteration.
   `--seed` selects the matched simulation seed and `--samples` remains bounded to 1..=64.
+  Each supplied seed also selects one of several small authored fixture variations (venue,
+  neighborhood, source quality, patrol rhythm, and routine economic context); RUSH, PRESS, and
+  RECON receive the same selected variation for a matched comparison. The harness validates state
+  against both structural and registry-aware contracts after setup and at each observation
+  boundary, and full-mode batches enforce the same strategy-specific evidence contracts as smoke.
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
   reuses one compiled target instead of launching a second untracked verification path.
 
