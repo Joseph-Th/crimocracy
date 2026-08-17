@@ -2,8 +2,13 @@
 //!
 //! RUSH, PRESS, and RECON use canonical production operations and player-visible information.
 //! `[DEV AUDIT]` output may inspect hidden state after decisions for diagnostics, but hidden state
-//! never feeds action selection. Batch runs vary the simulation seed only; strategy policy is
-//! deterministic and matched branches use the same seed.
+//! never feeds action selection. `[NARRATION]` lines are the harness's documentary voice: they
+//! explain world causality from player-visible facts and never feed action selection either.
+//! Narrative sessions also run a player-earned defector watch after an accepted defection: the
+//! organization watches a known rival through canonical surveillance and confirms where the
+//! departed member resurfaces, instead of the departure report leaking the recruiting organization.
+//! Batch runs vary the simulation seed only; strategy policy is deterministic and matched branches
+//! use the same seed.
 
 use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
@@ -507,6 +512,9 @@ struct RunMetrics {
     executive_brief_count: usize,
     autonomous_recruitment_attempts: u32,
     player_personnel_departures: u32,
+    defector: Option<crimocracy::core::id::CharacterId>,
+    defection_minute: Option<u64>,
+    defector_trail_confirmed: Option<bool>,
 }
 
 #[derive(Default)]
@@ -717,7 +725,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; case hot {:?}; cold {:?}; intelligence {:?}",
+            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; case hot {:?}; cold {:?}; intelligence {:?}; recruit attempts {}; departures {}",
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
             terminal_label(&metrics),
@@ -729,6 +737,8 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             metrics.followup_case_active,
             metrics.cold_case_confirmed,
             metrics.burglary_information_quality,
+            metrics.autonomous_recruitment_attempts,
+            metrics.player_personnel_departures,
         );
     }
     match selected_strategy {
@@ -1838,7 +1848,21 @@ fn play_session(
         } else {
             SimTime::from_minutes(1_440)
         };
-        run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
+        // The rival autonomous-recruitment cadence fires once per campaign day. Narrative sessions
+        // pause just past the first day boundary so an accepted defection is observable, let the
+        // organization run its own defector watch, then finish the observation window.
+        let recruitment_boundary = SimTime::from_minutes(1_441);
+        if narrative && observation_end > recruitment_boundary {
+            run_until(&mut scenario, recruitment_boundary, narrative, &mut metrics)?;
+        } else {
+            run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
+        }
+        if narrative && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
+            run_defector_trail(&mut scenario, narrative, &mut metrics)?;
+        }
+        if scenario.state.now() < observation_end {
+            run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
+        }
         let financials = resolve_financial_view(&scenario)?;
         metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
@@ -2841,6 +2865,8 @@ fn observe_tick(
         {
             metrics.player_personnel_departures =
                 metrics.player_personnel_departures.saturating_add(1);
+            metrics.defector = Some(attempt.candidate());
+            metrics.defection_minute = Some(outcome.now.as_minutes());
         }
         if narrative {
             let recruiter = scenario
@@ -2863,6 +2889,17 @@ fn observe_tick(
                 attempt.margin(),
                 attempt.outcome(),
             );
+            println!(
+                "[DEV AUDIT] Recruitment factors: drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, perceived legal pressure {}, membership resistance {}, trait adjustment {}.",
+                attempt.factors().drive_alignment(),
+                attempt.factors().relationship_support(),
+                attempt.factors().incumbent_attachment(),
+                attempt.factors().incumbent_resentment(),
+                attempt.factors().perceived_legal_pressure(),
+                attempt.factors().membership_resistance(),
+                attempt.factors().trait_adjustment(),
+            );
+            narrate_recruitment_causality(scenario, metrics, attempt, candidate);
         }
     }
 
@@ -2971,6 +3008,179 @@ fn observe_tick(
     Ok(())
 }
 
+/// Explains why an autonomous recruitment attempt landed or failed, connecting it to this
+/// session's player-visible events. `[NARRATION]` is the harness's documentary voice: it may
+/// explain world causality, but it never feeds action selection and never reads hidden
+/// case/evidence state.
+fn narrate_recruitment_causality(
+    scenario: &Scenario,
+    metrics: &RunMetrics,
+    attempt: &crimocracy::recruitment::RecruitmentAttemptRecord,
+    candidate: &crimocracy::world::CharacterRecord,
+) {
+    let candidate_name = candidate.name();
+    let crew_role = metrics
+        .burglary
+        .and_then(|operation| scenario.state.operations().get_operation(operation))
+        .and_then(|operation| {
+            operation
+                .roles()
+                .iter()
+                .find_map(|(role, member)| (*member == attempt.candidate()).then_some(*role))
+        });
+    let operation_title = metrics
+        .burglary
+        .and_then(|operation| scenario.state.operations().get_operation(operation))
+        .map(|operation| operation.title().to_owned());
+    let accepted = attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Accepted;
+    match (
+        accepted,
+        metrics.police_arrived,
+        crew_role,
+        operation_title,
+    ) {
+        (true, true, Some(role), Some(title)) => println!(
+            "[NARRATION] {candidate_name} was on the {title} crew when police arrived. That direct contact is the lever a rival's {:?} pitch exploited; the organization loses its {} for burglary work.",
+            attempt.approach(),
+            role_label(role),
+        ),
+        (true, true, _, Some(title)) => println!(
+            "[NARRATION] Police contact during the {title} operation opened the pressure window a rival's {:?} pitch exploited.",
+            attempt.approach(),
+        ),
+        (true, _, _, _) => println!(
+            "[NARRATION] {candidate_name} left the organization even without a revealed police contact this session; the rival's {:?} approach found another opening.",
+            attempt.approach(),
+        ),
+        (false, false, _, _) => println!(
+            "[NARRATION] {candidate_name} was not exposed to police this session, so the rival's {:?} pitch carried no immediate legal-pressure lever and it failed. The organization keeps its personnel.",
+            attempt.approach(),
+        ),
+        (false, true, _, _) => println!(
+            "[NARRATION] {candidate_name} refused the rival's {:?} pitch despite this session's police contact; the organization keeps its personnel.",
+            attempt.approach(),
+        ),
+    }
+}
+
+fn role_label(role: RoleKind) -> &'static str {
+    match role {
+        RoleKind::Driver => "driver",
+        RoleKind::Lookout => "lookout",
+        RoleKind::EntrySpecialist => "entry specialist",
+        RoleKind::SafeSpecialist => "safe specialist",
+        RoleKind::Muscle => "muscle",
+        RoleKind::InsideContact => "inside contact",
+        RoleKind::Coordinator => "coordinator",
+        RoleKind::Surveillance => "surveillance operator",
+        RoleKind::Negotiator => "negotiator",
+    }
+}
+
+/// Player-earned counter-intelligence after an accepted defection: the organization watches a
+/// known rival through canonical surveillance to confirm where the departed member resurfaces.
+/// The departure report deliberately never names the recruiting organization; this follow-up is
+/// the player-visible channel that closes the knowledge loop without any hidden-state reads.
+fn run_defector_trail(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    let Some(defector) = metrics.defector else {
+        return Ok(());
+    };
+    let defector_name = scenario
+        .state
+        .world()
+        .get_character(defector)
+        .expect("departed character must persist")
+        .name()
+        .to_owned();
+    let player_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.player)
+        .expect("player organization must persist")
+        .name()
+        .to_owned();
+    let rival_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.rival)
+        .expect("rival organization must persist")
+        .name()
+        .to_owned();
+    if narrative {
+        let departed_at = metrics
+            .defection_minute
+            .map(|minute| format!(" at minute {minute}"))
+            .unwrap_or_default();
+        println!(
+            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces; start with {rival_name}."
+        );
+    }
+    let title = format!("{rival_name} personnel watch");
+    let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
+    let operation = authorize_surveillance_target(
+        scenario,
+        EntityRef::Organization(scenario.rival),
+        &title,
+        scheduled_for,
+    )?;
+    run_until_operation_terminal(scenario, operation, narrative, metrics)?;
+    let resolution = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("personnel watch must persist")
+        .resolution()
+        .expect("completed personnel watch must have a resolution");
+    let confirmed = resolution
+        .discovered_information()
+        .iter()
+        .any(|information| {
+            scenario
+                .state
+                .intelligence()
+                .get_information(*information)
+                .is_some_and(|record| {
+                    record.topic() == InformationTopic::Personnel
+                        && record.subject() == EntityRef::Organization(scenario.rival)
+                        && record.summary().contains(&defector_name)
+                })
+        });
+    metrics.defector_trail_confirmed = Some(confirmed);
+    if narrative {
+        for information in resolution.discovered_information() {
+            let record = scenario
+                .state
+                .intelligence()
+                .get_information(*information)
+                .expect("personnel-watch information must persist");
+            if record.topic() == InformationTopic::Personnel
+                && record.subject() == EntityRef::Organization(scenario.rival)
+            {
+                println!(
+                    "[LEARN]   {:?} / {:?}: {}",
+                    record.reliability(),
+                    record.specificity(),
+                    record.summary()
+                );
+            }
+        }
+        if confirmed {
+            println!(
+                "[VERIFY DEFECTOR] {defector_name} now appears among {rival_name}'s recurring personnel. {player_name} confirmed through its own surveillance where its former member landed."
+            );
+        } else {
+            println!(
+                "[VERIFY DEFECTOR] The personnel watch did not directly confirm where {defector_name} landed."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn print_starting_player_view(scenario: &Scenario) {
     println!("[ORGANIZATION] Marrow Organization");
     for character in [
@@ -2995,7 +3205,7 @@ fn print_starting_player_view(scenario: &Scenario) {
         );
     }
     println!(
-        "[WORLD] {} has player-owned {} and {}, target {}, {} jurisdiction, and two rival organizations ({}, {}).",
+        "[WORLD] In {}: player fronts {} and {}; the target is {}; {} holds jurisdiction; two rivals operate: {} and {}.",
         scenario
             .state
             .world()
@@ -3454,7 +3664,15 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     print_loop_checkpoint(
         "organization",
         rush.autonomous_recruitment_attempts > 0 && rush.player_personnel_departures > 0,
-        "pressure changes personnel relationships without a scripted player event",
+        "a police-exposed crew member can be courted away by a rival without a scripted event",
+    );
+    let defector_trail_shown = rush.defector_trail_confirmed == Some(true)
+        && press.defector_trail_confirmed == Some(true)
+        && recon.defector_trail_confirmed.is_none();
+    print_loop_checkpoint(
+        "defector trail",
+        defector_trail_shown,
+        "after a departure, the organization can confirm where the defector landed through its own canonical surveillance channel instead of the report leaking the rival",
     );
     print_loop_checkpoint(
         "routine",
@@ -3479,6 +3697,11 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         terminal_label(rush),
     );
     println!(
+        "  - Personnel leverage: RUSH/PRESS exposed the crew to police and lost {} crew member(s) to rival recruitment, while RECON kept everyone ({} departures) because the crew never saw police.",
+        rush.player_personnel_departures + press.player_personnel_departures,
+        recon.player_personnel_departures,
+    );
+    println!(
         "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~500, then confirmed it shelved at minute {}; RECON realized {} cents of resale cash.",
         press.evidence_count,
         press.player_legal_activity_information,
@@ -3496,6 +3719,9 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     );
     println!(
         "  - The portfolio probe now covers prioritization and expiry across competing opportunities, but it still uses one operation type and does not test resource contention between simultaneous crews."
+    );
+    println!(
+        "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) currently stays inert."
     );
     println!(
         "  - The fixed RUSH/PRESS/RECON policies are calibration treatments; they expose causal differences but are not evidence that an actual player would choose the same policies."
