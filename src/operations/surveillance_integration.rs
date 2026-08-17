@@ -1276,6 +1276,7 @@ mod tests {
         }
 
         let police_information = police.id();
+        let access_information = access.id();
         let burglary = validate_authorize_operation(
             &fixture.registry,
             &fixture.state,
@@ -1292,7 +1293,7 @@ mod tests {
                     (RoleKind::Coordinator, fixture.observer),
                     (RoleKind::EntrySpecialist, fixture.observer),
                 ]),
-                intelligence: BTreeSet::from([police_information]),
+                intelligence: BTreeSet::from([police_information, access_information]),
                 constraints: Vec::new(),
                 contingencies: Vec::new(),
                 scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
@@ -1307,7 +1308,7 @@ mod tests {
             calculate_intelligence_factors(&fixture.registry, &fixture.state, burglary);
         assert!(quality.value() > 0);
         assert!(adjustment < 0);
-        assert!(covered > 0);
+        assert!(covered >= 2);
         assert!(covered < relevant);
         validate_state(&fixture.state).expect("surveillance-backed planning state should validate");
         validate_invariants(&fixture.state);

@@ -481,6 +481,7 @@ struct RunMetrics {
     decision_requests: u32,
     player_police_activity_information: u32,
     planning_information_count: usize,
+    planning_information_topics: BTreeSet<InformationTopic>,
     counterintelligence_outcome: Option<OperationObjectiveOutcome>,
     counterintelligence_information: usize,
     exposure_score: Option<i16>,
@@ -982,10 +983,16 @@ fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
             }
         }
         Strategy::Recon => {
-            if metrics.discovered_surveillance_information > 0 && metrics.outcome.is_some() {
+            if metrics.discovered_surveillance_information >= 2
+                && metrics.planning_information_count >= 3
+                && metrics
+                    .planning_information_topics
+                    .contains(&InformationTopic::MarketAccess)
+                && metrics.outcome.is_some()
+            {
                 None
             } else {
-                Some("surveillance information plus a terminal burglary outcome")
+                Some("surveillance information must carry both patrol and venue-access facts into the burglary plan")
             }
         }
     };
@@ -1434,9 +1441,12 @@ fn play_session(
                 );
             }
             if record.topic() == InformationTopic::PoliceActivity {
-                burglary_intelligence.insert(*information);
                 learned_patrol_summary = Some(record.summary().to_owned());
             }
+            // Every discovered record is already organization-held and target-relevant by the
+            // surveillance contract. Carry all of it into the next plan so the harness tests
+            // the same information-selection boundary a player would use.
+            burglary_intelligence.insert(*information);
         }
     } else if narrative && strategy == Strategy::Rush {
         println!(
@@ -1523,6 +1533,25 @@ fn play_session(
         .expect("burglary must exist")
         .intelligence()
         .len();
+    metrics.planning_information_topics = scenario
+        .state
+        .operations()
+        .get_operation(burglary)
+        .expect("burglary must exist")
+        .intelligence()
+        .iter()
+        .map(|information| {
+            scenario
+                .state
+                .intelligence()
+                .get_information(*information)
+                .expect("selected planning information must persist")
+                .topic()
+        })
+        .collect();
+    if narrative {
+        print_planning_inputs(&scenario, burglary);
+    }
 
     run_until_operation_terminal(&mut scenario, burglary, narrative, &mut metrics)?;
     metrics.burglary_terminal_minute = Some(scenario.state.now().as_minutes());
@@ -1565,6 +1594,7 @@ fn play_session(
                 resolution.exposure().investigation().is_some(),
                 resolution.exposure().evidence().len(),
             );
+            print_resolution_factors(resolution);
             if let Some(proceeds) = resolution.property_proceeds() {
                 println!(
                     "[PROCEEDS] Held property estimated at {} cents. This is organizational value, not liquid cash.",
@@ -2397,6 +2427,17 @@ fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(),
             "portfolio probe did not preserve selected and deferred opportunity lifecycles".into(),
         );
     }
+    if let Some(report_id) = deferred
+        .resolution()
+        .and_then(|resolution| resolution.report())
+    {
+        let report = scenario
+            .state
+            .reports()
+            .get_report(report_id)
+            .expect("expired opportunity report must persist");
+        print_report("PORTFOLIO EXPIRY REPORT", report, &scenario);
+    }
     println!(
         "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, and left the weaker opportunity to expire with a lifecycle report.",
         scenario.variation.alternate_target_name(),
@@ -2852,6 +2893,47 @@ fn print_starting_player_view(scenario: &Scenario) {
     );
 }
 
+fn print_planning_inputs(scenario: &Scenario, operation: OperationId) {
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("planning operation must persist");
+    for information_id in record.intelligence() {
+        let information = scenario
+            .state
+            .intelligence()
+            .get_information(*information_id)
+            .expect("selected planning information must persist");
+        println!(
+            "[PLAN INPUT] {:?} ({:?}/{:?}): {}",
+            information.topic(),
+            information.reliability(),
+            information.specificity(),
+            information.summary(),
+        );
+    }
+}
+
+fn print_resolution_factors(resolution: &crimocracy::operations::OperationResolutionRecord) {
+    let factors = resolution.factors();
+    println!(
+        "[CAUSAL FACTORS] margin {}; crew {}; leader {:?}; intelligence {} (-{} difficulty, {}/{} areas); police {:?}; response {}; approach {}; time pressure {}; variance {}.",
+        resolution.execution_margin(),
+        factors.role_capability_average().value(),
+        factors.leader_capability().map(Rating::value),
+        factors.intelligence_quality().value(),
+        factors.intelligence_adjustment().unsigned_abs(),
+        factors.intelligence_topics_covered(),
+        factors.intelligence_topics_relevant(),
+        factors.target_police_presence().map(Rating::value),
+        factors.police_response_arrived(),
+        factors.approach_adjustment(),
+        factors.time_pressure(),
+        factors.variance(),
+    );
+}
+
 fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
     let operation = scenario
         .state
@@ -3102,7 +3184,7 @@ fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -3111,6 +3193,7 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.police_arrived,
         metrics.decision_requests,
         metrics.planning_information_count,
+        metrics.planning_information_topics,
         metrics.burglary_information_quality,
         metrics.exposure_level,
         metrics.exposure_score,

@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 13;
+pub const CURRENT_CONTENT_REVISION: u32 = 14;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -810,7 +810,15 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
 
 fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationTopic> {
     let topics: &[InformationTopic] = match kind {
-        OperationKind::Burglary | OperationKind::DocumentTheft | OperationKind::Sabotage => &[
+        OperationKind::Burglary => &[
+            InformationTopic::TargetSecurity,
+            InformationTopic::MarketAccess,
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
+            InformationTopic::Route,
+        ],
+        OperationKind::DocumentTheft | OperationKind::Sabotage => &[
             InformationTopic::TargetSecurity,
             InformationTopic::Personnel,
             InformationTopic::Schedule,
