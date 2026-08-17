@@ -564,7 +564,7 @@ mod tests {
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
-        CharacterDraft, OrganizationDraft,
+        CapabilityKind, CharacterDraft, OrganizationDraft,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -574,6 +574,7 @@ mod tests {
         organization: OrganizationId,
         business: crate::core::id::BusinessId,
         leader: crate::core::id::CharacterId,
+        entry_specialist: crate::core::id::CharacterId,
         source: InformationId,
     }
 
@@ -638,6 +639,23 @@ mod tests {
             },
         )
         .expect("leader fixture should validate");
+        let entry_specialist = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Opportunity Entry Specialist".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Burglary,
+                    crate::world::Rating::try_new(70).unwrap(),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("entry specialist fixture should validate");
         let source = validate_record_information(
             &state,
             InformationDraft {
@@ -661,6 +679,7 @@ mod tests {
             organization,
             business,
             leader,
+            entry_specialist,
             source,
         }
     }
@@ -695,7 +714,7 @@ mod tests {
                 approach: OperationApproach::Covert,
                 roles: BTreeMap::from([
                     (RoleKind::Coordinator, fixture.leader),
-                    (RoleKind::EntrySpecialist, fixture.leader),
+                    (RoleKind::EntrySpecialist, fixture.entry_specialist),
                 ]),
                 intelligence: BTreeSet::from([fixture.source]),
                 constraints: Vec::new(),

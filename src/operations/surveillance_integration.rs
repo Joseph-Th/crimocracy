@@ -1099,6 +1099,7 @@ mod tests {
         state: AppState,
         crew: OrganizationId,
         observer: CharacterId,
+        entry_specialist: CharacterId,
         police: OrganizationId,
         neighborhood: NeighborhoodId,
         business: BusinessId,
@@ -1221,11 +1222,26 @@ mod tests {
             },
         )
         .expect("observer should validate");
+        let entry_specialist = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Nora Quill".to_owned(),
+                organization: Some(crew),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(CapabilityKind::Burglary, rating(observer_skill))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("entry specialist should validate");
         Fixture {
             registry,
             state,
             crew,
             observer,
+            entry_specialist,
             police,
             neighborhood,
             business,
@@ -1389,7 +1405,7 @@ mod tests {
                 approach: OperationApproach::Covert,
                 roles: BTreeMap::from([
                     (RoleKind::Coordinator, fixture.observer),
-                    (RoleKind::EntrySpecialist, fixture.observer),
+                    (RoleKind::EntrySpecialist, fixture.entry_specialist),
                 ]),
                 intelligence: BTreeSet::from([police_information, access_information]),
                 constraints: Vec::new(),

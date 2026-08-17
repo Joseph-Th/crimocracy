@@ -350,7 +350,10 @@ pub fn decide_enterprise_cycle(
             expected_enterprise_version: record.version(),
             authority,
             occurred_at: state.now(),
-            next_cycle_at: due_at + economics.cycle(),
+            // A detained manager leaves the enterprise overdue, but missed cycles are not
+            // retroactively paid out in a burst after release. Re-anchor the next cycle to the
+            // actual settlement instant so routine work resumes at its authored cadence.
+            next_cycle_at: state.now() + economics.cycle(),
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,
@@ -1468,6 +1471,11 @@ mod tests {
                 .next_cycle_at(),
             Some(SimTime::from_minutes(1_440))
         );
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(2_880));
+        let still_detained_tick = run_tick(&registry, &mut fixture.state);
+        assert!(still_detained_tick.enterprise_cycles.is_empty());
         validate_state(&fixture.state).expect("paused enterprise detention state should validate");
         validate_invariants(&fixture.state);
 
@@ -1486,6 +1494,18 @@ mod tests {
                 .enterprise(),
             enterprise
         );
+        let next_cycle_at = fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("enterprise should persist after release")
+            .next_cycle_at();
+        assert_eq!(
+            next_cycle_at,
+            Some(fixture.state.now() + SimDuration::from_minutes(1_440))
+        );
+        let no_burst_tick = run_tick(&registry, &mut fixture.state);
+        assert!(no_burst_tick.enterprise_cycles.is_empty());
         validate_state(&fixture.state).expect("resumed enterprise state should validate");
         validate_invariants(&fixture.state);
     }

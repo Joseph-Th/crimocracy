@@ -103,6 +103,16 @@ pub enum OperationError {
     },
     #[error("property-acquisition objective target {0:?} is not a business")]
     InvalidPropertyTarget(EntityRef),
+    #[error("operation objective target {0:?} is inactive")]
+    InactiveObjectiveTarget(EntityRef),
+    #[error(
+        "character {character} is assigned to multiple operation roles: {first_role:?} and {second_role:?}"
+    )]
+    DuplicateRoleParticipant {
+        character: CharacterId,
+        first_role: RoleKind,
+        second_role: RoleKind,
+    },
     #[error("operation is missing required role {0:?}")]
     MissingRequiredRole(RoleKind),
     #[error("operation is scheduled in the past")]
@@ -321,7 +331,7 @@ pub fn validate_authorize_operation(
             unreachable!("authorization validates target existence through the operation objective")
         }
     })?;
-    validate_operation_objective(draft.kind, &draft.objective)?;
+    validate_operation_objective(state, draft.kind, &draft.objective)?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -333,7 +343,15 @@ pub fn validate_authorize_operation(
             return Err(OperationError::MissingRequiredRole(*role));
         }
     }
-    for participant in draft.roles.values() {
+    let mut role_participants = BTreeMap::new();
+    for (role, participant) in &draft.roles {
+        if let Some(first_role) = role_participants.insert(*participant, *role) {
+            return Err(OperationError::DuplicateRoleParticipant {
+                character: *participant,
+                first_role,
+                second_role: *role,
+            });
+        }
         let record = state
             .world
             .get_character(*participant)
@@ -483,12 +501,31 @@ pub(crate) fn is_valid_operation_objective(
 }
 
 fn validate_operation_objective(
+    state: &AppState,
     kind: OperationKind,
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     if let OperationObjective::AcquireProperty { target } = objective {
-        if !matches!(target, EntityRef::Business(_)) {
+        let EntityRef::Business(business) = target else {
             return Err(OperationError::InvalidPropertyTarget(*target));
+        };
+        let business_record = state
+            .world
+            .get_business(*business)
+            .ok_or(OperationError::MissingEntity(*target))?;
+        if business_record.lifecycle() != Lifecycle::Active {
+            return Err(OperationError::InactiveObjectiveTarget(*target));
+        }
+        let neighborhood = state
+            .world
+            .get_neighborhood(business_record.neighborhood())
+            .ok_or(OperationError::MissingEntity(EntityRef::Neighborhood(
+                business_record.neighborhood(),
+            )))?;
+        if neighborhood.lifecycle() != Lifecycle::Active {
+            return Err(OperationError::InactiveObjectiveTarget(
+                EntityRef::Neighborhood(business_record.neighborhood()),
+            ));
         }
     }
     if kind != OperationKind::Surveillance
@@ -1248,6 +1285,37 @@ mod tests {
                 character: foreign_member,
                 expected: organization,
                 actual: Some(foreign_organization),
+            }
+        );
+        assert_eq!(state.operations().operations().count(), 0);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_rejects_one_character_filling_multiple_roles() {
+        let (registry, state, organization, leader, target) = make_test_operation_state();
+        let draft = OperationDraft {
+            title: "Impossible double assignment".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::Frighten { target },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Lookout, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::ZERO,
+        };
+
+        let error = validate_authorize_operation(&registry, &state, draft)
+            .expect_err("one character must not fill multiple simultaneous roles");
+        assert_eq!(
+            error,
+            OperationError::DuplicateRoleParticipant {
+                character: leader,
+                first_role: RoleKind::Lookout,
+                second_role: RoleKind::Coordinator,
             }
         );
         assert_eq!(state.operations().operations().count(), 0);
