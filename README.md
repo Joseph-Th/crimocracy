@@ -32,12 +32,21 @@ If these current authorities disagree about the same subject, treat the disagree
 
 ## Verification
 
-Use the smallest focused test while editing. The fast Rust completion gate is:
+Use the smallest focused test while editing. The one-command local gate runs the whole fast
+completion contract with clear per-stage output and timing:
+
+```text
+.\scripts\verify.ps1
+```
+
+It runs the four canonical steps below in order, stops at the first failing stage, and exits
+non-zero on failure. Build parallelism is cargo-autodetected; pass `-Jobs N` to cap it when you want
+to leave the machine quieter. The same four steps, run raw, are:
 
 ```text
 cargo fmt --check
-cargo clippy --locked --lib --example gameplay_harness -j 2 -- -D warnings
-cargo test --locked --all-targets --quiet -j 2
+cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+cargo test --locked --all-targets --quiet
 cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
 ```
 
@@ -63,6 +72,9 @@ cargo lint-fast
 cargo test-fast
 cargo soak
 cargo harness-smoke
+cargo harness-rush
+cargo harness-press
+cargo harness-recon
 cargo harness -- --mode smoke --strategy press
 ```
 
@@ -79,7 +91,7 @@ cargo run --locked --quiet --example gameplay_harness -- --mode smoke --strategy
 When a change can differ under optimized compilation, especially assertions, indexing, arithmetic, or persistence-sensitive runtime behavior, also run:
 
 ```text
-cargo test --release --locked -j 2
+cargo test --release --locked
 ```
 
 The explicit gameplay/integration lane is the controlled/calibration harness:

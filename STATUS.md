@@ -4,14 +4,19 @@ This file records the architectural foundation currently present in the reposito
 
 ## Verification Surface
 
-- The local completion gate documented in `README.md` is the verification authority. It checks
-  formatting, production/harness Clippy, the all-target unit/doc-test/example suite, and the targeted
-  smoke harness test. The all-target test pass owns compilation verification so the gate does not
-  repeat a separate all-target `cargo check`; Clippy does not rebuild test targets that the test pass
-  will compile. The controlled smoke contract is an explicit ignored test so it runs exactly once
-  afterward with focused output. GitHub Actions and hosted runners are not part of the verification
-  path. Release builds and long-form gameplay reports remain deliberate local checks rather than
-  part of every change gate.
+- `scripts/verify.ps1` is the one-command local completion gate and the verification authority. It
+  runs the canonical four-stage contract -- format check, production/harness Clippy, the all-target
+  unit/doc-test/example suite, and the targeted smoke harness test -- with per-stage PASS/FAIL and
+  timing, and stops at the first failing stage so a broken change fails fast. The equivalent raw
+  commands are documented in `README.md`. The all-target test pass owns compilation verification, so
+  the gate does not repeat a separate all-target `cargo check`; Clippy does not rebuild test targets
+  that the test pass will compile. The controlled smoke contract is an explicit ignored test so it
+  runs exactly once afterward with focused output. Build parallelism is cargo-autodetected rather
+  than fixed at the two-job ceiling the removed hosted runners needed, so cold dependency graphs and
+  the large single crate build as fast as the local machine allows; `verify.ps1 -Jobs N` caps
+  parallelism when a quieter build is wanted. GitHub Actions and hosted runners are not part of the
+  verification path. Release builds and long-form gameplay reports remain deliberate local checks
+  rather than part of every change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
   and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
   player-knowledge, standing-contingency, decision, surveillance, follow-up, and legal-consequence
@@ -35,8 +40,8 @@ This file records the architectural foundation currently present in the reposito
   RECON receive the same selected variation for a matched comparison. The harness validates state
   against both structural and registry-aware contracts after setup and at each observation
   boundary, and full-mode batches enforce the same strategy-specific evidence contracts as smoke.
-- Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
-  reuses one compiled target instead of launching a second untracked verification path. Smoke also
+- Harness CLI parsing has focused tests, and the smoke contract is run as an example test so the
+  gate reuses one compiled target instead of launching a second untracked verification path. Smoke also
   accepts a focused strategy selector for fast policy iteration while the default runs RUSH, PRESS,
   and RECON together; focused strategy runs skip the independent legal-foundation probe. The
   harness defaults to smoke mode so an unqualified example run stays fast;
@@ -48,7 +53,8 @@ This file records the architectural foundation currently present in the reposito
   shares it across legal, narrative, and matched-batch sessions; each session still owns a fresh
   mutable `AppState`.
 - `.cargo/config.toml` provides the short local loops `check-fast`, `lint-fast`, `test-fast`,
-  `soak`, `harness-smoke`, and `harness`. The fast unit alias skips only the named invariant soak;
+  `soak`, `harness-smoke`, the focused strategy aliases `harness-rush`, `harness-press`, and
+  `harness-recon`, and the generic `harness`. The fast unit alias skips only the named invariant soak;
   the normal test gate still includes it, and `soak` runs it explicitly when that stress coverage
   is the work being changed.
 

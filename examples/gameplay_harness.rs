@@ -688,11 +688,14 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
     let registry = build_registry();
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("mode: smoke | seed {seed:#x}");
-    println!(
-        "contract: {} canonical strategy path{} plus legal foundation",
-        selected_strategy.map_or("all".to_owned(), |strategy| strategy.label().to_owned()),
-        if selected_strategy.is_some() { "" } else { "s" },
-    );
+    let contract = match selected_strategy {
+        Some(strategy) => format!(
+            "contract: {} canonical strategy path (legal foundation skipped)",
+            strategy.label()
+        ),
+        None => "contract: all canonical strategy paths plus legal foundation".to_owned(),
+    };
+    println!("{contract}");
 
     if selected_strategy.is_none() {
         run_legal_foundation_check(&registry)?;
@@ -928,7 +931,7 @@ fn print_usage() {
     println!(
         "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX]"
     );
-    println!("  smoke  Fast canonical-path check for CI and local iteration (default).");
+    println!("  smoke  Fast canonical-path check for the local gate and iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
     println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
 }
@@ -3796,7 +3799,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "controlled smoke contract runs in its focused CI lane"]
+    #[ignore = "controlled smoke contract runs in its focused local gate lane"]
     fn smoke_mode_covers_canonical_paths() {
         run_smoke(DEFAULT_SEED, None)
             .expect("smoke harness should pass its canonical-path contract");
