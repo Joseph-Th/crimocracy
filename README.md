@@ -36,7 +36,7 @@ Use the smallest focused test while editing. The fast Rust completion gate is:
 
 ```text
 cargo fmt --check
-cargo clippy --locked --all-targets -j 2 -- -D warnings
+cargo clippy --locked --lib --example gameplay_harness -j 2 -- -D warnings
 cargo test --locked --all-targets --quiet -j 2
 cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
 ```
@@ -45,13 +45,30 @@ The GitHub Actions gate runs those checks in one cached job, compiles every targ
 all-target test pass, marks the controlled smoke contract as an explicit ignored test, and runs it
 immediately afterward with focused output. Superseded runs on the same branch are cancelled. CI
 disables incremental artifacts and test debug symbols to keep clean-run linking and cache uploads
-small. It does not run the long-form narrative batch or an optimized build on every change.
+small. Clippy intentionally covers production library code and the gameplay harness; the all-target
+test pass owns test-target compilation so CI does not build the same test targets twice. It does not
+run the long-form narrative batch or an optimized build on every change.
 Use the smoke harness for normal iteration. Running the example without a mode is also a fast
 smoke run; full calibration is always explicit:
 
 ```text
 cargo run --locked --quiet --example gameplay_harness -- --mode smoke
 ```
+
+The repository also provides Cargo aliases for the short loops:
+
+```text
+cargo check-fast
+cargo lint-fast
+cargo test-fast
+cargo soak
+cargo harness-smoke
+cargo harness -- --mode smoke --strategy press
+```
+
+`cargo test-fast` skips only the named invariant soak; `cargo soak` runs that deliberate stress
+check explicitly, while the normal `cargo test` gate still includes it. Focused `--strategy` smoke
+runs skip the independent legal-foundation probe; the default smoke run and CI still execute it.
 
 When iterating on one policy branch, focus the smoke run without changing the default CI contract:
 

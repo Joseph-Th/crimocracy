@@ -5,12 +5,12 @@ This file records the architectural foundation currently present in the reposito
 ## Verification Surface
 
 - `.github/workflows/ci.yml` is the single cached verification job for pushes and pull requests. It
-  checks formatting, Clippy, the all-target unit/doc-test/example suite, and the targeted smoke
+  checks formatting, production/harness Clippy, the all-target unit/doc-test/example suite, and the targeted smoke
   harness test. The all-target test pass owns compilation verification so CI does not repeat a
-  separate all-target `cargo check`; the controlled smoke contract is an explicit ignored test so it
-  runs exactly once afterward with focused output. Superseded runs on the same branch are cancelled,
-  and CI disables incremental artifacts and test debug symbols to keep clean-run linking and cache
-  uploads small.
+  separate all-target `cargo check`; Clippy does not rebuild test targets that the test pass will
+  compile. The controlled smoke contract is an explicit ignored test so it runs exactly once
+  afterward with focused output. Superseded runs on the same branch are cancelled, and CI disables
+  incremental artifacts and test debug symbols to keep clean-run linking and cache uploads small.
   Release builds and long-form gameplay reports remain deliberate local checks rather than part of
   every change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
@@ -35,7 +35,8 @@ This file records the architectural foundation currently present in the reposito
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
   reuses one compiled target instead of launching a second untracked verification path. Smoke also
   accepts a focused strategy selector for fast policy iteration while the default runs RUSH, PRESS,
-  and RECON together. The harness defaults to smoke mode so an unqualified example run stays fast;
+  and RECON together; focused strategy runs skip the independent legal-foundation probe. The
+  harness defaults to smoke mode so an unqualified example run stays fast;
   full mode is explicit and defaults to three matched samples, the minimum that exercises all
   authored fixture variations. The full readout also compares information leverage,
   exception-response leverage, and consequence leverage explicitly so a passing run explains
@@ -43,6 +44,10 @@ This file records the architectural foundation currently present in the reposito
   The harness builds one shared immutable registry per process and
   shares it across legal, narrative, and matched-batch sessions; each session still owns a fresh
   mutable `AppState`.
+- `.cargo/config.toml` provides the short local loops `check-fast`, `lint-fast`, `test-fast`,
+  `soak`, `harness-smoke`, and `harness`. The fast unit alias skips only the named invariant soak;
+  the normal test gate still includes it, and `soak` runs it explicitly when that stress coverage
+  is the work being changed.
 
 ## Current Foundation
 

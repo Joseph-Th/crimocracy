@@ -683,7 +683,11 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
         if selected_strategy.is_some() { "" } else { "s" },
     );
 
-    run_legal_foundation_check(&registry)?;
+    if selected_strategy.is_none() {
+        run_legal_foundation_check(&registry)?;
+    } else {
+        println!("legal foundation: skipped for focused strategy iteration");
+    }
     for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
         if selected_strategy.is_some_and(|selected| selected != strategy) {
             continue;

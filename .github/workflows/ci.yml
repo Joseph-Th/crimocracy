@@ -39,8 +39,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run Clippy
-        run: cargo clippy --locked --all-targets -j 2 -- -D warnings
+      - name: Lint production library and gameplay harness
+        # The all-target test below is the owner of test-target compilation. Linting test
+        # harnesses here as well would compile the same large test targets twice.
+        run: cargo clippy --locked --lib --example gameplay_harness -j 2 -- -D warnings
 
       - name: Run unit, documentation, and example tests
         run: cargo test --locked --all-targets --quiet -j 2
