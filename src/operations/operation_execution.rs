@@ -246,10 +246,10 @@ pub(crate) fn decide_operation_resolution(
     }
 
     let role_capability_average = resolve_role_capability_average(registry, state, operation);
-    let leader_management = state
+    let leader_capability = state
         .world
         .get_character(record.leader())
-        .and_then(|leader| leader.capability(CapabilityKind::Management));
+        .and_then(|leader| leader.capability(execution.leader_capability()));
     let (
         intelligence_quality,
         intelligence_adjustment,
@@ -286,7 +286,7 @@ pub(crate) fn decide_operation_resolution(
 
     let factors = OperationResolutionFactors {
         role_capability_average,
-        leader_management,
+        leader_capability,
         intelligence_quality,
         intelligence_adjustment,
         intelligence_topics_covered,
@@ -1101,12 +1101,12 @@ fn resolve_time_pressure(started_at: SimTime, due_at: SimTime, base_duration: u3
     u8::try_from(pressure.min(30)).expect("bounded time pressure must fit u8")
 }
 
-fn weighted_ability(role_average: Rating, leader_management: Option<Rating>) -> i16 {
+fn weighted_ability(role_average: Rating, leader_capability: Option<Rating>) -> i16 {
     let role = i16::from(role_average.value());
-    let management = leader_management
+    let leadership = leader_capability
         .map(|rating| i16::from(rating.value()))
         .unwrap_or(role);
-    (role * 3 + management) / 4
+    (role * 3 + leadership) / 4
 }
 
 pub(crate) fn calculate_intelligence_factors(
@@ -1214,7 +1214,7 @@ pub(crate) fn calculate_execution_margin(
 ) -> i16 {
     let ability = weighted_ability(
         factors.role_capability_average(),
-        factors.leader_management(),
+        factors.leader_capability(),
     );
     let police_pressure = factors
         .target_police_presence()
@@ -1310,8 +1310,8 @@ fn build_after_action_summary(
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
 ) -> String {
-    let management = factors
-        .leader_management()
+    let leadership = factors
+        .leader_capability()
         .map(|rating| {
             format!(
                 "Leadership coordination was {}.",
@@ -1319,7 +1319,7 @@ fn build_after_action_summary(
             )
         })
         .unwrap_or_else(|| {
-            "Leadership had no demonstrated management capability for the execution.".to_owned()
+            "Leadership had no demonstrated capability for the execution.".to_owned()
         });
     let police = match factors.target_police_presence() {
         Some(rating) if rating.value() >= 65 => {
@@ -1389,7 +1389,7 @@ fn build_after_action_summary(
         "Objective {}. Assigned-role competence was {}. {} {} {} {} {} {} {} {}",
         outcome_label(outcome),
         band_label(factors.role_capability_average().qualitative_band()),
-        management,
+        leadership,
         intelligence,
         police,
         response,
@@ -1906,7 +1906,7 @@ mod tests {
     fn after_action_summary_contextualizes_adverse_variance() {
         let factors = OperationResolutionFactors {
             role_capability_average: Rating::try_new(80).expect("fixture rating should be valid"),
-            leader_management: Some(Rating::try_new(80).expect("fixture rating should be valid")),
+            leader_capability: Some(Rating::try_new(80).expect("fixture rating should be valid")),
             intelligence_quality: Rating::try_new(0).expect("fixture rating should be valid"),
             intelligence_adjustment: 0,
             intelligence_topics_covered: 0,

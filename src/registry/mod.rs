@@ -320,6 +320,7 @@ pub struct OperationDefinition {
 #[derive(Clone, Debug)]
 pub struct OperationExecutionDefinition {
     pub(crate) difficulty: OperationDifficultyDefinition,
+    pub(crate) leader_capability: CapabilityKind,
     pub(crate) intelligence: OperationIntelligenceDefinition,
     pub(crate) exposure: OperationExposureDefinition,
     pub(crate) police_response: OperationPoliceResponseDefinition,
@@ -383,6 +384,9 @@ impl OperationExecutionDefinition {
     }
     pub fn base_difficulty(&self) -> u8 {
         self.difficulty.base_difficulty
+    }
+    pub fn leader_capability(&self) -> CapabilityKind {
+        self.leader_capability
     }
     pub fn capability_for_role(&self, role: RoleKind) -> Option<CapabilityKind> {
         self.difficulty.role_capabilities.get(&role).copied()
@@ -1534,6 +1538,33 @@ mod tests {
             definition.required_roles().clone(),
             definition.execution().clone(),
         )
+    }
+
+    #[test]
+    fn operation_leaders_use_their_authored_domain_capability() {
+        let registry = build_registry();
+
+        assert_eq!(
+            registry
+                .get_operation(OperationKind::Burglary)
+                .execution()
+                .leader_capability(),
+            CapabilityKind::Management
+        );
+        assert_eq!(
+            registry
+                .get_operation(OperationKind::Surveillance)
+                .execution()
+                .leader_capability(),
+            CapabilityKind::Surveillance
+        );
+        assert_eq!(
+            registry
+                .get_operation(OperationKind::Bribery)
+                .execution()
+                .leader_capability(),
+            CapabilityKind::Negotiation
+        );
     }
 
     fn recruitment_spec() -> RecruitmentDefinitionSpec {

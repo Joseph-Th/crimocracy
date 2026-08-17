@@ -389,7 +389,8 @@ impl OperationPropertyDispositionRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResolutionFactors {
     role_capability_average: Rating,
-    leader_management: Option<Rating>,
+    #[serde(alias = "leader_management")]
+    leader_capability: Option<Rating>,
     intelligence_quality: Rating,
     intelligence_adjustment: i8,
     intelligence_topics_covered: u8,
@@ -406,8 +407,8 @@ impl OperationResolutionFactors {
         self.role_capability_average
     }
 
-    pub fn leader_management(self) -> Option<Rating> {
-        self.leader_management
+    pub fn leader_capability(self) -> Option<Rating> {
+        self.leader_capability
     }
 
     pub fn intelligence_quality(self) -> Rating {

@@ -61,7 +61,7 @@ use crimocracy::operations::{
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
 };
-use crimocracy::opportunities::OperationOpportunityDraft;
+use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
 use crimocracy::registry::Registry;
 use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::social::relationship_system::validate_set_relationship;
@@ -264,6 +264,28 @@ impl FixtureVariation {
         }
     }
 
+    fn alternate_target_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "Bellmore Service Annex",
+            Self::Crowded => "Calder's Receiving House",
+            Self::Quiet => "Vesper Gold Annex",
+        }
+    }
+
+    fn alternate_source_summary(self) -> &'static str {
+        match self {
+            Self::Clockwork => {
+                "A delivery clerk directly observed the Bellmore service annex receiving high-value consignments after midnight."
+            }
+            Self::Crowded => {
+                "A delivery clerk directly observed Calder's receiving house storing high-value consignments after midnight."
+            }
+            Self::Quiet => {
+                "A delivery clerk directly observed the Vesper annex storing high-value consignments after midnight."
+            }
+        }
+    }
+
     fn front_name(self) -> &'static str {
         match self {
             Self::Clockwork => "Fulton Social Club",
@@ -429,6 +451,7 @@ struct Scenario<'registry> {
     police: OrganizationId,
     neighborhood: crimocracy::core::id::NeighborhoodId,
     target: BusinessId,
+    alternate_target: BusinessId,
     front: BusinessId,
     resale_venue: BusinessId,
     liquidation_cash: crimocracy::core::id::FinancialAccountId,
@@ -439,6 +462,7 @@ struct Scenario<'registry> {
     scout: CharacterId,
     detective: CharacterId,
     opportunity_information: InformationId,
+    alternate_opportunity_information: InformationId,
     enterprise: EnterpriseId,
     variation: FixtureVariation,
 }
@@ -762,6 +786,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!(
         "[HARNESS CHECK] Unchanged legitimate and delegated-enterprise systems produced identical cashflow across strategy branches."
     );
+
+    println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
+    run_opportunity_portfolio_probe(&registry, seed)?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;
@@ -1452,9 +1479,13 @@ fn play_session(
         )
         .into());
     }
+    let target = scenario.target;
+    let title = format!("{} burglary", scenario.variation.target_name());
     let burglary = authorize_burglary(
         &mut scenario,
         strategy,
+        target,
+        &title,
         scheduled_for,
         burglary_intelligence,
     )?;
@@ -1980,6 +2011,20 @@ fn build_scenario(
             owner: BusinessOwner::Independent,
         },
     )?;
+    let alternate_target = insert_business(
+        registry,
+        &mut state,
+        BusinessDraft {
+            name: variation.alternate_target_name().to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::ProfessionalRecords,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )?;
     let front = insert_business(
         registry,
         &mut state,
@@ -2121,6 +2166,21 @@ fn build_scenario(
         },
     )?
     .commit(&mut state);
+    let alternate_opportunity_information = validate_record_information(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(player),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: Some(EntityRef::Character(bartender)),
+            subject: EntityRef::Business(alternate_target),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: variation.alternate_source_summary().to_owned(),
+        },
+    )?
+    .commit(&mut state);
 
     let scenario = Scenario {
         registry,
@@ -2131,6 +2191,7 @@ fn build_scenario(
         police,
         neighborhood,
         target,
+        alternate_target,
         front,
         resale_venue,
         liquidation_cash,
@@ -2141,6 +2202,7 @@ fn build_scenario(
         scout,
         detective,
         opportunity_information,
+        alternate_opportunity_information,
         enterprise,
         variation,
     };
@@ -2181,6 +2243,8 @@ fn authorize_surveillance_target(
 fn authorize_burglary(
     scenario: &mut Scenario,
     strategy: Strategy,
+    target: BusinessId,
+    title: &str,
     scheduled_for: SimTime,
     intelligence: BTreeSet<InformationId>,
 ) -> Result<OperationId, Box<dyn Error>> {
@@ -2195,12 +2259,12 @@ fn authorize_burglary(
         scenario.registry,
         &scenario.state,
         OperationDraft {
-            title: format!("{} burglary", scenario.variation.target_name()),
+            title: title.to_owned(),
             kind: OperationKind::Burglary,
             responsible_organization: scenario.player,
             leader: scenario.lieutenant,
             objective: OperationObjective::AcquireProperty {
-                target: EntityRef::Business(scenario.target),
+                target: EntityRef::Business(target),
             },
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([
@@ -2217,6 +2281,124 @@ fn authorize_burglary(
         },
     )?
     .commit(&mut scenario.state)?)
+}
+
+fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let valid_until = Some(SimTime::from_minutes(180));
+    let primary_opportunity = validate_discover_operation_opportunity(
+        scenario.registry,
+        &scenario.state,
+        OperationOpportunityDraft {
+            organization: scenario.player,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Business(scenario.target)]),
+            source_information: BTreeSet::from([scenario.opportunity_information]),
+            summary: scenario.variation.opportunity_summary().to_owned(),
+            valid_until,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let alternate_opportunity = validate_discover_operation_opportunity(
+        scenario.registry,
+        &scenario.state,
+        OperationOpportunityDraft {
+            organization: scenario.player,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Business(scenario.alternate_target)]),
+            source_information: BTreeSet::from([scenario.alternate_opportunity_information]),
+            summary: format!(
+                "{} has directly observed high-value stock available after midnight.",
+                scenario.variation.alternate_target_name()
+            ),
+            valid_until,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    println!(
+        "[PORTFOLIO] Two burglary opportunities are open until minute 180: {} (street rumor) and {} (direct, precise observation).",
+        scenario.variation.target_name(),
+        scenario.variation.alternate_target_name(),
+    );
+
+    // This is an explicit player-visible prioritization rule: commit the opportunity with the
+    // strongest available source instead of treating every open card as equally actionable.
+    let target = scenario.alternate_target;
+    let title = format!("{} burglary", scenario.variation.alternate_target_name());
+    let intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
+    let selected_operation = authorize_burglary(
+        &mut scenario,
+        Strategy::Rush,
+        target,
+        &title,
+        SimTime::from_minutes(130),
+        intelligence,
+    )?;
+    validate_convert_opportunity(&scenario.state, alternate_opportunity, selected_operation)?
+        .commit(&mut scenario.state)?;
+    let mut metrics = RunMetrics {
+        strategy: Some(Strategy::Rush),
+        variation: Some(scenario.variation),
+        burglary: Some(selected_operation),
+        ..RunMetrics::default()
+    };
+    run_until_operation_terminal(&mut scenario, selected_operation, false, &mut metrics)?;
+    metrics.burglary_terminal_minute = Some(scenario.state.now().as_minutes());
+    run_until(
+        &mut scenario,
+        SimTime::from_minutes(181),
+        false,
+        &mut metrics,
+    )?;
+    let selected_operation_record = scenario
+        .state
+        .operations()
+        .get_operation(selected_operation)
+        .expect("selected portfolio operation must persist");
+    metrics.aborted = selected_operation_record.status() == OperationStatus::Aborted;
+    if metrics.aborted {
+        let abort = selected_operation_record
+            .abort_record()
+            .expect("aborted portfolio operation must preserve its cause");
+        metrics.abort_phase = Some(abort.phase());
+        metrics.abort_cause = Some(abort.cause());
+    } else {
+        metrics.outcome = selected_operation_record
+            .resolution()
+            .map(|resolution| resolution.objective_outcome());
+    }
+    validate_harness_state(scenario.registry, &scenario.state)?;
+    let selected = scenario
+        .state
+        .opportunities()
+        .get_opportunity(alternate_opportunity)
+        .expect("selected opportunity must persist");
+    let deferred = scenario
+        .state
+        .opportunities()
+        .get_opportunity(primary_opportunity)
+        .expect("deferred opportunity must persist");
+    if selected.status() != OpportunityStatus::Converted
+        || selected
+            .resolution()
+            .and_then(|resolution| resolution.operation())
+            != Some(selected_operation)
+        || deferred.status() != OpportunityStatus::Expired
+        || deferred
+            .resolution()
+            .and_then(|resolution| resolution.report())
+            .is_none()
+    {
+        return Err(
+            "portfolio probe did not preserve selected and deferred opportunity lifecycles".into(),
+        );
+    }
+    println!(
+        "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, and left the weaker opportunity to expire with a lifecycle report.",
+        scenario.variation.alternate_target_name(),
+        terminal_label(&metrics),
+    );
+    Ok(())
 }
 
 fn run_until_operation_terminal(
@@ -2912,8 +3094,11 @@ fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
 }
 
 fn print_metrics(metrics: &RunMetrics) {
+    let property_acquired = optional_cents(metrics.property_acquired_value_cents);
+    let property_realized = optional_cents(metrics.property_realized_cash_cents);
+    let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {:?}c -> {:?}c cash at {:?}m, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -2925,9 +3110,9 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.burglary_information_quality,
         metrics.exposure_level,
         metrics.exposure_score,
-        metrics.property_acquired_value_cents,
-        metrics.property_realized_cash_cents,
-        metrics.liquidation_minute,
+        property_acquired,
+        property_realized,
+        liquidation_minute,
         metrics.investigation_created,
         metrics.evidence_count,
         metrics.player_legal_activity_information,
@@ -2942,6 +3127,14 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.autonomous_recruitment_attempts,
         metrics.player_personnel_departures,
     );
+}
+
+fn optional_cents(value: Option<i64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |cents| format!("{cents}c"))
+}
+
+fn optional_minute(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |minute| format!("{minute}m"))
 }
 
 fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMetrics) {
@@ -3024,12 +3217,17 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         press.player_legal_activity_information,
         recon.property_realized_cash_cents.unwrap_or_default(),
     );
+    println!(
+        "  - Time tradeoff: RECON finished at minute {} versus RUSH at minute {}; the extra planning time bought lower exposure and liquid value in this matched fixture.",
+        recon.burglary_terminal_minute.unwrap_or_default(),
+        rush.burglary_terminal_minute.unwrap_or_default(),
+    );
     println!("Current experience gaps exposed by this fixture:");
     println!(
         "  - The fixture now proves a bounded counter-surveillance response, but it still does not model disrupting evidence, influencing counsel, or changing a prosecution outcome."
     );
     println!(
-        "  - The harness exercises one opportunity and one operation type, so it proves the planning loop but not a broader portfolio of competing organizational priorities."
+        "  - The portfolio probe now covers prioritization and expiry across competing opportunities, but it still uses one operation type and does not test resource contention between simultaneous crews."
     );
     println!(
         "  - The fixed RUSH/PRESS/RECON policies are calibration treatments; they expose causal differences but are not evidence that an actual player would choose the same policies."
@@ -3143,9 +3341,9 @@ fn level(value: u8) -> RelationshipLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows, run_smoke,
-        FixtureVariation, HarnessCliError, HarnessMode, HarnessOptions, ScenarioProfile, Strategy,
-        DEFAULT_SEED,
+        choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
+        run_opportunity_portfolio_probe, run_smoke, FixtureVariation, HarnessCliError, HarnessMode,
+        HarnessOptions, ScenarioProfile, Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
 
@@ -3303,6 +3501,12 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not contain actionable recurring patrol windows"));
+    }
+
+    #[test]
+    fn portfolio_probe_requires_explicit_opportunity_prioritization() {
+        run_opportunity_portfolio_probe(&crimocracy::build_registry(), DEFAULT_SEED)
+            .expect("portfolio probe should preserve selected and expired opportunities");
     }
 
     #[test]

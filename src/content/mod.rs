@@ -648,6 +648,23 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             capability_for_operation_role(RoleKind::Negotiator),
         ),
     ]);
+    let leader_capability = match kind {
+        OperationKind::Surveillance => CapabilityKind::Surveillance,
+        OperationKind::Bribery => CapabilityKind::Negotiation,
+        OperationKind::WitnessPressure => CapabilityKind::Intimidation,
+        OperationKind::Burglary
+        | OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Intimidation
+        | OperationKind::Kidnapping
+        | OperationKind::Sabotage
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::CovertTransfer
+        | OperationKind::Extraction
+        | OperationKind::RivalInfiltration => CapabilityKind::Management,
+    };
     let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
         .into_iter()
         .map(|approach| {
@@ -710,6 +727,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             achieved_margin: 5,
             partial_margin: -12,
         },
+        leader_capability,
         intelligence: OperationIntelligenceDefinition {
             relevant_topics: relevant_operation_intelligence(kind),
             max_difficulty_reduction: 14,
