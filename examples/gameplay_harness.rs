@@ -2962,6 +2962,15 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
                 > rush.burglary_information_quality.unwrap_or_default(),
         "the player can make a better plan from organization-held intelligence",
     );
+    let response_choice_changed_consequence = rush.aborted
+        && press.outcome.is_some()
+        && press.decision_requests > 0
+        && press.player_police_activity_information > 0;
+    print_loop_checkpoint(
+        "choice",
+        response_choice_changed_consequence,
+        "a player response to the same police exception changes whether the operation aborts or resolves",
+    );
     print_loop_checkpoint(
         "delegate",
         recon.burglary.is_some() && recon.outcome.is_some(),
@@ -2994,6 +3003,26 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
             && rush.enterprise_net_cents == press.enterprise_net_cents
             && press.enterprise_net_cents == recon.enterprise_net_cents,
         "delegated legitimate and illicit enterprises continue while leadership focuses on exceptions",
+    );
+    println!("Observed decision leverage:");
+    println!(
+        "  - Information leverage: RECON selected {} planning item(s) versus RUSH's {} and finished as {} versus {}.",
+        recon.planning_information_count,
+        rush.planning_information_count,
+        terminal_label(recon),
+        terminal_label(rush),
+    );
+    println!(
+        "  - Exception leverage: PRESS chose Continue at {} surfaced decision(s); RUSH chose Abort through its standing contingency, producing {} versus {}.",
+        press.decision_requests,
+        terminal_label(press),
+        terminal_label(rush),
+    );
+    println!(
+        "  - Consequence leverage: PRESS exposed {} evidence item(s) and {} legal-activity information item(s); RECON realized {} cents of resale cash.",
+        press.evidence_count,
+        press.player_legal_activity_information,
+        recon.property_realized_cash_cents.unwrap_or_default(),
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(

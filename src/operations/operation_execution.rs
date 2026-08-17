@@ -1362,10 +1362,18 @@ fn build_after_action_summary(
     } else {
         "The completion deadline compressed the execution window."
     };
-    let circumstances = match factors.variance() {
-        value if value < 0 => "Unplanned circumstances were adverse.",
-        0 => "Unplanned circumstances were neutral.",
-        _ => "Unplanned circumstances were favorable.",
+    let circumstances = match (outcome, factors.variance()) {
+        (OperationObjectiveOutcome::Achieved, value) if value < 0 => {
+            "Unplanned circumstances were adverse, but the crew overcame them."
+        }
+        (OperationObjectiveOutcome::Partial, value) if value < 0 => {
+            "Adverse unplanned circumstances reduced the result."
+        }
+        (OperationObjectiveOutcome::Failed, value) if value < 0 => {
+            "Adverse unplanned circumstances contributed to the failure."
+        }
+        (_, 0) => "Unplanned circumstances were neutral.",
+        (_, _) => "Favorable unplanned circumstances improved the result.",
     };
     let exposure = match exposure {
         OperationExposureLevel::None => "No material operational exposure was observed.",
@@ -1892,6 +1900,37 @@ mod tests {
             .contains(&EntityRef::Operation(operation)));
         validate_state(&state).expect("resolved operation state should validate");
         validate_invariants(&state);
+    }
+
+    #[test]
+    fn after_action_summary_contextualizes_adverse_variance() {
+        let factors = OperationResolutionFactors {
+            role_capability_average: Rating::try_new(80).expect("fixture rating should be valid"),
+            leader_management: Some(Rating::try_new(80).expect("fixture rating should be valid")),
+            intelligence_quality: Rating::try_new(0).expect("fixture rating should be valid"),
+            intelligence_adjustment: 0,
+            intelligence_topics_covered: 0,
+            intelligence_topics_relevant: 1,
+            target_police_presence: None,
+            police_response_arrived: false,
+            approach_adjustment: 0,
+            time_pressure: 0,
+            variance: -1,
+        };
+
+        let achieved = build_after_action_summary(
+            OperationObjectiveOutcome::Achieved,
+            factors,
+            OperationExposureLevel::None,
+        );
+        assert!(achieved.contains("but the crew overcame them"));
+
+        let failed = build_after_action_summary(
+            OperationObjectiveOutcome::Failed,
+            factors,
+            OperationExposureLevel::None,
+        );
+        assert!(failed.contains("contributed to the failure"));
     }
 
     #[test]

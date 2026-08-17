@@ -37,7 +37,10 @@ This file records the architectural foundation currently present in the reposito
   accepts a focused strategy selector for fast policy iteration while the default runs RUSH, PRESS,
   and RECON together. The harness defaults to smoke mode so an unqualified example run stays fast;
   full mode is explicit and defaults to three matched samples, the minimum that exercises all
-  authored fixture variations. The harness builds one shared immutable registry per process and
+  authored fixture variations. The full readout also compares information leverage,
+  exception-response leverage, and consequence leverage explicitly so a passing run explains
+  which player choices changed the outcome rather than only listing subsystem counts.
+  The harness builds one shared immutable registry per process and
   shares it across legal, narrative, and matched-batch sessions; each session still owns a fresh
   mutable `AppState`.
 
