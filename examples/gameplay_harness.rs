@@ -84,10 +84,11 @@ use crimocracy::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
-const DEFAULT_BATCH_SAMPLES: u64 = 8;
+const DEFAULT_BATCH_SAMPLES: u64 = 3;
 const MAX_BATCH_SAMPLES: u64 = 64;
 const DEFAULT_SEED: u64 = 0x1933_0514;
 const MAX_OPERATION_WAIT_MINUTES: u32 = 1_440;
+const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HarnessMode {
@@ -804,7 +805,7 @@ fn parse_options(
     arguments: impl IntoIterator<Item = String>,
 ) -> Result<Option<HarnessOptions>, HarnessCliError> {
     let mut arguments = arguments.into_iter();
-    let mut mode = HarnessMode::Full;
+    let mut mode = HarnessMode::Smoke;
     let mut samples = DEFAULT_BATCH_SAMPLES;
     let mut seed = DEFAULT_SEED;
     let mut strategy = None;
@@ -882,11 +883,9 @@ fn print_usage() {
     println!(
         "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX]"
     );
-    println!("  smoke  Fast canonical-path check for CI and local iteration.");
+    println!("  smoke  Fast canonical-path check for CI and local iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
-    println!(
-        "  full   Narrative session, legal check, matched batch, and sensitivity report (default)."
-    );
+    println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
 }
 
 fn validate_run_metrics(
@@ -1276,7 +1275,7 @@ fn run_strategy_batch(
         press_aggregate.add(&press);
         recon_aggregate.add(&recon);
     }
-    if samples >= 3 {
+    if samples >= MIN_SAMPLES_FOR_VARIATION_CONTRACT {
         let observed = rush_aggregate.fixture_variations.len();
         if observed < 3 {
             return Err(HarnessContractError::InsufficientFixtureVariation {
@@ -3177,14 +3176,25 @@ mod tests {
     }
 
     #[test]
-    fn uses_bounded_full_mode_defaults() {
+    fn uses_fast_smoke_mode_defaults() {
         let options = parse_options(std::iter::empty())
             .expect("default arguments should parse")
             .expect("default arguments should request a run");
 
+        assert_eq!(options.mode, HarnessMode::Smoke);
+        assert_eq!(options.samples, 1);
+        assert_eq!(options.seed, DEFAULT_SEED);
+    }
+
+    #[test]
+    fn keeps_full_mode_bounded_by_default() {
+        let options = parse_options(["--mode", "full"].into_iter().map(str::to_owned))
+            .expect("explicit full mode should parse")
+            .expect("non-help arguments should request a run");
+
         assert_eq!(options.mode, HarnessMode::Full);
         assert_eq!(options.samples, super::DEFAULT_BATCH_SAMPLES);
-        assert_eq!(options.seed, DEFAULT_SEED);
+        assert_eq!(options.samples, super::MIN_SAMPLES_FOR_VARIATION_CONTRACT);
     }
 
     #[test]

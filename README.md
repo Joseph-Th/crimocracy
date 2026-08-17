@@ -36,7 +36,7 @@ Use the smallest focused test while editing. The fast Rust completion gate is:
 
 ```text
 cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets -j 2 -- -D warnings
 cargo test --locked --all-targets --quiet -j 2
 cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
 ```
@@ -44,9 +44,10 @@ cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonica
 The GitHub Actions gate runs those checks in one cached job, compiles every target through the
 all-target test pass, marks the controlled smoke contract as an explicit ignored test, and runs it
 immediately afterward with focused output. Superseded runs on the same branch are cancelled. CI
-disables incremental artifacts to keep clean-run compilation and cache uploads smaller. It does not
-run the long-form narrative batch or an optimized build on every change.
-Use the smoke harness for normal iteration:
+disables incremental artifacts and test debug symbols to keep clean-run linking and cache uploads
+small. It does not run the long-form narrative batch or an optimized build on every change.
+Use the smoke harness for normal iteration. Running the example without a mode is also a fast
+smoke run; full calibration is always explicit:
 
 ```text
 cargo run --locked --quiet --example gameplay_harness -- --mode smoke
@@ -70,8 +71,10 @@ The explicit gameplay/integration lane is the controlled/calibration harness:
 cargo run --locked --example gameplay_harness -- --mode full --samples 8
 ```
 
-`--samples` must be between 1 and 64. Smoke accepts `--strategy all|rush|press|recon`; full mode
-always runs every strategy for matched comparison. `--seed` accepts a hexadecimal value and keeps matched
+`--samples` must be between 1 and 64. Full mode defaults to three samples, the minimum that
+exercises all three authored fixture variations; use a larger explicit count for deeper sensitivity
+evidence. Smoke accepts `--strategy all|rush|press|recon`; full mode always runs every strategy for
+matched comparison. `--seed` accepts a hexadecimal value and keeps matched
 strategy branches on the same simulation seed. The harness uses synthetic authored scenarios
 through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]`
 diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a

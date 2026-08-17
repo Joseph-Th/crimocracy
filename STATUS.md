@@ -9,7 +9,8 @@ This file records the architectural foundation currently present in the reposito
   harness test. The all-target test pass owns compilation verification so CI does not repeat a
   separate all-target `cargo check`; the controlled smoke contract is an explicit ignored test so it
   runs exactly once afterward with focused output. Superseded runs on the same branch are cancelled,
-  and CI disables incremental artifacts to keep clean-run compilation and cache uploads small.
+  and CI disables incremental artifacts and test debug symbols to keep clean-run linking and cache
+  uploads small.
   Release builds and long-form gameplay reports remain deliberate local checks rather than part of
   every change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
@@ -34,9 +35,11 @@ This file records the architectural foundation currently present in the reposito
 - Harness CLI parsing has focused tests, and the smoke contract is run as an example test so CI
   reuses one compiled target instead of launching a second untracked verification path. Smoke also
   accepts a focused strategy selector for fast policy iteration while the default runs RUSH, PRESS,
-  and RECON together. The harness builds one shared immutable registry per process and shares it
-  across legal, narrative, and matched-batch sessions; each session still owns a fresh mutable
-  `AppState`.
+  and RECON together. The harness defaults to smoke mode so an unqualified example run stays fast;
+  full mode is explicit and defaults to three matched samples, the minimum that exercises all
+  authored fixture variations. The harness builds one shared immutable registry per process and
+  shares it across legal, narrative, and matched-batch sessions; each session still owns a fresh
+  mutable `AppState`.
 
 ## Current Foundation
 
