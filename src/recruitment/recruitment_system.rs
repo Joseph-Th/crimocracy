@@ -1274,6 +1274,7 @@ pub(crate) fn select_perceived_legal_pressure_at(
                 information.observed_at(),
             )
         })
+        .filter(|(_, score, _)| *score > 0)
         .max_by_key(|(id, score, observed_at)| (*score, *observed_at, *id))
         .map_or((None, 0), |(id, score, _)| (Some(id), score))
 }

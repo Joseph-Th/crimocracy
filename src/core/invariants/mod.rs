@@ -100,6 +100,11 @@ pub enum StateValidationError {
         operation: OperationId,
         participant: CharacterId,
     },
+    #[error("active operation {operation} has a foreign participant {participant}")]
+    ActiveOperationForeignParticipant {
+        operation: OperationId,
+        participant: CharacterId,
+    },
     #[error("operation {operation} has invalid execution lifecycle state")]
     InvalidOperationRuntime { operation: OperationId },
     #[error("completed operation {operation} has an invalid after-action information link")]

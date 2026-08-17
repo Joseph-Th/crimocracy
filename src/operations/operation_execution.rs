@@ -1141,7 +1141,7 @@ pub(crate) fn calculate_intelligence_factors(
     let relevant_topics = execution.relevant_intelligence_topics();
     let covered = relevant_topics
         .iter()
-        .filter(|topic| best_by_topic.contains_key(topic))
+        .filter(|topic| best_by_topic.get(topic).is_some_and(|score| *score > 0))
         .count();
     let total = relevant_topics.iter().fold(0_u32, |total, topic| {
         total + u32::from(best_by_topic.get(topic).copied().unwrap_or(0))

@@ -113,7 +113,30 @@ pub enum OperationObjective {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OperationObjectiveKind {
+    AcquireProperty,
+    ObtainCash,
+    Frighten,
+    GatherInformation,
+    DestroyEquipment,
+    MoveContraband,
+    RemovePerson,
+}
+
 impl OperationObjective {
+    pub fn kind(&self) -> OperationObjectiveKind {
+        match self {
+            Self::AcquireProperty { .. } => OperationObjectiveKind::AcquireProperty,
+            Self::ObtainCash { .. } => OperationObjectiveKind::ObtainCash,
+            Self::Frighten { .. } => OperationObjectiveKind::Frighten,
+            Self::GatherInformation { .. } => OperationObjectiveKind::GatherInformation,
+            Self::DestroyEquipment { .. } => OperationObjectiveKind::DestroyEquipment,
+            Self::MoveContraband { .. } => OperationObjectiveKind::MoveContraband,
+            Self::RemovePerson { .. } => OperationObjectiveKind::RemovePerson,
+        }
+    }
+
     pub(crate) fn referenced_entities(&self) -> Vec<EntityRef> {
         match self {
             Self::AcquireProperty { target }
@@ -390,7 +413,6 @@ impl OperationPropertyDispositionRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResolutionFactors {
     role_capability_average: Rating,
-    #[serde(alias = "leader_management")]
     leader_capability: Option<Rating>,
     intelligence_quality: Rating,
     intelligence_adjustment: i8,

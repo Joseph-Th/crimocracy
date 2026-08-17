@@ -14,7 +14,9 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::operations::operation_execution::build_legal_activity_summary;
-use crate::operations::operation_system::is_information_subject_relevant;
+use crate::operations::operation_system::{
+    is_information_subject_relevant, is_valid_operation_objective,
+};
 use crate::operations::property_disposition::build_disposition_summary;
 use crate::operations::surveillance_integration::{
     expected_persisted_surveillance_signatures, is_supported_surveillance_target,
@@ -71,6 +73,14 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     participant: *participant,
                 });
             }
+            if requires_active_participants
+                && participant_record.organization() != Some(operation.responsible_organization())
+            {
+                return Err(StateValidationError::ActiveOperationForeignParticipant {
+                    operation: operation.id(),
+                    participant: *participant,
+                });
+            }
         }
         for information in operation.intelligence() {
             let record = state.intelligence.get_information(*information).ok_or(
@@ -94,6 +104,11 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     entity,
                 });
             }
+        }
+        if !is_valid_operation_objective(operation.kind(), operation.objective()) {
+            return Err(StateValidationError::InvalidOperationDefinition {
+                operation: operation.id(),
+            });
         }
         for constraint in operation.constraints() {
             match constraint {

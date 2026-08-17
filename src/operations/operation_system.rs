@@ -21,8 +21,8 @@ use crate::operations::police_response_integration::{
 use crate::operations::surveillance_integration::validate_surveillance_request;
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
-    OperationCommand, OperationDraft, OperationIdentity, OperationRecord, OperationRuntime,
-    OperationStatus, RoleKind,
+    OperationCommand, OperationDraft, OperationIdentity, OperationKind, OperationObjective,
+    OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus, RoleKind,
 };
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ValidatedReport};
@@ -65,6 +65,14 @@ pub enum OperationError {
     },
     #[error("character {0} assigned to an operation is not active")]
     InactiveParticipant(CharacterId),
+    #[error(
+        "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
+    )]
+    ForeignParticipant {
+        character: CharacterId,
+        expected: OrganizationId,
+        actual: Option<OrganizationId>,
+    },
     #[error("character {character} is detained under arrest {arrest} and cannot participate")]
     DetainedParticipant {
         character: CharacterId,
@@ -88,6 +96,13 @@ pub enum OperationError {
     InvalidSurveillanceObjective,
     #[error("entity {0:?} cannot be directly observed by a surveillance operation")]
     UnsupportedSurveillanceTarget(EntityRef),
+    #[error("operation objective {objective:?} is not supported by operation kind {kind:?}")]
+    InvalidObjectiveForKind {
+        kind: OperationKind,
+        objective: OperationObjectiveKind,
+    },
+    #[error("property-acquisition objective target {0:?} is not a business")]
+    InvalidPropertyTarget(EntityRef),
     #[error("operation is missing required role {0:?}")]
     MissingRequiredRole(RoleKind),
     #[error("operation is scheduled in the past")]
@@ -184,6 +199,13 @@ impl ValidatedOperation {
             }
             if record.lifecycle() != Lifecycle::Active {
                 return Err(OperationError::InactiveParticipant(*participant));
+            }
+            if record.organization() != Some(self.draft.responsible_organization) {
+                return Err(OperationError::ForeignParticipant {
+                    character: *participant,
+                    expected: self.draft.responsible_organization,
+                    actual: record.organization(),
+                });
             }
             if let Some(arrest) = state.legal.active_arrest_for_character(*participant) {
                 return Err(OperationError::DetainedParticipant {
@@ -299,6 +321,7 @@ pub fn validate_authorize_operation(
             unreachable!("authorization validates target existence through the operation objective")
         }
     })?;
+    validate_operation_objective(draft.kind, &draft.objective)?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -317,6 +340,13 @@ pub fn validate_authorize_operation(
             .ok_or(OperationError::MissingCharacter(*participant))?;
         if record.lifecycle() != Lifecycle::Active {
             return Err(OperationError::InactiveParticipant(*participant));
+        }
+        if record.organization() != Some(draft.responsible_organization) {
+            return Err(OperationError::ForeignParticipant {
+                character: *participant,
+                expected: draft.responsible_organization,
+                actual: record.organization(),
+            });
         }
         if let Some(arrest) = state.legal.active_arrest_for_character(*participant) {
             return Err(OperationError::DetainedParticipant {
@@ -428,6 +458,48 @@ pub(crate) fn is_information_subject_relevant(
         | EntityRef::Mandate(_)
         | EntityRef::Enterprise(_) => false,
     })
+}
+
+pub(crate) fn is_valid_operation_objective(
+    kind: OperationKind,
+    objective: &OperationObjective,
+) -> bool {
+    match objective {
+        OperationObjective::AcquireProperty { target } => {
+            matches!(target, EntityRef::Business(_))
+        }
+        OperationObjective::GatherInformation { target } => {
+            kind == OperationKind::Surveillance
+                && crate::operations::surveillance_integration::is_supported_surveillance_target(
+                    *target,
+                )
+        }
+        OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::DestroyEquipment { .. }
+        | OperationObjective::MoveContraband { .. }
+        | OperationObjective::RemovePerson { .. } => kind != OperationKind::Surveillance,
+    }
+}
+
+fn validate_operation_objective(
+    kind: OperationKind,
+    objective: &OperationObjective,
+) -> Result<(), OperationError> {
+    if let OperationObjective::AcquireProperty { target } = objective {
+        if !matches!(target, EntityRef::Business(_)) {
+            return Err(OperationError::InvalidPropertyTarget(*target));
+        }
+    }
+    if kind != OperationKind::Surveillance
+        && objective.kind() == OperationObjectiveKind::GatherInformation
+    {
+        return Err(OperationError::InvalidObjectiveForKind {
+            kind,
+            objective: objective.kind(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
@@ -1136,6 +1208,114 @@ mod tests {
         assert_eq!(record.status(), OperationStatus::Aborted);
         assert_eq!(record.version(), before);
         validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_rejects_foreign_crew_members_before_authorization() {
+        let (registry, state, organization, leader, target) = make_test_operation_state();
+        let mut state = state;
+        let foreign_organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Foreign Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("foreign organization fixture should validate");
+        let foreign_member = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Foreign Member".to_owned(),
+                organization: Some(foreign_organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("foreign member fixture should validate");
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.roles.insert(RoleKind::Coordinator, foreign_member);
+
+        let error = validate_authorize_operation(&registry, &state, draft)
+            .expect_err("foreign crew members must not be authorized");
+        assert_eq!(
+            error,
+            OperationError::ForeignParticipant {
+                character: foreign_member,
+                expected: organization,
+                actual: Some(foreign_organization),
+            }
+        );
+        assert_eq!(state.operations().operations().count(), 0);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn property_acquisition_requires_a_business_target() {
+        let (registry, state, organization, leader, _) = make_test_operation_state();
+        let draft = OperationDraft {
+            title: "Invalid property seizure".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Character(leader),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::EntrySpecialist, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::ZERO,
+        };
+
+        let error = validate_authorize_operation(&registry, &state, draft)
+            .expect_err("property acquisition must identify a business target");
+        assert_eq!(
+            error,
+            OperationError::InvalidPropertyTarget(EntityRef::Character(leader))
+        );
+    }
+
+    #[test]
+    fn expired_planning_information_is_not_reported_as_covered() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let information = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::Personnel,
+                source_entity: None,
+                subject: target,
+                observed_at: SimTime::ZERO,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Expired personnel observation".to_owned(),
+            },
+        )
+        .expect("information fixture should validate")
+        .commit(&mut state);
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.scheduled_for = SimTime::from_minutes(10_081);
+        draft.intelligence.insert(information);
+        let operation = validate_authorize_operation(&registry, &state, draft)
+            .expect("operation with stale but structurally valid information should authorize")
+            .commit(&mut state)
+            .expect("operation should commit");
+
+        let (quality, adjustment, covered, relevant) =
+            crate::operations::operation_execution::calculate_intelligence_factors(
+                &registry, &state, operation,
+            );
+        assert_eq!(quality.value(), 0);
+        assert_eq!(adjustment, 0);
+        assert_eq!(covered, 0);
+        assert_eq!(relevant, 3);
     }
 
     #[test]

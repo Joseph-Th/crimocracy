@@ -40,4 +40,37 @@ harness-smoke = [
     "--exact",
     "--nocapture",
 ]
+harness-rush = [
+    "run",
+    "--locked",
+    "--example",
+    "gameplay_harness",
+    "--",
+    "--mode",
+    "smoke",
+    "--strategy",
+    "rush",
+]
+harness-press = [
+    "run",
+    "--locked",
+    "--example",
+    "gameplay_harness",
+    "--",
+    "--mode",
+    "smoke",
+    "--strategy",
+    "press",
+]
+harness-recon = [
+    "run",
+    "--locked",
+    "--example",
+    "gameplay_harness",
+    "--",
+    "--mode",
+    "smoke",
+    "--strategy",
+    "recon",
+]
 harness = ["run", "--locked", "--example", "gameplay_harness"]
