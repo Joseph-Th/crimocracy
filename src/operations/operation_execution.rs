@@ -673,6 +673,8 @@ fn validate_exposure_incident(
                 admissibility: Admissibility::Unknown,
                 discovered_at,
             }],
+            origin_operation: Some(operation.id()),
+            notified_organizations: BTreeSet::from([operation.responsible_organization()]),
         },
     )?;
     Ok((

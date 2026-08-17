@@ -18,27 +18,27 @@ pub mod police_response_system;
 pub mod prosecution_system;
 pub mod witness_system;
 
-mod records;
 mod legal_state;
+mod records;
 
-pub use records::{
-    Admissibility, ALL_INVESTIGATION_WORK_KINDS, ArrestDraft, ArrestRecord, ArrestStatus,
-    CaseWitnessDraft, CaseWitnessRecord, DayMinute, DayMinuteError, EvidenceDraft, EvidenceKind,
-    EvidenceRecord, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
-    IncidentIntakeDraft, InformantDisclosureDraft, InformantDisclosureRecord, InformantDraft,
-    InformantRecord, InformantStatus, InvestigationDraft, InvestigationRecord, InvestigationStatus,
-    InvestigationWorkDraft, InvestigationWorkFactors, InvestigationWorkFocus, InvestigationWorkKind,
-    InvestigationWorkOutcome, InvestigationWorkRecord, InvestigationWorkResolution,
-    InvestigationWorkStatus, InvestigatorRole, JurisdictionDraft, JurisdictionRecord,
-    LegalRepresentationDraft, LegalRepresentationRecord, LegalRepresentationStatus,
-    LegalRepresentationEndReason, PatrolDeploymentDraft, PatrolDeploymentRecord,
-    PatrolDeploymentStatus, PatrolWindow, PatrolWindowError, PoliceResponsePatrolSnapshot,
-    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseDraft, ProsecutionCaseRecord,
-    ProsecutionCaseStatus, ProsecutionReferralDraft, ProsecutionReferralRecord,
-    WitnessCooperation, WitnessStatementDraft, WitnessStatementRecord,
-};
 pub use legal_state::LegalState;
 pub(crate) use records::ProsecutionCaseResolution;
+pub use records::{
+    Admissibility, ArrestDraft, ArrestRecord, ArrestStatus, CaseWitnessDraft, CaseWitnessRecord,
+    DayMinute, DayMinuteError, EvidenceDraft, EvidenceKind, EvidenceRecord, EvidenceReliability,
+    EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InformantDisclosureDraft,
+    InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
+    InvestigationDraft, InvestigationRecord, InvestigationStatus, InvestigationWorkDraft,
+    InvestigationWorkFactors, InvestigationWorkFocus, InvestigationWorkKind,
+    InvestigationWorkOutcome, InvestigationWorkRecord, InvestigationWorkResolution,
+    InvestigationWorkStatus, InvestigatorRole, JurisdictionDraft, JurisdictionRecord,
+    LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationRecord,
+    LegalRepresentationStatus, PatrolDeploymentDraft, PatrolDeploymentRecord,
+    PatrolDeploymentStatus, PatrolWindow, PatrolWindowError, PoliceResponsePatrolSnapshot,
+    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseDraft, ProsecutionCaseRecord,
+    ProsecutionCaseStatus, ProsecutionReferralDraft, ProsecutionReferralRecord, WitnessCooperation,
+    WitnessStatementDraft, WitnessStatementRecord, ALL_INVESTIGATION_WORK_KINDS,
+};
 pub(super) use records::{
     EvidenceAssessment, EvidenceConnection, EvidenceIdentity, InvestigationWorkIdentity,
     InvestigationWorkRuntime,

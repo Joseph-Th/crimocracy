@@ -149,7 +149,9 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
     Ok(())
 }
 
-pub(super) fn validate_social_and_intelligence(state: &AppState) -> Result<(), StateValidationError> {
+pub(super) fn validate_social_and_intelligence(
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for relationship in state.social.relationships() {
         for (context, entity) in [
             (

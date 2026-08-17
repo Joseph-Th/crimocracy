@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 14;
+pub const CURRENT_CONTENT_REVISION: u32 = 15;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -47,6 +47,9 @@ pub fn build_registry() -> Registry {
             .unwrap_or_else(|error| panic!("invalid drive registry: {error}"));
     }
     register_recruitment(&mut builder);
+    builder
+        .register_legal(SimDuration::from_minutes(2_160))
+        .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);
     for kind in ALL_OPERATION_KINDS {
         let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();

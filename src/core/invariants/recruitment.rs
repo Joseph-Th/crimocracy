@@ -6,7 +6,9 @@ use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crate::history::HistoryEventKind;
-use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity};
+use crate::intelligence::{
+    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+};
 use crate::recruitment::recruitment_system::{
     calculate_recruitment_factors_from_context, calculate_recruitment_margin,
     classify_recruitment_outcome, select_perceived_legal_pressure_at, RecruitmentFactorContext,

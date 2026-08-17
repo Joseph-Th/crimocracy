@@ -14,14 +14,14 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::legal::records::{
-    ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus, InvestigationWorkFocus,
-    InvestigationWorkKind, InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole,
-    LegalRepresentationEndReason, LegalRepresentationStatus, PatrolDeploymentStatus, PatrolWindow,
-    PoliceResponseStatus, ProsecutionCaseResolution, ProsecutionCaseStatus, WitnessCooperation,
-    ArrestRecord, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord, InformantRecord,
-    InvestigationRecord, InvestigationWorkRecord, JurisdictionRecord, LegalIndexes,
-    LegalRepresentationRecord, PatrolDeploymentRecord, PoliceResponseRecord, ProsecutionCaseRecord,
-    ProsecutionReferralRecord, WitnessStatementRecord,
+    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceKind, EvidenceRecord,
+    InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
+    InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
+    InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
+    LegalIndexes, LegalRepresentationEndReason, LegalRepresentationRecord,
+    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
+    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
+    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -712,11 +712,76 @@ impl LegalState {
                 .or_default()
                 .insert(record.id());
         }
+        if record.status() == InvestigationStatus::Active {
+            self.indexes
+                .investigations
+                .cases_by_last_activity
+                .entry(record.last_activity_at())
+                .or_default()
+                .insert(record.id());
+        }
         let previous = self.investigations.insert(record.id(), record);
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate investigation ID inserted"
         );
+    }
+
+    /// Advances a case's last-activity instant and re-synchronizes the cold-decay index in one
+    /// atomic step. Called by every consequence-bearing legal transition: incident intake,
+    /// evidence insertion, investigation-work scheduling, and investigation-work resolution.
+    pub(crate) fn note_investigation_activity(
+        &mut self,
+        investigation_id: InvestigationId,
+        at: SimTime,
+    ) {
+        let previous_key = {
+            let record = self
+                .investigations
+                .get_mut(&investigation_id)
+                .expect("validated investigation disappeared before activity update");
+            if record.status() != InvestigationStatus::Active || at <= record.last_activity_at {
+                return;
+            }
+            let previous_key = record.last_activity_at;
+            record.last_activity_at = at;
+            previous_key
+        };
+        let ids = self
+            .indexes
+            .investigations
+            .cases_by_last_activity
+            .get_mut(&previous_key)
+            .expect("active investigation must be indexed at its last activity instant");
+        ids.remove(&investigation_id);
+        if ids.is_empty() {
+            self.indexes
+                .investigations
+                .cases_by_last_activity
+                .remove(&previous_key);
+        }
+        self.indexes
+            .investigations
+            .cases_by_last_activity
+            .entry(at)
+            .or_default()
+            .insert(investigation_id);
+    }
+
+    pub(crate) fn active_case_ids_with_last_activity_at_or_before(
+        &self,
+        at: SimTime,
+    ) -> Vec<InvestigationId> {
+        let mut candidates = Vec::new();
+        for (_, ids) in self
+            .indexes
+            .investigations
+            .cases_by_last_activity
+            .range(..=at)
+        {
+            candidates.extend(ids.iter().copied());
+        }
+        candidates
     }
     pub(crate) fn insert_informant(&mut self, record: InformantRecord) {
         let id = record.id();
@@ -835,9 +900,11 @@ impl LegalState {
         );
     }
     pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord) {
+        let investigation_id = record.investigation();
+        let discovered_at = record.discovered_at();
         let investigation = self
             .investigations
-            .get_mut(&record.investigation())
+            .get_mut(&investigation_id)
             .expect("validated investigation disappeared before evidence commit");
         investigation.subjects.insert(record.subject());
         investigation.evidence.insert(record.id());
@@ -892,6 +959,7 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate evidence ID inserted"
         );
+        self.note_investigation_activity(investigation_id, discovered_at);
     }
     pub(crate) fn insert_case_witness(&mut self, record: CaseWitnessRecord) {
         let id = record.id();
@@ -988,6 +1056,7 @@ impl LegalState {
     pub(crate) fn insert_investigation_work(&mut self, record: InvestigationWorkRecord) {
         let id = record.id();
         let investigation_id = record.investigation();
+        let scheduled_at = record.scheduled_at();
         debug_assert_eq!(
             record.status(),
             InvestigationWorkStatus::Scheduled,
@@ -1033,12 +1102,14 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        self.note_investigation_activity(investigation_id, scheduled_at);
     }
     pub(crate) fn complete_investigation_work(
         &mut self,
         id: InvestigationWorkId,
         resolution: InvestigationWorkResolution,
     ) {
+        let resolved_at = resolution.resolved_at();
         let (due_at, focus_key) = {
             let record = self
                 .investigation_work
@@ -1078,12 +1149,19 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        self.note_investigation_activity(investigation_id, resolved_at);
     }
     pub(crate) fn set_investigation_status(
         &mut self,
         investigation_id: InvestigationId,
         status: InvestigationStatus,
+        at: SimTime,
     ) {
+        let previous_status = self
+            .investigations
+            .get(&investigation_id)
+            .expect("validated investigation disappeared before lifecycle commit")
+            .status;
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
@@ -1105,6 +1183,47 @@ impl LegalState {
                 .investigations
                 .active_without_lead
                 .remove(&investigation_id);
+        }
+        match (previous_status, status) {
+            (InvestigationStatus::Active, InvestigationStatus::Active)
+            | (InvestigationStatus::Suspended, InvestigationStatus::Suspended)
+            | (InvestigationStatus::Closed, InvestigationStatus::Closed) => {}
+            // Suspending or closing a case shelves it: it leaves the cold-decay index. Resuming
+            // re-engages institutional interest, so the cold window restarts from the resume
+            // instant rather than the stale pre-suspension activity.
+            (InvestigationStatus::Active, InvestigationStatus::Suspended)
+            | (InvestigationStatus::Active, InvestigationStatus::Closed) => {
+                let key = investigation.last_activity_at;
+                if let Some(ids) = self
+                    .indexes
+                    .investigations
+                    .cases_by_last_activity
+                    .get_mut(&key)
+                {
+                    ids.remove(&investigation_id);
+                    if ids.is_empty() {
+                        self.indexes
+                            .investigations
+                            .cases_by_last_activity
+                            .remove(&key);
+                    }
+                }
+            }
+            (InvestigationStatus::Suspended, InvestigationStatus::Active)
+            | (InvestigationStatus::Closed, InvestigationStatus::Active) => {
+                self.investigations
+                    .get_mut(&investigation_id)
+                    .expect("validated investigation disappeared before resume commit")
+                    .last_activity_at = at;
+                self.indexes
+                    .investigations
+                    .cases_by_last_activity
+                    .entry(at)
+                    .or_default()
+                    .insert(investigation_id);
+            }
+            (InvestigationStatus::Suspended, InvestigationStatus::Closed)
+            | (InvestigationStatus::Closed, InvestigationStatus::Suspended) => {}
         }
     }
     pub(crate) fn set_investigator_role(
@@ -2214,6 +2333,30 @@ impl LegalState {
                 return false;
             }
         }
+        for (at, ids) in &self.indexes.investigations.cases_by_last_activity {
+            for id in ids {
+                if !self.investigations.get(id).is_some_and(|record| {
+                    record.status() == InvestigationStatus::Active
+                        && record.last_activity_at() == *at
+                }) {
+                    return false;
+                }
+            }
+        }
+        for investigation in self.investigations.values() {
+            if investigation.status() != InvestigationStatus::Active {
+                continue;
+            }
+            if !self
+                .indexes
+                .investigations
+                .cases_by_last_activity
+                .get(&investigation.last_activity_at())
+                .is_some_and(|ids| ids.contains(&investigation.id()))
+            {
+                return false;
+            }
+        }
         for informant in self.informants.values() {
             let id = informant.id();
             if !self
@@ -2848,6 +2991,17 @@ impl LegalState {
                     "Index Completeness: investigator reverse index is missing an assigned case"
                 );
             }
+            let indexed_activity = self
+                .indexes
+                .investigations
+                .cases_by_last_activity
+                .get(&investigation.last_activity_at())
+                .is_some_and(|ids| ids.contains(&investigation.id()));
+            debug_assert_eq!(
+                indexed_activity,
+                investigation.status() == InvestigationStatus::Active,
+                "Derived Data Consistency: cold-decay activity index disagrees with case status"
+            );
         }
         for arrest in self.arrests.values() {
             debug_assert!(

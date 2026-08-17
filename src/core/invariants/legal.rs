@@ -12,18 +12,17 @@ use crate::intelligence::{
 };
 use crate::legal::informant_system::{informant_reliability, informant_strength};
 use crate::legal::investigation_work_execution::{
-    improve_evidence_reliability, is_reviewable_evidence_kind,
-    source_evidence_forms_simple_path,
+    improve_evidence_reliability, is_reviewable_evidence_kind, source_evidence_forms_simple_path,
 };
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
 use crate::legal::witness_system::{witness_reliability, witness_strength};
-use crate::operations::OperationStatus;
 use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
     InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
     InvestigationWorkStatus, LegalRepresentationStatus, PatrolDeploymentStatus,
     PoliceResponseStatus, ProsecutionCaseStatus, WitnessCooperation,
 };
+use crate::operations::OperationStatus;
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
 use std::collections::BTreeSet;
@@ -492,7 +491,9 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
     Ok(())
 }
 
-pub(super) fn validate_legal_reports_and_history(state: &AppState) -> Result<(), StateValidationError> {
+pub(super) fn validate_legal_reports_and_history(
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for jurisdiction in state.legal.jurisdictions() {
         let organization = state
             .world
@@ -750,6 +751,58 @@ pub(super) fn validate_legal_reports_and_history(state: &AppState) -> Result<(),
             return Err(StateValidationError::FutureTimestamp {
                 context: "investigation",
             });
+        }
+        if investigation.last_activity_at() > state.now()
+            || investigation.last_activity_at() < investigation.opened_at()
+        {
+            return Err(StateValidationError::InvalidInvestigationActivity {
+                investigation: investigation.id(),
+            });
+        }
+        let origin = investigation.origin_operation();
+        match origin {
+            Some(operation) => {
+                let operation_record = state.operations.get_operation(operation).ok_or(
+                    StateValidationError::InvalidInvestigationActivity {
+                        investigation: investigation.id(),
+                    },
+                )?;
+                if investigation.notified_organizations().is_empty()
+                    || !investigation
+                        .notified_organizations()
+                        .contains(&operation_record.responsible_organization())
+                {
+                    return Err(StateValidationError::InvalidInvestigationActivity {
+                        investigation: investigation.id(),
+                    });
+                }
+            }
+            None if !investigation.notified_organizations().is_empty() => {
+                return Err(StateValidationError::InvalidInvestigationActivity {
+                    investigation: investigation.id(),
+                });
+            }
+            None => {}
+        }
+        for notified in investigation.notified_organizations() {
+            let organization = state.world.get_organization(*notified).ok_or(
+                StateValidationError::InvalidInvestigationActivity {
+                    investigation: investigation.id(),
+                },
+            )?;
+            if !matches!(
+                organization.kind(),
+                OrganizationKind::Criminal
+                    | OrganizationKind::Political
+                    | OrganizationKind::Press
+                    | OrganizationKind::Labor
+                    | OrganizationKind::Civic
+                    | OrganizationKind::Commercial
+            ) {
+                return Err(StateValidationError::InvalidInvestigationActivity {
+                    investigation: investigation.id(),
+                });
+            }
         }
         match investigation.status() {
             InvestigationStatus::Active

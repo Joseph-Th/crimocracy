@@ -1,5 +1,6 @@
 //! Release-safe structural validation for the operations subsystem.
 
+use super::opportunities::validate_operation_exposure_links;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{InformationId, LedgerTransactionId, ReportId};
@@ -26,7 +27,6 @@ use crate::operations::{
 };
 use crate::reports::ReportKind;
 use crate::world::{BusinessFunction, BusinessOwner, Lifecycle};
-use super::opportunities::validate_operation_exposure_links;
 use std::collections::BTreeSet;
 
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {

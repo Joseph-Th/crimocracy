@@ -464,6 +464,7 @@ struct Scenario<'registry> {
     opportunity_information: InformationId,
     alternate_opportunity_information: InformationId,
     enterprise: EnterpriseId,
+    investigation: Option<crimocracy::core::id::InvestigationId>,
     variation: FixtureVariation,
 }
 
@@ -484,6 +485,9 @@ struct RunMetrics {
     planning_information_topics: BTreeSet<InformationTopic>,
     counterintelligence_outcome: Option<OperationObjectiveOutcome>,
     counterintelligence_information: usize,
+    followup_case_active: Option<bool>,
+    cold_case_confirmed: Option<bool>,
+    case_cold_minute: Option<u64>,
     exposure_score: Option<i16>,
     exposure_level: Option<crimocracy::operations::OperationExposureLevel>,
     investigation_created: bool,
@@ -532,6 +536,8 @@ struct Aggregate {
     standing_contingency_aborts: u64,
     legal_activity_information_sessions: u64,
     police_activity_information_sessions: u64,
+    followup_case_active_sessions: u64,
+    cold_case_confirmed_sessions: u64,
     player_report_total: u64,
     executive_brief_total: u64,
     autonomous_recruitment_attempts: u64,
@@ -589,6 +595,8 @@ impl Aggregate {
             u64::from(metrics.player_legal_activity_information > 0);
         self.police_activity_information_sessions +=
             u64::from(metrics.player_police_activity_information > 0);
+        self.followup_case_active_sessions += u64::from(metrics.followup_case_active == Some(true));
+        self.cold_case_confirmed_sessions += u64::from(metrics.cold_case_confirmed == Some(true));
         self.player_report_total += metrics.player_report_count as u64;
         self.executive_brief_total += metrics.executive_brief_count as u64;
         self.autonomous_recruitment_attempts += u64::from(metrics.autonomous_recruitment_attempts);
@@ -635,7 +643,7 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -647,6 +655,8 @@ impl Aggregate {
             self.percent(self.investigations),
             self.percent(self.legal_activity_information_sessions),
             self.percent(self.police_activity_information_sessions),
+            self.percent(self.followup_case_active_sessions),
+            self.percent(self.cold_case_confirmed_sessions),
             self.investigation_work_scheduled,
             self.investigation_work_resolved,
             avg_exposure,
@@ -704,7 +714,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; intelligence {:?}",
+            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; case hot {:?}; cold {:?}; intelligence {:?}",
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
             terminal_label(&metrics),
@@ -713,6 +723,8 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             metrics.player_legal_activity_information,
             metrics.player_police_activity_information,
             metrics.counterintelligence_outcome,
+            metrics.followup_case_active,
+            metrics.cold_case_confirmed,
             metrics.burglary_information_quality,
         );
     }
@@ -783,6 +795,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_night_trap_evidence(&rush)?;
     validate_night_trap_evidence(&press)?;
     validate_night_trap_evidence(&recon)?;
+    validate_press_consequence_arc(&press)?;
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
@@ -976,10 +989,11 @@ fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
                 && metrics.player_police_activity_information > 0
                 && metrics.counterintelligence_outcome.is_some()
                 && metrics.counterintelligence_information > 0
+                && metrics.followup_case_active == Some(true)
             {
                 None
             } else {
-                Some("police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up")
+                Some("police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up that reads whether the case is still active")
             }
         }
         Strategy::Recon => {
@@ -1015,6 +1029,28 @@ fn validate_strategy_evidence(
         Strategy::Press if metrics.police_arrived => validate_night_trap_evidence(metrics),
         Strategy::Recon => validate_night_trap_evidence(metrics),
         Strategy::Rush | Strategy::Press => Ok(()),
+    }
+}
+
+/// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
+/// reads that the case is hot, waits out the authored cold window, and verifies the case was
+/// shelved through their own surveillance rather than hidden case access.
+fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if metrics.followup_case_active == Some(true)
+        && metrics.cold_case_confirmed == Some(true)
+        && metrics.case_cold_minute.is_some()
+        && metrics.case_cold_minute.unwrap_or_default()
+            > metrics.burglary_terminal_minute.unwrap_or_default()
+    {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "the surfaced case must cool through the authored cold window and the player's own re-check must confirm the shelf",
+        })
     }
 }
 
@@ -1574,6 +1610,9 @@ fn play_session(
         metrics.exposure_level = Some(resolution.exposure().level());
         metrics.investigation_created = resolution.exposure().investigation().is_some();
         metrics.evidence_count = resolution.exposure().evidence().len();
+        // The case ID itself is developer-audit-only; the player only ever sees the surfaced
+        // legal-activity knowledge and their own later surveillance observations.
+        scenario.investigation = resolution.exposure().investigation();
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
         metrics.property_acquired_value_cents = resolution
@@ -1618,6 +1657,17 @@ fn play_session(
                 .get_report(artifacts.report())
                 .expect("started abort must persist its after-action report");
             print_report("ABORT REPORT", report, &scenario);
+        }
+        if strategy == Strategy::Rush && narrative {
+            println!(
+                "[DECIDE]  The standing abort protected the crew. Walk away from {} tonight; the police rhythm there is not beaten by speed alone.",
+                scenario
+                    .state
+                    .world()
+                    .get_neighborhood(scenario.neighborhood)
+                    .expect("neighborhood must persist")
+                    .name()
+            );
         }
     }
 
@@ -1675,37 +1725,43 @@ fn play_session(
         print_player_knowledge_gap(&scenario, burglary);
     }
 
-    // The Press branch now exercises a real player follow-up: the organization uses only the
-    // surfaced legal-activity report, the known neighborhood, and the field report to authorize
-    // counter-surveillance. The investigation's evidence and internal ID remain hidden.
+    // The Press branch exercises a real player follow-up: the organization uses only the
+    // surfaced legal-activity report and the crew's field report to authorize counter-surveillance
+    // of the precinct itself. The investigation's evidence, lead, and internal ID stay hidden; the
+    // follow-up reads only whether the authority is still visibly developing the known case.
     if strategy == Strategy::Press
         && metrics.player_legal_activity_information > 0
         && metrics.player_police_activity_information > 0
     {
-        if narrative {
-            let neighborhood_name = scenario
-                .state
-                .world()
-                .get_neighborhood(scenario.neighborhood)
-                .expect("counter-surveillance neighborhood must persist")
-                .name();
-            println!(
-                "[DECIDE]  Use the surfaced case existence and field report to quietly watch {neighborhood_name}, without reading hidden case state."
-            );
-        }
-        let neighborhood = scenario.neighborhood;
         let neighborhood_name = scenario
             .state
             .world()
-            .get_neighborhood(neighborhood)
+            .get_neighborhood(scenario.neighborhood)
             .expect("counter-surveillance neighborhood must persist")
             .name()
             .to_owned();
-        let counterintelligence_title = format!("{neighborhood_name} counter-surveillance");
+        let police_name = scenario
+            .state
+            .world()
+            .get_organization(scenario.police)
+            .expect("police organization must persist")
+            .name()
+            .to_owned();
+        if narrative {
+            println!(
+                "[DECIDE]  A case is open and the crew's field report is back. Stand down all visible work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
+            );
+            println!(
+                "[DECIDE]  Watch {police_name} itself at 08:20, outside the known patrol windows, to read whether detectives are still actively working the matter."
+            );
+        }
+        let counterintelligence_title = format!("{police_name} case-heat check");
+        let police = scenario.police;
         let counterintelligence = authorize_surveillance_target(
             &mut scenario,
-            EntityRef::Neighborhood(neighborhood),
+            EntityRef::Organization(police),
             &counterintelligence_title,
+            SimTime::from_minutes(500),
         )?;
         run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
         let operation = scenario
@@ -1716,13 +1772,60 @@ fn play_session(
         if let Some(resolution) = operation.resolution() {
             metrics.counterintelligence_outcome = Some(resolution.objective_outcome());
             metrics.counterintelligence_information = resolution.discovered_information().len();
+            metrics.followup_case_active = observe_authority_case_sightline(&scenario, resolution);
         }
         if narrative {
-            println!(
-                "[FOLLOW-UP] {counterintelligence_title} -> {:?}; organization gained {} additional police-activity record(s).",
-                metrics.counterintelligence_outcome,
-                metrics.counterintelligence_information,
-            );
+            match metrics.followup_case_active {
+                Some(true) => println!(
+                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Keep the district dark."
+                ),
+                Some(false) => println!(
+                    "[VERIFY]  No active case machinery around {police_name}; the matter appears shelved."
+                ),
+                None => println!(
+                    "[VERIFY]  The check did not produce a dependable read on the case's activity."
+                ),
+            }
+        }
+        // The narrative session waits out the authored cold-case window and re-checks the
+        // precinct through the same player-visible surveillance channel. Batch sessions observe
+        // one day and stop while the case is still hot, keeping the matched financial window intact.
+        if narrative {
+            run_until(
+                &mut scenario,
+                SimTime::from_minutes(2_525),
+                narrative,
+                &mut metrics,
+            )?;
+            let recheck_title = format!("{police_name} case re-check");
+            let recheck_at = scenario.state.now() + SimDuration::ONE_MINUTE;
+            let recheck = authorize_surveillance_target(
+                &mut scenario,
+                EntityRef::Organization(police),
+                &recheck_title,
+                recheck_at,
+            )?;
+            run_until_operation_terminal(&mut scenario, recheck, narrative, &mut metrics)?;
+            let recheck_operation = scenario
+                .state
+                .operations()
+                .get_operation(recheck)
+                .expect("recheck operation must persist");
+            if let Some(resolution) = recheck_operation.resolution() {
+                metrics.cold_case_confirmed =
+                    observe_authority_case_sightline(&scenario, resolution).map(|active| !active);
+            }
+            match metrics.cold_case_confirmed {
+                Some(true) => println!(
+                    "[CONSEQUENCE RESOLVED] The precinct has shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
+                ),
+                Some(false) => println!(
+                    "[VERIFY]  The precinct is still developing the case; keep standing down."
+                ),
+                None => println!(
+                    "[VERIFY]  The re-check did not produce a dependable read on the case's activity."
+                ),
+            }
         }
     }
 
@@ -2238,6 +2341,7 @@ fn build_scenario(
         opportunity_information,
         alternate_opportunity_information,
         enterprise,
+        investigation: None,
         variation,
     };
     validate_harness_state(scenario.registry, &scenario.state)?;
@@ -2246,13 +2350,19 @@ fn build_scenario(
 
 fn authorize_surveillance(scenario: &mut Scenario) -> Result<OperationId, Box<dyn Error>> {
     let title = format!("{} surveillance", scenario.variation.target_name());
-    authorize_surveillance_target(scenario, EntityRef::Business(scenario.target), &title)
+    authorize_surveillance_target(
+        scenario,
+        EntityRef::Business(scenario.target),
+        &title,
+        scenario.state.now() + SimDuration::ONE_MINUTE,
+    )
 }
 
 fn authorize_surveillance_target(
     scenario: &mut Scenario,
     target: EntityRef,
     title: &str,
+    scheduled_for: SimTime,
 ) -> Result<OperationId, Box<dyn Error>> {
     Ok(validate_authorize_operation(
         scenario.registry,
@@ -2268,10 +2378,39 @@ fn authorize_surveillance_target(
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
-            scheduled_for: scenario.state.now() + SimDuration::ONE_MINUTE,
+            scheduled_for,
         },
     )?
     .commit(&mut scenario.state)?)
+}
+
+/// Describes the surveillance plan level visible to the player from a discovered police-org
+/// observation: active-case heat versus a shelved case. Returns `None` when no legal-activity
+/// observation about the authority was produced.
+fn observe_authority_case_sightline(
+    scenario: &Scenario,
+    resolution: &crimocracy::operations::OperationResolutionRecord,
+) -> Option<bool> {
+    resolution
+        .discovered_information()
+        .iter()
+        .find_map(|information| {
+            let record = scenario
+                .state
+                .intelligence()
+                .get_information(*information)
+                .expect("discovered surveillance information must persist");
+            if record.topic() != InformationTopic::LegalActivity {
+                return None;
+            }
+            if record.summary().contains("actively developing the case") {
+                Some(true)
+            } else if record.summary().contains("shelved") {
+                Some(false)
+            } else {
+                None
+            }
+        })
 }
 
 fn authorize_burglary(
@@ -2507,7 +2646,7 @@ fn observe_tick(
                 .get_operation(*operation)
                 .expect("started operation must exist");
             println!(
-                "[RESOLVE] minute {:>4}: {} started.",
+                "[START]   minute {:>4}: {} started.",
                 outcome.now.as_minutes(),
                 record.title()
             );
@@ -2520,6 +2659,34 @@ fn observe_tick(
                 println!(
                     "          Police response dispatched; estimated arrival minute {} based on local deployment.",
                     response.arrival_due_at().as_minutes()
+                );
+            }
+        }
+    }
+
+    // A cold case shelved by its owning authority is a player-visible consequence resolution: the
+    // organization can verify it later through its own surveillance, and the narrative prints the
+    // institutional beat when the authored inactivity window elapses.
+    if let Some(case) = scenario.investigation {
+        if outcome.cold_case_suspensions.contains(&case) {
+            metrics.case_cold_minute = Some(outcome.now.as_minutes());
+            if narrative {
+                let owner = scenario
+                    .state
+                    .legal()
+                    .get_investigation(case)
+                    .expect("shelved case must persist")
+                    .owner();
+                let owner_name = scenario
+                    .state
+                    .world()
+                    .get_organization(owner)
+                    .expect("case owner must persist")
+                    .name();
+                println!(
+                    "[CASE COLD] minute {:>4}: {} shelved the case after sustained routine investigation found no actionable subject.",
+                    outcome.now.as_minutes(),
+                    owner_name
                 );
             }
         }
@@ -3184,7 +3351,7 @@ fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -3206,6 +3373,9 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.player_police_activity_information,
         metrics.counterintelligence_outcome,
         metrics.counterintelligence_information,
+        metrics.followup_case_active,
+        metrics.cold_case_confirmed,
+        metrics.case_cold_minute,
         metrics.investigation_work_scheduled,
         metrics.investigation_work_resolved,
         metrics.discovered_surveillance_information,
@@ -3268,8 +3438,15 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     );
     print_loop_checkpoint(
         "follow-up",
-        press.counterintelligence_outcome.is_some() && press.counterintelligence_information > 0,
-        "a player-visible legal report can seed a new surveillance plan without hidden case access",
+        press.counterintelligence_outcome.is_some()
+            && press.counterintelligence_information > 0
+            && press.followup_case_active == Some(true),
+        "a player-visible legal report can seed a precinct check that reads whether the case is still hot",
+    );
+    print_loop_checkpoint(
+        "survive",
+        press.cold_case_confirmed == Some(true) && press.case_cold_minute.is_some(),
+        "standing down and outlasting the investigation resolves the consequence through the player's own surveillance",
     );
     print_loop_checkpoint(
         "organization",
@@ -3299,9 +3476,10 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         terminal_label(rush),
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s) and {} legal-activity information item(s); RECON realized {} cents of resale cash.",
+        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~500, then confirmed it shelved at minute {}; RECON realized {} cents of resale cash.",
         press.evidence_count,
         press.player_legal_activity_information,
+        press.case_cold_minute.unwrap_or_default(),
         recon.property_realized_cash_cents.unwrap_or_default(),
     );
     println!(
@@ -3311,7 +3489,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The fixture now proves a bounded counter-surveillance response, but it still does not model disrupting evidence, influencing counsel, or changing a prosecution outcome."
+        "  - The consequence arc now closes: an open case can be read, outlasted by standing down, and verified shelved. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
         "  - The portfolio probe now covers prioritization and expiry across competing opportunities, but it still uses one operation type and does not test resource contention between simultaneous crews."

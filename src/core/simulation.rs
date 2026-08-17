@@ -14,6 +14,7 @@ use crate::economy::business_economy_system::{
 use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, due_active_enterprises, validate_enterprise_cycle_plan,
 };
+use crate::legal::investigation_system::process_cold_case_decay;
 use crate::legal::investigation_system::staff_unassigned_active_investigations;
 use crate::legal::investigation_work_execution::{
     decide_investigation_work_resolution, due_scheduled_investigation_work,
@@ -52,6 +53,7 @@ pub struct TickOutcome {
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
     pub expired_opportunities: Vec<OpportunityId>,
+    pub cold_case_suspensions: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
 }
 
@@ -138,6 +140,12 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated investigation work must commit atomically");
         resolved_investigation_work.push(resolved);
     }
+    // Cold-case decay runs after detective work resolution so the case's last-activity instant is
+    // final for the minute; an authored institutional-inactivity window then shelves operation-
+    // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
+    // decay does not perturb any domain RNG sequence.
+    let cold_case_suspensions = process_cold_case_decay(state, registry.legal().cold_case_window())
+        .expect("valid state should resolve cold-case decay");
     let due_businesses = due_active_businesses(state);
     let mut business_cycles = Vec::with_capacity(due_businesses.len());
     for business in due_businesses {
@@ -209,6 +217,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         enterprise_cycles,
         recruitment_attempts,
         expired_opportunities,
+        cold_case_suspensions,
         executive_brief,
     }
 }

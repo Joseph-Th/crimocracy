@@ -17,7 +17,7 @@ use crate::legal::{InvestigationStatus, PatrolWindow};
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
 };
-use crate::world::{BusinessFunction, Lifecycle, Rating};
+use crate::world::{BusinessFunction, Lifecycle, OrganizationKind, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -37,6 +37,7 @@ pub(crate) enum SurveillanceError {
 pub(crate) struct SurveillanceIntelligencePlan {
     target: EntityRef,
     observed_at: SimTime,
+    surveiller: Option<OrganizationId>,
     snapshot: SurveillanceTargetSnapshot,
     observations: Vec<SurveillanceObservation>,
 }
@@ -45,6 +46,15 @@ impl SurveillanceIntelligencePlan {
     pub(crate) fn observation_count(&self) -> usize {
         self.observations.len()
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LawEnforcementCaseSightline {
+    /// Whether the surveilling organization has been surfaced an active operation-originated case
+    /// owned by the targeted authority. The sightline never reveals evidence, subjects, or internal
+    /// case details; it only distinguishes "the case the organization knows about is still being
+    /// actively worked" from "the authority has shelved it".
+    active_case_against_surveiller: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +95,9 @@ enum SurveillanceTargetSnapshot {
         name: String,
         lifecycle: Lifecycle,
         active_members: Vec<(CharacterId, String)>,
+        // Present for law-enforcement/legal-authority targets so the player's known case can be
+        // re-checked through canonical surveillance after standing down.
+        law_enforcement_sightline: Option<LawEnforcementCaseSightline>,
     },
     Investigation {
         id: InvestigationId,
@@ -175,11 +188,13 @@ pub(crate) fn decide_surveillance_intelligence(
         return Err(SurveillanceError::UnsupportedTarget(*target));
     }
     let observed_at = state.now();
-    let snapshot = capture_target_snapshot(state, *target, observed_at)?;
+    let surveiller = operation.responsible_organization();
+    let snapshot = capture_target_snapshot(state, *target, observed_at, surveiller)?;
     let observations = build_observations(&snapshot, outcome, observed_at);
     Ok(Some(SurveillanceIntelligencePlan {
         target: *target,
         observed_at,
+        surveiller: Some(surveiller),
         snapshot,
         observations,
     }))
@@ -192,7 +207,10 @@ pub(crate) fn validate_surveillance_plan_snapshot(
     if state.now() != plan.observed_at {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
-    let current = capture_target_snapshot(state, plan.target, plan.observed_at)?;
+    let surveiller = plan
+        .surveiller
+        .expect("validated surveillance plan must carry its surveiller");
+    let current = capture_target_snapshot(state, plan.target, plan.observed_at, surveiller)?;
     if current != plan.snapshot {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
@@ -297,8 +315,17 @@ pub(crate) fn is_valid_persisted_surveillance_information(
                 && information.subject() == EntityRef::Character(character)
         }
         EntityRef::Organization(organization) => {
-            information.topic() == InformationTopic::Personnel
-                && information.subject() == EntityRef::Organization(organization)
+            let is_law_enforcement = state
+                .world
+                .get_organization(organization)
+                .is_some_and(|record| is_law_enforcement_authority(record.kind()));
+            if is_law_enforcement {
+                information.topic() == InformationTopic::LegalActivity
+                    && information.subject() == EntityRef::Organization(organization)
+            } else {
+                information.topic() == InformationTopic::Personnel
+                    && information.subject() == EntityRef::Organization(organization)
+            }
         }
         EntityRef::Investigation(investigation) => {
             information.topic() == InformationTopic::LegalActivity
@@ -358,10 +385,21 @@ pub(crate) fn expected_persisted_surveillance_signatures(
             expected.insert((InformationTopic::Personnel, EntityRef::Character(character)));
         }
         EntityRef::Organization(organization) => {
-            expected.insert((
-                InformationTopic::Personnel,
-                EntityRef::Organization(organization),
-            ));
+            let is_law_enforcement = state
+                .world
+                .get_organization(organization)
+                .is_some_and(|record| is_law_enforcement_authority(record.kind()));
+            if is_law_enforcement {
+                expected.insert((
+                    InformationTopic::LegalActivity,
+                    EntityRef::Organization(organization),
+                ));
+            } else {
+                expected.insert((
+                    InformationTopic::Personnel,
+                    EntityRef::Organization(organization),
+                ));
+            }
         }
         EntityRef::Investigation(investigation) => {
             expected.insert((
@@ -393,6 +431,7 @@ fn capture_target_snapshot(
     state: &AppState,
     target: EntityRef,
     at: SimTime,
+    surveiller: OrganizationId,
 ) -> Result<SurveillanceTargetSnapshot, SurveillanceError> {
     match target {
         EntityRef::Neighborhood(id) => {
@@ -464,11 +503,23 @@ fn capture_target_snapshot(
                 .filter(|character| character.lifecycle() == Lifecycle::Active)
                 .map(|character| (character.id(), character.name().to_owned()))
                 .collect();
+            let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
+                Some(LawEnforcementCaseSightline {
+                    active_case_against_surveiller: state.legal.investigations().any(|case| {
+                        case.owner() == id
+                            && case.status() == InvestigationStatus::Active
+                            && case.notified_organizations().contains(&surveiller)
+                    }),
+                })
+            } else {
+                None
+            };
             Ok(SurveillanceTargetSnapshot::Organization {
                 id,
                 name: organization.name().to_owned(),
                 lifecycle: organization.lifecycle(),
                 active_members,
+                law_enforcement_sightline,
             })
         }
         EntityRef::Investigation(id) => {
@@ -640,14 +691,28 @@ fn build_observations(
             id,
             name,
             active_members,
+            law_enforcement_sightline,
             lifecycle: _,
-        } => vec![SurveillanceObservation {
-            topic: InformationTopic::Personnel,
-            subject: EntityRef::Organization(*id),
-            reliability,
-            specificity,
-            summary: organization_summary(name, active_members, outcome),
-        }],
+        } => match law_enforcement_sightline {
+            Some(sightline) => vec![SurveillanceObservation {
+                topic: InformationTopic::LegalActivity,
+                subject: EntityRef::Organization(*id),
+                reliability,
+                specificity,
+                summary: authority_sightline_summary(
+                    name,
+                    sightline.active_case_against_surveiller,
+                    outcome,
+                ),
+            }],
+            None => vec![SurveillanceObservation {
+                topic: InformationTopic::Personnel,
+                subject: EntityRef::Organization(*id),
+                reliability,
+                specificity,
+                summary: organization_summary(name, active_members, outcome),
+            }],
+        },
         SurveillanceTargetSnapshot::Investigation {
             id,
             title,
@@ -852,6 +917,36 @@ fn character_summary(
     format!("Surveillance observed {name} {affiliation}.{reporting}")
 }
 
+fn is_law_enforcement_authority(kind: OrganizationKind) -> bool {
+    matches!(
+        kind,
+        OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+    )
+}
+
+fn authority_sightline_summary(
+    name: &str,
+    active_case_against_surveiller: bool,
+    outcome: OperationObjectiveOutcome,
+) -> String {
+    // The observation reports only visible authority activity tied to a case the surveilling
+    // organization already knows exists; it never reveals evidence, subjects, or case internals.
+    if outcome == OperationObjectiveOutcome::Partial {
+        return format!(
+            "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
+        );
+    }
+    if active_case_against_surveiller {
+        format!(
+            "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
+        )
+    } else {
+        format!(
+            "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
+        )
+    }
+}
+
 fn organization_summary(
     name: &str,
     active_members: &[(CharacterId, String)],
@@ -967,13 +1062,16 @@ mod tests {
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::simulation::run_tick;
     use crate::core::time::SimDuration;
-    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::investigation_system::{
+        process_cold_case_decay, validate_add_evidence, validate_incident_intake,
+        validate_open_investigation,
+    };
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
     use crate::legal::patrol_system::validate_establish_patrol_deployment;
     use crate::legal::{
         Admissibility, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
-        EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft,
-        PatrolWindow,
+        EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
+        JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
     };
     use crate::operations::operation_execution::{
         calculate_intelligence_factors, decide_operation_resolution,
@@ -1539,6 +1637,117 @@ mod tests {
         assert!(!information.summary().contains("Hidden Case Subject"));
         assert!(!information.summary().contains("Document"));
         validate_state(&fixture.state).expect("investigation surveillance state should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_leaks() {
+        let mut fixture = fixture(100, false);
+        let business = fixture.business;
+        let police = fixture.police;
+        let incident = authorize_surveillance(&mut fixture, EntityRef::Business(business));
+        // Resolve the originating surveillance to terminal state so it does not also start when
+        // the later re-check surveillance run_tick fires; the fixture has no patrol deployment, so
+        // its resolution creates no exposure case.
+        resolve_with_zero_variance(&mut fixture, incident);
+        let case = validate_incident_intake(
+            &fixture.state,
+            IncidentIntakeDraft {
+                owner: fixture.police,
+                title: "Crew Incident Inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Operation(incident)]),
+                evidence: vec![IncidentEvidenceDraft {
+                    subject: EntityRef::Operation(incident),
+                    origin: Some(EntityRef::Operation(incident)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: fixture.state.now(),
+                }],
+                origin_operation: Some(incident),
+                notified_organizations: BTreeSet::from([fixture.crew]),
+            },
+        )
+        .expect("incident intake should validate")
+        .commit(&mut fixture.state)
+        .expect("incident intake should commit")
+        .investigation;
+
+        // While the case is active, police-organization surveillance reports the case heat
+        // without revealing the evidence graph or internal case details.
+        let hot_surveillance =
+            authorize_surveillance(&mut fixture, EntityRef::Organization(police));
+        resolve_with_zero_variance(&mut fixture, hot_surveillance);
+        let hot_resolution = fixture
+            .state
+            .operations()
+            .get_operation(hot_surveillance)
+            .and_then(|record| record.resolution())
+            .expect("hot surveillance should resolve");
+        assert_eq!(hot_resolution.discovered_information().len(), 1);
+        let hot_observation = fixture
+            .state
+            .intelligence()
+            .get_information(
+                *hot_resolution
+                    .discovered_information()
+                    .iter()
+                    .next()
+                    .unwrap(),
+            )
+            .expect("case-heat observation should persist");
+        assert_eq!(hot_observation.topic(), InformationTopic::LegalActivity);
+        assert_eq!(hot_observation.subject(), EntityRef::Organization(police));
+        assert!(hot_observation
+            .summary()
+            .contains("actively developing the case"));
+        assert!(!hot_observation.summary().contains("Crew Incident Inquiry"));
+        assert!(!hot_observation.summary().contains("Surveillance"));
+
+        // A passing of the authored cold window deterministically shelves the case, and a fresh
+        // police-organization surveillance then reports the matter has gone quiet.
+        fixture.state.advance_clock(SimDuration::from_minutes(121));
+        let suspended = process_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
+            .expect("cold-case decay should resolve");
+        assert_eq!(suspended, vec![case]);
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_investigation(case)
+                .expect("cold case should persist")
+                .status(),
+            InvestigationStatus::Suspended
+        );
+        validate_state(&fixture.state).expect("cold-case decay state should validate");
+        validate_invariants(&fixture.state);
+
+        let cold_surveillance =
+            authorize_surveillance(&mut fixture, EntityRef::Organization(police));
+        resolve_with_zero_variance(&mut fixture, cold_surveillance);
+        let cold_resolution = fixture
+            .state
+            .operations()
+            .get_operation(cold_surveillance)
+            .and_then(|record| record.resolution())
+            .expect("recheck surveillance should resolve");
+        let cold_observation = fixture
+            .state
+            .intelligence()
+            .get_information(
+                *cold_resolution
+                    .discovered_information()
+                    .iter()
+                    .next()
+                    .unwrap(),
+            )
+            .expect("shelved observation should persist");
+        assert!(cold_observation.summary().contains("shelved"));
+        assert!(!cold_observation
+            .summary()
+            .contains("actively developing the case"));
+        validate_state(&fixture.state).expect("shelved recheck state should validate");
         validate_invariants(&fixture.state);
     }
 

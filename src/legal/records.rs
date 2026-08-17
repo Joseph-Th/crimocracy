@@ -434,7 +434,8 @@ pub struct ProsecutionReferralDraft {
 pub(super) struct ProsecutionIndexes {
     pub(super) cases_by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_defendant: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
-    pub(super) cases_by_source_investigation: BTreeMap<InvestigationId, BTreeSet<ProsecutionCaseId>>,
+    pub(super) cases_by_source_investigation:
+        BTreeMap<InvestigationId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_office: BTreeMap<OrganizationId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionCaseId>>,
@@ -914,6 +915,17 @@ pub struct InvestigationRecord {
     pub(super) subjects: BTreeSet<EntityRef>,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) opened_at: SimTime,
+    /// The operation whose exposure opened this case. Only operation-originated cases are
+    /// eligible for deterministic cold-case decay; institution-authored cases keep their own
+    /// lifecycle until an explicit transition.
+    pub(super) origin_operation: Option<OperationId>,
+    /// Organizations that were surfaced the case-open legal-activity knowledge when the case was
+    /// opened. Surveillance of the owning authority uses this set (never the hidden evidence
+    /// graph) to report whether that organization's case is still being actively worked.
+    pub(super) notified_organizations: BTreeSet<OrganizationId>,
+    /// The most recent minute the case gained evidence, subjects, scheduled work, or resolved
+    /// work. Cold-case decay measures institutional inactivity from this instant.
+    pub(super) last_activity_at: SimTime,
     pub(super) version: u32,
 }
 
@@ -953,6 +965,15 @@ impl InvestigationRecord {
     }
     pub fn opened_at(&self) -> SimTime {
         self.opened_at
+    }
+    pub fn origin_operation(&self) -> Option<OperationId> {
+        self.origin_operation
+    }
+    pub fn notified_organizations(&self) -> &BTreeSet<OrganizationId> {
+        &self.notified_organizations
+    }
+    pub fn last_activity_at(&self) -> SimTime {
+        self.last_activity_at
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -1327,6 +1348,9 @@ pub(super) struct InvestigationIndexes {
     pub(super) investigations_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationId>>,
     pub(super) active_without_lead: BTreeSet<InvestigationId>,
+    /// Every active case keyed by its last activity instant, so cold-case decay finds due
+    /// institutional-inactivity candidates deterministically without scanning the case set.
+    pub(super) cases_by_last_activity: BTreeMap<SimTime, BTreeSet<InvestigationId>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1340,7 +1364,8 @@ pub(super) struct EvidenceIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct WitnessIndexes {
-    pub(super) case_witness_by_case_character: BTreeMap<(InvestigationId, CharacterId), CaseWitnessId>,
+    pub(super) case_witness_by_case_character:
+        BTreeMap<(InvestigationId, CharacterId), CaseWitnessId>,
     pub(super) case_witnesses_by_character: BTreeMap<CharacterId, BTreeSet<CaseWitnessId>>,
     pub(super) case_witnesses_by_investigation: BTreeMap<InvestigationId, BTreeSet<CaseWitnessId>>,
     pub(super) witness_statement_by_evidence: BTreeMap<EvidenceId, WitnessStatementId>,
@@ -1452,6 +1477,13 @@ pub struct IncidentIntakeDraft {
     pub title: String,
     pub subjects: BTreeSet<EntityRef>,
     pub evidence: Vec<IncidentEvidenceDraft>,
+    /// The operation whose exposure opened this case; only operation-originated incidents carry
+    /// this link so cold-case decay never touches institution-authored casework.
+    pub origin_operation: Option<OperationId>,
+    /// Organizations surfaced the case-open legal-activity knowledge at intake; the owning
+    /// authority and later surveillance read only this set to decide what is visible about the
+    /// case, never the hidden evidence or investigation internals.
+    pub notified_organizations: BTreeSet<OrganizationId>,
 }
 
 pub struct EvidenceDraft {

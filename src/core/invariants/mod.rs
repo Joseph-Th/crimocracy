@@ -7,10 +7,11 @@ use crate::core::id::{
     ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, IdCounters, IdKind,
     InformantDisclosureId, InformantId, InformationId, InvestigationId, InvestigationWorkId,
     LedgerTransactionId, LegalRepresentationId, MandateId, OperationId, OpportunityId,
-    OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId,
-    ProsecutionReferralId, RecruitmentAttemptId, ReportId, WitnessStatementId,
+    OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
+    RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
+use crate::decisions::DecisionResponse;
 use crate::delegation::{MandateStatus, ResponsibilityScope};
 use crate::enterprises::EnterpriseLocation;
 use crate::finance::{AccountLifecycle, FinancialOwner};
@@ -37,10 +38,8 @@ use crate::world::{
     BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, OrganizationKind, PolicyKind,
     ALL_POLICY_KINDS,
 };
-use crate::decisions::DecisionResponse;
 use std::collections::BTreeSet;
 use thiserror::Error;
-
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum StateValidationError {
@@ -143,6 +142,8 @@ pub enum StateValidationError {
     InvalidProsecutionReferral { referral: ProsecutionReferralId },
     #[error("investigation {investigation} has invalid investigator staffing")]
     InvalidInvestigationStaffing { investigation: InvestigationId },
+    #[error("investigation {investigation} has invalid origin or case-awareness provenance")]
+    InvalidInvestigationActivity { investigation: InvestigationId },
     #[error("investigation work {work} has invalid persisted state")]
     InvalidInvestigationWork { work: InvestigationWorkId },
     #[error("evidence {evidence} has invalid derived provenance")]
@@ -310,13 +311,13 @@ pub enum StateValidationError {
     InvalidBusinessCycle { cycle: BusinessCycleId },
 }
 
-mod world;
-mod recruitment;
+mod business;
+mod decisions;
+mod legal;
 mod operations;
 mod opportunities;
-mod decisions;
-mod business;
-mod legal;
+mod recruitment;
+mod world;
 
 use self::business::{validate_business_economies, validate_enterprises};
 use self::decisions::{validate_decisions, validate_delegation};

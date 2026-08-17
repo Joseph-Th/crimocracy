@@ -683,6 +683,20 @@ pub struct Registry {
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
     executive_brief: ExecutiveBriefDefinition,
+    legal: LegalConfigDefinition,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LegalConfigDefinition {
+    cold_case_window: SimDuration,
+}
+
+impl LegalConfigDefinition {
+    /// How long an operation-originated investigation remains institutionally active after its
+    /// last evidence/work activity before the owning authority deterministically shelves it.
+    pub fn cold_case_window(self) -> SimDuration {
+        self.cold_case_window
+    }
 }
 
 impl Registry {
@@ -691,6 +705,9 @@ impl Registry {
     }
     pub fn recruitment(&self) -> &RecruitmentDefinition {
         &self.recruitment
+    }
+    pub fn legal(&self) -> LegalConfigDefinition {
+        self.legal
     }
     pub fn get_capability(&self, kind: CapabilityKind) -> &CapabilityDefinition {
         self.capabilities
@@ -873,6 +890,12 @@ pub(crate) enum RegistryBuildError {
     DuplicateExecutiveBrief,
     #[error("missing executive brief definition")]
     MissingExecutiveBrief,
+    #[error("missing legal configuration definition")]
+    MissingLegalConfig,
+    #[error("duplicate legal configuration definition")]
+    DuplicateLegalConfig,
+    #[error("legal cold-case window must be positive")]
+    InvalidLegalColdWindow,
     #[error("executive brief cadence must be positive")]
     InvalidExecutiveBriefCadence,
     #[error("executive brief must suppress routine source entries")]
@@ -909,6 +932,7 @@ pub(crate) struct RegistryBuilder {
     enterprises: BTreeMap<EnterpriseKind, EnterpriseDefinition>,
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
     executive_brief: Option<ExecutiveBriefDefinition>,
+    legal: Option<LegalConfigDefinition>,
 }
 
 impl RegistryBuilder {
@@ -927,6 +951,19 @@ impl RegistryBuilder {
         {
             return Err(RegistryBuildError::DuplicateCapability(kind));
         }
+        Ok(())
+    }
+    pub(crate) fn register_legal(
+        &mut self,
+        cold_case_window: SimDuration,
+    ) -> Result<(), RegistryBuildError> {
+        if self.legal.is_some() {
+            return Err(RegistryBuildError::DuplicateLegalConfig);
+        }
+        if cold_case_window.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidLegalColdWindow);
+        }
+        self.legal = Some(LegalConfigDefinition { cold_case_window });
         Ok(())
     }
     pub(crate) fn register_executive_brief(
@@ -1505,6 +1542,7 @@ impl RegistryBuilder {
         let executive_brief = self
             .executive_brief
             .ok_or(RegistryBuildError::MissingExecutiveBrief)?;
+        let legal = self.legal.ok_or(RegistryBuildError::MissingLegalConfig)?;
         Ok(Registry {
             content_revision,
             capabilities: self.capabilities,
@@ -1517,6 +1555,7 @@ impl RegistryBuilder {
             enterprises: self.enterprises,
             businesses: self.businesses,
             executive_brief,
+            legal,
         })
     }
 }

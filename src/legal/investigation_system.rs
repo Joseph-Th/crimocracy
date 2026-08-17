@@ -5,6 +5,7 @@ use crate::core::id::{
     ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::core::time::{SimDuration, SimTime};
 use crate::legal::{
     EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity, EvidenceRecord,
     IncidentIntakeDraft, InvestigationDraft, InvestigationRecord, InvestigationStatus,
@@ -138,6 +139,9 @@ impl ValidatedInvestigation {
             subjects: self.draft.subjects,
             evidence: Default::default(),
             opened_at: state.now(),
+            origin_operation: None,
+            notified_organizations: Default::default(),
+            last_activity_at: state.now(),
             version: 1,
         });
         Ok(id)
@@ -218,7 +222,7 @@ impl ValidatedInvestigationTransition {
         };
         state
             .legal
-            .set_investigation_status(self.investigation, status);
+            .set_investigation_status(self.investigation, status, state.now());
         Ok(())
     }
 }
@@ -329,6 +333,60 @@ fn validate_investigation_transition_dependencies(
         }
     }
     Ok(())
+}
+
+/// Deterministically shelves operation-originated investigations whose owning authority has been
+/// institutionally inactive for the authored cold window.
+///
+/// Cold cases are suspended through the canonical lifecycle transition, which revalidates every
+/// dependency (no scheduled work, no active arrest) at the current minute, so work that appeared
+/// between the deadline index scan and this call simply keeps the case active and decay retries on
+/// the refreshed deadline. Only cases carrying an operation origination link are eligible:
+/// institution-authored casework keeps its lifecycle until an explicit staff decision. A case whose
+/// evidence identified a concrete character is a real, actionable lead and is never auto-shelved.
+/// The owned authority keeps the sitting case history intact so a later operation exposure in the
+/// same jurisdiction can resume the same shelf rather than starting from silence.
+pub(crate) fn process_cold_case_decay(
+    state: &mut AppState,
+    cold_case_window: SimDuration,
+) -> Result<Vec<InvestigationId>, InvestigationError> {
+    let threshold_minutes = state
+        .now()
+        .as_minutes()
+        .saturating_sub(u64::from(cold_case_window.as_minutes()));
+    let candidates = state
+        .legal
+        .active_case_ids_with_last_activity_at_or_before(SimTime::from_minutes(threshold_minutes));
+    let mut suspended = Vec::new();
+    for investigation in candidates {
+        let record = state
+            .legal
+            .get_investigation(investigation)
+            .expect("cold-case candidate must still exist");
+        if record.origin_operation().is_none() {
+            continue;
+        }
+        // A case that connected its evidence to a concrete person is a real, actionable lead;
+        // the authority does not shelve a case that knows who the suspect is.
+        if record
+            .subjects()
+            .iter()
+            .any(|subject| matches!(subject, EntityRef::Character(_)))
+        {
+            continue;
+        }
+        let transition = validate_transition_investigation(
+            state,
+            investigation,
+            InvestigationTransition::Suspend,
+        );
+        let Ok(transition) = transition else { continue };
+        transition
+            .commit(state)
+            .expect("validated cold-case suspension must commit atomically");
+        suspended.push(investigation);
+    }
+    Ok(suspended)
 }
 
 #[derive(Debug)]
@@ -720,6 +778,9 @@ impl ValidatedIncidentIntake {
             subjects: self.draft.subjects,
             evidence: Default::default(),
             opened_at: state.now(),
+            origin_operation: self.draft.origin_operation,
+            notified_organizations: self.draft.notified_organizations,
+            last_activity_at: state.now(),
             version: 1,
         });
         let mut evidence_ids = Vec::with_capacity(self.draft.evidence.len());
@@ -776,6 +837,20 @@ fn validate_incident_intake_dependencies(
     )?;
     if draft.evidence.is_empty() {
         return Err(InvestigationError::NoIncidentEvidence);
+    }
+    if let Some(operation) = draft.origin_operation {
+        if !is_entity_present(state, EntityRef::Operation(operation)) {
+            return Err(InvestigationError::MissingEntity(EntityRef::Operation(
+                operation,
+            )));
+        }
+    }
+    for organization in &draft.notified_organizations {
+        if !is_entity_present(state, EntityRef::Organization(*organization)) {
+            return Err(InvestigationError::MissingEntity(EntityRef::Organization(
+                *organization,
+            )));
+        }
     }
     for evidence in &draft.evidence {
         if evidence.kind == crate::legal::EvidenceKind::PatternLink {
@@ -1705,6 +1780,179 @@ mod tests {
             }
         );
         validate_state(&state).expect("case graph indexes should remain structurally valid");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xC01D_1933);
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Cold Case Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let criminal = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Cold Case Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("criminal fixture should validate");
+        let leader = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Cold Case Leader".to_owned(),
+                organization: Some(criminal),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Surveillance, rating(80)),
+                    (CapabilityKind::Management, rating(80)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("leader fixture should validate");
+        let origin = crate::operations::operation_system::validate_authorize_operation(
+            &registry,
+            &state,
+            crate::operations::OperationDraft {
+                title: "Origin surveillance".to_owned(),
+                kind: crate::operations::OperationKind::Surveillance,
+                responsible_organization: criminal,
+                leader,
+                objective: crate::operations::OperationObjective::GatherInformation {
+                    target: EntityRef::Organization(criminal),
+                },
+                approach: crate::operations::OperationApproach::Covert,
+                roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            },
+        )
+        .expect("origin operation should validate")
+        .commit(&mut state)
+        .expect("origin operation should commit");
+        let case = validate_incident_intake(
+            &state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: "Sober incident inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+                evidence: vec![crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Operation(origin),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                }],
+                origin_operation: Some(origin),
+                notified_organizations: BTreeSet::from([criminal]),
+            },
+        )
+        .expect("incident intake should validate")
+        .commit(&mut state)
+        .expect("incident intake should commit")
+        .investigation;
+        let institution_authored = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "Institution-authored case stays put".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+            },
+        )
+        .expect("institution-authored case should validate")
+        .commit(&mut state)
+        .expect("institution-authored case should commit");
+
+        // A short cold window shelves only the operation-originated case without an identified
+        // suspect; an operation-originated case that named a concrete character is a real lead and
+        // stays active.
+        let identified = validate_incident_intake(
+            &state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: "Identified incident inquiry".to_owned(),
+                subjects: BTreeSet::from([
+                    EntityRef::Operation(origin),
+                    EntityRef::Character(leader),
+                ]),
+                evidence: vec![crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Character(leader),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::KnownAssociation,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: state.now(),
+                }],
+                origin_operation: Some(origin),
+                notified_organizations: BTreeSet::from([criminal]),
+            },
+        )
+        .expect("identified incident intake should validate")
+        .commit(&mut state)
+        .expect("identified incident intake should commit")
+        .investigation;
+        state.advance_clock(SimDuration::from_minutes(121));
+        let suspended = process_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("cold-case decay should resolve");
+        assert_eq!(suspended, vec![case]);
+        let record = state
+            .legal()
+            .get_investigation(case)
+            .expect("cold case should persist");
+        assert_eq!(record.status(), InvestigationStatus::Suspended);
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(institution_authored)
+                .expect("institution-authored case should persist")
+                .status(),
+            InvestigationStatus::Active
+        );
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(identified)
+                .expect("identified case should persist")
+                .status(),
+            InvestigationStatus::Active
+        );
+        validate_state(&state).expect("cold decay state should validate");
+        validate_invariants(&state);
+
+        // The cold-decay index and case provenance survive save/restore, so a campaign loaded
+        // after the shelf decision keeps the same institutional state.
+        state = restore_save(
+            &registry,
+            build_save(&registry, &state).expect("cold case state should save"),
+        )
+        .expect("cold case state should restore");
+        validate_state(&state).expect("restored cold decay state should validate");
+        validate_invariants(&state);
+
+        // The owning authority can resume the shelved case through the canonical transition; the
+        // resume refreshes institutional activity so it does not immediately re-cool.
+        validate_transition_investigation(&state, case, InvestigationTransition::Resume)
+            .expect("resume should validate")
+            .commit(&mut state)
+            .expect("resume should commit");
+        validate_state(&state).expect("resumed cold case state should validate");
         validate_invariants(&state);
     }
 }
