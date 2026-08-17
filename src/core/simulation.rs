@@ -25,7 +25,8 @@ use crate::operations::operation_execution::{
     OperationResolutionRandomness,
 };
 use crate::operations::operation_system::{
-    apply_transition, due_authorized_operations, OperationTransition,
+    apply_transition, due_authorized_operations, has_missed_operation_deadline,
+    validate_deadline_missed_operation, OperationTransition,
 };
 use crate::operations::police_response_integration::process_due_police_responses;
 use crate::opportunities::opportunity_system::expire_due_opportunities;
@@ -61,10 +62,19 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Opportunity expiry runs before other due work so its durable lifecycle report is available
     // to every same-minute consumer, including the executive brief synthesized at the end.
     let expired_opportunities = expire_due_opportunities(registry, state);
-    let started_operations = due_authorized_operations(state);
-    for operation in &started_operations {
-        apply_transition(registry, state, *operation, OperationTransition::Begin)
-            .expect("due authorized operation must support the begin transition");
+    let due_authorized = due_authorized_operations(state);
+    let mut started_operations = Vec::with_capacity(due_authorized.len());
+    for operation in due_authorized {
+        if has_missed_operation_deadline(state, operation) {
+            validate_deadline_missed_operation(state, operation)
+                .expect("a missed operation deadline must validate")
+                .commit(state)
+                .expect("a missed operation deadline must commit atomically");
+        } else {
+            apply_transition(registry, state, operation, OperationTransition::Begin)
+                .expect("due authorized operation must support the begin transition");
+            started_operations.push(operation);
+        }
     }
     let police_response_outcome = process_due_police_responses(state)
         .expect("due police responses must commit through canonical arrival processing");

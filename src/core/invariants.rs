@@ -2635,6 +2635,42 @@ fn validate_operation_abort_links(
             }
             return Ok(());
         }
+        (
+            OperationAbortPhase::BeforeStart,
+            OperationAbortCause::DeadlineMissed,
+            Some(artifacts),
+        ) => {
+            let deadline = operation
+                .constraints()
+                .iter()
+                .filter_map(|constraint| match constraint {
+                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+                    OperationConstraint::AvoidCasualties
+                    | OperationConstraint::DoNotHarmEmployees
+                    | OperationConstraint::AvoidFirearms
+                    | OperationConstraint::ProtectLeadershipIdentity
+                    | OperationConstraint::PreserveMerchandise
+                    | OperationConstraint::ExcludeCharacter(_) => None,
+                })
+                .min();
+            if operation.started_at().is_some()
+                || operation.resolution_due_at().is_some()
+                || deadline.is_none_or(|deadline| deadline >= abort.aborted_at())
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
         (OperationAbortPhase::InProgress, OperationAbortCause::AuthorityOrder, Some(artifacts)) => {
             let (Some(started_at), Some(due_at)) =
                 (operation.started_at(), operation.resolution_due_at())
@@ -2834,11 +2870,14 @@ fn validate_operation_abort_links(
             )?;
         }
         (OperationAbortPhase::BeforeStart, _, Some(_))
+        | (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed, None)
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_), None)
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_), None)
         | (OperationAbortPhase::InProgress, _, None)
         | (OperationAbortPhase::InProgress, OperationAbortCause::Decision(_), Some(_))
+        | (OperationAbortPhase::InProgress, OperationAbortCause::DeadlineMissed, Some(_))
         | (OperationAbortPhase::AwaitingDecision, _, None)
+        | (OperationAbortPhase::AwaitingDecision, OperationAbortCause::DeadlineMissed, Some(_))
         | (OperationAbortPhase::AwaitingDecision, OperationAbortCause::AuthorityOrder, Some(_)) => {
             return Err(StateValidationError::InvalidOperationAbort {
                 operation: operation.id(),
@@ -2920,6 +2959,7 @@ fn validate_operation_abort_artifacts(
                                     .entities
                                     .contains(&EntityRef::Neighborhood(response.neighborhood()))
                         }),
+                    OperationAbortCause::DeadlineMissed => true,
                 }
         })
     {
@@ -2962,6 +3002,7 @@ fn validate_operation_abort_artifacts(
                             .entities()
                             .contains(&EntityRef::Neighborhood(response.neighborhood()))
                 }),
+            OperationAbortCause::DeadlineMissed => false,
         }
     {
         return Err(StateValidationError::InvalidOperationAbort {

@@ -171,6 +171,7 @@ pub enum OperationAbortCause {
     AuthorityOrder,
     Decision(DecisionRequestId),
     PoliceArrival(PoliceResponseId),
+    DeadlineMissed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

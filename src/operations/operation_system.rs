@@ -127,6 +127,14 @@ pub enum OperationError {
         expected: SimTime,
         found: SimTime,
     },
+    #[error("operation {operation} missed its completion deadline at {deadline:?} before it could begin at {now:?}")]
+    DeadlineMissed {
+        operation: OperationId,
+        deadline: SimTime,
+        now: SimTime,
+    },
+    #[error("operation {operation} has not missed a completion deadline")]
+    DeadlineNotMissed { operation: OperationId },
     #[error("operation {operation} cannot use abort cause {cause:?} from status {status:?}")]
     InvalidAbortCause {
         operation: OperationId,
@@ -426,6 +434,40 @@ pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
     state.operations.due_authorized_at_or_before(state.now())
 }
 
+pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: OperationId) -> bool {
+    state
+        .operations
+        .get_operation(operation)
+        .and_then(earliest_operation_deadline)
+        .is_some_and(|deadline| state.now() > deadline)
+}
+
+pub(crate) fn validate_deadline_missed_operation(
+    state: &AppState,
+    operation: OperationId,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    if !has_missed_operation_deadline(state, operation) {
+        return Err(OperationError::DeadlineNotMissed { operation });
+    }
+    validate_operation_abort(state, operation, OperationAbortCause::DeadlineMissed)
+}
+
+fn earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
+    record
+        .constraints()
+        .iter()
+        .filter_map(|constraint| match constraint {
+            crate::operations::OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            crate::operations::OperationConstraint::AvoidCasualties
+            | crate::operations::OperationConstraint::DoNotHarmEmployees
+            | crate::operations::OperationConstraint::AvoidFirearms
+            | crate::operations::OperationConstraint::ProtectLeadershipIdentity
+            | crate::operations::OperationConstraint::PreserveMerchandise
+            | crate::operations::OperationConstraint::ExcludeCharacter(_) => None,
+        })
+        .min()
+}
+
 pub fn apply_transition(
     registry: &Registry,
     state: &mut AppState,
@@ -513,6 +555,15 @@ pub(crate) fn validate_begin_operation(
     }
     if state.now() < record.scheduled_for() {
         return Err(OperationError::StartBeforeScheduled(operation));
+    }
+    if let Some(deadline) = earliest_operation_deadline(record) {
+        if state.now() > deadline {
+            return Err(OperationError::DeadlineMissed {
+                operation,
+                deadline,
+                now: state.now(),
+            });
+        }
     }
     let duration = registry.get_operation(record.kind()).execution().duration();
     let mut resolution_due_at = state.now() + duration;
@@ -700,6 +751,12 @@ fn validate_operation_abort(
         (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::BeforeStart
         }
+        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
+            if earliest_operation_deadline(record)
+                .is_some_and(|deadline| state.now() > deadline) =>
+        {
+            OperationAbortPhase::BeforeStart
+        }
         (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::InProgress
         }
@@ -727,9 +784,13 @@ fn validate_operation_abort(
         }
     };
 
-    let (information, report, history) = match phase {
-        OperationAbortPhase::BeforeStart => (None, None, None),
-        OperationAbortPhase::InProgress | OperationAbortPhase::AwaitingDecision => {
+    let (information, report, history) = match (phase, cause) {
+        (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder) => {
+            (None, None, None)
+        }
+        (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed)
+        | (OperationAbortPhase::InProgress, _)
+        | (OperationAbortPhase::AwaitingDecision, _) => {
             let summary = build_abort_summary(state, record, cause)?;
             let entities = abort_entities(state, record, cause);
             let information = validate_record_information(
@@ -774,6 +835,10 @@ fn validate_operation_abort(
             )
             .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
             (Some(information), Some(report), Some(history))
+        }
+        (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_))
+        | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_)) => {
+            unreachable!("pre-start operation aborts cannot use execution-only causes")
         }
     };
 
@@ -832,6 +897,16 @@ fn build_abort_summary(
                 authority.name()
             ))
         }
+        OperationAbortCause::DeadlineMissed => {
+            let deadline = earliest_operation_deadline(operation).expect(
+                "validated deadline abort must retain a completion deadline",
+            );
+            Ok(format!(
+                "{} missed its completion deadline at minute {} before execution could begin.",
+                operation.title(),
+                deadline.as_minutes()
+            ))
+        }
     }
 }
 
@@ -858,6 +933,7 @@ fn abort_entities(
                 entities.insert(EntityRef::Neighborhood(response.neighborhood()));
             }
         }
+        OperationAbortCause::DeadlineMissed => {}
     }
     entities
 }
@@ -1263,6 +1339,64 @@ mod tests {
         assert_eq!(record.status(), OperationStatus::Authorized);
         assert_eq!(record.version(), version);
         validate_invariants(&state);
+    }
+
+    #[test]
+    fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let mut draft = make_test_draft(organization, leader, target);
+        draft.scheduled_for = SimTime::from_minutes(30);
+        draft
+            .constraints
+            .push(crate::operations::OperationConstraint::CompleteBefore(
+                SimTime::from_minutes(40),
+            ));
+        let operation = validate_authorize_operation(&registry, &state, draft)
+            .expect("deadline-constrained operation should validate")
+            .commit(&mut state)
+            .expect("deadline-constrained operation should commit");
+
+        state.advance_clock(crate::core::time::SimDuration::from_minutes(41));
+        let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+
+        assert!(outcome.started_operations.is_empty());
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("deadline-missed operation should persist");
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        let abort = record
+            .abort_record()
+            .expect("deadline miss should persist an abort record");
+        assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
+        assert_eq!(abort.cause(), OperationAbortCause::DeadlineMissed);
+        let artifacts = abort
+            .artifacts()
+            .expect("deadline miss should produce visible provenance");
+        let information = state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("deadline information should persist");
+        assert!(information
+            .summary()
+            .contains("missed its completion deadline"));
+        assert_eq!(state.reports().reports_for(organization).count(), 1);
+        validate_state(&state).expect("deadline-missed operation should remain valid");
+        validate_invariants(&state);
+
+        let envelope = build_save(&registry, &state).expect("deadline miss should be saveable");
+        let bytes = bincode::serialize(&envelope).expect("deadline save should serialize");
+        let decoded: SaveEnvelope =
+            bincode::deserialize(&bytes).expect("deadline save should deserialize");
+        let restored = restore_save(&registry, decoded).expect("deadline save should restore");
+        assert_eq!(
+            restored
+                .operations()
+                .get_operation(operation)
+                .and_then(|record| record.abort_record())
+                .map(|abort| abort.cause()),
+            Some(OperationAbortCause::DeadlineMissed)
+        );
     }
 
     #[test]
