@@ -4,15 +4,14 @@ This file records the architectural foundation currently present in the reposito
 
 ## Verification Surface
 
-- `.github/workflows/ci.yml` is the single cached verification job for pushes and pull requests. It
-  checks formatting, production/harness Clippy, the all-target unit/doc-test/example suite, and the targeted smoke
-  harness test. The all-target test pass owns compilation verification so CI does not repeat a
-  separate all-target `cargo check`; Clippy does not rebuild test targets that the test pass will
-  compile. The controlled smoke contract is an explicit ignored test so it runs exactly once
-  afterward with focused output. Superseded runs on the same branch are cancelled, and CI disables
-  incremental artifacts and test debug symbols to keep clean-run linking and cache uploads small.
-  Release builds and long-form gameplay reports remain deliberate local checks rather than part of
-  every change gate.
+- The local completion gate documented in `README.md` is the verification authority. It checks
+  formatting, production/harness Clippy, the all-target unit/doc-test/example suite, and the targeted
+  smoke harness test. The all-target test pass owns compilation verification so the gate does not
+  repeat a separate all-target `cargo check`; Clippy does not rebuild test targets that the test pass
+  will compile. The controlled smoke contract is an explicit ignored test so it runs exactly once
+  afterward with focused output. GitHub Actions and hosted runners are not part of the verification
+  path. Release builds and long-form gameplay reports remain deliberate local checks rather than
+  part of every change gate.
 - `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
   and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
   player-knowledge, standing-contingency, decision, surveillance, follow-up, and legal-consequence

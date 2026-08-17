@@ -41,13 +41,13 @@ cargo test --locked --all-targets --quiet -j 2
 cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
 ```
 
-The GitHub Actions gate runs those checks in one cached job, compiles every target through the
-all-target test pass, marks the controlled smoke contract as an explicit ignored test, and runs it
-immediately afterward with focused output. Superseded runs on the same branch are cancelled. CI
-disables incremental artifacts and test debug symbols to keep clean-run linking and cache uploads
-small. Clippy intentionally covers production library code and the gameplay harness; the all-target
-test pass owns test-target compilation so CI does not build the same test targets twice. It does not
-run the long-form narrative batch or an optimized build on every change.
+The local completion gate above is the authoritative routine verification path. It compiles every
+target through the all-target test pass, marks the controlled smoke contract as an explicit ignored
+test, and runs it immediately afterward with focused output. Clippy intentionally covers production
+library code and the gameplay harness; the all-target test pass owns test-target compilation so the
+gate does not build the same test targets twice. No hosted runner or GitHub Actions workflow is part
+of verification. The routine gate does not run the long-form narrative batch or an optimized build
+on every change.
 Use the smoke harness for normal iteration. Running the example without a mode is also a fast
 smoke run; full calibration is always explicit:
 
@@ -68,9 +68,9 @@ cargo harness -- --mode smoke --strategy press
 
 `cargo test-fast` skips only the named invariant soak; `cargo soak` runs that deliberate stress
 check explicitly, while the normal `cargo test` gate still includes it. Focused `--strategy` smoke
-runs skip the independent legal-foundation probe; the default smoke run and CI still execute it.
+runs skip the independent legal-foundation probe; the default smoke run and completion gate still execute it.
 
-When iterating on one policy branch, focus the smoke run without changing the default CI contract:
+When iterating on one policy branch, focus the smoke run without changing the default completion contract:
 
 ```text
 cargo run --locked --quiet --example gameplay_harness -- --mode smoke --strategy press
@@ -96,7 +96,7 @@ strategy branches on the same simulation seed. The harness uses synthetic author
 through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]`
 diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a
 natural-play or human-UX verdict. Full mode is deliberately more verbose and expensive; smoke mode
-is the CI/local fast path. Each seed selects a small authored fixture variation, shared by all
+is the local fast path. Each seed selects a small authored fixture variation, shared by all
 strategy branches for that seed, so batches exercise more than one fixed venue and patrol rhythm.
 The harness validates structural and registry-aware state after setup and at observation boundaries.
 Narrative sessions observe two simulated days; batch sensitivity runs observe one day so repeated
