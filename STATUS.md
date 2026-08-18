@@ -1,6 +1,6 @@
 # Crimocracy Foundation Status
 
-This file records the architectural foundation currently present in the repository. It is not a feature roadmap and does not override `AGENTS.md` or `GAME_DESIGN.md`.
+This file records implemented capability and explicit exclusions. It is not a feature roadmap and does not override `AGENTS.md`, `ARCHITECTURE.md`, `TESTING.md`, or `GAME_DESIGN.md` in the contracts those documents own.
 
 ## Verification Surface
 

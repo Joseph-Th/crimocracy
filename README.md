@@ -4,10 +4,11 @@ Crimocracy is a deterministic Rust simulation foundation for a systemic crime-or
 
 ## Start here
 
-1. Read `AGENTS.md` before changing code. It is the repository execution and architecture contract.
+1. Read `AGENTS.md` before changing code. It is the concise repository execution card.
 2. Read `STATUS.md` for the foundation that is currently implemented.
-3. Read `GAME_DESIGN.md` for product intent and player-facing design criteria.
-4. Route the change to the owning module named by `AGENTS.md` and inspect its focused tests before editing.
+3. Read `ARCHITECTURE.md` for ownership, canonical mutation, determinism, persistence, and invariants.
+4. Read `TESTING.md` for test and gameplay-evidence rules.
+5. Read `GAME_DESIGN.md` only when product intent or player-facing design criteria are relevant.
 
 Do not use `GAME_DESIGN.md` as proof that a feature is implemented. Do not use `STATUS.md` as a substitute for product intent.
 
@@ -17,14 +18,16 @@ The implemented foundation uses explicit serializable `AppState`, immutable Rust
 
 Consequential behavior belongs to owning systems. UI, adapters, tests, examples, and reports must not become alternate mutation paths.
 
-See `STATUS.md` for the current domain coverage and `AGENTS.md` for the canonical mutation, determinism, ownership, naming, persistence, and test rules.
+See `STATUS.md` for current domain coverage, `ARCHITECTURE.md` for technical contracts, and `TESTING.md` for verification and gameplay-evidence contracts.
 
 ## Documentation authority
 
 | Question | Authority |
 | --- | --- |
-| How may the repository be changed? | `AGENTS.md` |
-| What architecture and capability currently exist? | `STATUS.md` |
+| How should repository work proceed? | `AGENTS.md` |
+| What is the implemented ownership and execution model? | `ARCHITECTURE.md` |
+| What capability currently exists or is excluded? | `STATUS.md` |
+| How are tests and gameplay evidence selected? | `TESTING.md` |
 | What player experience and product behavior are intended? | `GAME_DESIGN.md` |
 | What behavior is executable now? | Owning source module and tests |
 
