@@ -10,7 +10,7 @@ Use the narrowest test that proves the changed behavior. The repository provides
 .\scripts\verify.ps1
 ```
 
-The gate runs formatting, strict production/harness Clippy, all-target tests, and the controlled smoke harness contract. `README.md` owns the current raw command expansion and operator examples; this document owns test semantics.
+The gate runs formatting, strict production/harness Clippy, all-target tests, and the controlled smoke harness contract. The all-target pass includes `tests/documentation_contracts.rs`, which protects the current authority set, local documentation links and concrete routes, documented Cargo entrypoints, and the published state-schema value. `README.md` owns the current raw command expansion and operator examples; this document owns test semantics.
 
 Repository verification is local. GitHub Actions and hosted runners are not verification authorities.
 
