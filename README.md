@@ -55,7 +55,10 @@ cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonica
 
 The local completion gate above is the authoritative routine verification path. It compiles every
 target through the all-target test pass, marks the controlled smoke contract as an explicit ignored
-test, and runs it immediately afterward with focused output. Clippy intentionally covers production
+test, and runs it immediately afterward with focused output. Before that smoke run it also lists the
+harness's ignored tests and fails closed unless the smoke contract is exactly selectable, so a
+renamed/removed contract cannot silently erase the stage; `.\scripts\verify.ps1 -SelfTest` runs that
+selection check alone. Clippy intentionally covers production
 library code and the gameplay harness; the all-target test pass owns test-target compilation so the
 gate does not build the same test targets twice. No hosted runner or GitHub Actions workflow is part
 of verification. The routine gate does not run the long-form narrative batch or an optimized build
@@ -113,7 +116,16 @@ diagnostics, and provides bounded deterministic strategy/sensitivity evidence ra
 natural-play or human-UX verdict. Full mode is deliberately more verbose and expensive; smoke mode
 is the local fast path. Each seed selects a small authored fixture variation, shared by all
 strategy branches for that seed, so batches exercise more than one fixed venue and patrol rhythm.
-The harness validates structural and registry-aware state after setup and at observation boundaries.
+The RUSH/PRESS burglary schedule also rotates with the simulation seed inside the authored patrol
+window, so each fixture runs a slightly different timing interplay instead of repeating the same
+minute forever. The harness validates structural and registry-aware state after setup and at every
+consequential observation boundary; fully routine minutes are not revalidated on each tick.
 Narrative sessions observe two simulated days of routine ticks; the press branch's player-run
 defector watch starts after its cold-case wait and can finish a short way past that boundary.
+Within that window every narrative branch also discovers a reopened second score at the same
+canonical minute, and the branches then diverge on purpose: RUSH rebuilds its lost crew through
+canonical executive recruitment and works the score in the morning lull, RECON re-invests in fresh
+surveillance and a patrol-safe window, and PRESS deliberately lets the score lapse as the price of
+standing down. Act-2 liquidation cash stays outside the branch-matched legitimate/enterprise
+financial comparison, so those nets remain identical across strategies.
 Batch sensitivity runs observe one day so repeated routine ticks do not dominate the evidence or runtime.

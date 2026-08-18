@@ -112,17 +112,10 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
         }
         for constraint in operation.constraints() {
             match constraint {
-                OperationConstraint::AvoidCasualties
-                | OperationConstraint::DoNotHarmEmployees
-                | OperationConstraint::AvoidFirearms
-                | OperationConstraint::ProtectLeadershipIdentity
-                | OperationConstraint::PreserveMerchandise
-                | OperationConstraint::CompleteBefore(_) => {}
-                OperationConstraint::ExcludeCharacter(id) => {
-                    if state.world.get_character(*id).is_none() {
-                        return Err(StateValidationError::MissingEntity {
-                            context: "operation constraint",
-                            entity: EntityRef::Character(*id),
+                OperationConstraint::CompleteBefore(deadline) => {
+                    if operation.scheduled_for() >= *deadline {
+                        return Err(StateValidationError::InvalidOperationRuntime {
+                            operation: operation.id(),
                         });
                     }
                 }
@@ -131,17 +124,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
         for contingency in operation.contingencies() {
             match contingency {
                 OperationContingency::AbortOnPoliceArrivalBeforeEntry
-                | OperationContingency::UseForceOnResistance
-                | OperationContingency::UseSecondaryExitIfBlocked
                 | OperationContingency::RequestDecisionOnUnexpectedCondition => {}
-                OperationContingency::ContactIfDetained(id) => {
-                    if state.world.get_character(*id).is_none() {
-                        return Err(StateValidationError::MissingEntity {
-                            context: "operation contingency",
-                            entity: EntityRef::Character(*id),
-                        });
-                    }
-                }
             }
         }
         if operation.entry_at().is_some_and(|entry_at| {
@@ -749,14 +732,8 @@ fn validate_operation_abort_links(
             let deadline = operation
                 .constraints()
                 .iter()
-                .filter_map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
-                    OperationConstraint::AvoidCasualties
-                    | OperationConstraint::DoNotHarmEmployees
-                    | OperationConstraint::AvoidFirearms
-                    | OperationConstraint::ProtectLeadershipIdentity
-                    | OperationConstraint::PreserveMerchandise
-                    | OperationConstraint::ExcludeCharacter(_) => None,
+                .map(|constraint| match constraint {
+                    OperationConstraint::CompleteBefore(deadline) => *deadline,
                 })
                 .min();
             if operation.started_at().is_some()

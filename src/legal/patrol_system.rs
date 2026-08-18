@@ -1,6 +1,6 @@
 //! Canonical patrol deployment validation, lifecycle transitions, and time-of-day presence queries.
 
-use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
+use crate::core::id::{IdExhaustionError, NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::legal::{
@@ -80,6 +80,8 @@ pub enum PatrolError {
     },
     #[error("patrol validation occurred at {expected:?}, but simulation time is now {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,7 +119,7 @@ impl ValidatedPatrolDeployment {
         )?;
         validate_active_dependencies(state, self.draft.organization, self.draft.neighborhood)?;
         ensure_no_active_duplicate(state, self.draft.organization, self.draft.neighborhood)?;
-        let id = state.ids.next_patrol_deployment();
+        let id = state.ids.next_patrol_deployment()?;
         state
             .legal
             .insert_patrol_deployment(PatrolDeploymentRecord {

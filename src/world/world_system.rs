@@ -2,11 +2,11 @@
 
 use crate::core::id::{
     ArrestId, BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, EnterpriseId,
-    InformantId, InvestigationId, MandateId, NeighborhoodId, OperationId, OrganizationId,
-    ProsecutionCaseId,
+    IdExhaustionError, IdKind, InformantId, InvestigationId, MandateId, NeighborhoodId,
+    OperationId, OrganizationId, ProsecutionCaseId,
 };
 use crate::core::state::AppState;
-use crate::enterprises::EnterpriseStatus;
+use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
 use crate::operations::OperationStatus;
 use crate::registry::Registry;
@@ -47,6 +47,12 @@ pub enum WorldError {
     },
     #[error("business {business} supports active enterprise {enterprise} for organization {organization}")]
     ActiveEnterpriseSupport {
+        business: BusinessId,
+        enterprise: EnterpriseId,
+        organization: OrganizationId,
+    },
+    #[error("business {business} is the hosted venue of active enterprise {enterprise} for organization {organization}")]
+    ActiveEnterpriseHost {
         business: BusinessId,
         enterprise: EnterpriseId,
         organization: OrganizationId,
@@ -123,6 +129,8 @@ pub enum WorldError {
         "organization {0} is not a criminal organization and cannot be the player organization"
     )]
     InvalidPlayerOrganization(OrganizationId),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub fn insert_organization(
@@ -133,7 +141,7 @@ pub fn insert_organization(
     if draft.name.trim().is_empty() {
         return Err(WorldError::EmptyName);
     }
-    let id = state.ids.next_organization();
+    let id = state.ids.next_organization()?;
     let policies = registry.default_policies();
     state.world.insert_organization(OrganizationRecord {
         id,
@@ -167,7 +175,7 @@ pub fn insert_neighborhood(
     if draft.name.trim().is_empty() {
         return Err(WorldError::EmptyName);
     }
-    let id = state.ids.next_neighborhood();
+    let id = state.ids.next_neighborhood()?;
     state.world.insert_neighborhood(NeighborhoodRecord {
         id,
         name: draft.name,
@@ -196,7 +204,7 @@ pub fn insert_character(
         registry.get_drive(*kind);
     }
 
-    let id = state.ids.next_character();
+    let id = state.ids.next_character()?;
     state.world.insert_character(CharacterRecord {
         identity: CharacterIdentity {
             id,
@@ -291,13 +299,16 @@ fn validate_reassignment_preconditions(
     }
     validate_membership(state, organization, supervisor)?;
 
+    // A detained character cannot be given a new supervisor or organization regardless of whether
+    // the organization changes: custody blocks new supervisory assignments per the custody contract.
+    if let Some(arrest) = state.legal.active_arrest_for_character(character) {
+        return Err(WorldError::ActiveArrestAssignment {
+            character,
+            arrest: arrest.id(),
+        });
+    }
+
     if organization != record.organization() {
-        if let Some(arrest) = state.legal.active_arrest_for_character(character) {
-            return Err(WorldError::ActiveArrestAssignment {
-                character,
-                arrest: arrest.id(),
-            });
-        }
         if let Some(case) = state
             .legal
             .prosecution_cases_for_lead(character)
@@ -399,9 +410,12 @@ pub fn insert_business(
     }
     registry.get_business(draft.kind);
     validate_business_owner(state, draft.owner)?;
+    state
+        .ids
+        .reserve_many(&[(IdKind::Business, 1), (IdKind::BusinessOwnershipChange, 1)])?;
 
-    let id = state.ids.next_business();
-    let ownership_change = state.ids.next_business_ownership_change();
+    let id = state.ids.next_business()?;
+    let ownership_change = state.ids.next_business_ownership_change()?;
     let changed_at = state.now();
     let BusinessDraft {
         name,
@@ -470,7 +484,7 @@ impl ValidatedBusinessOwnershipTransfer {
             .expected_version
             .checked_add(1)
             .expect("business version counter exhausted");
-        let id = state.ids.next_business_ownership_change();
+        let id = state.ids.next_business_ownership_change()?;
         state
             .world
             .transfer_business_ownership(BusinessOwnershipChangeRecord {
@@ -520,6 +534,22 @@ fn validate_business_support_ownership_change(
             && new_owner != BusinessOwner::Organization(enterprise.organization())
         {
             return Err(WorldError::ActiveEnterpriseSupport {
+                business,
+                enterprise: enterprise.id(),
+                organization: enterprise.organization(),
+            });
+        }
+    }
+    // A business that hosts an active racket as its venue is locked the same way a support
+    // business is: the racket cannot keep settling at a venue the organization no longer owns.
+    for enterprise in state
+        .enterprises
+        .enterprises_at(EnterpriseLocation::Business(business))
+    {
+        if enterprise.status() == EnterpriseStatus::Active
+            && new_owner != BusinessOwner::Organization(enterprise.organization())
+        {
+            return Err(WorldError::ActiveEnterpriseHost {
                 business,
                 enterprise: enterprise.id(),
                 organization: enterprise.organization(),

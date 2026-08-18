@@ -795,6 +795,8 @@ pub(crate) enum RegistryBuildError {
     InvalidRecruitmentDuration,
     #[error("recruitment weights and membership resistance must be in 0..=100")]
     InvalidRecruitmentWeight,
+    #[error("recruitment willingness and acceptance scores must be in 0..=100")]
+    InvalidRecruitmentScoring,
     #[error("recruitment relationship weighting is invalid")]
     InvalidRecruitmentRelationshipWeights,
     #[error("recruitment information quality scores must be in 0..=100")]
@@ -1057,6 +1059,12 @@ impl RegistryBuilder {
         .any(|value| value > 100)
         {
             return Err(RegistryBuildError::InvalidRecruitmentWeight);
+        }
+        // The residual scoring constants participate in the same bounded 0..=100 margin space as
+        // every other recruitment input; an out-of-range willingness or acceptance score would
+        // silently skew margins relative to the calibrated capability/relationship/pressure terms.
+        if !(0..=100).contains(&base_willingness) || !(0..=100).contains(&acceptance_score) {
+            return Err(RegistryBuildError::InvalidRecruitmentScoring);
         }
         if recruiter_capabilities.is_empty() {
             return Err(RegistryBuildError::MissingRecruitmentCapabilities);

@@ -5,8 +5,8 @@ use crate::contacts::{
     InstitutionalContactRecord,
 };
 use crate::core::id::{
-    ArrestId, CharacterId, ContactDisclosureId, ContactId, InformationId, LegalRepresentationId,
-    OrganizationId,
+    ArrestId, CharacterId, ContactDisclosureId, ContactId, IdExhaustionError, IdKind,
+    InformationId, LegalRepresentationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -34,6 +34,11 @@ pub enum ContactError {
     #[error("contact handler {handler} is detained under arrest {arrest}")]
     DetainedHandler {
         handler: CharacterId,
+        arrest: ArrestId,
+    },
+    #[error("institutional contact character {contact} is detained under arrest {arrest}")]
+    DetainedContact {
+        contact: CharacterId,
         arrest: ArrestId,
     },
     #[error("institutional contact character {0} does not exist")]
@@ -102,6 +107,8 @@ pub enum ContactError {
     },
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Debug)]
@@ -150,7 +157,7 @@ impl ValidatedContactEstablishment {
                 found: contact_record.version(),
             });
         }
-        let id = state.ids.next_contact();
+        let id = state.ids.next_contact()?;
         state.contacts.insert_contact(InstitutionalContactRecord {
             id,
             parties: super::ContactParties {
@@ -303,6 +310,9 @@ pub struct ValidatedContactDisclosure {
 
 impl ValidatedContactDisclosure {
     pub fn commit(self, state: &mut AppState) -> Result<ContactDisclosureId, ContactError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::Information, 1), (IdKind::ContactDisclosure, 1)])?;
         validate_time(state, self.disclosed_at)?;
         let record = state
             .contacts
@@ -320,8 +330,8 @@ impl ValidatedContactDisclosure {
         }
         validate_disclosure_source(state, record, self.source)?;
         ensure_disclosure_not_duplicate(state, self.contact, self.source)?;
-        let disclosed_information = self.information.commit(state);
-        let id = state.ids.next_contact_disclosure();
+        let disclosed_information = self.information.commit(state)?;
+        let id = state.ids.next_contact_disclosure()?;
         state.contacts.insert_disclosure(ContactDisclosureRecord {
             id,
             contact: self.contact,
@@ -426,6 +436,14 @@ fn validate_contact_dependencies(
     if contact_record.lifecycle() != Lifecycle::Active {
         return Err(ContactError::InactiveContact(contact));
     }
+    // A detained external contact cannot serve as an institutional channel: custody blocks
+    // contact handling for the person themselves, which calls must not treat as a working source.
+    if let Some(arrest) = state.legal.active_arrest_for_character(contact) {
+        return Err(ContactError::DetainedContact {
+            contact,
+            arrest: arrest.id(),
+        });
+    }
     let institution = contact_record
         .organization()
         .ok_or(ContactError::ContactHasNoInstitution(contact))?;
@@ -456,6 +474,12 @@ fn validate_disclosure_source(
     if let Some(arrest) = state.legal.active_arrest_for_character(contact.handler()) {
         return Err(ContactError::DetainedHandler {
             handler: contact.handler(),
+            arrest: arrest.id(),
+        });
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(contact.contact()) {
+        return Err(ContactError::DetainedContact {
+            contact: contact.contact(),
             arrest: arrest.id(),
         });
     }
@@ -723,6 +747,7 @@ mod tests {
         )
         .expect("source information should validate")
         .commit(&mut fixture.state)
+        .expect("source information should commit")
     }
 
     #[test]

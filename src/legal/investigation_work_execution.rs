@@ -1,7 +1,9 @@
 //! Scheduled detective pattern analysis; this sibling system derives new case evidence only from evidence already owned by the investigation.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId};
+use crate::core::id::{
+    ArrestId, CharacterId, EvidenceId, IdExhaustionError, InvestigationId, InvestigationWorkId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::legal::case_graph::resolve_evidence_path;
@@ -98,6 +100,8 @@ pub enum InvestigationWorkError {
     VarianceOutOfRange { variance: i8, limit: u8 },
     #[error("investigation work source evidence {0} no longer belongs to the case")]
     InvalidSourceEvidence(EvidenceId),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -139,16 +143,12 @@ impl ValidatedInvestigationWorkSchedule {
         }
         validate_case_and_investigator(state, self.draft.investigation, self.draft.investigator)?;
         validate_no_duplicate_work(state, self.draft)?;
-        let current_sources = resolve_work_sources(state, self.draft)?;
-        if current_sources != self.source_evidence {
-            return Err(InvestigationWorkError::StaleInvestigation {
-                investigation: self.draft.investigation,
-                expected: self.expected_investigation_version,
-                found: investigation.version(),
-            });
-        }
+        // The investigation version snapshot above is authoritative for evidence-set
+        // staleness: every evidence mutation bumps the investigation version, so no separate
+        // source-set comparison is needed (and one could not report a meaningful
+        // expected/found version pair).
 
-        let id = state.ids.next_investigation_work();
+        let id = state.ids.next_investigation_work()?;
         let scheduled_at = state.now();
         let due_at =
             scheduled_at + crate::core::time::SimDuration::from_minutes(self.duration_minutes);
@@ -364,6 +364,7 @@ impl InvestigationWorkRandomness {
 pub struct InvestigationWorkResolutionPlan {
     work: InvestigationWorkId,
     expected_work_version: u32,
+    expected_investigation_version: u32,
     expected_investigator_version: u32,
     resolved_at: SimTime,
     outcome: InvestigationWorkOutcome,
@@ -408,6 +409,10 @@ pub fn decide_investigation_work_resolution(
         .world
         .get_character(work.investigator())
         .expect("validated scheduled investigator must exist");
+    let investigation = state
+        .legal
+        .get_investigation(work.investigation())
+        .expect("validated scheduled work must have an investigation");
     let (factors, margin) =
         calculate_work_factors_and_margin(definition, state, work, randomness.variance())?;
     let superseded_by = find_superseding_evidence(state, work);
@@ -424,6 +429,7 @@ pub fn decide_investigation_work_resolution(
     Ok(InvestigationWorkResolutionPlan {
         work: work.id(),
         expected_work_version: work.version(),
+        expected_investigation_version: investigation.version(),
         expected_investigator_version: investigator.version(),
         resolved_at: state.now(),
         outcome,
@@ -777,27 +783,30 @@ impl ValidatedInvestigationWorkResolution {
             InvestigationWorkOutcome::Inconclusive | InvestigationWorkOutcome::Superseded => None,
         };
         let derived_evidence = if let Some(draft) = derived_evidence_draft {
-            let id = state.ids.next_evidence();
-            state.legal.insert_evidence(EvidenceRecord {
-                identity: EvidenceIdentity {
-                    id,
-                    investigation: draft.investigation,
-                    custodian: draft.custodian,
+            let id = state.ids.next_evidence()?;
+            state.legal.insert_evidence(
+                EvidenceRecord {
+                    identity: EvidenceIdentity {
+                        id,
+                        investigation: draft.investigation,
+                        custodian: draft.custodian,
+                    },
+                    connection: EvidenceConnection {
+                        subject: draft.subject,
+                        origin: draft.origin,
+                        source: None,
+                        derived_from: draft.derived_from,
+                    },
+                    assessment: EvidenceAssessment {
+                        kind: draft.kind,
+                        strength: draft.strength,
+                        reliability: draft.reliability,
+                        admissibility: draft.admissibility,
+                    },
+                    discovered_at: self.plan.resolved_at,
                 },
-                connection: EvidenceConnection {
-                    subject: draft.subject,
-                    origin: draft.origin,
-                    source: None,
-                    derived_from: draft.derived_from,
-                },
-                assessment: EvidenceAssessment {
-                    kind: draft.kind,
-                    strength: draft.strength,
-                    reliability: draft.reliability,
-                    admissibility: draft.admissibility,
-                },
-                discovered_at: self.plan.resolved_at,
-            });
+                self.plan.resolved_at,
+            );
             Some(id)
         } else {
             None
@@ -964,6 +973,17 @@ fn validate_resolution_snapshot(
             found: investigator.version(),
         });
     }
+    let investigation = state
+        .legal
+        .get_investigation(work.investigation())
+        .expect("validated work must have an investigation");
+    if investigation.version() != plan.expected_investigation_version {
+        return Err(InvestigationWorkError::StaleInvestigation {
+            investigation: investigation.id(),
+            expected: plan.expected_investigation_version,
+            found: investigation.version(),
+        });
+    }
     if state.now() != plan.resolved_at {
         return Err(InvestigationWorkError::StaleResolutionTime {
             expected: plan.resolved_at,
@@ -1006,6 +1026,7 @@ mod tests {
         police: crate::core::id::OrganizationId,
         investigation: InvestigationId,
         investigator: CharacterId,
+        second_investigator: CharacterId,
         first: CharacterId,
         middle: CharacterId,
         target: CharacterId,
@@ -1060,6 +1081,23 @@ mod tests {
             },
         )
         .expect("investigator fixture should validate");
+        let second_investigator = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Detective Vera".to_owned(),
+                organization: Some(police),
+                supervisor: Some(investigator),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Investigation,
+                    rating(investigator_skill),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("second investigator fixture should validate");
         let mut insert_subject = |name: &str| {
             insert_character(
                 &registry,
@@ -1124,6 +1162,7 @@ mod tests {
             police,
             investigation,
             investigator,
+            second_investigator,
             first,
             middle,
             target,
@@ -1683,7 +1722,7 @@ mod tests {
         validate_assign_investigator(
             &restored,
             second_investigation,
-            fixture.investigator,
+            fixture.second_investigator,
             InvestigatorRole::Lead,
         )
         .expect("post-restore investigator assignment should validate")
@@ -1718,7 +1757,7 @@ mod tests {
             &restored,
             InvestigationWorkDraft {
                 investigation: second_investigation,
-                investigator: fixture.investigator,
+                investigator: fixture.second_investigator,
                 kind: InvestigationWorkKind::PatternAnalysis,
                 focus: InvestigationWorkFocus::new(
                     EntityRef::Character(fixture.first),

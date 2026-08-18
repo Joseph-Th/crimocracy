@@ -3,7 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, FinancialAccountId, InformationId, LedgerTransactionId, OperationId, ReportId,
+    BusinessId, FinancialAccountId, IdExhaustionError, IdKind, InformationId, LedgerTransactionId,
+    OperationId, ReportId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -104,6 +105,8 @@ pub enum PropertyDispositionError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedPropertyDisposition {
@@ -126,6 +129,11 @@ impl ValidatedPropertyDisposition {
         self,
         state: &mut AppState,
     ) -> Result<PropertyDispositionOutcome, PropertyDispositionError> {
+        state.ids.reserve_many(&[
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+        ])?;
         let operation = state.operations.get_operation(self.draft.operation).ok_or(
             PropertyDispositionError::MissingOperation(self.draft.operation),
         )?;
@@ -158,8 +166,8 @@ impl ValidatedPropertyDisposition {
         }
 
         let transaction = self.ledger.commit(state)?;
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
         state.operations.set_property_disposition(
             self.draft.operation,
             OperationPropertyDispositionRecord {

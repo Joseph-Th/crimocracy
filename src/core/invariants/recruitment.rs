@@ -350,9 +350,25 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                     || !history
                         .entities()
                         .contains(&EntityRef::Character(attempt.recruiter()))
-                    || !history
+                    || history
                         .entities()
                         .contains(&EntityRef::Organization(attempt.target_organization()))
+                        == attempt.previous_organization().is_some()
+                {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                // The membership consequence of an accepted attempt is part of the persisted
+                // outcome: the candidate must now belong to the target organization under the
+                // recruiter.
+                let candidate = state.world.get_character(attempt.candidate()).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if candidate.organization() != Some(attempt.target_organization())
+                    || candidate.supervisor() != Some(attempt.recruiter())
                 {
                     return Err(StateValidationError::InvalidRecruitmentAttempt {
                         attempt: attempt.id(),
@@ -361,6 +377,18 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
             }
             RecruitmentOutcome::Refused => {
                 if attempt.history_event().is_some() {
+                    return Err(StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    });
+                }
+                // A refused attempt must leave membership unchanged: the candidate remains in
+                // their pre-attempt organization (or stays independent).
+                let candidate = state.world.get_character(attempt.candidate()).ok_or(
+                    StateValidationError::InvalidRecruitmentAttempt {
+                        attempt: attempt.id(),
+                    },
+                )?;
+                if candidate.organization() != attempt.previous_organization() {
                     return Err(StateValidationError::InvalidRecruitmentAttempt {
                         attempt: attempt.id(),
                     });

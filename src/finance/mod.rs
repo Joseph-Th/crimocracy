@@ -10,7 +10,6 @@ use crate::core::time::SimTime;
 use crate::delegation::{MandateAuthority, ResponsibilityScope};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Money(i64);
@@ -42,12 +41,6 @@ impl<'de> Deserialize<'de> for Money {
     {
         Ok(Self(i64::deserialize(deserializer)?))
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-pub enum MoneyError {
-    #[error("money arithmetic overflow")]
-    Overflow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -197,7 +190,6 @@ pub struct FinanceState {
     accounts: BTreeMap<FinancialAccountId, FinancialAccountRecord>,
     transactions: BTreeMap<LedgerTransactionId, LedgerTransactionRecord>,
     accounts_by_owner: BTreeMap<FinancialOwner, BTreeSet<FinancialAccountId>>,
-    transactions_by_account: BTreeMap<FinancialAccountId, BTreeSet<LedgerTransactionId>>,
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
 }
 
@@ -223,17 +215,6 @@ impl FinanceState {
             .into_iter()
             .flatten()
             .filter_map(|id| self.accounts.get(id))
-    }
-
-    pub fn transactions_for_account(
-        &self,
-        account: FinancialAccountId,
-    ) -> impl Iterator<Item = &LedgerTransactionRecord> {
-        self.transactions_by_account
-            .get(&account)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.transactions.get(id))
     }
 
     pub fn transactions_for_mandate(
@@ -283,12 +264,6 @@ impl FinanceState {
                 .checked_add(1)
                 .expect("financial account version counter exhausted");
         }
-        for posting in record.postings() {
-            self.transactions_by_account
-                .entry(posting.account)
-                .or_default()
-                .insert(record.id());
-        }
         if let Some(usage) = record.budget_usage() {
             self.transactions_by_mandate
                 .entry(usage.mandate())
@@ -319,29 +294,6 @@ impl FinanceState {
                     .get(id)
                     .is_some_and(|account| account.owner() == *owner)
                 {
-                    return false;
-                }
-            }
-        }
-        for transaction in self.transactions.values() {
-            for posting in transaction.postings() {
-                if !self
-                    .transactions_by_account
-                    .get(&posting.account)
-                    .is_some_and(|ids| ids.contains(&transaction.id()))
-                {
-                    return false;
-                }
-            }
-        }
-        for (account, ids) in &self.transactions_by_account {
-            for id in ids {
-                if !self.transactions.get(id).is_some_and(|transaction| {
-                    transaction
-                        .postings()
-                        .iter()
-                        .any(|posting| posting.account == *account)
-                }) {
                     return false;
                 }
             }

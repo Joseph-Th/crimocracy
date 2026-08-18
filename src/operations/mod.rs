@@ -153,23 +153,20 @@ impl OperationObjective {
     }
 }
 
+/// Authorable execution boundaries that have a real mechanical effect. No-casualty or
+/// violence-avoidance style wording was removed because the execution model has no casualty,
+/// injury, or collateral-damage axis to act on; only timing boundaries are modeled.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationConstraint {
-    AvoidCasualties,
-    DoNotHarmEmployees,
-    AvoidFirearms,
-    ProtectLeadershipIdentity,
-    PreserveMerchandise,
     CompleteBefore(SimTime),
-    ExcludeCharacter(CharacterId),
 }
 
+/// Standing reactions tied to police-response and leadership-follow-up mechanics. Force,
+/// exit, and contact-on-detention reactions were removed because the model has no tactical
+/// combat, pursuit, or detention-contact execution axis to act on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationContingency {
     AbortOnPoliceArrivalBeforeEntry,
-    UseForceOnResistance,
-    UseSecondaryExitIfBlocked,
-    ContactIfDetained(CharacterId),
     RequestDecisionOnUnexpectedCondition,
 }
 

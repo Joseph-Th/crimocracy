@@ -3,7 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, DecisionRequestId, InformationId, OrganizationId, RecruitmentAttemptId,
+    ArrestId, CharacterId, DecisionRequestId, IdExhaustionError, IdKind, InformationId,
+    OrganizationId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -156,6 +157,8 @@ pub enum RecruitmentError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -303,13 +306,20 @@ pub(crate) fn resolve_due_autonomous_recruitment(
         ) {
             continue;
         }
+        // A single mandate that currently cannot resolve (policy, candidate availability, or a
+        // transient commit rejection) must not abort every other mandate's due work in the same
+        // minute: each eligible authority is evaluated independently.
         let policy =
-            resolve_policy_for_manager(state, manager, PolicyKind::IndependentRecruitment)?;
+            match resolve_policy_for_manager(state, manager, PolicyKind::IndependentRecruitment) {
+                Ok(policy) => policy,
+                Err(_) => continue,
+            };
         if policy.setting != PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated) {
             continue;
         }
         let approach = autonomous_recruitment_approach(manager_record);
-        let Some(candidate) = find_recruitment_candidates(registry, state, organization, manager)?
+        let Some(candidate) = find_recruitment_candidates(registry, state, organization, manager)
+            .unwrap_or_default()
             .into_iter()
             .next()
         else {
@@ -320,7 +330,7 @@ pub(crate) fn resolve_due_autonomous_recruitment(
             manager,
             scope: personnel_scope,
         };
-        let attempt = validate_delegated_recruitment_attempt(
+        let attempt = match validate_delegated_recruitment_attempt(
             registry,
             state,
             authority,
@@ -330,8 +340,13 @@ pub(crate) fn resolve_due_autonomous_recruitment(
                 candidate,
                 approach,
             },
-        )?
-        .commit(state)?;
+        ) {
+            Ok(validated) => match validated.commit(state) {
+                Ok(attempt) => attempt,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
         attempts.push(attempt);
     }
     Ok(attempts)
@@ -602,24 +617,47 @@ fn validate_recruitment_plan_with_authority(
             .world
             .get_organization(plan.draft.target_organization)
             .expect("validated target organization must exist");
-        Some(validate_record_event(
-            state,
-            HistoryEventDraft {
-                occurred_at: plan.context.occurred_at,
-                kind: HistoryEventKind::Recruitment,
-                summary: format!(
-                    "{} joined {} after recruitment by {}.",
-                    candidate.name(),
-                    organization.name(),
-                    recruiter.name()
-                ),
-                entities: BTreeSet::from([
-                    EntityRef::Character(plan.draft.candidate),
-                    EntityRef::Character(plan.draft.recruiter),
-                    EntityRef::Organization(plan.draft.target_organization),
-                ]),
-            },
-        )?)
+        // When the candidate is poached from another organization, campaign history must not leak
+        // the hidden recruiting organization: the defector's former organization is told only that
+        // the member left, and the player discovers the destination through surveillance, not a
+        // global history read. So a defection event omits the organization entity and its name.
+        if plan.context.previous_organization.is_some() {
+            Some(validate_record_event(
+                state,
+                HistoryEventDraft {
+                    occurred_at: plan.context.occurred_at,
+                    kind: HistoryEventKind::Recruitment,
+                    summary: format!(
+                        "{} joined after recruitment by {}.",
+                        candidate.name(),
+                        recruiter.name()
+                    ),
+                    entities: BTreeSet::from([
+                        EntityRef::Character(plan.draft.candidate),
+                        EntityRef::Character(plan.draft.recruiter),
+                    ]),
+                },
+            )?)
+        } else {
+            Some(validate_record_event(
+                state,
+                HistoryEventDraft {
+                    occurred_at: plan.context.occurred_at,
+                    kind: HistoryEventKind::Recruitment,
+                    summary: format!(
+                        "{} joined {} after recruitment by {}.",
+                        candidate.name(),
+                        organization.name(),
+                        recruiter.name()
+                    ),
+                    entities: BTreeSet::from([
+                        EntityRef::Character(plan.draft.candidate),
+                        EntityRef::Character(plan.draft.recruiter),
+                        EntityRef::Organization(plan.draft.target_organization),
+                    ]),
+                },
+            )?)
+        }
     } else {
         None
     };
@@ -716,6 +754,12 @@ pub struct ValidatedRecruitmentAttempt {
 
 impl ValidatedRecruitmentAttempt {
     pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
+        state.ids.reserve_many(&[
+            (IdKind::HistoryEvent, 1),
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+            (IdKind::RecruitmentAttempt, 1),
+        ])?;
         if let Some(guard) = self.delegated_guard {
             validate_mandate_authority_snapshot(state, guard.authority)?;
             let current_policy = resolve_policy_for_manager(
@@ -741,7 +785,7 @@ impl ValidatedRecruitmentAttempt {
                 Some(
                     self.history
                         .expect("accepted recruitment must carry a history token")
-                        .commit(state),
+                        .commit(state)?,
                 )
             }
             RecruitmentOutcome::Refused => {
@@ -750,11 +794,11 @@ impl ValidatedRecruitmentAttempt {
                 None
             }
         };
-        let outcome_information = self.outcome_information.commit(state);
+        let outcome_information = self.outcome_information.commit(state)?;
         if let Some(report) = self.departure_report {
-            report.commit(state);
+            report.commit(state)?;
         }
-        let id = state.ids.next_recruitment_attempt();
+        let id = state.ids.next_recruitment_attempt()?;
         state
             .recruitment
             .insert(build_recruitment_record(RecruitmentRecordParts {
@@ -781,7 +825,7 @@ impl ValidatedRecruitmentAttempt {
     }
 }
 
-fn recruitment_policy_source(source: PolicySource) -> RecruitmentPolicySource {
+pub(crate) fn recruitment_policy_source(source: PolicySource) -> RecruitmentPolicySource {
     match source {
         PolicySource::Organization(organization) => {
             RecruitmentPolicySource::Organization(organization)
@@ -2049,7 +2093,8 @@ mod tests {
             },
         )
         .expect("candidate-held legal pressure information should validate")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("candidate-held legal pressure information should commit");
 
         let error = token
             .commit(&mut fixture.state)
@@ -2174,9 +2219,19 @@ mod tests {
         assert!(history
             .entities()
             .contains(&EntityRef::Character(fixture.recruiter)));
-        assert!(history
+        // This is a defection out of `fixture.source`, so campaign history must not leak the
+        // hidden recruiting organization: the player finds the destination through surveillance,
+        // not a global history read.
+        assert!(!history
             .entities()
             .contains(&EntityRef::Organization(fixture.target)));
+        let target_name = fixture
+            .state
+            .world()
+            .get_organization(fixture.target)
+            .expect("target organization should persist")
+            .name();
+        assert!(!history.summary().contains(target_name));
         let departure_reports: Vec<_> = fixture
             .state
             .reports()

@@ -120,6 +120,18 @@ fn status_state_schema_version() -> u16 {
         .expect("STATUS.md state schema version must be an integer")
 }
 
+fn status_content_revision() -> u32 {
+    const PREFIX: &str = "The current authored content revision is ";
+    let rest = STATUS
+        .split_once(PREFIX)
+        .map(|(_, rest)| rest)
+        .expect("STATUS.md must publish the current authored content revision");
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .expect("STATUS.md authored content revision must be an integer")
+}
+
 #[test]
 fn required_current_documents_exist_and_are_routed_from_readme() {
     let root = repository_root();
@@ -222,5 +234,10 @@ fn published_state_schema_matches_the_source_owner() {
         status_state_schema_version(),
         CURRENT_STATE_SCHEMA_VERSION,
         "STATUS.md state schema version is stale"
+    );
+    assert_eq!(
+        status_content_revision(),
+        crimocracy::content::CURRENT_CONTENT_REVISION,
+        "STATUS.md authored content revision is stale"
     );
 }

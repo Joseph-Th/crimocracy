@@ -1,7 +1,7 @@
 //! Financial validation and atomic ledger commits; sibling finance state owns balances and indexes.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{FinancialAccountId, LedgerTransactionId, MandateId};
+use crate::core::id::{FinancialAccountId, IdExhaustionError, LedgerTransactionId, MandateId};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::{
     resolve_mandate_authority, validate_mandate_authority_snapshot, DelegationError,
@@ -34,6 +34,8 @@ pub enum FinanceError {
     ZeroPosting(FinancialAccountId),
     #[error("ledger transaction postings do not balance to zero; net cents {net_cents}")]
     Unbalanced { net_cents: i64 },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
     #[error("ledger transaction would overflow account {0}")]
     BalanceOverflow(FinancialAccountId),
     #[error("ledger transaction cannot occur in the future")]
@@ -83,7 +85,7 @@ pub fn insert_account(
     if !crate::core::entity::is_entity_present(state, draft.owner.entity()) {
         return Err(FinanceError::MissingEntity(draft.owner.entity()));
     }
-    let id = state.ids.next_financial_account();
+    let id = state.ids.next_financial_account()?;
     state.finance.insert_account(FinancialAccountRecord {
         id,
         owner: draft.owner,
@@ -122,7 +124,7 @@ impl ValidatedLedgerTransaction {
         if let Some(snapshot) = self.authority_snapshot {
             validate_mandate_authority_snapshot(state, snapshot)?;
         }
-        let id = state.ids.next_ledger_transaction();
+        let id = state.ids.next_ledger_transaction()?;
         let LedgerTransactionDraft {
             occurred_at,
             memo,

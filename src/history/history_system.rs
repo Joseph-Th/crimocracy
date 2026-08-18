@@ -1,7 +1,7 @@
 //! Campaign-history validation and insertion; sibling history state owns synchronized entity indexes.
 
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::HistoryEventId;
+use crate::core::id::{HistoryEventId, IdExhaustionError};
 use crate::core::state::AppState;
 use crate::history::{HistoryEventDraft, HistoryEventRecord};
 use thiserror::Error;
@@ -16,14 +16,16 @@ pub enum HistoryError {
     MissingEntity(EntityRef),
     #[error("history event cannot occur in the future")]
     OccursInFuture,
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedHistoryEvent {
     draft: HistoryEventDraft,
 }
 impl ValidatedHistoryEvent {
-    pub fn commit(self, state: &mut AppState) -> HistoryEventId {
-        let id = state.ids.next_history_event();
+    pub fn commit(self, state: &mut AppState) -> Result<HistoryEventId, HistoryError> {
+        let id = state.ids.next_history_event()?;
         state.history.insert(HistoryEventRecord {
             id,
             occurred_at: self.draft.occurred_at,
@@ -31,7 +33,7 @@ impl ValidatedHistoryEvent {
             summary: self.draft.summary,
             entities: self.draft.entities,
         });
-        id
+        Ok(id)
     }
 }
 

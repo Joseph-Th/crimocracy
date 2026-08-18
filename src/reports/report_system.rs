@@ -1,7 +1,9 @@
 //! Report validation and insertion; reports expose known information rather than world truth.
 
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{DecisionRequestId, InformationId, OrganizationId, ReportId};
+use crate::core::id::{
+    DecisionRequestId, IdExhaustionError, InformationId, OrganizationId, ReportId,
+};
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
 use crate::reports::{ReportDraft, ReportRecord};
@@ -32,14 +34,16 @@ pub enum ReportError {
         decision_recipient: OrganizationId,
         report_recipient: OrganizationId,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedReport {
     draft: ReportDraft,
 }
 impl ValidatedReport {
-    pub fn commit(self, state: &mut AppState) -> ReportId {
-        let id = state.ids.next_report();
+    pub fn commit(self, state: &mut AppState) -> Result<ReportId, ReportError> {
+        let id = state.ids.next_report()?;
         state.reports.insert(ReportRecord {
             id,
             recipient: self.draft.recipient,
@@ -48,7 +52,7 @@ impl ValidatedReport {
             generated_at: state.now(),
             entries: self.draft.entries,
         });
-        id
+        Ok(id)
     }
 }
 
@@ -155,7 +159,8 @@ mod tests {
             },
         )
         .expect("information fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("information fixture should commit");
 
         let error = match validate_record_report(
             &state,

@@ -4,7 +4,8 @@ use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, ContactId, FinancialAccountId, LegalRepresentationId, OrganizationId,
+    ArrestId, CharacterId, ContactId, FinancialAccountId, IdExhaustionError, IdKind,
+    InvestigationId, LegalRepresentationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -22,8 +23,8 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::legal::{
-    LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationRecord,
-    LegalRepresentationStatus,
+    ArrestStatus, InvestigationStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
+    LegalRepresentationRecord, LegalRepresentationStatus,
 };
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -81,6 +82,13 @@ pub enum LegalRepresentationError {
     AlreadyRepresented {
         arrest: ArrestId,
         representation: LegalRepresentationId,
+    },
+    #[error("arrest {arrest} is not an active detention")]
+    ArrestNotActive { arrest: ArrestId },
+    #[error("arrest {arrest} source investigation {investigation} is not active")]
+    InvestigationNotActive {
+        arrest: ArrestId,
+        investigation: InvestigationId,
     },
     #[error("legal retainer fee must be greater than zero")]
     InvalidFee,
@@ -161,6 +169,8 @@ pub enum LegalRepresentationError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -190,6 +200,12 @@ impl ValidatedLegalRepresentation {
         self,
         state: &mut AppState,
     ) -> Result<LegalRepresentationId, LegalRepresentationError> {
+        state.ids.reserve_many(&[
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+            (IdKind::LegalRepresentation, 1),
+        ])?;
         validate_time(state, self.retained_at)?;
         validate_dependency_versions(
             state,
@@ -211,9 +227,9 @@ impl ValidatedLegalRepresentation {
         }
 
         let payment = self.payment.commit(state)?;
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
-        let id = state.ids.next_legal_representation();
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
+        let id = state.ids.next_legal_representation()?;
         state
             .legal
             .insert_legal_representation(LegalRepresentationRecord {
@@ -341,6 +357,21 @@ fn validate_representation_dependencies(
         .legal
         .get_arrest(draft.arrest)
         .ok_or(LegalRepresentationError::MissingArrest(draft.arrest))?;
+    if arrest.status() != ArrestStatus::Detained {
+        return Err(LegalRepresentationError::ArrestNotActive {
+            arrest: draft.arrest,
+        });
+    }
+    let source_investigation = state
+        .legal
+        .get_investigation(arrest.investigation())
+        .ok_or(LegalRepresentationError::MissingArrest(draft.arrest))?;
+    if source_investigation.status() != InvestigationStatus::Active {
+        return Err(LegalRepresentationError::InvestigationNotActive {
+            arrest: draft.arrest,
+            investigation: arrest.investigation(),
+        });
+    }
     if let Some(existing) = state.legal.active_representation_for_arrest(draft.arrest) {
         return Err(LegalRepresentationError::AlreadyRepresented {
             arrest: draft.arrest,
@@ -627,6 +658,9 @@ pub struct ValidatedLegalRepresentationEnd {
 
 impl ValidatedLegalRepresentationEnd {
     pub fn commit(self, state: &mut AppState) -> Result<(), LegalRepresentationError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::Information, 1), (IdKind::Report, 1)])?;
         validate_time(state, self.ended_at)?;
         let record = state
             .legal
@@ -646,8 +680,8 @@ impl ValidatedLegalRepresentationEnd {
                 self.representation,
             ));
         }
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
         state.legal.end_legal_representation(
             self.representation,
             self.ended_at,
@@ -1024,6 +1058,69 @@ mod tests {
         .expect("legal representation should validate")
         .commit(&mut fixture.state)
         .expect("legal representation should commit")
+    }
+
+    #[test]
+    fn retain_legal_representation_id_exhaustion_is_atomic_and_typed() {
+        // The composite retain commit allocates a ledger transaction, information, a report, and
+        // then the representation ID. Exhausting the report class must abort the whole commit
+        // before the ledger funds move, instead of stranding a partly-applied transaction.
+        let mut fixture = fixture();
+        let payer_before = fixture
+            .state
+            .finance()
+            .get_account(fixture.payer)
+            .expect("payer account should exist")
+            .balance();
+        let ledger_before = fixture.state.finance().transactions().count();
+        let information_before = fixture.state.intelligence().information().count();
+        fixture
+            .state
+            .ids
+            .set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+        let validated = {
+            let draft = representation_draft(&mut fixture, 12_000, None);
+            validate_retain_legal_representation(&fixture.state, draft)
+                .expect("read-only validation must ignore ID exhaustion")
+        };
+        let error = validated
+            .commit(&mut fixture.state)
+            .expect_err("report exhaustion must reject the composite commit");
+        assert!(
+            matches!(error, LegalRepresentationError::IdExhaustion(_)),
+            "expected typed ID exhaustion, got {error:?}"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.payer)
+                .expect("payer account should persist")
+                .balance(),
+            payer_before,
+            "ledger must not move when a later ID allocation is exhausted"
+        );
+        assert_eq!(
+            fixture.state.finance().transactions().count(),
+            ledger_before,
+            "no ledger transaction may be committed on a rejected composite commit"
+        );
+        assert_eq!(
+            fixture.state.intelligence().information().count(),
+            information_before,
+            "no information may be recorded on a rejected composite commit"
+        );
+        assert!(
+            fixture
+                .state
+                .legal()
+                .active_representation_for_arrest(fixture.arrest)
+                .is_none(),
+            "no representation may be created on a rejected composite commit"
+        );
+        validate_state(&fixture.state).expect("rejected commit must leave valid state");
+        validate_invariants(&fixture.state);
     }
 
     #[test]

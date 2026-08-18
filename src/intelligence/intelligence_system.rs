@@ -1,7 +1,7 @@
 //! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
 
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{CharacterId, InformationId, OrganizationId};
+use crate::core::id::{CharacterId, IdExhaustionError, InformationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::intelligence::{
     InformationDraft, InformationRecord, InformationSourceKind, InformationTransferDraft,
@@ -55,6 +55,8 @@ pub enum IntelligenceError {
         expected: u32,
         found: u32,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub(crate) fn validate_contact_information_derivation(
@@ -115,7 +117,7 @@ pub struct ValidatedInformation {
 }
 
 impl ValidatedInformation {
-    pub fn commit(self, state: &mut AppState) -> InformationId {
+    pub fn commit(self, state: &mut AppState) -> Result<InformationId, IntelligenceError> {
         let InformationDraft {
             holder,
             source_kind,
@@ -127,7 +129,7 @@ impl ValidatedInformation {
             specificity,
             summary,
         } = self.draft;
-        let id = state.ids.next_information();
+        let id = state.ids.next_information()?;
         let recorded_at = state.now();
         state.intelligence.insert(InformationRecord {
             id,
@@ -151,7 +153,7 @@ impl ValidatedInformation {
                 summary,
             },
         });
-        id
+        Ok(id)
     }
 }
 
@@ -177,13 +179,36 @@ fn validate_information_draft(
         return Err(IntelligenceError::EmptySummary);
     }
     match draft.holder {
-        KnowledgeHolder::Character(id) if state.world.get_character(id).is_none() => {
-            return Err(IntelligenceError::MissingCharacter(id))
+        KnowledgeHolder::Character(id) => {
+            if state.world.get_character(id).is_none() {
+                return Err(IntelligenceError::MissingCharacter(id));
+            }
+            if state
+                .world
+                .get_character(id)
+                .is_some_and(|record| record.lifecycle() != Lifecycle::Active)
+            {
+                // A detained or otherwise inactive person cannot keep recording fresh knowledge;
+                // only active holders may acquire new information.
+                return Err(IntelligenceError::InactiveHolder(
+                    KnowledgeHolder::Character(id),
+                ));
+            }
         }
-        KnowledgeHolder::Organization(id) if state.world.get_organization(id).is_none() => {
-            return Err(IntelligenceError::MissingOrganization(id))
+        KnowledgeHolder::Organization(id) => {
+            if state.world.get_organization(id).is_none() {
+                return Err(IntelligenceError::MissingOrganization(id));
+            }
+            if state
+                .world
+                .get_organization(id)
+                .is_some_and(|record| record.lifecycle() != Lifecycle::Active)
+            {
+                return Err(IntelligenceError::InactiveHolder(
+                    KnowledgeHolder::Organization(id),
+                ));
+            }
         }
-        KnowledgeHolder::Character(_) | KnowledgeHolder::Organization(_) => {}
     }
     if !is_entity_present(state, draft.subject) {
         return Err(IntelligenceError::MissingEntity(draft.subject));
@@ -249,7 +274,7 @@ impl ValidatedInformationTransfer {
         }
         validate_transfer_relationship(state, source_holder, self.recipient)?;
         let draft = build_transfer_draft(source, self.recipient);
-        Ok(validate_internal_transfer_information(state, draft, self.source)?.commit(state))
+        validate_internal_transfer_information(state, draft, self.source)?.commit(state)
     }
 }
 
@@ -438,6 +463,7 @@ mod tests {
         )
         .expect("character information fixture should validate")
         .commit(state)
+        .expect("character information fixture should commit")
     }
 
     #[test]
@@ -540,7 +566,8 @@ mod tests {
             },
         )
         .expect("organization-held transfer should be reportable")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("organization-held transfer report should commit");
 
         validate_reassign_character(&state, character, None, None)
             .expect("character should be able to leave after reporting information")

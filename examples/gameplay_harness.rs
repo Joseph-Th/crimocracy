@@ -10,13 +10,15 @@
 //! Timeline constants are derived from the authored registry (operation durations, autonomous
 //! recruitment cadence, cold-case window) where possible so session timing tracks the game instead
 //! of hard-coded minutes drifting from authored content. Batch runs vary the simulation seed only;
-//! strategy policy is deterministic and matched branches use the same seed.
+//! each seed also rotates the RUSH/PRESS burglary schedule and fixture variation so the flat policy
+//! treatments still exercise slightly different timing, while matched branches stay on the same seed.
 
 use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
-    BusinessId, CharacterId, EnterpriseId, InformationId, OperationId, OrganizationId,
+    BusinessId, CharacterId, EnterpriseId, InformationId, OperationId, OpportunityId,
+    OrganizationId,
 };
 use crimocracy::core::invariants::{validate_state, validate_state_against_registry};
 use crimocracy::core::simulation::{run_tick, TickOutcome};
@@ -62,14 +64,16 @@ use crimocracy::operations::property_disposition::{
     validate_dispose_property, PropertyDispositionDraft,
 };
 use crimocracy::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationConstraint,
-    OperationContingency, OperationDraft, OperationKind, OperationObjective,
-    OperationObjectiveOutcome, OperationStatus, RoleKind,
+    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
+    OperationDraft, OperationKind, OperationObjective, OperationObjectiveOutcome, OperationStatus,
+    RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
 };
 use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
+use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
+use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crimocracy::registry::Registry;
 use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::social::relationship_system::validate_set_relationship;
@@ -95,11 +99,33 @@ use std::error::Error;
 const DEFAULT_BATCH_SAMPLES: u64 = 3;
 const MAX_BATCH_SAMPLES: u64 = 64;
 const DEFAULT_SEED: u64 = 0x1933_0514;
-const MAX_OPERATION_WAIT_MINUTES: u32 = 1_440;
 const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
+/// Minutes of slack added to each operation's authored duration to form the terminal-wait guard,
+/// staying registry-derived instead of a hard-coded window that could go stale as authors add
+/// longer operations.
+const OPERATION_WAIT_SLACK_MINUTES: u32 = 240;
+/// Minutes after the surrounding case opens before leadership runs the precinct heat check. The
+/// check lands well inside every authored cold-case window, so it always reads a still-active case
+/// instead of depending on a fixed clock.
+const CASE_HEAT_CHECK_DELAY_MINUTES: u64 = 60;
 /// Small deterministic margin past the authored cold-case shelf instant so the narrative re-check
 /// observes a case the simulation has already shelved, without depending on in-tick scheduling.
-const COLD_CASE_RECHECK_SLACK_MINUTES: u64 = 10;
+const COLD_CASE_RECHECK_SLACK_MINUTES: u32 = 10;
+/// The canonical narrative minute at which the organization begins to notice the reopened second
+/// score on the alternate target, after the first day's law-enforcement beat has settled. All
+/// narrative branches discover this opportunity at the same minute so the branch difference is
+/// purely what leadership does with it.
+const SECOND_OPPORTUNITY_DISCOVERY_MINUTE: u64 = 1_450;
+/// Player-visible validity window for the second opportunity, measured from the canonical discovery
+/// minute: discovery + 12 hours, past the second day's dawn so PRESS's standing-down discipline
+/// visibly costs the score during the cold-case wait.
+const SECOND_OPPORTUNITY_VALIDITY_MINUTES: u64 = 720;
+/// RUSH act 2 works the second score during the second day's morning lull (day-2 clock 09:20),
+/// deliberately outside every authored patrol window, with the rebuilt crew and no fresh recon.
+const RUSH_ACT2_SCHEDULE_MINUTE: u64 = 2_000;
+/// RECON act 2 re-runs surveillance on the alternate target, then picks the first patrol-safe
+/// start from the fresh report.
+const RECON_ACT2_SURVEILLANCE_MINUTE: u64 = 1_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HarnessMode {
@@ -471,6 +497,9 @@ struct Scenario<'registry> {
     lieutenant: CharacterId,
     burglar: CharacterId,
     scout: CharacterId,
+    /// Player-side replacement candidate for act 2: an independent with a pre-existing personal
+    /// relationship to the boss, recruitable only through canonical executive recruitment.
+    danny_ferro: CharacterId,
     detective: CharacterId,
     opportunity_information: InformationId,
     alternate_opportunity_information: InformationId,
@@ -500,6 +529,7 @@ struct RunMetrics {
     cold_case_confirmed: Option<bool>,
     case_cold_minute: Option<u64>,
     case_open_minute: Option<u64>,
+    counterintelligence_scheduled_at: Option<u64>,
     exposure_score: Option<i16>,
     exposure_level: Option<crimocracy::operations::OperationExposureLevel>,
     investigation_created: bool,
@@ -522,6 +552,20 @@ struct RunMetrics {
     defector: Option<crimocracy::core::id::CharacterId>,
     defection_minute: Option<u64>,
     defector_trail_confirmed: Option<bool>,
+    // Act-2 (second wind) evidence: the narrative branches either rebuild and recover value on a
+    // reopened second score or deliberately let it lapse as the price of standing down.
+    second_opportunity: Option<OpportunityId>,
+    second_opportunity_discovered: bool,
+    second_opportunity_expired: bool,
+    replacement: Option<crimocracy::core::id::CharacterId>,
+    replacement_recruited: bool,
+    second_burglary: Option<OperationId>,
+    second_burglary_aborted: bool,
+    second_burglary_outcome: Option<OperationObjectiveOutcome>,
+    second_burglary_terminal_minute: Option<u64>,
+    second_act_recon_information: usize,
+    second_act_property_acquired_value_cents: Option<i64>,
+    second_act_property_realized_cash_cents: Option<i64>,
 }
 
 #[derive(Default)]
@@ -532,6 +576,7 @@ struct Aggregate {
     partial: u64,
     failed: u64,
     aborted: u64,
+    unresolved: u64,
     police_dispatched: u64,
     police_arrived: u64,
     decisions: u64,
@@ -570,7 +615,10 @@ impl Aggregate {
             Some(OperationObjectiveOutcome::Partial) => self.partial += 1,
             Some(OperationObjectiveOutcome::Failed) => self.failed += 1,
             None if metrics.aborted => self.aborted += 1,
-            None => {}
+            // A run that reached neither a resolution nor an abort is an unresolved breakage; count
+            // it explicitly so the outcome percentages never silently stop summing to the sample
+            // count.
+            None => self.unresolved += 1,
         }
         self.police_dispatched += u64::from(metrics.police_dispatched);
         self.police_arrived += u64::from(metrics.police_arrived);
@@ -658,13 +706,14 @@ impl Aggregate {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
         println!(
-            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
+            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
             self.percent(self.partial),
             self.percent(self.failed),
             self.percent(self.aborted),
+            self.unresolved,
             self.percent(self.standing_contingency_aborts),
             self.percent(self.police_dispatched),
             self.percent(self.investigations),
@@ -819,6 +868,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_defector_trail_evidence(&rush)?;
     validate_defector_trail_evidence(&press)?;
     validate_defector_trail_evidence(&recon)?;
+    validate_second_act_evidence(&rush)?;
+    validate_second_act_evidence(&press)?;
+    validate_second_act_evidence(&recon)?;
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
@@ -877,6 +929,7 @@ fn parse_options(
     let mut samples = DEFAULT_BATCH_SAMPLES;
     let mut seed = DEFAULT_SEED;
     let mut strategy = None;
+    let mut strategy_was_passed = false;
     let mut samples_were_explicit = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -925,6 +978,7 @@ fn parse_options(
                     .next()
                     .ok_or(HarnessCliError::MissingValue { flag: "--strategy" })?;
                 strategy = Strategy::parse(&value)?;
+                strategy_was_passed = true;
             }
             _ => {
                 return Err(HarnessCliError::UnsupportedArgument { argument });
@@ -936,7 +990,7 @@ fn parse_options(
             return Err(HarnessCliError::SmokeSampleCount { value: samples });
         }
         samples = 1;
-    } else if strategy.is_some() {
+    } else if strategy_was_passed {
         return Err(HarnessCliError::StrategyOnlyInSmoke);
     }
     Ok(Some(HarnessOptions {
@@ -1101,6 +1155,59 @@ fn validate_defector_trail_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             evidence: "a session without an autonomous rival departure must not fabricate a defector trail",
         })
     }
+}
+
+/// Full-mode narrative sessions must close the second-wind arc through canonical production paths:
+/// every branch discovers the reopened second score at the same minute, then either rebuilds and
+/// recovers value from it (RUSH via executive recruitment + morning-lull hit, RECON via fresh
+/// recon + patrol-safe window) or deliberately lets it lapse as the price of standing down (PRESS).
+fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    let evidence = match strategy {
+        Strategy::Rush => {
+            if metrics.second_opportunity_discovered
+                && metrics.replacement_recruited
+                && metrics.replacement.is_some()
+                && metrics.second_burglary.is_some()
+                && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
+                && metrics.second_act_recon_information == 0
+                && metrics.second_burglary_terminal_minute.is_some()
+                && metrics.player_personnel_departures > 0
+            {
+                None
+            } else {
+                Some("the RUSH second act must discover the reopened score, rebuild the crew after at least one rival departure through the canonical executive path, and work the second score in the morning lull with the rebuilt crew and no fresh recon")
+            }
+        }
+        Strategy::Recon => {
+            if metrics.second_opportunity_discovered
+                && metrics.second_burglary.is_some()
+                && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
+                && metrics.second_act_recon_information > 0
+                && metrics.second_burglary_terminal_minute.is_some()
+            {
+                None
+            } else {
+                Some("the RECON second act must discover the reopened score, re-run surveillance on the alternate target, and complete the burglary inside a fresh patrol-safe window")
+            }
+        }
+        Strategy::Press => {
+            if metrics.second_opportunity_discovered
+                && metrics.second_opportunity_expired
+                && metrics.second_burglary.is_none()
+                && !metrics.replacement_recruited
+            {
+                None
+            } else {
+                Some("the PRESS second act must discover the reopened score and deliberately let it lapse while standing down, without recruiting or working the second score")
+            }
+        }
+    };
+    evidence.map_or(Ok(()), |evidence| {
+        Err(HarnessContractError::MissingStrategyEvidence { strategy, evidence })
+    })
 }
 
 fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
@@ -1533,19 +1640,10 @@ fn play_session(
             // the same information-selection boundary a player would use.
             burglary_intelligence.insert(*information);
         }
-    } else if narrative && strategy == Strategy::Rush {
-        println!(
-            "[DECIDE]  Move immediately on the opportunity at 02:10, using only the original street information."
-        );
-    } else if narrative {
-        println!(
-            "[DECIDE]  Hit {} at 02:10 and press on through a police response unless leadership later orders otherwise.",
-            scenario.variation.target_name(),
-        );
     }
 
     let scheduled_for = match strategy {
-        Strategy::Rush | Strategy::Press => SimTime::from_minutes(130),
+        Strategy::Rush | Strategy::Press => choose_burglary_schedule(seed),
         Strategy::Recon => {
             let patrol_summary = learned_patrol_summary.as_deref().ok_or(
                 "recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
@@ -1570,6 +1668,19 @@ fn play_session(
             chosen
         }
     };
+    if narrative && matches!(strategy, Strategy::Rush | Strategy::Press) {
+        let clock = format_minute_of_day(scheduled_for.as_minutes());
+        match strategy {
+            Strategy::Rush => println!(
+                "[DECIDE]  Move immediately on the opportunity at {clock}, using only the original street information."
+            ),
+            Strategy::Press => println!(
+                "[DECIDE]  Hit {} at {clock} and press on through a police response unless leadership later orders otherwise.",
+                scenario.variation.target_name(),
+            ),
+            Strategy::Recon => unreachable!("recon narrates its own planning decision"),
+        }
+    }
     if scenario.state.now() >= scheduled_for {
         return Err(format!(
             "scenario preparation reached minute {} before burglary schedule {}",
@@ -1579,6 +1690,7 @@ fn play_session(
         .into());
     }
     let target = scenario.target;
+    let entry_specialist = scenario.burglar;
     let title = format!("{} burglary", scenario.variation.target_name());
     let burglary = authorize_burglary(
         &mut scenario,
@@ -1587,6 +1699,7 @@ fn play_session(
         &title,
         scheduled_for,
         burglary_intelligence,
+        entry_specialist,
     )?;
     validate_convert_opportunity(&scenario.state, opportunity, burglary)?
         .commit(&mut scenario.state)?;
@@ -1688,8 +1801,8 @@ fn play_session(
             print_resolution_factors(resolution);
             if let Some(proceeds) = resolution.property_proceeds() {
                 println!(
-                    "[PROCEEDS] Held property estimated at {} cents. This is organizational value, not liquid cash.",
-                    proceeds.estimated_value().cents()
+                    "[PROCEEDS] Held property estimated at {}. This is organizational value, not liquid cash.",
+                    format_cents(proceeds.estimated_value().cents())
                 );
             }
         }
@@ -1757,9 +1870,9 @@ fn play_session(
         metrics.liquidation_minute = Some(scenario.state.now().as_minutes());
         if narrative {
             println!(
-                "[LIQUIDATE] {} cents estimated property -> {} cents realized resale cash.",
-                estimated_value.cents(),
-                disposition.realized_value.cents(),
+                "[LIQUIDATE] {} estimated property -> {} realized resale cash.",
+                format_cents(estimated_value.cents()),
+                format_cents(disposition.realized_value.cents())
             );
         }
     }
@@ -1799,21 +1912,27 @@ fn play_session(
             .expect("police organization must persist")
             .name()
             .to_owned();
+        let case_open_minute = metrics
+            .case_open_minute
+            .expect("press consequence arc requires the surfaced case-open minute");
+        let heat_check_at = SimTime::from_minutes(case_open_minute + CASE_HEAT_CHECK_DELAY_MINUTES);
         if narrative {
             println!(
-                "[DECIDE]  A case is open and the crew's field report is back. Stand down all visible work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
+                "[DECIDE]  A case is open and the crew's field report is back. Hold back on further street work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
             );
             println!(
-                "[DECIDE]  Watch {police_name} itself at 08:20, outside the known patrol windows, to read whether detectives are still actively working the matter."
+                "[DECIDE]  Watch {police_name} itself at {}, about one hour after the case opened, to read whether detectives are still actively working the matter.",
+                format_minute_of_day(heat_check_at.as_minutes())
             );
         }
+        metrics.counterintelligence_scheduled_at = Some(heat_check_at.as_minutes());
         let counterintelligence_title = format!("{police_name} case-heat check");
         let police = scenario.police;
         let counterintelligence = authorize_surveillance_target(
             &mut scenario,
             EntityRef::Organization(police),
             &counterintelligence_title,
-            SimTime::from_minutes(500),
+            heat_check_at,
         )?;
         run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
         let operation = scenario
@@ -1854,13 +1973,39 @@ fn play_session(
                 .registry
                 .get_investigation_work(InvestigationWorkKind::EvidenceReview)
                 .duration();
-            let recheck_at = SimTime::from_minutes(
+            let mut recheck_at = SimTime::from_minutes(
                 case_open_minute
                     + u64::from(cold_case_window.as_minutes())
                     + u64::from(evidence_review_duration.as_minutes())
-                    + COLD_CASE_RECHECK_SLACK_MINUTES,
+                    + u64::from(COLD_CASE_RECHECK_SLACK_MINUTES),
             );
+            // PRESS notices the reopened second score at the same canonical minute every narrative
+            // branch does, while it is still standing down. The branch then deliberately schedules
+            // nothing on it: the discipline that protects the open case is also an opportunity cost.
+            if !metrics.second_opportunity_discovered {
+                let discovery_at = SimTime::from_minutes(SECOND_OPPORTUNITY_DISCOVERY_MINUTE);
+                if scenario.state.now() < discovery_at {
+                    run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
+                }
+                discover_second_opportunity(&mut scenario, narrative, &mut metrics)?;
+                if narrative {
+                    println!(
+                        "[DECIDE]  The second score is real, but {police_name} is still developing the case. Leadership holds the district dark and takes nothing; the opportunity will be allowed to lapse."
+                    );
+                }
+            }
             run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
+            // The shelf estimate assumes only the auto-scheduled evidence review advances the
+            // case's last-activity instant. If some later work or evidence event pushed that
+            // instant past the estimate, extend once by the same authored review plus slack so
+            // the narrative still observes the deterministic shelf instead of misreading a
+            // still-hot case through its own surveillance.
+            if metrics.case_cold_minute.is_none() {
+                recheck_at = recheck_at
+                    + evidence_review_duration
+                    + SimDuration::from_minutes(COLD_CASE_RECHECK_SLACK_MINUTES);
+                run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
+            }
             let recheck_title = format!("{police_name} case re-check");
             let recheck_at = scenario.state.now() + SimDuration::ONE_MINUTE;
             let recheck = authorize_surveillance_target(
@@ -1918,8 +2063,22 @@ fn play_session(
         } else {
             run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
         }
+        // All narrative branches notice the reopened second score at the same canonical minute and
+        // then each branch either works it (RUSH rebuild, RECON re-recon) or deliberately lets it
+        // lapse as the price of standing down (PRESS, which already discovered it during the
+        // cold-case wait above). Batch sessions keep the single-act window for performance.
+        if narrative && !metrics.second_opportunity_discovered {
+            let discovery_at = SimTime::from_minutes(SECOND_OPPORTUNITY_DISCOVERY_MINUTE);
+            if scenario.state.now() < discovery_at {
+                run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
+            }
+            discover_second_opportunity(&mut scenario, narrative, &mut metrics)?;
+        }
         if narrative && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
             run_defector_trail(&mut scenario, narrative, &mut metrics)?;
+        }
+        if narrative {
+            run_second_act(&mut scenario, strategy, narrative, &mut metrics)?;
         }
         if scenario.state.now() < observation_end {
             run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
@@ -1929,6 +2088,7 @@ fn play_session(
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
         if narrative {
             print_final_case_audit(&scenario, burglary);
+            print_second_act_recap(&scenario, strategy, &metrics);
             print_financial_view(&scenario, financials);
             println!("\n[EXECUTIVE BRIEFS]");
             for report in scenario
@@ -1937,7 +2097,7 @@ fn play_session(
                 .reports_for(scenario.player)
                 .filter(|report| report.kind() == ReportKind::ExecutiveBrief)
             {
-                print_report("BRIEF", report, &scenario);
+                print_report_condensed("BRIEF", report);
             }
         }
     }
@@ -2145,6 +2305,27 @@ fn build_scenario(
             drives: BTreeMap::new(),
         },
     )?;
+    // Danny Ferro is the act-2 replacement candidate: an independent the organization would need
+    // to court through the canonical executive recruitment path after losing a crew member. His
+    // Gambling-independent career means Burglary 70 / Stealth 58, and he already carries a
+    // pre-existing personal relationship to the boss that makes the pitch deterministic without
+    // any RNG or hidden-state reads.
+    let danny_ferro = insert_character(
+        registry,
+        &mut state,
+        CharacterDraft {
+            name: "Danny Ferro".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Burglary, rating(70)),
+                (CapabilityKind::Stealth, rating(58)),
+            ]),
+            traits: BTreeSet::from([TraitKind::Greedy]),
+            drives: BTreeMap::from([(DriveKind::Money, rating(80))]),
+        },
+    )?;
     let rival_recruiter = insert_character(
         registry,
         &mut state,
@@ -2200,6 +2381,25 @@ fn build_scenario(
             dependence: level(90),
             resentment: level(5),
             debt: level(20),
+        },
+    )?
+    .commit(&mut state);
+
+    // Danny's pitch leverages a long-standing personal debt to Marrow, so the relationship edges
+    // run from the candidate to the recruiter and the executive recruitment path stays canonical.
+    // The margin calculation reads only this authored relationship plus the registry definitions.
+    validate_set_relationship(
+        &state,
+        danny_ferro,
+        boss,
+        RelationshipDimensions {
+            trust: level(70),
+            respect: level(60),
+            fear: level(10),
+            affection: level(60),
+            dependence: level(20),
+            resentment: level(0),
+            debt: level(40),
         },
     )?
     .commit(&mut state);
@@ -2390,7 +2590,8 @@ fn build_scenario(
             summary: variation.source_summary().to_owned(),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("opportunity source information fixture should commit");
     let alternate_opportunity_information = validate_record_information(
         &state,
         InformationDraft {
@@ -2405,7 +2606,8 @@ fn build_scenario(
             summary: variation.alternate_source_summary().to_owned(),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("alternate opportunity source information fixture should commit");
 
     let scenario = Scenario {
         registry,
@@ -2425,6 +2627,7 @@ fn build_scenario(
         lieutenant,
         burglar,
         scout,
+        danny_ferro,
         detective,
         opportunity_information,
         alternate_opportunity_information,
@@ -2508,6 +2711,7 @@ fn authorize_burglary(
     title: &str,
     scheduled_for: SimTime,
     intelligence: BTreeSet<InformationId>,
+    entry_specialist: CharacterId,
 ) -> Result<OperationId, Box<dyn Error>> {
     let contingencies = match strategy {
         Strategy::Rush | Strategy::Recon => vec![
@@ -2530,18 +2734,436 @@ fn authorize_burglary(
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([
                 (RoleKind::Coordinator, scenario.lieutenant),
-                (RoleKind::EntrySpecialist, scenario.burglar),
+                (RoleKind::EntrySpecialist, entry_specialist),
             ]),
             intelligence,
-            constraints: vec![
-                OperationConstraint::AvoidCasualties,
-                OperationConstraint::ProtectLeadershipIdentity,
-            ],
+            constraints: Vec::new(),
             contingencies,
             scheduled_for,
         },
     )?
     .commit(&mut scenario.state)?)
+}
+
+/// The narrative act-2 opening: at the canonical discovery minute every narrative branch sees the
+/// alternate target's second score as a fresh player-visible opportunity, committed through the
+/// canonical discovery path so conversion, expiry, and their reports all follow production rules.
+fn discover_second_opportunity(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<OpportunityId, Box<dyn Error>> {
+    let discovered_at = scenario.state.now();
+    debug_assert!(
+        discovered_at.as_minutes() >= SECOND_OPPORTUNITY_DISCOVERY_MINUTE,
+        "second opportunity discovery must not be authored earlier than its canonical minute"
+    );
+    let valid_until = SimTime::from_minutes(
+        SECOND_OPPORTUNITY_DISCOVERY_MINUTE + SECOND_OPPORTUNITY_VALIDITY_MINUTES,
+    );
+    let opportunity = validate_discover_operation_opportunity(
+        scenario.registry,
+        &scenario.state,
+        OperationOpportunityDraft {
+            organization: scenario.player,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Business(scenario.alternate_target)]),
+            source_information: BTreeSet::from([scenario.alternate_opportunity_information]),
+            summary: format!(
+                "{} is moving high-value stock again; the second score on {} is available until the window closes.",
+                scenario.variation.alternate_target_name(),
+                scenario
+                    .state
+                    .world()
+                    .get_neighborhood(scenario.neighborhood)
+                    .expect("neighborhood must persist")
+                    .name(),
+            ),
+            valid_until: Some(valid_until),
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.second_opportunity = Some(opportunity);
+    metrics.second_opportunity_discovered = true;
+    if narrative {
+        let record = scenario
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("committed second opportunity must be queryable");
+        println!("[OBSERVE] {}", stamp(discovered_at.as_minutes()));
+        println!("          Opportunity: {}", record.summary());
+        println!(
+            "          Source: {}",
+            scenario
+                .state
+                .intelligence()
+                .get_information(scenario.alternate_opportunity_information)
+                .expect("alternate source information must persist")
+                .summary()
+        );
+        println!(
+            "          The second score expires at {}.",
+            format_minute_of_day(valid_until.as_minutes())
+        );
+    }
+    Ok(opportunity)
+}
+
+/// The RUSH rebuild beat: after an autonomous rival departure removed the entry specialist, the
+/// player works the canonical executive recruitment path to court the independent candidate. The
+/// candidate relationship is authored so acceptance is deterministic and identical across seeds;
+/// the recruitment decision itself never reads hidden or audit state.
+fn recruit_replacement(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<CharacterId, Box<dyn Error>> {
+    let candidate = scenario.danny_ferro;
+    let recruiter = scenario.boss;
+    let organization = scenario.player;
+    let attempt = validate_recruitment_attempt(
+        scenario.registry,
+        &scenario.state,
+        RecruitmentDraft {
+            target_organization: organization,
+            recruiter,
+            candidate,
+            approach: RecruitmentApproach::FinancialOpportunity,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let attempt_record = scenario
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("committed executive recruitment must be queryable");
+    if attempt_record.outcome() != crimocracy::recruitment::RecruitmentOutcome::Accepted {
+        let candidate_name = scenario
+            .state
+            .world()
+            .get_character(candidate)
+            .expect("replacement candidate must persist")
+            .name()
+            .to_owned();
+        return Err(format!(
+            "replacement recruitment of {candidate_name} was {:?}; the rebuilt-crew contract requires acceptance",
+            attempt_record.outcome()
+        )
+        .into());
+    }
+    let record = scenario
+        .state
+        .world()
+        .get_character(candidate)
+        .expect("recruited replacement must persist");
+    if record.organization() != Some(organization) {
+        return Err(
+            "replacement recruitment committed without a player-organization membership".into(),
+        );
+    }
+    metrics.replacement = Some(candidate);
+    metrics.replacement_recruited = true;
+    if narrative {
+        let candidate_name = record.name();
+        let recruiter_name = scenario
+            .state
+            .world()
+            .get_character(recruiter)
+            .expect("recruiter must persist")
+            .name();
+        let organization_name = scenario
+            .state
+            .world()
+            .get_organization(organization)
+            .expect("player organization must persist")
+            .name();
+        println!(
+            "[DECIDE]  Leadership personally recruited {candidate_name}: Marrow made the {:?} pitch and {candidate_name} accepted, joining {organization_name} as the replacement entry specialist.",
+            attempt_record.approach()
+        );
+        println!(
+            "[NARRATION] {recruiter_name}'s pitch was backed by an existing relationship and the candidate's greed drive; margin {}, outcome {:?}. No hidden or audit state influenced the decision.",
+            attempt_record.margin(),
+            attempt_record.outcome()
+        );
+    }
+    Ok(candidate)
+}
+
+/// Executes the narrative act-2 beat per branch. RUSH rebuilds the crew and works the second score
+/// in the morning lull; RECON re-invests in planning and works it inside a fresh patrol-safe
+/// window; PRESS deliberately takes nothing and lets the discovered opportunity lapse.
+fn run_second_act(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    let Some(opportunity) = metrics.second_opportunity else {
+        return Err("act 2 cannot run before the second opportunity is discovered".into());
+    };
+    let alternate_target = scenario.alternate_target;
+    let neighborhood_name = scenario
+        .state
+        .world()
+        .get_neighborhood(scenario.neighborhood)
+        .expect("neighborhood must persist")
+        .name()
+        .to_owned();
+
+    match strategy {
+        Strategy::Rush => {
+            let replacement = recruit_replacement(scenario, narrative, metrics)?;
+            let scheduled_for = SimTime::from_minutes(RUSH_ACT2_SCHEDULE_MINUTE);
+            let title = format!(
+                "{} second-score burglary",
+                scenario.variation.alternate_target_name()
+            );
+            if narrative {
+                println!(
+                    "[DECIDE]  Rebuild is in hand. Work the second score on {} during the morning lull at {}, with the rebuilt crew and the original street observation only — no fresh recon.",
+                    scenario.variation.alternate_target_name(),
+                    format_minute_of_day(scheduled_for.as_minutes()),
+                );
+            }
+            let intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
+            let burglary = authorize_burglary(
+                scenario,
+                Strategy::Rush,
+                alternate_target,
+                &title,
+                scheduled_for,
+                intelligence,
+                replacement,
+            )?;
+            validate_convert_opportunity(&scenario.state, opportunity, burglary)?
+                .commit(&mut scenario.state)?;
+            metrics.second_burglary = Some(burglary);
+            run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
+            record_second_act_burglary_terminal(scenario, burglary, metrics);
+            liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
+        }
+        Strategy::Recon => {
+            let title = format!(
+                "{} second-score surveillance",
+                scenario.variation.alternate_target_name()
+            );
+            if narrative {
+                println!(
+                    "[DECIDE]  Re-invest in planning: run fresh surveillance on {} before committing the second score, and pick the protected window from the new report.",
+                    scenario.variation.alternate_target_name()
+                );
+            }
+            let recon = authorize_surveillance_target(
+                scenario,
+                EntityRef::Business(alternate_target),
+                &title,
+                SimTime::from_minutes(RECON_ACT2_SURVEILLANCE_MINUTE),
+            )?;
+            run_until_operation_terminal(scenario, recon, narrative, metrics)?;
+            let resolution = scenario
+                .state
+                .operations()
+                .get_operation(recon)
+                .expect("second-score surveillance must persist")
+                .resolution()
+                .expect("completed second-score surveillance must have a resolution");
+            metrics.second_act_recon_information = resolution.discovered_information().len();
+            let mut burglary_intelligence =
+                BTreeSet::from([scenario.alternate_opportunity_information]);
+            let mut learned_patrol_summary = None;
+            for information in resolution.discovered_information() {
+                let record = scenario
+                    .state
+                    .intelligence()
+                    .get_information(*information)
+                    .expect("second-score surveillance information must persist");
+                if narrative {
+                    println!(
+                        "[LEARN]   {:?} / {:?}: {}",
+                        record.reliability(),
+                        record.specificity(),
+                        record.summary()
+                    );
+                }
+                if record.topic() == InformationTopic::PoliceActivity {
+                    learned_patrol_summary = Some(record.summary().to_owned());
+                }
+                burglary_intelligence.insert(*information);
+            }
+            let patrol_summary = learned_patrol_summary.as_deref().ok_or(
+                "second-score recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
+            )?;
+            let duration = scenario
+                .registry
+                .get_operation(OperationKind::Burglary)
+                .execution()
+                .duration();
+            let scheduled_for = choose_safe_start_from_patrol_report(
+                scenario.state.now(),
+                patrol_summary,
+                duration,
+                SimDuration::from_minutes(60),
+            )?;
+            if narrative {
+                println!(
+                    "[INTERPRET] Parsed the reported recurring patrol windows and chose {} so the second-score burglary stays outside them with a one-hour uncertainty buffer.",
+                    format_minute_of_day(scheduled_for.as_minutes())
+                );
+            }
+            let title = format!(
+                "{} second-score burglary",
+                scenario.variation.alternate_target_name()
+            );
+            let burglary = authorize_burglary(
+                scenario,
+                Strategy::Recon,
+                alternate_target,
+                &title,
+                scheduled_for,
+                burglary_intelligence,
+                scenario.burglar,
+            )?;
+            validate_convert_opportunity(&scenario.state, opportunity, burglary)?
+                .commit(&mut scenario.state)?;
+            metrics.second_burglary = Some(burglary);
+            run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
+            record_second_act_burglary_terminal(scenario, burglary, metrics);
+            liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
+        }
+        Strategy::Press => {
+            // PRESS already discovered the second score during the cold-case wait and deliberately
+            // scheduled nothing on it. The lapse is a standing-down cost, narrated when the
+            // opportunity expired and confirmed here from the public lifecycle record.
+            if metrics.second_opportunity_expired {
+                if narrative {
+                    println!(
+                        "[DECIDE]  Standing down has a price: the second score on {} lapsed without action while the case stayed protected. The discipline that outlasted the investigation also gave up real value.",
+                        scenario.variation.alternate_target_name()
+                    );
+                }
+            } else if narrative {
+                println!(
+                    "[DECIDE]  The second score is still on the table, but {neighborhood_name} stays dark until leadership confirms the case is shelved."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_second_act_burglary_terminal(
+    scenario: &Scenario,
+    burglary: OperationId,
+    metrics: &mut RunMetrics,
+) {
+    metrics.second_burglary_terminal_minute = Some(scenario.state.now().as_minutes());
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(burglary)
+        .expect("second-score burglary must remain queryable");
+    metrics.second_burglary_aborted = record.status() == OperationStatus::Aborted;
+    if let Some(resolution) = record.resolution() {
+        metrics.second_burglary_outcome = Some(resolution.objective_outcome());
+        metrics.second_act_property_acquired_value_cents = resolution
+            .property_proceeds()
+            .map(|proceeds| proceeds.estimated_value().cents());
+    }
+}
+
+fn liquidate_second_act_property(
+    scenario: &mut Scenario,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    let Some(estimated_value) = scenario
+        .state
+        .operations()
+        .get_operation(burglary)
+        .and_then(|operation| operation.resolution())
+        .and_then(|resolution| resolution.property_proceeds())
+        .map(|proceeds| proceeds.estimated_value())
+    else {
+        return Ok(());
+    };
+    let venue_name = scenario
+        .state
+        .world()
+        .get_business(scenario.resale_venue)
+        .expect("resale venue must persist")
+        .name()
+        .to_owned();
+    if narrative {
+        println!(
+            "[DECIDE]  Move the second-score property through {venue_name} rather than leave it as held inventory."
+        );
+    }
+    let disposition = validate_dispose_property(
+        scenario.registry,
+        &scenario.state,
+        PropertyDispositionDraft {
+            operation: burglary,
+            venue: scenario.resale_venue,
+            cash_account: scenario.liquidation_cash,
+            settlement_account: scenario.liquidation_settlement,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.second_act_property_realized_cash_cents = Some(disposition.realized_value.cents());
+    if narrative {
+        println!(
+            "[LIQUIDATE] {} estimated property -> {} realized resale cash.",
+            format_cents(estimated_value.cents()),
+            format_cents(disposition.realized_value.cents())
+        );
+    }
+    Ok(())
+}
+
+fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: &RunMetrics) {
+    let target = scenario.variation.alternate_target_name();
+    match strategy {
+        Strategy::Rush | Strategy::Recon => {
+            let outcome = metrics
+                .second_burglary_outcome
+                .map(|outcome| format!("{outcome:?}"))
+                .unwrap_or_else(|| "no resolution".to_owned());
+            let realized = optional_dollars(metrics.second_act_property_realized_cash_cents);
+            println!(
+                "\n[ACT 2] {target} second score: {} at minute {}, liquidating {}.",
+                outcome,
+                metrics
+                    .second_burglary_terminal_minute
+                    .map(|minute| minute.to_string())
+                    .unwrap_or_else(|| "-".to_owned()),
+                realized
+            );
+            if strategy == Strategy::Rush {
+                println!(
+                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the rebuilt crew worked the morning lull."
+                );
+            } else {
+                println!(
+                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s) and the burglary used a patrol-safe window.",
+                    metrics.second_act_recon_information
+                );
+            }
+        }
+        Strategy::Press => {
+            let lapsed_at = metrics
+                .second_opportunity
+                .and_then(|opportunity| scenario.state.opportunities().get_opportunity(opportunity))
+                .and_then(|record| record.resolution())
+                .map(|resolution| resolution.at().as_minutes().to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            println!(
+                "\n[ACT 2] {target} second score deliberately lapsed at minute {lapsed_at} while the case stayed hot; the standing-down cost the organization the value it refused to risk."
+            );
+        }
+    }
 }
 
 fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
@@ -2587,6 +3209,7 @@ fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(),
     let target = scenario.alternate_target;
     let title = format!("{} burglary", scenario.variation.alternate_target_name());
     let intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
+    let entry_specialist = scenario.burglar;
     let selected_operation = authorize_burglary(
         &mut scenario,
         Strategy::Rush,
@@ -2594,6 +3217,7 @@ fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(),
         &title,
         SimTime::from_minutes(130),
         intelligence,
+        entry_specialist,
     )?;
     validate_convert_opportunity(&scenario.state, alternate_opportunity, selected_operation)?
         .commit(&mut scenario.state)?;
@@ -2680,7 +3304,25 @@ fn run_until_operation_terminal(
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     let started_at = scenario.state.now();
-    let deadline = started_at + SimDuration::from_minutes(MAX_OPERATION_WAIT_MINUTES);
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized operation must remain queryable");
+    let operation_kind = record.kind();
+    let authored_duration_minutes = scenario
+        .registry
+        .get_operation(operation_kind)
+        .execution()
+        .duration()
+        .as_minutes();
+    // The terminal-wait guard anchors at the later of the loop's current minute and the
+    // operation's authored schedule, then adds the authored duration plus a decision and
+    // police-arrival slack window, so it covers the wait-to-start and stays synchronized with
+    // authored content instead of a hard-coded constant that could go stale.
+    let guard_anchor = record.scheduled_for().max(started_at);
+    let deadline = guard_anchor
+        + SimDuration::from_minutes(authored_duration_minutes + OPERATION_WAIT_SLACK_MINUTES);
     loop {
         let status = scenario
             .state
@@ -2734,8 +3376,8 @@ fn observe_tick(
                 .get_operation(*operation)
                 .expect("started operation must exist");
             println!(
-                "[START]   minute {:>4}: {} started.",
-                outcome.now.as_minutes(),
+                "[START]   {}: {} started.",
+                stamp(outcome.now.as_minutes()),
                 record.title()
             );
             if let Some(response) = record.police_response() {
@@ -2772,9 +3414,25 @@ fn observe_tick(
                     .expect("case owner must persist")
                     .name();
                 println!(
-                    "[CASE COLD] minute {:>4}: {} shelved the case after sustained routine investigation found no actionable subject.",
-                    outcome.now.as_minutes(),
+                    "[CASE COLD] {}: {} shelved the case after sustained routine investigation found no actionable subject.",
+                    stamp(outcome.now.as_minutes()),
                     owner_name
+                );
+            }
+        }
+    }
+
+    // The second score's lapse is a deliberate, observed consequence: PRESS stands down while the
+    // case is hot and the opportunity expires through the canonical lifecycle, generating its own
+    // report instead of any hidden-state read.
+    if let Some(opportunity) = metrics.second_opportunity {
+        if outcome.expired_opportunities.contains(&opportunity) {
+            metrics.second_opportunity_expired = true;
+            if narrative {
+                println!(
+                    "[OPPORTUNITY COST] {}: the second score on {} lapsed without action. The standing-down discipline that protects the hot case has a real price.",
+                    stamp(outcome.now.as_minutes()),
+                    scenario.variation.alternate_target_name()
                 );
             }
         }
@@ -2816,8 +3474,8 @@ fn observe_tick(
             .expect("surfaced decision must persist");
         if narrative {
             println!(
-                "[EXCEPTION] minute {:>4}: {}",
-                outcome.now.as_minutes(),
+                "[EXCEPTION] {}: {}",
+                stamp(outcome.now.as_minutes()),
                 decision.summary()
             );
         }
@@ -2850,7 +3508,23 @@ fn observe_tick(
                 .decisions()
                 .get_decision(follow_up.decision)
                 .expect("follow-up decision must persist");
-            let follow_up_response = DecisionResponse::Abort;
+            // The deferred follow-up is itself a police-arrival decision, so it honors the same
+            // branch policy as the decision it was queued behind: PRESS presses on, the other
+            // strategies abort.
+            let follow_up_response = match follow_up_record.context() {
+                DecisionContext::OperationException {
+                    reason: OperationExceptionReason::PoliceArrival(_),
+                    ..
+                } if metrics.strategy == Some(Strategy::Press) => DecisionResponse::Continue,
+                // Every other deferred follow-up context (non-arrival exception, or any approval
+                // context) is not produced on this path; abort defensively.
+                DecisionContext::OperationException {
+                    reason: OperationExceptionReason::PoliceArrival(_),
+                    ..
+                } => DecisionResponse::Abort,
+                DecisionContext::OperationException { .. } => DecisionResponse::Abort,
+                DecisionContext::RecruitmentApproval(_) => DecisionResponse::Abort,
+            };
             metrics.decision_requests += 1;
             if narrative {
                 println!("[EXCEPTION] Deferred: {}", follow_up_record.summary());
@@ -2905,8 +3579,8 @@ fn observe_tick(
                 metrics.player_police_activity_information.saturating_add(1);
             if narrative {
                 println!(
-                    "[PLAYER ACTION] minute {:>4}: the crew reported the police response back to Marrow Organization; the organization now knows what the burglar directly experienced.",
-                    outcome.now.as_minutes(),
+                    "[PLAYER ACTION] {}: the crew reported the police response back to Marrow Organization; the organization now knows what the burglar directly experienced.",
+                    stamp(outcome.now.as_minutes()),
                 );
             }
         }
@@ -2941,8 +3615,8 @@ fn observe_tick(
                 .get_character(attempt.candidate())
                 .expect("autonomous candidate must exist");
             println!(
-                "[AUTONOMY] minute {:>4}: {} independently approached {} using {:?}; pressure {}, margin {}, outcome {:?}.",
-                outcome.now.as_minutes(),
+                "[AUTONOMY] {}: {} independently approached {} using {:?}; pressure {}, margin {}, outcome {:?}.",
+                stamp(outcome.now.as_minutes()),
                 recruiter.name(),
                 candidate.name(),
                 attempt.approach(),
@@ -3041,8 +3715,8 @@ fn observe_tick(
                 .resolution()
                 .expect("resolved operation must have result");
             println!(
-                "[RESULT]  minute {:>4}: {} -> {:?}, exposure {:?}.",
-                outcome.now.as_minutes(),
+                "[RESULT]  {}: {} -> {:?}, exposure {:?}.",
+                stamp(outcome.now.as_minutes()),
                 record.title(),
                 resolution.objective_outcome(),
                 resolution.exposure().level(),
@@ -3050,8 +3724,8 @@ fn observe_tick(
         }
         if !outcome.business_cycles.is_empty() || !outcome.enterprise_cycles.is_empty() {
             println!(
-                "[ROUTINE] minute {:>4}: {} legitimate business cycle(s), {} delegated enterprise cycle(s).",
-                outcome.now.as_minutes(),
+                "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s).",
+                stamp(outcome.now.as_minutes()),
                 outcome.business_cycles.len(),
                 outcome.enterprise_cycles.len(),
             );
@@ -3062,10 +3736,12 @@ fn observe_tick(
                 .reports()
                 .get_report(report)
                 .expect("executive brief must persist");
-            print_report("BRIEF GENERATED", report, scenario);
+            print_report_condensed("BRIEF GENERATED", report);
         }
     }
-    validate_harness_state(scenario.registry, &scenario.state)?;
+    if tick_changed_observable_state(outcome) {
+        validate_harness_state(scenario.registry, &scenario.state)?;
+    }
     Ok(())
 }
 
@@ -3368,6 +4044,23 @@ fn print_starting_player_view(scenario: &Scenario) {
             .expect("detective must have investigation capability")
             .value(),
     );
+    let replacement = scenario
+        .state
+        .world()
+        .get_character(scenario.danny_ferro)
+        .expect("replacement candidate must exist");
+    println!(
+        "[STATE] {} is an independent with Burglary {} / Stealth {}; Marrow holds a personal relationship with him, so he is the fallback entry specialist if the current crew is lost.",
+        replacement.name(),
+        replacement
+            .capability(CapabilityKind::Burglary)
+            .expect("replacement must have burglary capability")
+            .value(),
+        replacement
+            .capability(CapabilityKind::Stealth)
+            .expect("replacement must have stealth capability")
+            .value(),
+    );
 }
 
 fn print_planning_inputs(scenario: &Scenario, operation: OperationId) {
@@ -3600,28 +4293,33 @@ fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn 
 
 fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     println!(
-        "\n[FINANCIAL VIEW at minute {}]",
-        scenario.state.now().as_minutes()
+        "\n[FINANCIAL VIEW {}]",
+        stamp(scenario.state.now().as_minutes())
     );
     println!(
-        "  Legitimate front: {} cycle(s), net {} cents.",
-        view.legitimate_cycle_count, view.legitimate_net_cents,
+        "  Legitimate front: {} cycle(s), net {}.",
+        view.legitimate_cycle_count,
+        format_cents(view.legitimate_net_cents),
     );
     println!(
-        "  Delegated gambling: {} cycle(s), net {} cents, street-cash balance {} cents.",
-        view.enterprise_cycle_count, view.enterprise_net_cents, view.street_cash_cents,
+        "  Delegated gambling: {} cycle(s), net {}, street-cash balance {}.",
+        view.enterprise_cycle_count,
+        format_cents(view.enterprise_net_cents),
+        format_cents(view.street_cash_cents),
     );
     println!(
-        "  Resale liquidation cash balance: {} cents.",
-        view.liquidation_cash_cents,
+        "  Resale liquidation cash balance: {}.",
+        format_cents(view.liquidation_cash_cents),
     );
     println!(
-        "  Held operation property: {} operation(s), estimated value {} cents, unliquidated.",
-        view.held_property_operations, view.held_property_value_cents,
+        "  Held operation property: {} operation(s), estimated value {}, unliquidated.",
+        view.held_property_operations,
+        format_cents(view.held_property_value_cents),
     );
     println!(
-        "  Liquidated operation property: {} disposition(s), realized {} cents.",
-        view.liquidated_property_operations, view.liquidated_property_cash_cents,
+        "  Liquidated operation property: {} disposition(s), realized {}.",
+        view.liquidated_property_operations,
+        format_cents(view.liquidated_property_cash_cents),
     );
 }
 
@@ -3651,6 +4349,33 @@ fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
         if let Some(context) = context {
             println!("  - [{marker}] [{context}] {}", entry.summary);
         } else {
+            println!("  - [{marker}] {}", entry.summary);
+        }
+    }
+}
+
+/// Condensed report rendering for routine briefs: header plus only the entries that need a
+/// leader's attention. Full after-action text stays on the [AFTER-ACTION]/[ABORT REPORT] beats so
+/// the interesting consequence text is not drowned in repeated boilerplate.
+fn print_report_condensed(label: &str, report: &ReportRecord) {
+    let entries = report.entries();
+    println!(
+        "[{label}] minute {}: {} ({} entries)",
+        report.generated_at().as_minutes(),
+        report.title(),
+        entries.len()
+    );
+    for entry in entries {
+        let marker = match entry.attention {
+            AttentionClass::Routine => "routine",
+            AttentionClass::Notable => "notable",
+            AttentionClass::Exception => "EXCEPTION",
+            AttentionClass::Crisis => "CRISIS",
+        };
+        if matches!(
+            entry.attention,
+            AttentionClass::Notable | AttentionClass::Exception | AttentionClass::Crisis
+        ) {
             println!("  - [{marker}] {}", entry.summary);
         }
     }
@@ -3693,6 +4418,19 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.executive_brief_count,
         metrics.autonomous_recruitment_attempts,
         metrics.player_personnel_departures,
+    );
+    println!(
+        "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}",
+        metrics.second_opportunity_discovered,
+        metrics.second_opportunity_expired,
+        metrics.replacement_recruited,
+        metrics.second_burglary.is_some(),
+        optional_minute(metrics.second_burglary_terminal_minute),
+        metrics.second_burglary_outcome,
+        metrics.second_burglary_aborted,
+        metrics.second_act_recon_information,
+        optional_cents(metrics.second_act_property_acquired_value_cents),
+        optional_cents(metrics.second_act_property_realized_cash_cents),
     );
 }
 
@@ -3763,6 +4501,22 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         rush.autonomous_recruitment_attempts > 0 && rush.player_personnel_departures > 0,
         "a police-exposed crew member can be courted away by a rival without a scripted event",
     );
+    print_loop_checkpoint(
+        "rebuild",
+        rush.replacement_recruited && rush.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
+        "a crew member lost to rival pressure can be replaced through a player-authored executive recruitment, and the rebuilt crew works a second score safely",
+    );
+    print_loop_checkpoint(
+        "second wind",
+        recon.second_act_recon_information > 0
+            && recon.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
+        "an organization that re-invests in planning can recover value on a reopened window",
+    );
+    print_loop_checkpoint(
+        "discipline cost",
+        press.second_opportunity_expired && press.second_burglary.is_none(),
+        "choosing to stand down has a real price: the second score lapses while the hot case stays protected",
+    );
     let defector_trail_shown = rush.defector_trail_confirmed == Some(true)
         && press.defector_trail_confirmed == Some(true)
         && recon.defector_trail_confirmed.is_none();
@@ -3799,11 +4553,12 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~500, then confirmed it shelved at minute {}; RECON realized {} cents of resale cash.",
+        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; RECON realized {} of resale cash.",
         press.evidence_count,
         press.player_legal_activity_information,
+        press.counterintelligence_scheduled_at.unwrap_or_default(),
         press.case_cold_minute.unwrap_or_default(),
-        recon.property_realized_cash_cents.unwrap_or_default(),
+        optional_dollars(recon.property_realized_cash_cents),
     );
     println!(
         "  - Time tradeoff: RECON finished at minute {} versus RUSH at minute {}; the extra planning time bought lower exposure and liquid value in this matched fixture.",
@@ -3821,7 +4576,10 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
-        "  - The fixed RUSH/PRESS/RECON policies are calibration treatments; they expose causal differences but are not evidence that an actual player would choose the same policies."
+        "  - The delegation pillar is still routine-only: the delegated enterprise and legitimate front run on their authored cadence, but the fixtures never ask the player to re-scope a mandate, replace a delegated manager, or respond to manager drift."
+    );
+    println!(
+        "  - The RUSH/PRESS/RECON policies are calibration treatments; the act-1 burglary schedule and the authored fixture rotate with the simulation seed inside the same patrol window so each run exercises a slightly different evening timing, while the act-2 (second-wind) discovery and branch schedules are fixed canonical minutes that all seeds share so the branches stay directly comparable. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."
     );
 }
 
@@ -3843,6 +4601,56 @@ fn terminal_label(metrics: &RunMetrics) -> String {
     } else {
         format!("completed {:?}", metrics.outcome)
     }
+}
+
+/// A small, seed-derived burglary schedule ladder for the RUSH/PRESS matched branches. Every
+/// candidate lands inside every authored night-trap patrol window (the narrowest one opens at
+/// minute 120), so each fixture still exercises the same guarded-abort or decision exception
+/// while a different seed gets a slightly different timing interplay instead of repeating the
+/// same fixed minute forever.
+fn choose_burglary_schedule(seed: u64) -> SimTime {
+    SimTime::from_minutes(120 + 10 * (seed % 5))
+}
+
+/// Renders an absolute campaign minute as the clock time the player would see on a report.
+fn format_minute_of_day(minute: u64) -> String {
+    let minute_of_day = minute % 1_440;
+    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
+}
+
+/// Renders a player-facing tick beat as minute plus clock, e.g. `minute 160 (02:40)`.
+fn stamp(minute: u64) -> String {
+    format!("minute {} ({})", minute, format_minute_of_day(minute))
+}
+
+/// Renders cents as a player-facing dollar amount, e.g. `23019` -> `$230.19`.
+fn format_cents(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let magnitude = cents.unsigned_abs();
+    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+fn optional_dollars(value: Option<i64>) -> String {
+    value.map_or_else(|| "-".to_owned(), format_cents)
+}
+
+/// True when the tick produced any transaction a player could observe or that persists state.
+/// The harness validates the whole world at these consequential boundaries; skipping fully routine
+/// minutes keeps the matched-batch lane fast without losing corruption coverage at any real event.
+fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
+    !outcome.started_operations.is_empty()
+        || !outcome.arrived_police_responses.is_empty()
+        || !outcome.decision_requests.is_empty()
+        || !outcome.resolved_operations.is_empty()
+        || !outcome.staffed_investigations.is_empty()
+        || !outcome.scheduled_investigation_work.is_empty()
+        || !outcome.resolved_investigation_work.is_empty()
+        || !outcome.business_cycles.is_empty()
+        || !outcome.enterprise_cycles.is_empty()
+        || !outcome.recruitment_attempts.is_empty()
+        || !outcome.expired_opportunities.is_empty()
+        || !outcome.cold_case_suspensions.is_empty()
+        || outcome.executive_brief.is_some()
 }
 
 fn choose_safe_start_from_patrol_report(

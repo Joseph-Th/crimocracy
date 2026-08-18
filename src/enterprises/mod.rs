@@ -225,7 +225,6 @@ pub struct EnterpriseState {
     by_manager: BTreeMap<crate::core::id::CharacterId, BTreeSet<EnterpriseId>>,
     by_location: BTreeMap<EnterpriseLocation, BTreeSet<EnterpriseId>>,
     by_supporting_business: BTreeMap<BusinessId, BTreeSet<EnterpriseId>>,
-    by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
     by_settlement_account: BTreeMap<FinancialAccountId, EnterpriseId>,
@@ -355,10 +354,6 @@ impl EnterpriseState {
                 .or_default()
                 .insert(id);
         }
-        self.by_mandate
-            .entry(record.authority().mandate)
-            .or_default()
-            .insert(id);
         self.active_by_mandate
             .entry(record.authority().mandate)
             .or_default()
@@ -521,10 +516,6 @@ impl EnterpriseState {
                         .get(business)
                         .is_some_and(|ids| ids.contains(&record.id()))
                 })
-                || !self
-                    .by_mandate
-                    .get(&record.authority().mandate)
-                    .is_some_and(|ids| ids.contains(&record.id()))
                 || self.by_settlement_account.get(&record.settlement_account())
                     != Some(&record.id())
             {
@@ -585,17 +576,6 @@ impl EnterpriseState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.supporting_businesses().contains(business))
-                {
-                    return false;
-                }
-            }
-        }
-        for (mandate, ids) in &self.by_mandate {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.authority().mandate == *mandate)
                 {
                     return false;
                 }

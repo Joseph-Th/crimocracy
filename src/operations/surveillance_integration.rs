@@ -505,11 +505,17 @@ fn capture_target_snapshot(
                 .collect();
             let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
                 Some(LawEnforcementCaseSightline {
-                    active_case_against_surveiller: state.legal.investigations().any(|case| {
-                        case.owner() == id
-                            && case.status() == InvestigationStatus::Active
-                            && case.notified_organizations().contains(&surveiller)
-                    }),
+                    // Every operation-originated case the surveiller has been surfaced by this
+                    // authority, resolved through the owner index rather than a world scan. The
+                    // sightline is "still being worked" while any known case is active: that is the
+                    // player-relevant heat signal, and it never reveals evidence, subjects, or
+                    // internal case details.
+                    active_case_against_surveiller: state.legal.investigations_for_owner(id).any(
+                        |case| {
+                            case.status() == InvestigationStatus::Active
+                                && case.notified_organizations().contains(&surveiller)
+                        },
+                    ),
                 })
             } else {
                 None

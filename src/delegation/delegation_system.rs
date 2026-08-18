@@ -1,7 +1,8 @@
 //! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
 use crate::core::id::{
-    ArrestId, BusinessId, CharacterId, EnterpriseId, MandateId, NeighborhoodId, OrganizationId,
+    ArrestId, BusinessId, CharacterId, EnterpriseId, IdExhaustionError, MandateId, NeighborhoodId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::delegation::{
@@ -114,6 +115,8 @@ pub enum DelegationError {
         enterprise: EnterpriseId,
         scope: ResponsibilityScope,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -136,7 +139,7 @@ impl ValidatedMandateAssignment {
                 mandate: existing.id(),
             });
         }
-        let id = state.ids.next_mandate();
+        let id = state.ids.next_mandate()?;
         state
             .delegation
             .insert(build_mandate_record(id, self.draft));

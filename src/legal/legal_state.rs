@@ -633,6 +633,18 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.investigations.get(id))
     }
+    pub fn investigations_for_owner(
+        &self,
+        owner: OrganizationId,
+    ) -> impl Iterator<Item = &InvestigationRecord> {
+        self.indexes
+            .investigations
+            .by_owner
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.investigations.get(id))
+    }
     pub(crate) fn active_investigation_for_investigator(
         &self,
         investigator: CharacterId,
@@ -847,6 +859,7 @@ impl LegalState {
         &mut self,
         evidence: EvidenceRecord,
         disclosure: InformantDisclosureRecord,
+        activity_at: SimTime,
     ) {
         debug_assert_eq!(
             evidence.id(),
@@ -858,7 +871,7 @@ impl LegalState {
             disclosure.investigation(),
             "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
         );
-        self.insert_evidence(evidence);
+        self.insert_evidence(evidence, activity_at);
         let id = disclosure.id();
         self.indexes
             .informants
@@ -899,9 +912,8 @@ impl LegalState {
             "Index Uniqueness: duplicate informant disclosure ID inserted"
         );
     }
-    pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord) {
+    pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord, activity_at: SimTime) {
         let investigation_id = record.investigation();
-        let discovered_at = record.discovered_at();
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
@@ -959,7 +971,11 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate evidence ID inserted"
         );
-        self.note_investigation_activity(investigation_id, discovered_at);
+        // Advance the case's last-activity instant to the commit minute, not the evidence's
+        // discovery time: backdated evidence is legal (see validate_evidence_draft), but the case
+        // still gained active work at the instant the evidence was actually added, so the
+        // cold-case inactivity clock must reset to now.
+        self.note_investigation_activity(investigation_id, activity_at);
     }
     pub(crate) fn insert_case_witness(&mut self, record: CaseWitnessRecord) {
         let id = record.id();
@@ -1033,11 +1049,20 @@ impl LegalState {
             .case_witnesses
             .get_mut(&case_witness)
             .expect("validated case witness disappeared before statement commit");
+        let investigation_id = witness.investigation();
         witness.statements.insert(id);
         witness.version = witness
             .version
             .checked_add(1)
             .expect("case witness version counter exhausted");
+        let investigation = self
+            .investigations
+            .get_mut(&investigation_id)
+            .expect("validated investigation disappeared before statement commit");
+        investigation.version = investigation
+            .version
+            .checked_add(1)
+            .expect("investigation version counter exhausted");
         let previous_evidence = self
             .indexes
             .witnesses
@@ -1185,12 +1210,9 @@ impl LegalState {
                 .remove(&investigation_id);
         }
         match (previous_status, status) {
-            (InvestigationStatus::Active, InvestigationStatus::Active)
-            | (InvestigationStatus::Suspended, InvestigationStatus::Suspended)
-            | (InvestigationStatus::Closed, InvestigationStatus::Closed) => {}
-            // Suspending or closing a case shelves it: it leaves the cold-decay index. Resuming
-            // re-engages institutional interest, so the cold window restarts from the resume
-            // instant rather than the stale pre-suspension activity.
+            // Suspending or closing an active case shelves it: it leaves the cold-decay index.
+            // Resuming re-engages institutional interest, so the cold window restarts from the
+            // resume instant rather than the stale pre-suspension activity.
             (InvestigationStatus::Active, InvestigationStatus::Suspended)
             | (InvestigationStatus::Active, InvestigationStatus::Closed) => {
                 let key = investigation.last_activity_at;
@@ -1209,8 +1231,7 @@ impl LegalState {
                     }
                 }
             }
-            (InvestigationStatus::Suspended, InvestigationStatus::Active)
-            | (InvestigationStatus::Closed, InvestigationStatus::Active) => {
+            (InvestigationStatus::Suspended, InvestigationStatus::Active) => {
                 self.investigations
                     .get_mut(&investigation_id)
                     .expect("validated investigation disappeared before resume commit")
@@ -1222,8 +1243,14 @@ impl LegalState {
                     .or_default()
                     .insert(investigation_id);
             }
-            (InvestigationStatus::Suspended, InvestigationStatus::Closed)
-            | (InvestigationStatus::Closed, InvestigationStatus::Suspended) => {}
+            // Closing a suspended case adds nothing: it left the cold-decay index when suspended.
+            (InvestigationStatus::Suspended, InvestigationStatus::Closed) => {}
+            // Every other combination is rejected by validate_investigation_transition_dependencies
+            // (closed cases are terminal, and no canonical path rewrites an unchanged status).
+            (previous, target) => debug_assert!(
+                false,
+                "unreachable investigation transition {previous:?} -> {target:?}"
+            ),
         }
     }
     pub(crate) fn set_investigator_role(
@@ -2916,22 +2943,6 @@ impl LegalState {
         true
     }
     pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_arrest_indexes(),
-            "Derived Data Consistency: arrest indexes disagree with source records"
-        );
-        debug_assert!(
-            self.has_consistent_legal_representation_indexes(),
-            "Derived Data Consistency: legal representation indexes disagree with source records"
-        );
-        debug_assert!(
-            self.has_consistent_prosecution_indexes(),
-            "Derived Data Consistency: prosecution indexes disagree with source records"
-        );
-        debug_assert!(
-            self.has_consistent_police_response_indexes(),
-            "Derived Data Consistency: police response indexes disagree with source records"
-        );
         debug_assert!(
             self.has_consistent_indexes(),
             "Derived Data Consistency: legal indexes disagree with source records"

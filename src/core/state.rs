@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 40;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 41;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -194,6 +194,7 @@ impl AppState {
         self.simulation.now = self.simulation.now + duration;
     }
 
+    #[cfg(test)]
     pub(crate) fn rng_mut(&mut self) -> &mut ChaCha8Rng {
         &mut self.simulation.rng
     }
@@ -280,8 +281,8 @@ mod tests {
     };
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{
-        OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
-        OperationKind, OperationObjective, RoleKind,
+        OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
+        RoleKind,
     };
     use crate::recruitment::recruitment_system::validate_recruitment_attempt;
     use crate::recruitment::{RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome};
@@ -577,7 +578,8 @@ mod tests {
             },
         )
         .expect("field information fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("field information fixture should commit");
         let information = validate_information_transfer(
             &state,
             InformationTransferDraft {
@@ -605,7 +607,8 @@ mod tests {
             },
         )
         .expect("associate legal-pressure knowledge should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("associate legal-pressure knowledge should commit");
 
         let investigation = validate_open_investigation(
             &state,
@@ -653,7 +656,7 @@ mod tests {
                     (RoleKind::EntrySpecialist, associate),
                 ]),
                 intelligence: BTreeSet::new(),
-                constraints: vec![OperationConstraint::AvoidCasualties],
+                constraints: Vec::new(),
                 contingencies: vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
                 scheduled_for: SimTime::from_minutes(10),
             },
@@ -707,7 +710,8 @@ mod tests {
             },
         )
         .expect("report fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("report fixture should commit");
 
         validate_record_event(
             &state,
@@ -723,7 +727,8 @@ mod tests {
             },
         )
         .expect("history fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("history fixture should commit");
 
         crate::core::invariants::validate_invariants(&state);
         TestScenario {
@@ -873,7 +878,8 @@ mod tests {
                         },
                     )
                     .expect("decision-linked report should validate")
-                    .commit(&mut state);
+                    .commit(&mut state)
+                    .expect("decision-linked report should commit");
                     pending_decision = Some(request.decision);
                 }
                 12 => {
@@ -1095,7 +1101,8 @@ mod tests {
             state.now(),
         )
         .expect("combined organization financial report should validate after soak")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("combined organization financial report should commit");
         let financial_report = state
             .reports()
             .get_report(financial_report)
@@ -1499,7 +1506,8 @@ mod tests {
             },
         )
         .expect("pending-decision report should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("pending-decision report should commit");
 
         let envelope = build_save(&registry, &state).expect("valid pending state should save");
         let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
@@ -1631,5 +1639,44 @@ mod tests {
                 "enterprise RNG stream must continue identically after restore"
             );
         }
+    }
+
+    #[test]
+    fn save_restore_near_id_exhaustion_remains_recoverable() {
+        let registry = build_registry();
+        let TestScenario {
+            mut state,
+            operation: _,
+            mandate: _,
+        } = make_test_scenario();
+        // Put the character counter at its last representable value so a restore keeps exactly
+        // that boundary rather than synthesizing capacity or wrapping.
+        state
+            .ids
+            .set_next_raw_for_test(IdKind::Character, u32::MAX - 1);
+        let envelope = build_save(&registry, &state).expect("near-exhaustion state should save");
+        let bytes = bincode::serialize(&envelope).expect("save should serialize");
+        let decoded: SaveEnvelope = bincode::deserialize(&bytes).expect("save should deserialize");
+        let mut restored =
+            restore_save(&registry, decoded).expect("near-exhaustion save should restore");
+        // The last representable allocation still succeeds after restore...
+        let last = restored
+            .ids
+            .next_character()
+            .expect("last representable character ID should allocate after restore");
+        assert_eq!(last.raw(), u32::MAX - 1);
+        // ...and the following allocation is a typed recoverable error, not a panic.
+        let error = restored
+            .ids
+            .next_character()
+            .expect_err("exhaustion after restore must be a typed error");
+        assert!(matches!(
+            error,
+            crate::core::id::IdExhaustionError::Exhausted {
+                kind: "character",
+                next: u32::MAX
+            }
+        ));
+        validate_state(&restored).expect("restored near-exhaustion state must remain valid");
     }
 }

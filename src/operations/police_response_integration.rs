@@ -197,7 +197,9 @@ pub(crate) fn process_due_police_responses(
             );
         }
         for information in participant_pressure {
-            information.commit(state);
+            information
+                .commit(state)
+                .expect("police pressure information should commit");
         }
         arrived.push(response_id);
     }

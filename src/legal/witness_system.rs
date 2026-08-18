@@ -2,7 +2,8 @@
 
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    CaseWitnessId, CharacterId, EvidenceId, InvestigationId, WitnessStatementId,
+    CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
+    WitnessStatementId,
 };
 use crate::core::state::AppState;
 use crate::legal::{
@@ -58,6 +59,8 @@ pub enum WitnessError {
         expected: u32,
         found: u32,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -75,7 +78,7 @@ impl ValidatedCaseWitnessRegistration {
             self.expected_investigation_version,
             self.expected_character_version,
         )?;
-        let id = state.ids.next_case_witness();
+        let id = state.ids.next_case_witness()?;
         state.legal.insert_case_witness(CaseWitnessRecord {
             id,
             investigation: self.draft.investigation,
@@ -241,6 +244,9 @@ pub struct ValidatedWitnessStatement {
 
 impl ValidatedWitnessStatement {
     pub fn commit(self, state: &mut AppState) -> Result<WitnessStatementOutcome, WitnessError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
         let (investigation_id, witness_id) = {
             let case_witness = validate_witness_mutation_snapshot(
                 state,
@@ -252,33 +258,36 @@ impl ValidatedWitnessStatement {
             (case_witness.investigation(), case_witness.witness())
         };
 
-        let statement = state.ids.next_witness_statement();
-        let evidence = state.ids.next_evidence();
+        let statement = state.ids.next_witness_statement()?;
+        let evidence = state.ids.next_evidence()?;
         let investigation = state
             .legal
             .get_investigation(investigation_id)
             .expect("validated witness investigation must exist");
         let recorded_at = state.now();
-        state.legal.insert_evidence(EvidenceRecord {
-            identity: EvidenceIdentity {
-                id: evidence,
-                investigation: investigation_id,
-                custodian: investigation.owner(),
+        state.legal.insert_evidence(
+            EvidenceRecord {
+                identity: EvidenceIdentity {
+                    id: evidence,
+                    investigation: investigation_id,
+                    custodian: investigation.owner(),
+                },
+                connection: EvidenceConnection {
+                    subject: self.draft.subject,
+                    origin: self.draft.origin,
+                    source: Some(EntityRef::Character(witness_id)),
+                    derived_from: Default::default(),
+                },
+                assessment: EvidenceAssessment {
+                    kind: EvidenceKind::WitnessTestimony,
+                    strength: witness_strength(self.draft.confidence),
+                    reliability: witness_reliability(self.draft.confidence),
+                    admissibility: Admissibility::Unknown,
+                },
+                discovered_at: recorded_at,
             },
-            connection: EvidenceConnection {
-                subject: self.draft.subject,
-                origin: self.draft.origin,
-                source: Some(EntityRef::Character(witness_id)),
-                derived_from: Default::default(),
-            },
-            assessment: EvidenceAssessment {
-                kind: EvidenceKind::WitnessTestimony,
-                strength: witness_strength(self.draft.confidence),
-                reliability: witness_reliability(self.draft.confidence),
-                admissibility: Admissibility::Unknown,
-            },
-            discovered_at: recorded_at,
-        });
+            recorded_at,
+        );
         state
             .legal
             .insert_witness_statement(WitnessStatementRecord {

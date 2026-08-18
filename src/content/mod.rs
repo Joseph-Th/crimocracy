@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 15;
+pub const CURRENT_CONTENT_REVISION: u32 = 16;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -51,14 +51,14 @@ pub fn build_registry() -> Registry {
         .register_legal(SimDuration::from_minutes(2_160))
         .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);
+    let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
     for kind in ALL_OPERATION_KINDS {
-        let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
         let roles = required_roles(kind);
         builder
             .register_operation(
                 kind,
                 operation_name(kind),
-                approaches,
+                approaches.clone(),
                 roles.clone(),
                 operation_execution(kind),
             )
@@ -704,7 +704,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         response_exposure,
     ) = match kind {
         OperationKind::Burglary => (20, 12, Some(10), 14, 18),
-        OperationKind::Robbery => (12, 8, Some(3), 18, 24),
+        OperationKind::Robbery => (12, 8, Some(6), 18, 24),
         OperationKind::Hijacking => (18, 10, Some(5), 16, 22),
         OperationKind::Smuggling => (28, 15, None, 12, 18),
         OperationKind::Intimidation => (24, 10, None, 12, 18),
@@ -771,6 +771,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             }),
             OperationKind::DocumentTheft => Some(OperationPropertyProceedsDefinition {
                 business_gross_basis_points: 12_500,
+                // Stolen documents capture a large share on a partial grab (50%) but resell for
+                // much less (40%) because recovered paperwork has poor resale value compared with
+                // resalable inventoried goods — an intentional inversion from Burglary/Hijacking.
                 partial_recovery_basis_points: 5_000,
                 liquidation_recovery_basis_points: 4_000,
             }),

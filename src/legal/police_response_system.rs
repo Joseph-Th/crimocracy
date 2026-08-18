@@ -1,6 +1,8 @@
 //! Versioned law-enforcement dispatch and arrival transactions.
 
-use crate::core::id::{NeighborhoodId, OperationId, OrganizationId, PoliceResponseId};
+use crate::core::id::{
+    IdExhaustionError, NeighborhoodId, OperationId, OrganizationId, PoliceResponseId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
@@ -63,6 +65,8 @@ pub(crate) enum PoliceResponseError {
     StaleTime { expected: SimTime, found: SimTime },
     #[error("police response institutional context changed after validation")]
     StaleInstitutionalContext,
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -81,7 +85,7 @@ impl ValidatedPoliceResponseDispatch {
         state: &mut AppState,
     ) -> Result<PoliceResponseId, PoliceResponseError> {
         validate_dispatch_snapshot(state, &self)?;
-        let id = state.ids.next_police_response();
+        let id = state.ids.next_police_response()?;
         state.legal.insert_police_response(PoliceResponseRecord {
             id,
             routing: super::PoliceResponseRouting {

@@ -2,8 +2,8 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, OperationId, OrganizationId, PoliceResponseId,
-    RecruitmentAttemptId,
+    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
+    PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
 use crate::decisions::{
@@ -13,8 +13,7 @@ use crate::decisions::{
     RecruitmentApprovalContext, RecruitmentApprovalRequestDraft,
 };
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, DelegationError, PolicySource,
-    ResolvedPolicy,
+    resolve_mandate_authority, resolve_policy_for_manager, DelegationError, ResolvedPolicy,
 };
 use crate::delegation::{ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
@@ -24,10 +23,11 @@ use crate::operations::operation_system::{
 };
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::recruitment::recruitment_system::{
-    validate_approved_recruitment_attempt, validate_recruitment_proposal, RecruitmentError,
-    ValidatedRecruitmentAttempt, ValidatedRecruitmentProposal,
+    recruitment_policy_source, validate_approved_recruitment_attempt,
+    validate_recruitment_proposal, RecruitmentError, ValidatedRecruitmentAttempt,
+    ValidatedRecruitmentProposal,
 };
-use crate::recruitment::{RecruitmentDraft, RecruitmentPolicySource};
+use crate::recruitment::RecruitmentDraft;
 use crate::registry::Registry;
 use crate::world::{ApprovalPolicy, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
@@ -140,6 +140,8 @@ pub enum DecisionError {
     Recruitment(#[from] RecruitmentError),
     #[error(transparent)]
     Operation(#[from] OperationError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,7 +191,7 @@ impl ValidatedDecisionRequest {
             });
         }
         self.revalidate_police_response(state)?;
-        Ok(self.commit_prevalidated(state))
+        self.commit_prevalidated(state)
     }
 
     fn operation(&self) -> OperationId {
@@ -230,12 +232,19 @@ impl ValidatedDecisionRequest {
         Ok(())
     }
 
-    fn commit_prevalidated(self, state: &mut AppState) -> DecisionRequestOutcome {
+    fn commit_prevalidated(
+        self,
+        state: &mut AppState,
+    ) -> Result<DecisionRequestOutcome, DecisionError> {
         let operation_id = self.operation();
-        let requests_pause = state
-            .attention_settings()
-            .is_auto_pause_enabled(self.draft.attention);
-        let id = state.ids.next_decision_request();
+        // Auto-pause only applies to decisions the player is responsible for resolving: a decision
+        // addressed to some other organization should not pause the simulation based on the
+        // player's own attention preferences.
+        let requests_pause = state.player_organization() == Some(self.recipient)
+            && state
+                .attention_settings()
+                .is_auto_pause_enabled(self.draft.attention);
+        let id = state.ids.next_decision_request()?;
         state
             .decisions
             .insert(DecisionRequestRecord::from(DecisionRecordParts {
@@ -248,10 +257,10 @@ impl ValidatedDecisionRequest {
         state
             .operations
             .set_awaiting_decision(operation_id, state.now());
-        DecisionRequestOutcome {
+        Ok(DecisionRequestOutcome {
             decision: id,
             requests_pause,
-        }
+        })
     }
 }
 
@@ -575,10 +584,11 @@ impl ValidatedRecruitmentApprovalRequest {
         }
         self.proposal.revalidate_state(state)?;
 
-        let requests_pause = state
-            .attention_settings()
-            .is_auto_pause_enabled(self.draft.attention);
-        let id = state.ids.next_decision_request();
+        let requests_pause = state.player_organization() == Some(self.recipient)
+            && state
+                .attention_settings()
+                .is_auto_pause_enabled(self.draft.attention);
+        let id = state.ids.next_decision_request()?;
         state
             .decisions
             .insert(DecisionRequestRecord::from(DecisionRecordParts {
@@ -723,6 +733,7 @@ pub struct DecisionResolutionOutcome {
 
 impl ValidatedDecisionResolution {
     pub fn commit(self, state: &mut AppState) -> Result<DecisionResolutionOutcome, DecisionError> {
+        state.ids.reserve(IdKind::DecisionRequest, 1)?;
         let decision = state
             .decisions
             .get_decision(self.decision)
@@ -786,7 +797,7 @@ impl ValidatedDecisionResolution {
                                 .decisions
                                 .pending_for_operation(operation)
                                 .is_none());
-                            decision_request = Some(follow_up.commit_prevalidated(state));
+                            decision_request = Some(follow_up.commit_prevalidated(state)?);
                         }
                     }
                     OperationStatus::Aborted => {
@@ -980,13 +991,4 @@ fn validate_recruitment_approval_authority_snapshot(
         return Err(DecisionError::StaleRecruitmentApprovalAuthority);
     }
     Ok(())
-}
-
-fn recruitment_policy_source(source: PolicySource) -> RecruitmentPolicySource {
-    match source {
-        PolicySource::Organization(organization) => {
-            RecruitmentPolicySource::Organization(organization)
-        }
-        PolicySource::Mandate(mandate) => RecruitmentPolicySource::Mandate(mandate),
-    }
 }

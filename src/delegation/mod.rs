@@ -111,10 +111,6 @@ impl BudgetWindow {
     pub fn end(self) -> SimTime {
         self.end
     }
-
-    pub fn has_time(self, time: SimTime) -> bool {
-        self.start <= time && time < self.end
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +173,6 @@ impl MandateRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DelegationState {
     records: BTreeMap<MandateId, MandateRecord>,
-    by_organization: BTreeMap<OrganizationId, BTreeSet<MandateId>>,
     active_by_manager: BTreeMap<CharacterId, MandateId>,
     active_by_scope: BTreeMap<ResponsibilityScope, BTreeSet<MandateId>>,
 }
@@ -197,17 +192,6 @@ impl DelegationState {
             .and_then(|id| self.records.get(id))
     }
 
-    pub fn mandates_for_organization(
-        &self,
-        organization: OrganizationId,
-    ) -> impl Iterator<Item = &MandateRecord> {
-        self.by_organization
-            .get(&organization)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
     pub fn active_for_scope(
         &self,
         scope: ResponsibilityScope,
@@ -225,10 +209,6 @@ impl DelegationState {
 
     pub(crate) fn insert(&mut self, record: MandateRecord) {
         let id = record.id();
-        self.by_organization
-            .entry(record.organization())
-            .or_default()
-            .insert(id);
         self.active_by_manager.insert(record.manager(), id);
         for scope in record.scopes() {
             self.active_by_scope.entry(*scope).or_default().insert(id);
@@ -316,13 +296,6 @@ impl DelegationState {
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         for record in self.records.values() {
-            if !self
-                .by_organization
-                .get(&record.organization())
-                .is_some_and(|ids| ids.contains(&record.id()))
-            {
-                return false;
-            }
             match record.status() {
                 MandateStatus::Active => {
                     if self.active_by_manager.get(&record.manager()) != Some(&record.id()) {
@@ -355,17 +328,6 @@ impl DelegationState {
             }
         }
 
-        for (organization, ids) in &self.by_organization {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.organization() == *organization)
-                {
-                    return false;
-                }
-            }
-        }
         for (manager, id) in &self.active_by_manager {
             if !self.records.get(id).is_some_and(|record| {
                 record.manager() == *manager && record.status() == MandateStatus::Active

@@ -2,8 +2,8 @@
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, OperationId,
-    OrganizationId,
+    ArrestId, CharacterId, EvidenceId, IdExhaustionError, InvestigationId, InvestigationWorkId,
+    OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::legal::{
@@ -90,6 +90,8 @@ pub enum ArrestError {
         expected: u32,
         found: u32,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -127,7 +129,7 @@ impl ValidatedArrest {
         let authority = validate_arrest_dependencies(state, &self.draft)?;
         debug_assert_eq!(authority, self.authority);
 
-        let id = state.ids.next_arrest();
+        let id = state.ids.next_arrest()?;
         state.legal.insert_arrest(ArrestRecord {
             id,
             character: self.draft.character,

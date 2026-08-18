@@ -3,14 +3,16 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    ArrestId, CharacterId, DecisionRequestId, InformationId, OperationId, OrganizationId,
-    PoliceResponseId,
+    ArrestId, CharacterId, DecisionRequestId, IdExhaustionError, IdKind, InformationId,
+    OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::history::history_system::{validate_record_event, ValidatedHistoryEvent};
+use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
-use crate::intelligence::intelligence_system::{validate_record_information, ValidatedInformation};
+use crate::intelligence::intelligence_system::{
+    validate_record_information, IntelligenceError, ValidatedInformation,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
@@ -25,7 +27,7 @@ use crate::operations::{
     OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus, RoleKind,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ValidatedReport};
+use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::Lifecycle;
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,8 +121,6 @@ pub enum OperationError {
     ScheduledInPast,
     #[error("operation completion deadline is earlier than its scheduled start")]
     DeadlineBeforeStart,
-    #[error("excluded character {0} is assigned to the operation")]
-    ExcludedParticipant(CharacterId),
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
     #[error("operation {0} cannot begin before its scheduled time")]
@@ -168,6 +168,14 @@ pub enum OperationError {
     },
     #[error("operation {operation} abort artifacts could not be validated against current state")]
     InvalidAbortArtifacts { operation: OperationId },
+    #[error(transparent)]
+    Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    Report(#[from] ReportError),
+    #[error(transparent)]
+    History(#[from] HistoryError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -235,6 +243,26 @@ impl ValidatedOperation {
             });
         }
 
+        // Revalidate plan dependencies that can change independently of participant versions: a
+        // target business or neighborhood lifecycle change, or intelligence transferred out of the
+        // organization between validation and commit, must stale the authorization. Topic and
+        // objective-shape relevance are invariant here because intelligence topics are immutable
+        // and the authored operation definition is static.
+        validate_operation_objective(state, self.draft.kind, &self.draft.objective)?;
+        for information in &self.draft.intelligence {
+            let record = state
+                .intelligence
+                .get_information(*information)
+                .ok_or(OperationError::MissingInformation(*information))?;
+            if record.holder() != KnowledgeHolder::Organization(self.draft.responsible_organization)
+            {
+                return Err(OperationError::InformationUnavailable {
+                    information: *information,
+                    organization: self.draft.responsible_organization,
+                });
+            }
+        }
+
         let OperationDraft {
             title,
             kind,
@@ -248,7 +276,7 @@ impl ValidatedOperation {
             contingencies,
             scheduled_for,
         } = self.draft;
-        let id = state.ids.next_operation();
+        let id = state.ids.next_operation()?;
         state.operations.insert(OperationRecord {
             identity: OperationIdentity { id, title, kind },
             command: OperationCommand {
@@ -400,34 +428,13 @@ pub fn validate_authorize_operation(
         }
     }
     for constraint in &draft.constraints {
-        match constraint {
-            crate::operations::OperationConstraint::AvoidCasualties
-            | crate::operations::OperationConstraint::DoNotHarmEmployees
-            | crate::operations::OperationConstraint::AvoidFirearms
-            | crate::operations::OperationConstraint::ProtectLeadershipIdentity
-            | crate::operations::OperationConstraint::PreserveMerchandise => {}
-            crate::operations::OperationConstraint::CompleteBefore(deadline) => {
-                if *deadline < draft.scheduled_for {
-                    return Err(OperationError::DeadlineBeforeStart);
-                }
-            }
-            crate::operations::OperationConstraint::ExcludeCharacter(character) => {
-                if state.world.get_character(*character).is_none() {
-                    return Err(OperationError::MissingCharacter(*character));
-                }
-                if *character == draft.leader || draft.roles.values().any(|id| id == character) {
-                    return Err(OperationError::ExcludedParticipant(*character));
-                }
-            }
+        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;
+        if *deadline <= draft.scheduled_for {
+            return Err(OperationError::DeadlineBeforeStart);
         }
     }
     for contingency in &draft.contingencies {
         match contingency {
-            crate::operations::OperationContingency::ContactIfDetained(character) => {
-                if state.world.get_character(*character).is_none() {
-                    return Err(OperationError::MissingCharacter(*character));
-                }
-            }
             crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
                 if definition.execution().operation_entry_offset().is_none() =>
             {
@@ -436,8 +443,6 @@ pub fn validate_authorize_operation(
                 ));
             }
             crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
-            | crate::operations::OperationContingency::UseForceOnResistance
-            | crate::operations::OperationContingency::UseSecondaryExitIfBlocked
             | crate::operations::OperationContingency::RequestDecisionOnUnexpectedCondition => {}
         }
     }
@@ -548,7 +553,7 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
         .operations
         .get_operation(operation)
         .and_then(earliest_operation_deadline)
-        .is_some_and(|deadline| state.now() > deadline)
+        .is_some_and(|deadline| state.now() >= deadline)
 }
 
 pub(crate) fn validate_deadline_missed_operation(
@@ -565,14 +570,8 @@ fn earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
     record
         .constraints()
         .iter()
-        .filter_map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
-            crate::operations::OperationConstraint::AvoidCasualties
-            | crate::operations::OperationConstraint::DoNotHarmEmployees
-            | crate::operations::OperationConstraint::AvoidFirearms
-            | crate::operations::OperationConstraint::ProtectLeadershipIdentity
-            | crate::operations::OperationConstraint::PreserveMerchandise
-            | crate::operations::OperationConstraint::ExcludeCharacter(_) => None,
+        .map(|constraint| match constraint {
+            crate::operations::OperationConstraint::CompleteBefore(deadline) => *deadline,
         })
         .min()
 }
@@ -666,7 +665,7 @@ pub(crate) fn validate_begin_operation(
         return Err(OperationError::StartBeforeScheduled(operation));
     }
     if let Some(deadline) = earliest_operation_deadline(record) {
-        if state.now() > deadline {
+        if state.now() >= deadline {
             return Err(OperationError::DeadlineMissed {
                 operation,
                 deadline,
@@ -677,10 +676,9 @@ pub(crate) fn validate_begin_operation(
     let duration = registry.get_operation(record.kind()).execution().duration();
     let mut resolution_due_at = state.now() + duration;
     for constraint in record.constraints() {
-        if let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint {
-            if *deadline < resolution_due_at {
-                resolution_due_at = *deadline;
-            }
+        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;
+        if *deadline < resolution_due_at {
+            resolution_due_at = *deadline;
         }
     }
     let police_response = decide_operation_police_response_start(registry, state, operation)
@@ -708,6 +706,11 @@ pub struct ValidatedOperationAbort {
 
 impl ValidatedOperationAbort {
     pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
+        state.ids.reserve_many(&[
+            (IdKind::Information, 1),
+            (IdKind::HistoryEvent, 1),
+            (IdKind::Report, 1),
+        ])?;
         let record = state
             .operations
             .get_operation(self.operation)
@@ -755,9 +758,9 @@ impl ValidatedOperationAbort {
         let artifacts = match (self.information, self.report, self.history) {
             (None, None, None) => None,
             (Some(information), Some(report), Some(history)) => {
-                let information = information.commit(state);
-                let history_event = history.commit(state);
-                let report = report.commit(state);
+                let information = information.commit(state)?;
+                let history_event = history.commit(state)?;
+                let report = report.commit(state)?;
                 Some(OperationAbortArtifacts {
                     information,
                     report,
@@ -862,7 +865,7 @@ fn validate_operation_abort(
         }
         (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
             if earliest_operation_deadline(record)
-                .is_some_and(|deadline| state.now() > deadline) =>
+                .is_some_and(|deadline| state.now() >= deadline) =>
         {
             OperationAbortPhase::BeforeStart
         }
@@ -1367,7 +1370,8 @@ mod tests {
             },
         )
         .expect("information fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("information fixture should commit");
         let mut draft = make_test_draft(organization, leader, target);
         draft.scheduled_for = SimTime::from_minutes(10_081);
         draft.intelligence.insert(information);
@@ -1734,7 +1738,8 @@ mod tests {
             },
         )
         .expect("irrelevant information fixture should still be valid information")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("irrelevant information fixture should commit");
         let unavailable = validate_record_information(
             &state,
             InformationDraft {
@@ -1750,7 +1755,8 @@ mod tests {
             },
         )
         .expect("character information fixture should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("character information fixture should commit");
 
         let mut draft = make_test_draft(organization, leader, target);
         draft.intelligence = BTreeSet::from([irrelevant]);

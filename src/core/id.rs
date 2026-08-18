@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use thiserror::Error;
 
 macro_rules! define_id {
     ($name:ident, $label:literal) => {
@@ -216,6 +217,12 @@ impl IdKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum IdExhaustionError {
+    #[error("persistent {kind} ID space is exhausted (next value {next})")]
+    Exhausted { kind: &'static str, next: u32 },
+}
+
 impl IdCounters {
     pub(crate) fn new() -> Self {
         Self {
@@ -271,14 +278,7 @@ impl IdCounters {
         }
     }
 
-    fn take(counter: &mut u32, label: &'static str) -> u32 {
-        let current = *counter;
-        *counter = counter
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("persistent {label} ID space exhausted"));
-        current
-    }
-
+    /// Reads the effective next value for a kind (no mutation).
     pub(crate) const fn next_raw(&self, kind: IdKind) -> u32 {
         match kind {
             IdKind::Organization => self.world.organization,
@@ -315,6 +315,42 @@ impl IdCounters {
             IdKind::EnterpriseCycle => self.economy.enterprise_cycle,
             IdKind::BusinessCycle => self.economy.business_cycle,
         }
+    }
+
+    /// Pre-flight availability check for allocating `count` more IDs of `kind` without mutating
+    /// anything. Every composite commit reserves its full ID budget up front so that no later
+    /// allocation can exhaust and strand an already-mutated owner. A counter of `u32::MAX` cannot
+    /// allocate any further ID (incrementing it would overflow), so the last representable
+    /// allocation is when the counter reads `u32::MAX - 1`.
+    pub(crate) fn reserve(&self, kind: IdKind, count: u32) -> Result<(), IdExhaustionError> {
+        let next = self.next_raw(kind);
+        if next == 0 || next.checked_add(count).is_none() {
+            return Err(IdExhaustionError::Exhausted {
+                kind: kind.label(),
+                next,
+            });
+        }
+        Ok(())
+    }
+
+    /// Pre-flight availability check for a whole budget of kinds resolved as one atomic unit.
+    pub(crate) fn reserve_many(&self, budget: &[(IdKind, u32)]) -> Result<(), IdExhaustionError> {
+        for (kind, count) in budget {
+            self.reserve(*kind, *count)?;
+        }
+        Ok(())
+    }
+
+    fn take(counter: &mut u32, label: &'static str) -> Result<u32, IdExhaustionError> {
+        let current = *counter;
+        let Some(next) = counter.checked_add(1) else {
+            return Err(IdExhaustionError::Exhausted {
+                kind: label,
+                next: current,
+            });
+        };
+        *counter = next;
+        Ok(current)
     }
 
     #[cfg(test)]
@@ -356,198 +392,335 @@ impl IdCounters {
         }
     }
 
-    pub(crate) fn next_organization(&mut self) -> OrganizationId {
-        OrganizationId::from_raw(Self::take(&mut self.world.organization, "organization"))
+    pub(crate) fn next_organization(&mut self) -> Result<OrganizationId, IdExhaustionError> {
+        Ok(OrganizationId::from_raw(Self::take(
+            &mut self.world.organization,
+            "organization",
+        )?))
     }
 
-    pub(crate) fn next_character(&mut self) -> CharacterId {
-        CharacterId::from_raw(Self::take(&mut self.world.character, "character"))
+    pub(crate) fn next_character(&mut self) -> Result<CharacterId, IdExhaustionError> {
+        Ok(CharacterId::from_raw(Self::take(
+            &mut self.world.character,
+            "character",
+        )?))
     }
 
-    pub(crate) fn next_neighborhood(&mut self) -> NeighborhoodId {
-        NeighborhoodId::from_raw(Self::take(&mut self.world.neighborhood, "neighborhood"))
+    pub(crate) fn next_neighborhood(&mut self) -> Result<NeighborhoodId, IdExhaustionError> {
+        Ok(NeighborhoodId::from_raw(Self::take(
+            &mut self.world.neighborhood,
+            "neighborhood",
+        )?))
     }
 
-    pub(crate) fn next_business(&mut self) -> BusinessId {
-        BusinessId::from_raw(Self::take(&mut self.world.business, "business"))
+    pub(crate) fn next_business(&mut self) -> Result<BusinessId, IdExhaustionError> {
+        Ok(BusinessId::from_raw(Self::take(
+            &mut self.world.business,
+            "business",
+        )?))
     }
 
-    pub(crate) fn next_business_ownership_change(&mut self) -> BusinessOwnershipChangeId {
-        BusinessOwnershipChangeId::from_raw(Self::take(
+    pub(crate) fn next_business_ownership_change(
+        &mut self,
+    ) -> Result<BusinessOwnershipChangeId, IdExhaustionError> {
+        Ok(BusinessOwnershipChangeId::from_raw(Self::take(
             &mut self.world.business_ownership_change,
             "business ownership change",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_operation(&mut self) -> OperationId {
-        OperationId::from_raw(Self::take(&mut self.operations.operation, "operation"))
+    pub(crate) fn next_operation(&mut self) -> Result<OperationId, IdExhaustionError> {
+        Ok(OperationId::from_raw(Self::take(
+            &mut self.operations.operation,
+            "operation",
+        )?))
     }
 
-    pub(crate) fn next_opportunity(&mut self) -> OpportunityId {
-        OpportunityId::from_raw(Self::take(&mut self.operations.opportunity, "opportunity"))
+    pub(crate) fn next_opportunity(&mut self) -> Result<OpportunityId, IdExhaustionError> {
+        Ok(OpportunityId::from_raw(Self::take(
+            &mut self.operations.opportunity,
+            "opportunity",
+        )?))
     }
 
-    pub(crate) fn next_information(&mut self) -> InformationId {
-        InformationId::from_raw(Self::take(&mut self.operations.information, "information"))
+    pub(crate) fn next_information(&mut self) -> Result<InformationId, IdExhaustionError> {
+        Ok(InformationId::from_raw(Self::take(
+            &mut self.operations.information,
+            "information",
+        )?))
     }
 
-    pub(crate) fn next_contact(&mut self) -> ContactId {
-        ContactId::from_raw(Self::take(&mut self.operations.contact, "contact"))
+    pub(crate) fn next_contact(&mut self) -> Result<ContactId, IdExhaustionError> {
+        Ok(ContactId::from_raw(Self::take(
+            &mut self.operations.contact,
+            "contact",
+        )?))
     }
 
-    pub(crate) fn next_contact_disclosure(&mut self) -> ContactDisclosureId {
-        ContactDisclosureId::from_raw(Self::take(
+    pub(crate) fn next_contact_disclosure(
+        &mut self,
+    ) -> Result<ContactDisclosureId, IdExhaustionError> {
+        Ok(ContactDisclosureId::from_raw(Self::take(
             &mut self.operations.contact_disclosure,
             "contact disclosure",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_investigation(&mut self) -> InvestigationId {
-        InvestigationId::from_raw(Self::take(
+    pub(crate) fn next_investigation(&mut self) -> Result<InvestigationId, IdExhaustionError> {
+        Ok(InvestigationId::from_raw(Self::take(
             &mut self.legal.investigation.investigation,
             "investigation",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_investigation_work(&mut self) -> InvestigationWorkId {
-        InvestigationWorkId::from_raw(Self::take(
+    pub(crate) fn next_investigation_work(
+        &mut self,
+    ) -> Result<InvestigationWorkId, IdExhaustionError> {
+        Ok(InvestigationWorkId::from_raw(Self::take(
             &mut self.legal.investigation.investigation_work,
             "investigation work",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_patrol_deployment(&mut self) -> PatrolDeploymentId {
-        PatrolDeploymentId::from_raw(Self::take(
+    pub(crate) fn next_patrol_deployment(
+        &mut self,
+    ) -> Result<PatrolDeploymentId, IdExhaustionError> {
+        Ok(PatrolDeploymentId::from_raw(Self::take(
             &mut self.legal.investigation.patrol_deployment,
             "patrol deployment",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_police_response(&mut self) -> PoliceResponseId {
-        PoliceResponseId::from_raw(Self::take(
+    pub(crate) fn next_police_response(&mut self) -> Result<PoliceResponseId, IdExhaustionError> {
+        Ok(PoliceResponseId::from_raw(Self::take(
             &mut self.legal.investigation.police_response,
             "police response",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_case_witness(&mut self) -> CaseWitnessId {
-        CaseWitnessId::from_raw(Self::take(
+    pub(crate) fn next_case_witness(&mut self) -> Result<CaseWitnessId, IdExhaustionError> {
+        Ok(CaseWitnessId::from_raw(Self::take(
             &mut self.legal.investigation.case_witness,
             "case witness",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_witness_statement(&mut self) -> WitnessStatementId {
-        WitnessStatementId::from_raw(Self::take(
+    pub(crate) fn next_witness_statement(
+        &mut self,
+    ) -> Result<WitnessStatementId, IdExhaustionError> {
+        Ok(WitnessStatementId::from_raw(Self::take(
             &mut self.legal.investigation.witness_statement,
             "witness statement",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_informant(&mut self) -> InformantId {
-        InformantId::from_raw(Self::take(
+    pub(crate) fn next_informant(&mut self) -> Result<InformantId, IdExhaustionError> {
+        Ok(InformantId::from_raw(Self::take(
             &mut self.legal.investigation.informant,
             "informant",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_informant_disclosure(&mut self) -> InformantDisclosureId {
-        InformantDisclosureId::from_raw(Self::take(
+    pub(crate) fn next_informant_disclosure(
+        &mut self,
+    ) -> Result<InformantDisclosureId, IdExhaustionError> {
+        Ok(InformantDisclosureId::from_raw(Self::take(
             &mut self.legal.investigation.informant_disclosure,
             "informant disclosure",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_evidence(&mut self) -> EvidenceId {
-        EvidenceId::from_raw(Self::take(
+    pub(crate) fn next_evidence(&mut self) -> Result<EvidenceId, IdExhaustionError> {
+        Ok(EvidenceId::from_raw(Self::take(
             &mut self.legal.investigation.evidence,
             "evidence",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_arrest(&mut self) -> ArrestId {
-        ArrestId::from_raw(Self::take(&mut self.legal.investigation.arrest, "arrest"))
+    pub(crate) fn next_arrest(&mut self) -> Result<ArrestId, IdExhaustionError> {
+        Ok(ArrestId::from_raw(Self::take(
+            &mut self.legal.investigation.arrest,
+            "arrest",
+        )?))
     }
 
-    pub(crate) fn next_legal_representation(&mut self) -> LegalRepresentationId {
-        LegalRepresentationId::from_raw(Self::take(
+    pub(crate) fn next_legal_representation(
+        &mut self,
+    ) -> Result<LegalRepresentationId, IdExhaustionError> {
+        Ok(LegalRepresentationId::from_raw(Self::take(
             &mut self.legal.proceedings.legal_representation,
             "legal representation",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_prosecution_case(&mut self) -> ProsecutionCaseId {
-        ProsecutionCaseId::from_raw(Self::take(
+    pub(crate) fn next_prosecution_case(&mut self) -> Result<ProsecutionCaseId, IdExhaustionError> {
+        Ok(ProsecutionCaseId::from_raw(Self::take(
             &mut self.legal.proceedings.prosecution_case,
             "prosecution case",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_prosecution_referral(&mut self) -> ProsecutionReferralId {
-        ProsecutionReferralId::from_raw(Self::take(
+    pub(crate) fn next_prosecution_referral(
+        &mut self,
+    ) -> Result<ProsecutionReferralId, IdExhaustionError> {
+        Ok(ProsecutionReferralId::from_raw(Self::take(
             &mut self.legal.proceedings.prosecution_referral,
             "prosecution referral",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_report(&mut self) -> ReportId {
-        ReportId::from_raw(Self::take(&mut self.reporting_finance.report, "report"))
+    pub(crate) fn next_report(&mut self) -> Result<ReportId, IdExhaustionError> {
+        Ok(ReportId::from_raw(Self::take(
+            &mut self.reporting_finance.report,
+            "report",
+        )?))
     }
 
-    pub(crate) fn next_history_event(&mut self) -> HistoryEventId {
-        HistoryEventId::from_raw(Self::take(
+    pub(crate) fn next_history_event(&mut self) -> Result<HistoryEventId, IdExhaustionError> {
+        Ok(HistoryEventId::from_raw(Self::take(
             &mut self.reporting_finance.history_event,
             "history event",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_financial_account(&mut self) -> FinancialAccountId {
-        FinancialAccountId::from_raw(Self::take(
+    pub(crate) fn next_financial_account(
+        &mut self,
+    ) -> Result<FinancialAccountId, IdExhaustionError> {
+        Ok(FinancialAccountId::from_raw(Self::take(
             &mut self.reporting_finance.financial_account,
             "financial account",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_ledger_transaction(&mut self) -> LedgerTransactionId {
-        LedgerTransactionId::from_raw(Self::take(
+    pub(crate) fn next_ledger_transaction(
+        &mut self,
+    ) -> Result<LedgerTransactionId, IdExhaustionError> {
+        Ok(LedgerTransactionId::from_raw(Self::take(
             &mut self.reporting_finance.ledger_transaction,
             "ledger transaction",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_decision_request(&mut self) -> DecisionRequestId {
-        DecisionRequestId::from_raw(Self::take(
+    pub(crate) fn next_decision_request(&mut self) -> Result<DecisionRequestId, IdExhaustionError> {
+        Ok(DecisionRequestId::from_raw(Self::take(
             &mut self.management.decision_request,
             "decision request",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_mandate(&mut self) -> MandateId {
-        MandateId::from_raw(Self::take(&mut self.management.mandate, "mandate"))
+    pub(crate) fn next_mandate(&mut self) -> Result<MandateId, IdExhaustionError> {
+        Ok(MandateId::from_raw(Self::take(
+            &mut self.management.mandate,
+            "mandate",
+        )?))
     }
 
-    pub(crate) fn next_recruitment_attempt(&mut self) -> RecruitmentAttemptId {
-        RecruitmentAttemptId::from_raw(Self::take(
+    pub(crate) fn next_recruitment_attempt(
+        &mut self,
+    ) -> Result<RecruitmentAttemptId, IdExhaustionError> {
+        Ok(RecruitmentAttemptId::from_raw(Self::take(
             &mut self.management.recruitment_attempt,
             "recruitment attempt",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_enterprise(&mut self) -> EnterpriseId {
-        EnterpriseId::from_raw(Self::take(&mut self.economy.enterprise, "enterprise"))
+    pub(crate) fn next_enterprise(&mut self) -> Result<EnterpriseId, IdExhaustionError> {
+        Ok(EnterpriseId::from_raw(Self::take(
+            &mut self.economy.enterprise,
+            "enterprise",
+        )?))
     }
 
-    pub(crate) fn next_enterprise_cycle(&mut self) -> EnterpriseCycleId {
-        EnterpriseCycleId::from_raw(Self::take(
+    pub(crate) fn next_enterprise_cycle(&mut self) -> Result<EnterpriseCycleId, IdExhaustionError> {
+        Ok(EnterpriseCycleId::from_raw(Self::take(
             &mut self.economy.enterprise_cycle,
             "enterprise cycle",
-        ))
+        )?))
     }
 
-    pub(crate) fn next_business_cycle(&mut self) -> BusinessCycleId {
-        BusinessCycleId::from_raw(Self::take(
+    pub(crate) fn next_business_cycle(&mut self) -> Result<BusinessCycleId, IdExhaustionError> {
+        Ok(BusinessCycleId::from_raw(Self::take(
             &mut self.economy.business_cycle,
             "business cycle",
-        ))
+        )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocation_at_u32_max_is_a_typed_recoverable_error() {
+        let mut counters = IdCounters::new();
+        counters.set_next_raw_for_test(IdKind::Operation, u32::MAX);
+        let error = counters
+            .next_operation()
+            .expect_err("operation counter at u32::MAX cannot allocate another ID");
+        assert!(matches!(
+            error,
+            IdExhaustionError::Exhausted {
+                kind: "operation",
+                next: u32::MAX
+            }
+        ));
+    }
+
+    #[test]
+    fn last_representable_allocation_is_u32_max_minus_one() {
+        let mut counters = IdCounters::new();
+        counters.set_next_raw_for_test(IdKind::Character, u32::MAX - 1);
+        let last = counters
+            .next_character()
+            .expect("counter at u32::MAX-1 may still allocate that exact raw value");
+        assert_eq!(last.raw(), u32::MAX - 1);
+        // The counter advanced to u32::MAX; the following allocation is the exhaustion point.
+        counters
+            .next_character()
+            .expect_err("counter at u32::MAX cannot allocate");
+    }
+
+    #[test]
+    fn reserve_checks_availability_without_mutating() {
+        let mut counters = IdCounters::new();
+        counters.set_next_raw_for_test(IdKind::Business, u32::MAX - 1);
+        // One more fits; two do not.
+        assert!(counters.reserve(IdKind::Business, 1).is_ok());
+        assert!(matches!(
+            counters.reserve(IdKind::Business, 2),
+            Err(IdExhaustionError::Exhausted { .. })
+        ));
+        // Reserve of zero is always fine and never mutates the counter.
+        let before = counters.next_raw(IdKind::Business);
+        assert!(counters.reserve(IdKind::Business, 0).is_ok());
+        assert_eq!(counters.next_raw(IdKind::Business), before);
+        // Exhaustion resets nothing: the counter still reads u32::MAX.
+        counters.set_next_raw_for_test(IdKind::Business, u32::MAX);
+        counters
+            .reserve(IdKind::Business, 1)
+            .expect_err("counter at u32::MAX cannot reserve one more");
+        assert_eq!(counters.next_raw(IdKind::Business), u32::MAX);
+    }
+
+    #[test]
+    fn reserve_many_reports_the_first_exhausted_kind() {
+        let mut counters = IdCounters::new();
+        counters.set_next_raw_for_test(IdKind::Information, u32::MAX);
+        counters.set_next_raw_for_test(IdKind::Report, 5);
+        let budget = [
+            (IdKind::Report, 1),
+            (IdKind::Information, 1),
+            (IdKind::HistoryEvent, 1),
+        ];
+        let error = counters
+            .reserve_many(&budget)
+            .expect_err("exhausted information must abort the combined reservation");
+        assert!(matches!(
+            error,
+            IdExhaustionError::Exhausted {
+                kind: "information",
+                ..
+            }
+        ));
     }
 }

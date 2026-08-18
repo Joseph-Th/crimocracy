@@ -2,7 +2,8 @@
 
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, InvestigationId, InvestigationWorkId, OrganizationId,
+    ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
+    InvestigationWorkId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -53,6 +54,8 @@ pub enum InvestigationError {
         investigator: CharacterId,
         role: InvestigatorRole,
     },
+    #[error("character {investigator} already leads an active investigation and cannot take another active case")]
+    InvestigatorAtCaseCapacity { investigator: CharacterId },
     #[error("character {investigator} is not assigned to investigation {investigation}")]
     InvestigatorNotAssigned {
         investigation: InvestigationId,
@@ -113,6 +116,8 @@ pub enum InvestigationError {
         investigation: InvestigationId,
         arrest: ArrestId,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,7 +133,7 @@ pub struct ValidatedInvestigation {
 impl ValidatedInvestigation {
     pub fn commit(self, state: &mut AppState) -> Result<InvestigationId, InvestigationError> {
         validate_investigation_draft(state, &self.draft)?;
-        let id = state.ids.next_investigation();
+        let id = state.ids.next_investigation()?;
         state.legal.insert_investigation(InvestigationRecord {
             id,
             owner: self.draft.owner,
@@ -559,6 +564,18 @@ fn validate_investigator_assignment_dependencies(
             owner: investigation.owner(),
         });
     }
+    // One active case per investigator: an investigator already assigned to another active
+    // investigation cannot take a second active case. The same case is exempt so a support
+    // investigator can be promoted to lead of the case they already staff.
+    if state
+        .legal
+        .active_investigation_for_investigator(investigator_id)
+        .is_some_and(|active| active.id() != investigation_id)
+    {
+        return Err(InvestigationError::InvestigatorAtCaseCapacity {
+            investigator: investigator_id,
+        });
+    }
     if investigator
         .capability(CapabilityKind::Investigation)
         .is_none()
@@ -664,7 +681,7 @@ pub struct ValidatedEvidence {
 impl ValidatedEvidence {
     pub fn commit(self, state: &mut AppState) -> Result<EvidenceId, InvestigationError> {
         validate_evidence_draft(state, &self.draft)?;
-        let id = state.ids.next_evidence();
+        let id = state.ids.next_evidence()?;
         let EvidenceDraft {
             investigation,
             custodian,
@@ -676,26 +693,29 @@ impl ValidatedEvidence {
             admissibility,
             discovered_at,
         } = self.draft;
-        state.legal.insert_evidence(EvidenceRecord {
-            identity: EvidenceIdentity {
-                id,
-                investigation,
-                custodian,
+        state.legal.insert_evidence(
+            EvidenceRecord {
+                identity: EvidenceIdentity {
+                    id,
+                    investigation,
+                    custodian,
+                },
+                connection: EvidenceConnection {
+                    subject,
+                    origin,
+                    source: None,
+                    derived_from: Default::default(),
+                },
+                assessment: EvidenceAssessment {
+                    kind,
+                    strength,
+                    reliability,
+                    admissibility,
+                },
+                discovered_at,
             },
-            connection: EvidenceConnection {
-                subject,
-                origin,
-                source: None,
-                derived_from: Default::default(),
-            },
-            assessment: EvidenceAssessment {
-                kind,
-                strength,
-                reliability,
-                admissibility,
-            },
-            discovered_at,
-        });
+            state.now(),
+        );
         Ok(id)
     }
 }
@@ -765,9 +785,17 @@ pub struct ValidatedIncidentIntake {
 }
 
 impl ValidatedIncidentIntake {
+    pub(crate) fn evidence_count(&self) -> u32 {
+        u32::try_from(self.draft.evidence.len()).expect("incident evidence count must fit u32")
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<IncidentIntakeOutcome, InvestigationError> {
         validate_incident_intake_dependencies(state, &self.draft)?;
-        let investigation = state.ids.next_investigation();
+        state.ids.reserve_many(&[
+            (IdKind::Investigation, 1),
+            (IdKind::Evidence, self.evidence_count()),
+        ])?;
+        let investigation = state.ids.next_investigation()?;
         state.legal.insert_investigation(InvestigationRecord {
             id: investigation,
             owner: self.draft.owner,
@@ -785,27 +813,30 @@ impl ValidatedIncidentIntake {
         });
         let mut evidence_ids = Vec::with_capacity(self.draft.evidence.len());
         for evidence in self.draft.evidence {
-            let id = state.ids.next_evidence();
-            state.legal.insert_evidence(EvidenceRecord {
-                identity: EvidenceIdentity {
-                    id,
-                    investigation,
-                    custodian: self.draft.owner,
+            let id = state.ids.next_evidence()?;
+            state.legal.insert_evidence(
+                EvidenceRecord {
+                    identity: EvidenceIdentity {
+                        id,
+                        investigation,
+                        custodian: self.draft.owner,
+                    },
+                    connection: EvidenceConnection {
+                        subject: evidence.subject,
+                        origin: evidence.origin,
+                        source: None,
+                        derived_from: Default::default(),
+                    },
+                    assessment: EvidenceAssessment {
+                        kind: evidence.kind,
+                        strength: evidence.strength,
+                        reliability: evidence.reliability,
+                        admissibility: evidence.admissibility,
+                    },
+                    discovered_at: evidence.discovered_at,
                 },
-                connection: EvidenceConnection {
-                    subject: evidence.subject,
-                    origin: evidence.origin,
-                    source: None,
-                    derived_from: Default::default(),
-                },
-                assessment: EvidenceAssessment {
-                    kind: evidence.kind,
-                    strength: evidence.strength,
-                    reliability: evidence.reliability,
-                    admissibility: evidence.admissibility,
-                },
-                discovered_at: evidence.discovered_at,
-            });
+                state.now(),
+            );
             evidence_ids.push(id);
         }
         Ok(IncidentIntakeOutcome {

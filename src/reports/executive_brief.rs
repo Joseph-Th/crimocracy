@@ -148,11 +148,11 @@ pub fn decide_executive_brief(
             .map(|candidate| candidate.entry),
     );
     if omitted > 0 {
+        // The omitted tail may include Exception or Crisis items, so avoid mislabeling them as
+        // only "notable": report the count without overclaiming a specific attention class.
         entries.push(ReportEntry {
             attention: AttentionClass::Notable,
-            summary: format!(
-                "{omitted} additional notable items remain available in underlying reports."
-            ),
+            summary: format!("{omitted} additional items remain available in underlying reports."),
             sources: Vec::new(),
             entities: BTreeSet::new(),
             decision: None,
@@ -290,18 +290,16 @@ fn refresh_operation_financial_state(
         let Some(venue) = state.world().get_business(disposition.venue()) else {
             continue;
         };
-        let prior = format!(
-            "The crew secured property with an estimated held value of {} cents; it remains unliquidated.",
-            proceeds.estimated_value().cents()
+        let prior = crate::operations::operation_execution::unliquidated_property_clause(
+            proceeds.estimated_value().cents(),
         );
         if !refreshed.summary.contains(&prior) {
             continue;
         }
-        let current = format!(
-            "The crew secured property with an estimated held value of {} cents; it was later liquidated through {} for {} cents.",
+        let current = crate::operations::operation_execution::liquidated_property_clause(
             proceeds.estimated_value().cents(),
             venue.name(),
-            disposition.realized_value().cents()
+            disposition.realized_value().cents(),
         );
         refreshed.summary = refreshed.summary.replace(&prior, &current);
     }
@@ -368,7 +366,7 @@ pub struct ValidatedExecutiveBrief {
 impl ValidatedExecutiveBrief {
     pub fn commit(self, state: &mut AppState) -> Result<ReportId, ExecutiveBriefError> {
         validate_plan_dependencies(state, &self.plan)?;
-        Ok(self.report.commit(state))
+        Ok(self.report.commit(state)?)
     }
 }
 
@@ -598,6 +596,7 @@ mod tests {
         )
         .expect("source report fixture should validate")
         .commit(state)
+        .expect("source report fixture should commit")
     }
 
     fn entry(attention: AttentionClass, summary: &str) -> ReportEntry {
@@ -772,9 +771,7 @@ mod tests {
         assert_eq!(plan.entries().len(), 9);
         assert_eq!(plan.entries()[0].attention, AttentionClass::Crisis);
         assert_eq!(plan.entries()[1].attention, AttentionClass::Crisis);
-        assert!(plan.entries()[8]
-            .summary
-            .contains("2 additional notable items"));
+        assert!(plan.entries()[8].summary.contains("2 additional items"));
         validate_invariants(&fixture.state);
     }
 

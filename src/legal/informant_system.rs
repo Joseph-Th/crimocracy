@@ -2,7 +2,8 @@
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, InformantDisclosureId, InformantId, InformationId, InvestigationId, OrganizationId,
+    CharacterId, IdExhaustionError, IdKind, InformantDisclosureId, InformantId, InformationId,
+    InvestigationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
@@ -96,6 +97,8 @@ pub enum InformantError {
         expected: u32,
         found: u32,
     },
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Debug)]
@@ -118,7 +121,7 @@ impl ValidatedInformantEstablishment {
             });
         }
         validate_establishment_dependencies(state, self.draft)?;
-        let id = state.ids.next_informant();
+        let id = state.ids.next_informant()?;
         state.legal.insert_informant(InformantRecord {
             id,
             character: self.draft.character,
@@ -248,6 +251,9 @@ pub struct ValidatedInformantDisclosure {
 
 impl ValidatedInformantDisclosure {
     pub fn commit(self, state: &mut AppState) -> Result<InformantDisclosureId, InformantError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::Evidence, 1), (IdKind::InformantDisclosure, 1)])?;
         let informant = state
             .legal
             .get_informant(self.draft.informant)
@@ -289,8 +295,8 @@ impl ValidatedInformantDisclosure {
         let reliability = informant_reliability(information.reliability());
         let disclosed_at = state.now();
 
-        let evidence_id = state.ids.next_evidence();
-        let disclosure_id = state.ids.next_informant_disclosure();
+        let evidence_id = state.ids.next_evidence()?;
+        let disclosure_id = state.ids.next_informant_disclosure()?;
         let evidence = EvidenceRecord {
             identity: EvidenceIdentity {
                 id: evidence_id,
@@ -321,7 +327,7 @@ impl ValidatedInformantDisclosure {
         };
         state
             .legal
-            .insert_informant_disclosure(evidence, disclosure);
+            .insert_informant_disclosure(evidence, disclosure, disclosed_at);
         Ok(disclosure_id)
     }
 }
@@ -523,6 +529,7 @@ mod tests {
         )
         .expect("personal information should validate")
         .commit(&mut fixture.state)
+        .expect("personal information should commit")
     }
 
     #[test]
@@ -567,7 +574,8 @@ mod tests {
             },
         )
         .expect("organization information should validate")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("organization information should commit");
         assert_eq!(
             validate_record_informant_disclosure(
                 &fixture.state,

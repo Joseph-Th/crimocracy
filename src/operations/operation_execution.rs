@@ -2,7 +2,9 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, NeighborhoodId, OperationId, PoliceResponseId};
+use crate::core::id::{
+    CharacterId, IdExhaustionError, IdKind, NeighborhoodId, OperationId, PoliceResponseId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_economy_system::{
@@ -108,6 +110,8 @@ pub(crate) enum OperationResolutionError {
     Surveillance(#[from] SurveillanceError),
     #[error(transparent)]
     BusinessEconomy(#[from] BusinessEconomyError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,9 +318,8 @@ pub(crate) fn decide_operation_resolution(
     let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
     if let Some(proceeds) = property_proceeds {
         summary.push(' ');
-        summary.push_str(&format!(
-            "The crew secured property with an estimated held value of {} cents; it remains unliquidated.",
-            proceeds.estimated_value().cents()
+        summary.push_str(&unliquidated_property_clause(
+            proceeds.estimated_value().cents(),
         ));
     }
     if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
@@ -387,6 +390,27 @@ impl ValidatedOperationResolution {
         self,
         state: &mut AppState,
     ) -> Result<OperationId, OperationResolutionError> {
+        let incident_evidence_count = self
+            .incident
+            .as_ref()
+            .map(ValidatedIncidentIntake::evidence_count)
+            .unwrap_or(0);
+        let surveillance_information_count = u32::try_from(self.surveillance_information.len())
+            .expect("surveillance information count must fit u32");
+        let mut budget = vec![
+            (
+                IdKind::Information,
+                1 + u32::from(self.legal_activity_information.is_some())
+                    + surveillance_information_count,
+            ),
+            (IdKind::HistoryEvent, 1),
+            (IdKind::Report, 1),
+        ];
+        if self.incident.is_some() {
+            budget.push((IdKind::Investigation, 1));
+            budget.push((IdKind::Evidence, incident_evidence_count));
+        }
+        state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan)?;
         if let Some(snapshot) = self.incident_authority {
             let found = resolve_case_intake_authority(state, snapshot.neighborhood);
@@ -432,17 +456,18 @@ impl ValidatedOperationResolution {
             investigation,
             evidence,
         };
-        let legal_activity_information = self
-            .legal_activity_information
-            .map(|information| information.commit(state));
+        let legal_activity_information = match self.legal_activity_information {
+            Some(information) => Some(information.commit(state)?),
+            None => None,
+        };
         let discovered_information = self
             .surveillance_information
             .into_iter()
             .map(|information| information.commit(state))
-            .collect();
-        let after_action_information = self.information.commit(state);
-        let history_event = self.history.commit(state);
-        let after_action_report = self.report.commit(state);
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let after_action_information = self.information.commit(state)?;
+        let history_event = self.history.commit(state)?;
+        let after_action_report = self.report.commit(state)?;
         state.operations.complete(
             self.plan.snapshot.operation,
             OperationResolutionRecord {
@@ -736,13 +761,10 @@ fn validate_plan_snapshot(
             .expect("in-progress operation must have a start time"),
         plan.snapshot.resolved_at,
     );
-    if current_police_snapshot != plan.snapshot.police_snapshot
-        || plan.outcome.factors.target_police_presence()
-            != plan.snapshot.police_snapshot.target_presence
-        || plan.outcome.exposure.neighborhood != plan.snapshot.police_snapshot.exposure_neighborhood
-        || plan.outcome.exposure.factors.target_police_presence()
-            != plan.snapshot.police_snapshot.target_presence
-    {
+    // The real staleness signal is the recomputed snapshots: patrol deployments or the police
+    // response may have changed since planning. The plan's outcome factors were derived from the
+    // plan snapshot itself, so no re-derivation is needed (and comparing them would be tautological).
+    if current_police_snapshot != plan.snapshot.police_snapshot {
         return Err(OperationResolutionError::StalePoliceDeploymentContext {
             operation: plan.snapshot.operation,
         });
@@ -760,8 +782,6 @@ fn validate_plan_snapshot(
     });
     if current_police_response != plan.snapshot.police_response
         || did_police_response_arrive_by(state, record, plan.snapshot.resolved_at)
-            != plan.outcome.factors.police_response_arrived()
-        || plan.outcome.exposure.factors.police_response_arrived()
             != plan.outcome.factors.police_response_arrived()
     {
         return Err(OperationResolutionError::StalePoliceResponseContext {
@@ -810,36 +830,9 @@ fn resolve_target_police_snapshot(
     entities: Vec<EntityRef>,
     at: SimTime,
 ) -> TargetPoliceSnapshot {
-    let neighborhoods = resolve_target_neighborhoods(state, entities);
-    let mut patrol_by_neighborhood = BTreeMap::new();
-    let mut strongest: Option<(NeighborhoodId, Rating)> = None;
-    for neighborhood in neighborhoods {
-        let patrol = resolve_patrol_presence_snapshot(state, neighborhood, at);
-        let effective_presence = patrol.presence().or_else(|| {
-            state
-                .world
-                .get_neighborhood(neighborhood)
-                .map(|record| record.profile().institutions.police_presence)
-        });
-        patrol_by_neighborhood.insert(neighborhood, patrol);
-        let Some(effective_presence) = effective_presence else {
-            continue;
-        };
-        match strongest {
-            None => strongest = Some((neighborhood, effective_presence)),
-            Some((_current_neighborhood, current_presence))
-                if effective_presence.value() > current_presence.value() =>
-            {
-                strongest = Some((neighborhood, effective_presence));
-            }
-            Some(_) => {}
-        }
-    }
-    TargetPoliceSnapshot {
-        patrol_by_neighborhood,
-        target_presence: strongest.map(|(_, presence)| presence),
-        exposure_neighborhood: strongest.map(|(neighborhood, _)| neighborhood),
-    }
+    resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
+        resolve_patrol_presence_snapshot(state, neighborhood, at)
+    })
 }
 
 fn resolve_target_police_interval_snapshot(
@@ -848,11 +841,21 @@ fn resolve_target_police_interval_snapshot(
     start: SimTime,
     end: SimTime,
 ) -> TargetPoliceSnapshot {
+    resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
+        resolve_patrol_presence_interval_snapshot(state, neighborhood, start, end)
+    })
+}
+
+fn resolve_target_police_snapshot_from(
+    state: &AppState,
+    entities: Vec<EntityRef>,
+    patrol_for: impl Fn(&AppState, NeighborhoodId) -> PatrolPresenceSnapshot,
+) -> TargetPoliceSnapshot {
     let neighborhoods = resolve_target_neighborhoods(state, entities);
     let mut patrol_by_neighborhood = BTreeMap::new();
     let mut strongest: Option<(NeighborhoodId, Rating)> = None;
     for neighborhood in neighborhoods {
-        let patrol = resolve_patrol_presence_interval_snapshot(state, neighborhood, start, end);
+        let patrol = patrol_for(state, neighborhood);
         let effective_presence = patrol.presence().or_else(|| {
             state
                 .world
@@ -1105,9 +1108,12 @@ fn resolve_time_pressure(started_at: SimTime, due_at: SimTime, base_duration: u3
 
 fn weighted_ability(role_average: Rating, leader_capability: Option<Rating>) -> i16 {
     let role = i16::from(role_average.value());
+    // A leader without the authored leadership capability contributes nothing to coordination
+    // rather than being silently averaged up to the roster's role skill: the after-action summary
+    // reports "no demonstrated capability", and the arithmetic should match.
     let leadership = leader_capability
         .map(|rating| i16::from(rating.value()))
-        .unwrap_or(role);
+        .unwrap_or(0);
     (role * 3 + leadership) / 4
 }
 
@@ -1192,9 +1198,13 @@ fn information_score(
 }
 
 fn reliability_score(reliability: Reliability) -> u8 {
+    // Known-unreliable information scores worst (actively misleading); unverified/unknown
+    // reliability scores slightly better than known-unreliable. This matches the authored
+    // recruitment information-quality table, so the same Reliability enum cannot contribute
+    // contradictory values in different subsystems.
     match reliability {
-        Reliability::Unknown => 10,
-        Reliability::Unreliable => 20,
+        Reliability::Unknown => 20,
+        Reliability::Unreliable => 10,
         Reliability::Mixed => 40,
         Reliability::GenerallyReliable => 70,
         Reliability::DirectAccess => 100,
@@ -1305,6 +1315,27 @@ pub(crate) fn calculate_property_proceeds(
         EntityRef::Business(*business),
         crate::finance::Money::from_cents(cents),
     )))
+}
+
+/// The canonical after-action phrasing for a yet-unliquidated operation property hold. The
+/// executive brief refreshes this clause in-place when the property is later liquidated, so the
+/// phrasing must be shared here rather than duplicated and allowed to drift.
+pub(crate) fn unliquidated_property_clause(est_value_cents: i64) -> String {
+    format!(
+        "The crew secured property with an estimated held value of {est_value_cents} cents; it remains unliquidated."
+    )
+}
+
+/// The after-action phrasing used when held property has since been liquidated through a resale
+/// venue. Must stay coherent with `unliquidated_property_clause` for the brief's in-place refresh.
+pub(crate) fn liquidated_property_clause(
+    est_value_cents: i64,
+    venue_name: &str,
+    realized_cents: i64,
+) -> String {
+    format!(
+        "The crew secured property with an estimated held value of {est_value_cents} cents; it was later liquidated through {venue_name} for {realized_cents} cents."
+    )
 }
 
 fn build_after_action_summary(
@@ -1638,7 +1669,8 @@ mod tests {
                 },
             )
             .expect("planning information should validate")
-            .commit(&mut state);
+            .commit(&mut state)
+            .expect("planning information should commit");
             intelligence.insert(information);
         }
         let operation = validate_authorize_operation(
@@ -2886,6 +2918,13 @@ mod tests {
                 true,
                 vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
             );
+        let organization = state
+            .operations()
+            .get_operation(operation)
+            .expect("authorized operation should persist")
+            .responsible_organization();
+        designate_player_organization(&mut state, organization)
+            .expect("operation organization should be eligible as the player organization");
         validate_establish_patrol_deployment(
             &state,
             PatrolDeploymentDraft {
@@ -3363,7 +3402,8 @@ mod tests {
             achieved_state.now(),
         )
         .expect("held property should integrate into organization financial reporting")
-        .commit(&mut achieved_state);
+        .commit(&mut achieved_state)
+        .expect("held property financial report should commit");
         let report = achieved_state
             .reports()
             .get_report(financial_report)
@@ -3438,7 +3478,8 @@ mod tests {
             achieved_state.now(),
         )
         .expect("liquidated property should integrate into organization financial reporting")
-        .commit(&mut achieved_state);
+        .commit(&mut achieved_state)
+        .expect("liquidated property financial report should commit");
         let liquidated_report = achieved_state
             .reports()
             .get_report(liquidated_report)

@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, InvestigationId, OrganizationId, ProsecutionCaseId,
-    ProsecutionReferralId,
+    ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId, OrganizationId,
+    ProsecutionCaseId, ProsecutionReferralId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -113,6 +113,8 @@ pub enum ProsecutionError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -137,6 +139,12 @@ pub struct ValidatedProsecutionCaseOpening {
 
 impl ValidatedProsecutionCaseOpening {
     pub fn commit(self, state: &mut AppState) -> Result<ProsecutionCaseId, ProsecutionError> {
+        state.ids.reserve_many(&[
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+            (IdKind::ProsecutionCase, 1),
+            (IdKind::ProsecutionReferral, 1),
+        ])?;
         validate_time(state, self.referred_at)?;
         validate_opening_versions(state, self.draft.arrest, self.dependencies)?;
         let current = validate_opening_dependencies(state, &self.draft)?;
@@ -151,10 +159,10 @@ impl ValidatedProsecutionCaseOpening {
             self.dependencies.prosecutor_office
         );
 
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
-        let case_id = state.ids.next_prosecution_case();
-        let referral_id = state.ids.next_prosecution_referral();
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
+        let case_id = state.ids.next_prosecution_case()?;
+        let referral_id = state.ids.next_prosecution_referral()?;
         state.legal.insert_prosecution_case(
             ProsecutionCaseRecord {
                 id: case_id,
@@ -307,6 +315,11 @@ pub struct ValidatedProsecutionReferral {
 
 impl ValidatedProsecutionReferral {
     pub fn commit(self, state: &mut AppState) -> Result<ProsecutionReferralId, ProsecutionError> {
+        state.ids.reserve_many(&[
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+            (IdKind::ProsecutionReferral, 1),
+        ])?;
         validate_time(state, self.referred_at)?;
         let case = state
             .legal
@@ -348,9 +361,9 @@ impl ValidatedProsecutionReferral {
         let source_investigation = case.source_investigation();
         let source_authority = case.source_authority();
         let prosecutor_office = case.prosecutor_office();
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
-        let referral_id = state.ids.next_prosecution_referral();
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
+        let referral_id = state.ids.next_prosecution_referral()?;
         state
             .legal
             .add_prosecution_referral(ProsecutionReferralRecord {
@@ -598,6 +611,9 @@ pub struct ValidatedProsecutionCaseResolution {
 
 impl ValidatedProsecutionCaseResolution {
     pub fn commit(self, state: &mut AppState) -> Result<(), ProsecutionError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::Information, 1), (IdKind::Report, 1)])?;
         validate_time(state, self.resolved_at)?;
         let case = state
             .legal
@@ -622,8 +638,8 @@ impl ValidatedProsecutionCaseResolution {
         }
         validate_resolution_dependencies(state, self.case)?;
 
-        let information = self.information.commit(state);
-        let report = self.report.commit(state);
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
         state.legal.resolve_prosecution_case(
             self.case,
             self.resolution,

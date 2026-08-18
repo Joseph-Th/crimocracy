@@ -2,7 +2,9 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::{InformationId, OperationId, OpportunityId, OrganizationId, ReportId};
+use crate::core::id::{
+    IdExhaustionError, IdKind, InformationId, OperationId, OpportunityId, OrganizationId, ReportId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::intelligence::KnowledgeHolder;
@@ -73,6 +75,13 @@ pub enum OpportunityError {
     #[error("opportunity {0} has no validity deadline and cannot expire automatically")]
     MissingValidityDeadline(OpportunityId),
     #[error(
+        "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
+    )]
+    OperationScheduledAfterWindow {
+        operation: OperationId,
+        valid_until: SimTime,
+    },
+    #[error(
         "opportunity {opportunity} does not expire until {valid_until:?}; current time is {now:?}"
     )]
     ExpiryNotDue {
@@ -121,6 +130,8 @@ pub enum OpportunityError {
     },
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedOpportunityDiscovery {
@@ -131,6 +142,9 @@ pub struct ValidatedOpportunityDiscovery {
 
 impl ValidatedOpportunityDiscovery {
     pub fn commit(self, state: &mut AppState) -> Result<OpportunityId, OpportunityError> {
+        state
+            .ids
+            .reserve_many(&[(IdKind::Report, 1), (IdKind::Opportunity, 1)])?;
         if state.now() != self.discovered_at {
             return Err(OpportunityError::StaleDiscoveryTime {
                 expected: self.discovered_at,
@@ -138,8 +152,8 @@ impl ValidatedOpportunityDiscovery {
             });
         }
         validate_discovery_state(state, &self.draft, self.discovered_at)?;
-        let report = self.report.commit(state);
-        let id = state.ids.next_opportunity();
+        let report = self.report.commit(state)?;
+        let id = state.ids.next_opportunity()?;
         state.opportunities.insert(OpportunityRecord {
             id,
             organization: self.draft.organization,
@@ -435,6 +449,21 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
+    // The opportunity window is meaningful: converting must bind an operation that will actually
+    // execute inside the window, not one scheduled after the opportunity has closed. Otherwise the
+    // "valid until" deadline could be consumed by an operation that never runs while the situation
+    // was live.
+    if opportunity
+        .valid_until()
+        .is_some_and(|valid_until| operation.scheduled_for() >= valid_until)
+    {
+        return Err(OpportunityError::OperationScheduledAfterWindow {
+            operation: operation.id(),
+            valid_until: opportunity
+                .valid_until()
+                .expect("expiry-checked opportunity has a validity window"),
+        });
+    }
     Ok(())
 }
 
@@ -465,7 +494,7 @@ impl ValidatedOpportunityExpiry {
         let valid_until = validate_expiry_due(state, opportunity)?;
         debug_assert_eq!(valid_until, self.valid_until);
 
-        let report = self.report.commit(state);
+        let report = self.report.commit(state)?;
         state
             .opportunities
             .expire(self.opportunity, self.valid_until, report);
@@ -672,7 +701,8 @@ mod tests {
             },
         )
         .expect("opportunity source information should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("opportunity source information should commit");
         OpportunityFixture {
             registry,
             state,
@@ -1183,7 +1213,8 @@ mod tests {
             },
         )
         .expect("personal source fixture should validate")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("personal source fixture should commit");
         let foreign_organization = insert_organization(
             &fixture.registry,
             &mut fixture.state,
@@ -1209,7 +1240,8 @@ mod tests {
             },
         )
         .expect("foreign source fixture should validate")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("foreign source fixture should commit");
 
         for unavailable in [personal_source, foreign_source] {
             let mut draft = opportunity_draft(&fixture, SimTime::from_minutes(120));

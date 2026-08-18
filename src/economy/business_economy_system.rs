@@ -2,7 +2,7 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId};
+use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId, IdExhaustionError, IdKind};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::economy::{
@@ -90,6 +90,8 @@ pub enum BusinessEconomyError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedBusinessEconomyEstablishment {
@@ -271,7 +273,11 @@ pub fn decide_business_cycle(
             owner: business_record.owner(),
             expected_economy_version: economy.version(),
             occurred_at: state.now(),
-            next_cycle_at: due_at + economics.cycle(),
+            // Re-anchor to the actual settlement instant (mirroring enterprise cycles): if a
+            // business settles late (e.g. after a multi-minute advance), the next cycle starts
+            // from now rather than from the stale due time, so missed cycles do not resolve as a
+            // rapid one-per-minute backlog when work resumes.
+            next_cycle_at: state.now() + economics.cycle(),
         },
         economics: BusinessCycleEconomics {
             gross_revenue,
@@ -295,6 +301,11 @@ pub struct ValidatedBusinessCycle {
 
 impl ValidatedBusinessCycle {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
+        state.ids.reserve_many(&[
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Information, 1),
+            (IdKind::BusinessCycle, 1),
+        ])?;
         let business = validate_business(state, self.plan.snapshot.business)?;
         if business.version() != self.plan.snapshot.expected_business_version {
             return Err(BusinessEconomyError::StaleBusiness {
@@ -338,10 +349,11 @@ impl ValidatedBusinessCycle {
             Some(ledger) => Some(ledger.commit(state)?),
             None => None,
         };
-        let information = self
-            .information
-            .map(|information| information.commit(state));
-        let cycle = state.ids.next_business_cycle();
+        let information = match self.information {
+            Some(information) => Some(information.commit(state)?),
+            None => None,
+        };
+        let cycle = state.ids.next_business_cycle()?;
         state.economy.apply_cycle(
             BusinessCycleRecord {
                 id: cycle,
@@ -1093,7 +1105,8 @@ mod tests {
             fixture.state.now(),
         )
         .expect("original owner report should retain its notable historical cycle")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("original owner report should commit");
         let successor_report = validate_organization_financial_report(
             &fixture.state,
             successor,
@@ -1101,7 +1114,8 @@ mod tests {
             fixture.state.now(),
         )
         .expect("successor report should include its notable post-transfer cycle")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("successor report should commit");
         assert_eq!(
             fixture
                 .state
@@ -1230,7 +1244,8 @@ mod tests {
             fixture.state.now(),
         )
         .expect("organization financial report should synthesize legitimate business history")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("organization financial report should commit");
         let report = fixture
             .state
             .reports()

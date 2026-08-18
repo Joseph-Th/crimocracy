@@ -245,17 +245,6 @@ impl DecisionState {
         self.records.get(&id)
     }
 
-    pub fn decisions_for_recipient(
-        &self,
-        recipient: OrganizationId,
-    ) -> impl Iterator<Item = &DecisionRequestRecord> {
-        self.by_recipient
-            .get(&recipient)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
     pub fn pending_for_recipient(
         &self,
         recipient: OrganizationId,

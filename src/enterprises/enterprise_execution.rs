@@ -3,7 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, OrganizationId,
+    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -69,6 +70,12 @@ pub enum EnterpriseError {
         owner: BusinessOwner,
         organization: OrganizationId,
     },
+    #[error("hosted business {business} is owned by {owner:?}, not enterprise organization {organization}")]
+    HostBusinessOwnershipMismatch {
+        business: BusinessId,
+        owner: BusinessOwner,
+        organization: OrganizationId,
+    },
     #[error("supporting business {business} duplicates the enterprise's hosted business location")]
     DuplicateSupportingLocation { business: BusinessId },
     #[error("enterprise support network lacks required function {function:?}")]
@@ -130,6 +137,8 @@ pub enum EnterpriseError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 pub struct ValidatedEnterpriseEstablishment {
@@ -162,7 +171,7 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.settlement_account,
             None,
         )?;
-        let id = state.ids.next_enterprise();
+        let id = state.ids.next_enterprise()?;
         let established_at = state.now();
         let next_cycle_at = established_at + self.cycle_duration;
         state.enterprises.insert(build_enterprise_record(
@@ -381,6 +390,11 @@ pub struct ValidatedEnterpriseCycle {
 
 impl ValidatedEnterpriseCycle {
     pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
+        state.ids.reserve_many(&[
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Information, 1),
+            (IdKind::EnterpriseCycle, 1),
+        ])?;
         let record = state
             .enterprises
             .get_enterprise(self.plan.snapshot.enterprise)
@@ -417,10 +431,11 @@ impl ValidatedEnterpriseCycle {
             Some(ledger) => Some(ledger.commit(state)?),
             None => None,
         };
-        let information = self
-            .information
-            .map(|information| information.commit(state));
-        let cycle_id = state.ids.next_enterprise_cycle();
+        let information = match self.information {
+            Some(information) => Some(information.commit(state)?),
+            None => None,
+        };
+        let cycle_id = state.ids.next_enterprise_cycle()?;
         state.enterprises.apply_cycle(
             EnterpriseCycleRecord {
                 id: cycle_id,
@@ -830,6 +845,7 @@ fn resolve_location_profile(
 fn validate_business_location_requirements(
     definition: &EnterpriseDefinition,
     state: &AppState,
+    organization: OrganizationId,
     location: EnterpriseLocation,
 ) -> Result<(), EnterpriseError> {
     let EnterpriseLocation::Business(business_id) = location else {
@@ -847,6 +863,15 @@ fn validate_business_location_requirements(
             });
         }
     }
+    // The hosting venue must remain organization-owned while the racket runs, just like the
+    // support network: a racket cannot keep settling at a business the organization no longer owns.
+    if business.owner() != BusinessOwner::Organization(organization) {
+        return Err(EnterpriseError::HostBusinessOwnershipMismatch {
+            business: business_id,
+            owner: business.owner(),
+            organization,
+        });
+    }
     Ok(())
 }
 
@@ -857,7 +882,7 @@ fn validate_enterprise_business_dependencies(
     location: EnterpriseLocation,
     supporting_businesses: &BTreeSet<BusinessId>,
 ) -> Result<(), EnterpriseError> {
-    validate_business_location_requirements(definition, state, location)?;
+    validate_business_location_requirements(definition, state, organization, location)?;
     validate_supporting_businesses(state, organization, location, supporting_businesses)?;
 
     if definition.required_network_functions().is_empty() {
@@ -2234,7 +2259,8 @@ mod tests {
             period_end,
         )
         .expect("financial report should synthesize only recipient-known enterprise information")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("enterprise financial report should commit");
         let report = fixture
             .state
             .reports()

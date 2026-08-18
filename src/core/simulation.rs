@@ -250,7 +250,8 @@ pub enum RandomDecisionError {
     EmptyChoiceSet,
 }
 
-pub fn decide_index(
+#[cfg(test)]
+pub(crate) fn decide_index(
     state: &mut AppState,
     choice_count: usize,
 ) -> Result<usize, RandomDecisionError> {
