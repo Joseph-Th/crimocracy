@@ -15,6 +15,33 @@ Crimocracy uses an explicit Registry / AppState / Record / System model.
 
 Static definitions describe what may exist. Runtime records describe what does exist. Mutable progress must not live in registry definitions, and generated future-affecting state must not be reconstructed plausibly after load when exact continuation requires persistence.
 
+## Source map
+
+Every `src/` subsystem owns its records and canonical mutation paths and is validated by `src/core/invariants/`. The top-level execution boundary is `core::simulation::run_tick`, driven from `AppState` and the immutable `Registry`.
+
+| Module | Owns | Canonical mutation |
+|---|---|---|
+| `core/` | Deterministic `SimTime`/`SimDuration`, typed persistent IDs, entity refs, attention classes, serializable `AppState`, persistence envelope, top-level tick, invariant validation | `core::simulation` runs the deterministic tick pipeline; `core::state` is the single owner of generated state |
+| `registry/` | Immutable authored definitions and validated lookup tables (`typedef`-safe `Registry`) | Read-only after construction; `content::build_registry` assembles it |
+| `content/` | Code-owned authored definitions for the startup registry | `build_registry` |
+| `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, organization designation | `world_system` owns insertion and designation mutations |
+| `social/` | Directional character relationships with source/target indexes | `relationship_system` is the sole relationship mutation path |
+| `intelligence/` | Provenance-bearing information records and holder/topic indexes | `intelligence_system` records knowledge and executes canonical transfers |
+| `reports/` | Player-facing reports and synthesized briefs/financial reports | `report_system` validates and inserts; synthesis modules build artifacts |
+| `history/` | Durable entity-linked campaign events | `history_system` owns insertion/indexing |
+| `finance/` | Typed monetary accounts and balanced ledger | `finance_system` owns every financial mutation, including multi-account transactions |
+| `operations/` | Semantic operation plans, execution records, surveillance/police/property integrations | `operation_system` authorizes and commits lifecycle; `operation_execution` resolves outcomes deterministically |
+| `opportunities/` | Provenance-backed operation opportunities with lifecycle | `opportunity_system` owns discovery and lifecycle transitions |
+| `decisions/` | Durable typed decision records and pending indexes | `decision_system` owns request resolution |
+| `delegation/` | Persistent manager mandates and responsibility indexes | `delegation_system` owns assignment, revision, revocation, policy resolution |
+| `enterprises/` | Routine criminal enterprises and cycle history | `enterprise_execution` owns lifecycle and settlement; `enterprise_reporting` aggregates read-only |
+| `economy/` | Legitimate business operating economies and cycle history | `business_economy_system` owns establishment and cycle settlement; `business_reporting` aggregates |
+| `legal/` | Jurisdictions, patrol deployments, investigations/evidence, arrests/custody, representation, prosecution, witnesses, informants, police response | Named legal system modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, ...) mutate through their own transactions; `legal_state` keeps records and indexes synchronized |
+| `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` owns establishment, termination, disclosure |
+| `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` owns candidate discovery, decisions, and membership |
+
+Adapters, the gameplay harness (`examples/gameplay_harness.rs`), and verification tooling (`scripts/verify.ps1`) live outside `src/` and must go through the canonical production paths above.
+
 ## Canonical operations
 
 Every consequential operation class has one production path. UI, examples, tests, importers, migrations, and administrative tools use the same semantics rather than creating parallel implementations.

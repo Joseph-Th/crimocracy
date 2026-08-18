@@ -5,10 +5,12 @@
 //! never feeds action selection. `[NARRATION]` lines are the harness's documentary voice: they
 //! explain world causality from player-visible facts and never feed action selection either.
 //! Narrative sessions also run a player-earned defector watch after an accepted defection: the
-//! organization watches a known rival through canonical surveillance and confirms where the
+//! organization watches every known rival through canonical surveillance and confirms where the
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
-//! Batch runs vary the simulation seed only; strategy policy is deterministic and matched branches
-//! use the same seed.
+//! Timeline constants are derived from the authored registry (operation durations, autonomous
+//! recruitment cadence, cold-case window) where possible so session timing tracks the game instead
+//! of hard-coded minutes drifting from authored content. Batch runs vary the simulation seed only;
+//! strategy policy is deterministic and matched branches use the same seed.
 
 use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
@@ -51,8 +53,9 @@ use crimocracy::legal::prosecution_system::{
 };
 use crimocracy::legal::{
     Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
-    EvidenceStrength, InvestigationDraft, InvestigationWorkStatus, JurisdictionDraft,
-    LegalRepresentationDraft, PatrolDeploymentDraft, PatrolWindow, ProsecutionCaseDraft,
+    EvidenceStrength, InvestigationDraft, InvestigationWorkKind, InvestigationWorkStatus,
+    JurisdictionDraft, LegalRepresentationDraft, PatrolDeploymentDraft, PatrolWindow,
+    ProsecutionCaseDraft,
 };
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::property_disposition::{
@@ -94,6 +97,9 @@ const MAX_BATCH_SAMPLES: u64 = 64;
 const DEFAULT_SEED: u64 = 0x1933_0514;
 const MAX_OPERATION_WAIT_MINUTES: u32 = 1_440;
 const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
+/// Small deterministic margin past the authored cold-case shelf instant so the narrative re-check
+/// observes a case the simulation has already shelved, without depending on in-tick scheduling.
+const COLD_CASE_RECHECK_SLACK_MINUTES: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HarnessMode {
@@ -493,6 +499,7 @@ struct RunMetrics {
     followup_case_active: Option<bool>,
     cold_case_confirmed: Option<bool>,
     case_cold_minute: Option<u64>,
+    case_open_minute: Option<u64>,
     exposure_score: Option<i16>,
     exposure_level: Option<crimocracy::operations::OperationExposureLevel>,
     investigation_created: bool,
@@ -809,6 +816,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_night_trap_evidence(&press)?;
     validate_night_trap_evidence(&recon)?;
     validate_press_consequence_arc(&press)?;
+    validate_defector_trail_evidence(&rush)?;
+    validate_defector_trail_evidence(&press)?;
+    validate_defector_trail_evidence(&recon)?;
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
@@ -1063,6 +1073,32 @@ fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessCon
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
             evidence: "the surfaced case must cool through the authored cold window and the player's own re-check must confirm the shelf",
+        })
+    }
+}
+
+/// Full-mode narrative sessions must close the defection loop: whenever an autonomous rival
+/// departure actually removed a player member, the player's own surveillance of every known rival
+/// must confirm where that member landed. A session without a departure must not fabricate a trail.
+fn validate_defector_trail_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    if metrics.player_personnel_departures > 0 {
+        if metrics.defector_trail_confirmed == Some(true) {
+            Ok(())
+        } else {
+            Err(HarnessContractError::MissingStrategyEvidence {
+                strategy,
+                evidence: "after an autonomous rival departure removed a player member, the player's own surveillance of every known rival must confirm where the member landed",
+            })
+        }
+    } else if metrics.defector_trail_confirmed.is_none() {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "a session without an autonomous rival departure must not fabricate a defector trail",
         })
     }
 }
@@ -1626,6 +1662,9 @@ fn play_session(
         // The case ID itself is developer-audit-only; the player only ever sees the surfaced
         // legal-activity knowledge and their own later surveillance observations.
         scenario.investigation = resolution.exposure().investigation();
+        metrics.case_open_minute = scenario
+            .investigation
+            .map(|_| scenario.state.now().as_minutes());
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
         metrics.property_acquired_value_cents = resolution
@@ -1803,13 +1842,25 @@ fn play_session(
         // The narrative session waits out the authored cold-case window and re-checks the
         // precinct through the same player-visible surveillance channel. Batch sessions observe
         // one day and stop while the case is still hot, keeping the matched financial window intact.
+        // The re-check lands just past the authored inactivity window plus the initial evidence
+        // review the authority runs, so session timing tracks registry content instead of
+        // hard-coded minutes drifting from authored content.
         if narrative {
-            run_until(
-                &mut scenario,
-                SimTime::from_minutes(2_525),
-                narrative,
-                &mut metrics,
-            )?;
+            let case_open_minute = metrics
+                .case_open_minute
+                .expect("press consequence arc requires the surfaced case-open minute");
+            let cold_case_window = scenario.registry.legal().cold_case_window();
+            let evidence_review_duration = scenario
+                .registry
+                .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+                .duration();
+            let recheck_at = SimTime::from_minutes(
+                case_open_minute
+                    + u64::from(cold_case_window.as_minutes())
+                    + u64::from(evidence_review_duration.as_minutes())
+                    + COLD_CASE_RECHECK_SLACK_MINUTES,
+            );
+            run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
             let recheck_title = format!("{police_name} case re-check");
             let recheck_at = scenario.state.now() + SimDuration::ONE_MINUTE;
             let recheck = authorize_surveillance_target(
@@ -1843,15 +1894,25 @@ fn play_session(
     }
 
     if continue_for_financial_day {
+        // The authored autonomous-recruitment cadence defines the rivals' campaign day. Sessions
+        // observe a whole number of those days so financial windows stay matched while session
+        // timing tracks the authored content instead of hard-coded minutes.
+        let campaign_day_minutes = u64::from(
+            scenario
+                .registry
+                .recruitment()
+                .autonomous_attempt_cadence()
+                .as_minutes(),
+        );
         let observation_end = if narrative {
-            SimTime::from_minutes(2_880)
+            SimTime::from_minutes(campaign_day_minutes * 2)
         } else {
-            SimTime::from_minutes(1_440)
+            SimTime::from_minutes(campaign_day_minutes)
         };
         // The rival autonomous-recruitment cadence fires once per campaign day. Narrative sessions
         // pause just past the first day boundary so an accepted defection is observable, let the
         // organization run its own defector watch, then finish the observation window.
-        let recruitment_boundary = SimTime::from_minutes(1_441);
+        let recruitment_boundary = SimTime::from_minutes(campaign_day_minutes + 1);
         if narrative && observation_end > recruitment_boundary {
             run_until(&mut scenario, recruitment_boundary, narrative, &mut metrics)?;
         } else {
@@ -3077,10 +3138,10 @@ fn role_label(role: RoleKind) -> &'static str {
     }
 }
 
-/// Player-earned counter-intelligence after an accepted defection: the organization watches a
-/// known rival through canonical surveillance to confirm where the departed member resurfaces.
-/// The departure report deliberately never names the recruiting organization; this follow-up is
-/// the player-visible channel that closes the knowledge loop without any hidden-state reads.
+/// Player-earned counter-intelligence after an accepted defection: the organization watches every
+/// known rival through canonical surveillance to confirm where the departed member resurfaces. The
+/// departure report deliberately never names the recruiting organization; this follow-up is the
+/// player-visible channel that closes the knowledge loop without any hidden-state reads.
 fn run_defector_trail(
     scenario: &mut Scenario,
     narrative: bool,
@@ -3103,7 +3164,7 @@ fn run_defector_trail(
         .expect("player organization must persist")
         .name()
         .to_owned();
-    let rival_name = scenario
+    let first_rival_name = scenario
         .state
         .world()
         .get_organization(scenario.rival)
@@ -3116,66 +3177,102 @@ fn run_defector_trail(
             .map(|minute| format!(" at minute {minute}"))
             .unwrap_or_default();
         println!(
-            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces; start with {rival_name}."
+            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces; start with {first_rival_name}."
         );
     }
-    let title = format!("{rival_name} personnel watch");
-    let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
-    let operation = authorize_surveillance_target(
-        scenario,
-        EntityRef::Organization(scenario.rival),
-        &title,
-        scheduled_for,
-    )?;
-    run_until_operation_terminal(scenario, operation, narrative, metrics)?;
-    let resolution = scenario
-        .state
-        .operations()
-        .get_operation(operation)
-        .expect("personnel watch must persist")
-        .resolution()
-        .expect("completed personnel watch must have a resolution");
-    let confirmed = resolution
-        .discovered_information()
-        .iter()
-        .any(|information| {
-            scenario
-                .state
-                .intelligence()
-                .get_information(*information)
-                .is_some_and(|record| {
-                    record.topic() == InformationTopic::Personnel
-                        && record.subject() == EntityRef::Organization(scenario.rival)
-                        && record.summary().contains(&defector_name)
-                })
-        });
-    metrics.defector_trail_confirmed = Some(confirmed);
-    if narrative {
-        for information in resolution.discovered_information() {
-            let record = scenario
-                .state
-                .intelligence()
-                .get_information(*information)
-                .expect("personnel-watch information must persist");
-            if record.topic() == InformationTopic::Personnel
-                && record.subject() == EntityRef::Organization(scenario.rival)
-            {
+    // The fixture has two named rivals; watch each one through the player's own surveillance. At
+    // most one rival is the true destination, so the trail confirms where the member landed while
+    // still showing absence everywhere else through the same canonical channel.
+    let known_rivals = [scenario.rival, scenario.second_rival];
+    let mut resurfaced_at: Option<OrganizationId> = None;
+    for rival in known_rivals {
+        let rival_name = scenario
+            .state
+            .world()
+            .get_organization(rival)
+            .expect("known rival must persist")
+            .name()
+            .to_owned();
+        let title = format!("{rival_name} personnel watch");
+        let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
+        let operation = authorize_surveillance_target(
+            scenario,
+            EntityRef::Organization(rival),
+            &title,
+            scheduled_for,
+        )?;
+        run_until_operation_terminal(scenario, operation, narrative, metrics)?;
+        let resolution = scenario
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("personnel watch must persist")
+            .resolution()
+            .expect("completed personnel watch must have a resolution");
+        let found = resolution
+            .discovered_information()
+            .iter()
+            .any(|information| {
+                scenario
+                    .state
+                    .intelligence()
+                    .get_information(*information)
+                    .is_some_and(|record| {
+                        record.topic() == InformationTopic::Personnel
+                            && record.subject() == EntityRef::Organization(rival)
+                            && record.summary().contains(&defector_name)
+                    })
+            });
+        if found {
+            resurfaced_at = Some(rival);
+        }
+        if narrative {
+            for information in resolution.discovered_information() {
+                let record = scenario
+                    .state
+                    .intelligence()
+                    .get_information(*information)
+                    .expect("personnel-watch information must persist");
+                if record.topic() == InformationTopic::Personnel
+                    && record.subject() == EntityRef::Organization(rival)
+                {
+                    println!(
+                        "[LEARN]   {:?} / {:?}: {}",
+                        record.reliability(),
+                        record.specificity(),
+                        record.summary()
+                    );
+                }
+            }
+            if found {
                 println!(
-                    "[LEARN]   {:?} / {:?}: {}",
-                    record.reliability(),
-                    record.specificity(),
-                    record.summary()
+                    "[VERIFY DEFECTOR] {defector_name} now appears among {rival_name}'s recurring personnel."
+                );
+            } else {
+                println!(
+                    "[VERIFY DEFECTOR] {rival_name}'s watch shows {defector_name} is not working there."
                 );
             }
         }
-        if confirmed {
-            println!(
-                "[VERIFY DEFECTOR] {defector_name} now appears among {rival_name}'s recurring personnel. {player_name} confirmed through its own surveillance where its former member landed."
-            );
-        } else {
-            println!(
-                "[VERIFY DEFECTOR] The personnel watch did not directly confirm where {defector_name} landed."
-            );
+    }
+    metrics.defector_trail_confirmed = Some(resurfaced_at.is_some());
+    if narrative {
+        match resurfaced_at {
+            Some(rival) => {
+                let rival_name = scenario
+                    .state
+                    .world()
+                    .get_organization(rival)
+                    .expect("confirmed rival must persist")
+                    .name()
+                    .to_owned();
+                println!(
+                    "[VERIFY DEFECTOR] {defector_name} resurfaces among {rival_name}'s personnel. {player_name} confirmed through its own surveillance where its former member landed."
+                );
+            }
+            None => println!(
+                "[VERIFY DEFECTOR] None of the watched rivals showed {defector_name}; the personnel watch did not directly confirm where the member landed."
+            ),
         }
     }
     Ok(())
@@ -3721,7 +3818,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - The portfolio probe now covers prioritization and expiry across competing opportunities, but it still uses one operation type and does not test resource contention between simultaneous crews."
     );
     println!(
-        "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) currently stays inert."
+        "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
         "  - The fixed RUSH/PRESS/RECON policies are calibration treatments; they expose causal differences but are not evidence that an actual player would choose the same policies."

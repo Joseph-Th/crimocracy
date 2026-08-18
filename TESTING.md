@@ -39,6 +39,7 @@ The deterministic invariant soak remains an explicit stress lane rather than a s
 - `--mode smoke` is the fast canonical strategy/legal-foundation contract; `--mode full` adds the broader narrative, matched-seed batch, property/legal, opportunity, and bounded sensitivity evidence.
 - `--samples` varies the `AppState` simulation/world seed; there is no separate stochastic behavior seed. Matched strategy branches use the same selected fixture variation.
 - Structural and registry-aware validation occurs at setup and observation boundaries.
+- The defection-loop contract is enforced per narrative run: whenever an accepted rival departure removed a player member, every known rival must be watched through canonical player surveillance to confirm where the member landed; a run with no such departure must not fabricate a trail. Violations fail the run explicitly.
 - Per-run events and `RunMetrics` are raw evidence beneath aggregates. Aggregate output is diagnostic, not a universal game-quality score or durable research archive.
 - Missing acting information or canonical validation rejection fails the controlled run explicitly. Missing events remain observed absence rather than being forced into a positive or negative verdict.
 - Any future persisted evaluation artifact retains per-run seeds and raw metrics beneath derived findings.

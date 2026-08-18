@@ -114,5 +114,6 @@ natural-play or human-UX verdict. Full mode is deliberately more verbose and exp
 is the local fast path. Each seed selects a small authored fixture variation, shared by all
 strategy branches for that seed, so batches exercise more than one fixed venue and patrol rhythm.
 The harness validates structural and registry-aware state after setup and at observation boundaries.
-Narrative sessions observe two simulated days; batch sensitivity runs observe one day so repeated
-routine ticks do not dominate the evidence or runtime.
+Narrative sessions observe two simulated days of routine ticks; the press branch's player-run
+defector watch starts after its cold-case wait and can finish a short way past that boundary.
+Batch sensitivity runs observe one day so repeated routine ticks do not dominate the evidence or runtime.
