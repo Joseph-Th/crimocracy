@@ -14,6 +14,8 @@ This file is the execution card for repository work. Detailed ownership and muta
 
 If ownership, current scope, or the proving test is not discoverable, repair the owning documentation as part of the change.
 
+This project applies the Universal, Stateful Application, Deterministic System, and Automated Behavior Evaluation portfolio profiles.
+
 ## Authority map
 
 | Question | Authority |
