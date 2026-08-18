@@ -18,6 +18,7 @@ use crate::delegation::delegation_system::{
 use crate::delegation::{ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
 use crate::operations::operation_system::{
+    has_missed_operation_deadline, validate_deadline_missed_operation,
     validate_decision_abort_operation, validate_police_arrival_abort_if_applicable, OperationError,
     ValidatedOperationAbort,
 };
@@ -733,7 +734,16 @@ pub struct DecisionResolutionOutcome {
 
 impl ValidatedDecisionResolution {
     pub fn commit(self, state: &mut AppState) -> Result<DecisionResolutionOutcome, DecisionError> {
-        state.ids.reserve(IdKind::DecisionRequest, 1)?;
+        let creates_follow_up = matches!(
+            &self.action,
+            DecisionResolutionAction::Operation {
+                follow_up: Some(_),
+                ..
+            }
+        );
+        if creates_follow_up {
+            state.ids.reserve(IdKind::DecisionRequest, 1)?;
+        }
         let decision = state
             .decisions
             .get_decision(self.decision)
@@ -900,9 +910,13 @@ pub fn validate_resolve_decision(
                 }
             };
             let abort = match response {
-                DecisionResponse::Abort => Some(Box::new(validate_decision_abort_operation(
-                    state, operation, decision,
-                )?)),
+                DecisionResponse::Abort => Some(Box::new(
+                    if has_missed_operation_deadline(state, operation) {
+                        validate_deadline_missed_operation(state, operation)?
+                    } else {
+                        validate_decision_abort_operation(state, operation, decision)?
+                    },
+                )),
                 DecisionResponse::Continue => police_abort.map(Box::new),
                 DecisionResponse::Approve | DecisionResponse::Reject => {
                     unreachable!("operation responses were validated above")

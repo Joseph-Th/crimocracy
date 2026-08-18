@@ -301,11 +301,15 @@ pub struct ValidatedBusinessCycle {
 
 impl ValidatedBusinessCycle {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
-        state.ids.reserve_many(&[
-            (IdKind::LedgerTransaction, 1),
-            (IdKind::Information, 1),
-            (IdKind::BusinessCycle, 1),
-        ])?;
+        let mut budget = Vec::new();
+        if self.ledger.is_some() {
+            budget.push((IdKind::LedgerTransaction, 1));
+        }
+        if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        budget.push((IdKind::BusinessCycle, 1));
+        state.ids.reserve_many(&budget)?;
         let business = validate_business(state, self.plan.snapshot.business)?;
         if business.version() != self.plan.snapshot.expected_business_version {
             return Err(BusinessEconomyError::StaleBusiness {

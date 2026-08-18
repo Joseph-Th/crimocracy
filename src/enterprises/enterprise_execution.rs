@@ -390,11 +390,15 @@ pub struct ValidatedEnterpriseCycle {
 
 impl ValidatedEnterpriseCycle {
     pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
-        state.ids.reserve_many(&[
-            (IdKind::LedgerTransaction, 1),
-            (IdKind::Information, 1),
-            (IdKind::EnterpriseCycle, 1),
-        ])?;
+        let mut budget = Vec::new();
+        if self.ledger.is_some() {
+            budget.push((IdKind::LedgerTransaction, 1));
+        }
+        if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        budget.push((IdKind::EnterpriseCycle, 1));
+        state.ids.reserve_many(&budget)?;
         let record = state
             .enterprises
             .get_enterprise(self.plan.snapshot.enterprise)

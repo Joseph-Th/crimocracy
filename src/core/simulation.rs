@@ -7,7 +7,8 @@ use crate::core::id::{
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::decisions::decision_system::DecisionRequestOutcome;
+use crate::decisions::decision_system::{validate_resolve_decision, DecisionRequestOutcome};
+use crate::decisions::DecisionResponse;
 use crate::economy::business_economy_system::{
     decide_business_cycle, due_active_businesses, validate_business_cycle_plan,
 };
@@ -26,8 +27,8 @@ use crate::operations::operation_execution::{
     OperationResolutionRandomness,
 };
 use crate::operations::operation_system::{
-    apply_transition, due_authorized_operations, has_missed_operation_deadline,
-    validate_deadline_missed_operation, OperationTransition,
+    apply_transition, due_authorized_operations, due_operations_with_missed_deadlines,
+    has_missed_operation_deadline, validate_deadline_missed_operation, OperationTransition,
 };
 use crate::operations::police_response_integration::process_due_police_responses;
 use crate::opportunities::opportunity_system::expire_due_opportunities;
@@ -76,6 +77,30 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             apply_transition(registry, state, operation, OperationTransition::Begin)
                 .expect("due authorized operation must support the begin transition");
             started_operations.push(operation);
+        }
+    }
+    for operation in due_operations_with_missed_deadlines(state) {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("overdue operation must still exist");
+        if let Some(decision) = state.decisions().pending_for_operation(operation) {
+            let recipient = record.responsible_organization();
+            validate_resolve_decision(
+                registry,
+                state,
+                decision,
+                recipient,
+                DecisionResponse::Abort,
+            )
+            .expect("an overdue operation decision must support automatic abort")
+            .commit(state)
+            .expect("automatic deadline decision abort must commit atomically");
+        } else {
+            validate_deadline_missed_operation(state, operation)
+                .expect("an overdue in-progress operation must validate a deadline abort")
+                .commit(state)
+                .expect("an overdue in-progress operation must abort atomically");
         }
     }
     let police_response_outcome = process_due_police_responses(state)

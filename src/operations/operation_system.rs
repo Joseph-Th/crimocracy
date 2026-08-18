@@ -556,6 +556,26 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
         .is_some_and(|deadline| state.now() >= deadline)
 }
 
+pub(crate) fn due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
+    let mut due = state
+        .operations
+        .operations_with_status(OperationStatus::InProgress)
+        .chain(
+            state
+                .operations
+                .operations_with_status(OperationStatus::AwaitingDecision),
+        )
+        .filter(|operation| {
+            earliest_operation_deadline(operation).is_some_and(|deadline| state.now() >= deadline)
+        })
+        .map(|operation| operation.id())
+        .collect::<Vec<_>>();
+    // The status indexes are separate, so restore one global stable order before any
+    // deadline abort creates IDs or reports that later work can observe.
+    due.sort_unstable();
+    due
+}
+
 pub(crate) fn validate_deadline_missed_operation(
     state: &AppState,
     operation: OperationId,
@@ -706,11 +726,17 @@ pub struct ValidatedOperationAbort {
 
 impl ValidatedOperationAbort {
     pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
-        state.ids.reserve_many(&[
-            (IdKind::Information, 1),
-            (IdKind::HistoryEvent, 1),
-            (IdKind::Report, 1),
-        ])?;
+        let mut budget = Vec::new();
+        if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.history.is_some() {
+            budget.push((IdKind::HistoryEvent, 1));
+        }
+        if self.report.is_some() {
+            budget.push((IdKind::Report, 1));
+        }
+        state.ids.reserve_many(&budget)?;
         let record = state
             .operations
             .get_operation(self.operation)
@@ -869,6 +895,18 @@ fn validate_operation_abort(
         {
             OperationAbortPhase::BeforeStart
         }
+        (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed)
+            if earliest_operation_deadline(record)
+                .is_some_and(|deadline| state.now() >= deadline) =>
+        {
+            OperationAbortPhase::InProgress
+        }
+        (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed)
+            if earliest_operation_deadline(record)
+                .is_some_and(|deadline| state.now() >= deadline) =>
+        {
+            OperationAbortPhase::AwaitingDecision
+        }
         (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::InProgress
         }
@@ -1013,10 +1051,20 @@ fn build_abort_summary(
             let deadline = earliest_operation_deadline(operation).expect(
                 "validated deadline abort must retain a completion deadline",
             );
+            let phase = match operation.status() {
+                OperationStatus::Authorized => "before execution could begin",
+                OperationStatus::InProgress | OperationStatus::AwaitingDecision => {
+                    "before execution could complete"
+                }
+                OperationStatus::Completed | OperationStatus::Aborted => {
+                    unreachable!("terminal operations cannot miss an active deadline")
+                }
+            };
             Ok(format!(
-                "{} missed its completion deadline at minute {} before execution could begin.",
+                "{} missed its completion deadline at minute {} {}.",
                 operation.title(),
-                deadline.as_minutes()
+                deadline.as_minutes(),
+                phase,
             ))
         }
     }
@@ -1090,10 +1138,13 @@ fn police_arrival_can_abort(
 mod tests {
     use super::*;
     use crate::build_registry;
+    use crate::core::attention::AttentionClass;
     use crate::core::entity::EntityRef;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::time::SimTime;
+    use crate::decisions::decision_system::validate_request_decision;
+    use crate::decisions::{DecisionContext, DecisionRequestDraft, OperationExceptionReason};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{
         InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -1400,6 +1451,13 @@ mod tests {
             .commit(&mut state)
             .expect("future operation should commit");
 
+        // A pre-start cancellation creates no information, report, or history record. Its
+        // transaction must therefore remain usable even when an unrelated optional ID stream is
+        // exhausted.
+        state
+            .ids
+            .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
+
         validate_authority_abort_operation(&state, operation)
             .expect("authorized operation should accept a leadership cancellation")
             .commit(&mut state)
@@ -1649,6 +1707,126 @@ mod tests {
                 .map(|abort| abort.cause()),
             Some(OperationAbortCause::DeadlineMissed)
         );
+    }
+
+    #[test]
+    fn in_progress_operation_cannot_resolve_at_or_after_completion_deadline() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let mut draft = make_test_draft(organization, leader, target);
+        draft
+            .constraints
+            .push(crate::operations::OperationConstraint::CompleteBefore(
+                SimTime::from_minutes(10),
+            ));
+        let operation = validate_authorize_operation(&registry, &state, draft)
+            .expect("deadline-constrained operation should validate")
+            .commit(&mut state)
+            .expect("deadline-constrained operation should commit");
+        apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+            .expect("operation should begin before its deadline");
+
+        state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+        let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+
+        assert!(outcome.resolved_operations.is_empty());
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("deadline-aborted operation should persist");
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        assert_eq!(
+            record.abort_record().map(|abort| abort.phase()),
+            Some(OperationAbortPhase::InProgress)
+        );
+        assert_eq!(
+            record.abort_record().map(|abort| abort.cause()),
+            Some(OperationAbortCause::DeadlineMissed)
+        );
+        let artifacts = record
+            .abort_record()
+            .and_then(|abort| abort.artifacts())
+            .expect("an in-progress deadline miss should be visible");
+        assert!(state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("deadline information should persist")
+            .summary()
+            .contains("before execution could complete"));
+        validate_state(&state).expect("deadline abort should remain structurally valid");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn decision_paused_operation_auto_aborts_when_deadline_expires() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let mut draft = make_test_draft(organization, leader, target);
+        draft
+            .constraints
+            .push(crate::operations::OperationConstraint::CompleteBefore(
+                SimTime::from_minutes(10),
+            ));
+        draft
+            .contingencies
+            .push(crate::operations::OperationContingency::RequestDecisionOnUnexpectedCondition);
+        let operation = validate_authorize_operation(&registry, &state, draft)
+            .expect("decision-capable operation should validate")
+            .commit(&mut state)
+            .expect("decision-capable operation should commit");
+        apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+            .expect("operation should begin before its deadline");
+        let decision = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: leader,
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::UnexpectedCondition,
+                },
+                attention: AttentionClass::Exception,
+                summary: "The crew encountered an unexpected condition.".to_owned(),
+            },
+        )
+        .expect("operation exception should request a decision")
+        .commit(&mut state)
+        .expect("decision request should commit")
+        .decision;
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("operation should persist")
+                .status(),
+            OperationStatus::AwaitingDecision
+        );
+
+        state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+        crate::core::simulation::run_tick(&registry, &mut state);
+
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("deadline-aborted operation should persist");
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        assert_eq!(
+            record.abort_record().map(|abort| abort.phase()),
+            Some(OperationAbortPhase::AwaitingDecision)
+        );
+        assert_eq!(
+            record.abort_record().map(|abort| abort.cause()),
+            Some(OperationAbortCause::DeadlineMissed)
+        );
+        let request = state
+            .decisions()
+            .get_decision(decision)
+            .expect("deadline decision should remain historical");
+        assert_eq!(request.status(), crate::decisions::DecisionStatus::Resolved);
+        assert_eq!(
+            request.resolution().map(|resolution| resolution.response()),
+            Some(crate::decisions::DecisionResponse::Abort)
+        );
+        assert!(state.decisions().pending_for_operation(operation).is_none());
+        validate_state(&state).expect("deadline decision abort should remain valid");
+        validate_invariants(&state);
     }
 
     #[test]

@@ -754,12 +754,16 @@ pub struct ValidatedRecruitmentAttempt {
 
 impl ValidatedRecruitmentAttempt {
     pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
-        state.ids.reserve_many(&[
-            (IdKind::HistoryEvent, 1),
-            (IdKind::Information, 1),
-            (IdKind::Report, 1),
-            (IdKind::RecruitmentAttempt, 1),
-        ])?;
+        let mut budget = Vec::new();
+        if self.history.is_some() {
+            budget.push((IdKind::HistoryEvent, 1));
+        }
+        budget.push((IdKind::Information, 1));
+        if self.departure_report.is_some() {
+            budget.push((IdKind::Report, 1));
+        }
+        budget.push((IdKind::RecruitmentAttempt, 1));
+        state.ids.reserve_many(&budget)?;
         if let Some(guard) = self.delegated_guard {
             validate_mandate_authority_snapshot(state, guard.authority)?;
             let current_policy = resolve_policy_for_manager(

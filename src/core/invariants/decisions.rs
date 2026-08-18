@@ -249,7 +249,9 @@ fn validate_operation_decision(
                     let abort = operation.abort_record();
                     if operation.status() != OperationStatus::Aborted
                         || !abort.is_some_and(|abort| {
-                            abort.cause() == OperationAbortCause::Decision(decision.id())
+                            (abort.cause() == OperationAbortCause::Decision(decision.id())
+                                || (abort.cause() == OperationAbortCause::DeadlineMissed
+                                    && abort.phase() == OperationAbortPhase::AwaitingDecision))
                                 && abort.phase() == OperationAbortPhase::AwaitingDecision
                                 && abort.aborted_at() == resolution.resolved_at()
                         })
