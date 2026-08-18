@@ -2,67 +2,7 @@
 
 This file records implemented capability and explicit exclusions. It is not a feature roadmap and does not override `AGENTS.md`, `ARCHITECTURE.md`, `TESTING.md`, or `GAME_DESIGN.md` in the contracts those documents own.
 
-## Verification Surface
-
-- `scripts/verify.ps1` is the one-command local completion gate and the verification authority. It
-  runs the canonical four-stage contract -- format check, production/harness Clippy, the all-target
-  unit/doc-test/example suite, and the targeted smoke harness test -- with per-stage PASS/FAIL and
-  timing, and stops at the first failing stage so a broken change fails fast. The equivalent raw
-  commands are documented in `README.md`. The all-target test pass owns compilation verification, so
-  the gate does not repeat a separate all-target `cargo check`; Clippy does not rebuild test targets
-  that the test pass will compile. The controlled smoke contract is an explicit ignored test so it
-  runs exactly once afterward with focused output. Build parallelism is cargo-autodetected rather
-  than fixed at the two-job ceiling the removed hosted runners needed, so cold dependency graphs and
-  the large single crate build as fast as the local machine allows; `verify.ps1 -Jobs N` caps
-  parallelism when a quieter build is wanted. GitHub Actions and hosted runners are not part of the
-  verification path. Release builds and long-form gameplay reports remain deliberate local checks
-  rather than part of every change gate.
-- `examples/gameplay_harness.rs` has explicit `smoke` and `full` modes. Smoke exercises RUSH, PRESS,
-  and RECON through terminal state plus the legal-foundation path and validates per-run terminal,
-  player-knowledge, standing-contingency, decision, surveillance, follow-up, and legal-consequence
-  contracts. Press reports direct police experience back to the organization through canonical
-  information transfer, then uses only surfaced legal activity, known precinct state, and
-  player-held police information to stand down and authorize precinct counter-surveillance; hidden
-  investigation evidence, lead, and internal IDs never feed action selection. The follow-up reads
-  whether the authority is still actively developing the case, and the narrative session then waits
-  out the authored cold-case window and re-checks through the same player-visible surveillance
-  channel so the Press branch closes a complete consequence arc: risk taken, case opened, standing
-  down, case shelved, heat verified gone. Rival manager cadence fires once per campaign day, so
-  narrative sessions run just past the first day boundary to make an accepted defection
-  observable, then run a player-earned defector watch: the organization runs canonical
-  surveillance on every known rival to
-  confirm where the departed member resurfaces, instead of the departure report leaking the
-  recruiting organization. Full mode retains the
-  narrative, matched-seed batch, property liquidation, legal foundation, and bounded
-  scenario-sensitivity evidence, adds an opportunity-portfolio prioritization/expiry probe, and adds a player-loop readout covering learning, planning,
-  delegation, response, consequences, follow-up, organization change, defector trail, and routine continuity.
-  Narrative sessions observe two simulated days of routine ticks, and the press branch's
-  player-run defector watch can finish a short way past that boundary; batch runs observe one day
-  so repeated routine ticks do not dominate the evidence or runtime. Operation waits have an explicit 1,440-minute
-  harness guard so a broken terminal transition fails with context instead of hanging iteration.
-  `--seed` selects the matched simulation seed and `--samples` remains bounded to 1..=64.
-  Each supplied seed also selects one of several small authored fixture variations (venue,
-  neighborhood, source quality, patrol rhythm, and routine economic context); RUSH, PRESS, and
-  RECON receive the same selected variation for a matched comparison. The harness validates state
-  against both structural and registry-aware contracts after setup and at each observation
-  boundary, and full-mode batches enforce the same strategy-specific evidence contracts as smoke.
-- Harness CLI parsing has focused tests, and the smoke contract is run as an example test so the
-  gate reuses one compiled target instead of launching a second untracked verification path. Smoke also
-  accepts a focused strategy selector for fast policy iteration while the default runs RUSH, PRESS,
-  and RECON together; focused strategy runs skip the independent legal-foundation probe. The
-  harness defaults to smoke mode so an unqualified example run stays fast;
-  full mode is explicit and defaults to three matched samples, the minimum that exercises all
-  authored fixture variations. The full readout also compares information leverage,
-  exception-response leverage, and consequence leverage explicitly so a passing run explains
-  which player choices changed the outcome rather than only listing subsystem counts.
-  The harness builds one shared immutable registry per process and
-  shares it across legal, narrative, and matched-batch sessions; each session still owns a fresh
-  mutable `AppState`.
-- `.cargo/config.toml` provides the short local loops `check-fast`, `lint-fast`, `test-fast`,
-  `soak`, `harness-smoke`, the focused strategy aliases `harness-rush`, `harness-press`, and
-  `harness-recon`, and the generic `harness`. The fast unit alias skips only the named invariant soak;
-  the normal test gate still includes it, and `soak` runs it explicitly when that stress coverage
-  is the work being changed.
+Verification procedure and gameplay-evidence semantics are owned by `README.md` and `TESTING.md`. This status file records only the implemented product foundation and explicit scope boundaries.
 
 ## Current Foundation
 
