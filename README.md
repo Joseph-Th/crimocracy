@@ -1,138 +1,77 @@
 # Crimocracy
 
-Crimocracy is a deterministic Rust simulation foundation for a systemic crime-organization strategy game. The player acts through people, information, plans, policies, relationships, delegated authority, enterprises, and institutions rather than directly scripting every simulated action.
+Crimocracy is a deterministic Rust simulation foundation for a systemic crime-organization strategy game. The player acts through people, information, plans, policies, relationships, delegated authority, enterprises, and institutions.
 
-## Start here
+## Cold-start route
 
-1. Read `AGENTS.md` before changing code. It is the concise repository execution card.
-2. Read `STATUS.md` for the foundation that is currently implemented.
-3. Read `ARCHITECTURE.md` for ownership, canonical mutation, determinism, persistence, and invariants.
-4. Read `TESTING.md` for test and gameplay-evidence rules.
-5. Read `GAME_DESIGN.md` only when product intent or player-facing design criteria are relevant.
+Read only the document that answers the question you have:
 
-Do not use `GAME_DESIGN.md` as proof that a feature is implemented. Do not use `STATUS.md` as a substitute for product intent.
+1. [`AGENTS.md`](AGENTS.md) — repository rules, change routing, and completion requirements.
+2. [`STATUS.md`](STATUS.md) — implemented capability and current exclusions.
+3. [`ARCHITECTURE.md`](ARCHITECTURE.md) — state ownership, mutation paths, determinism, persistence, and invariants.
+4. [`TESTING.md`](TESTING.md) — focused tests, harness evidence, and verification semantics.
+5. [`GAME_DESIGN.md`](GAME_DESIGN.md) — player experience and product intent.
 
-## Current architecture
+The source module and its focused tests are the authority for executable behavior. Design intent does not prove implementation, and status does not define product intent.
 
-The implemented foundation uses explicit serializable `AppState`, immutable Rust-authored registry definitions, typed persistent IDs, domain-owned state, canonical system functions, deterministic state-owned RNG streams, and invariant validation.
-
-Consequential behavior belongs to owning systems. UI, adapters, tests, examples, and reports must not become alternate mutation paths.
-
-See `STATUS.md` for current domain coverage, `ARCHITECTURE.md` for technical contracts, and `TESTING.md` for verification and gameplay-evidence contracts.
-
-## Documentation authority
+## Authority map
 
 | Question | Authority |
 | --- | --- |
-| How should repository work proceed? | `AGENTS.md` |
-| What is the implemented ownership and execution model? | `ARCHITECTURE.md` |
-| What capability currently exists or is excluded? | `STATUS.md` |
-| How are tests and gameplay evidence selected? | `TESTING.md` |
-| What player experience and product behavior are intended? | `GAME_DESIGN.md` |
-| What behavior is executable now? | Owning source module and tests |
+| How should repository work proceed? | [`AGENTS.md`](AGENTS.md) |
+| Who owns state and how may it change? | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| What exists or is excluded? | [`STATUS.md`](STATUS.md) |
+| How is behavior proved? | [`TESTING.md`](TESTING.md) |
+| What experience is intended? | [`GAME_DESIGN.md`](GAME_DESIGN.md) |
+| What behavior is executable? | Owning `src/` module and focused tests |
 
-If these current authorities disagree about the same subject, treat the disagreement as a defect. Resolve it in the owning document and implementation rather than selecting the convenient description.
+If two authorities disagree about the same contract, repair the owning document and implementation. Do not resolve the conflict by choosing the more convenient wording.
 
-## Verification
+## Implemented shape
 
-Use the smallest focused test while editing. The one-command local gate runs the whole fast
-completion contract with clear per-stage output and timing:
+The library has three important layers:
 
-```text
-.\scripts\verify.cmd
-```
+- `Registry` contains immutable, Rust-authored definitions.
+- `AppState` contains serializable mutable campaign state, typed IDs, clocks, and state-owned random streams.
+- Domain systems validate requests, commit mutations, and maintain their owned indexes and records.
 
-The `verify.cmd` shim invokes the same `verify.ps1` gate with a process-local PowerShell execution
-policy, so the documented command also works on machines that block direct `.ps1` invocation.
+The canonical execution boundary is [`core::simulation::run_tick`](src/core/simulation.rs). It advances one simulated minute and processes due work in a deterministic order. External adapters, the gameplay harness, tests, and reports observe or request behavior through the same production systems; they do not create alternate mutation paths.
 
-It runs the four canonical steps below in order, stops at the first failing stage, and exits
-non-zero on failure. Build parallelism is cargo-autodetected; pass `-Jobs N` to cap it when you want
-to leave the machine quieter. The same four steps, run raw, are:
+The source ownership map and mutation patterns are in [`ARCHITECTURE.md`](ARCHITECTURE.md). The current domain list and exclusions are in [`STATUS.md`](STATUS.md).
 
-```text
-cargo fmt --check
-cargo clippy --locked --lib --example gameplay_harness -- -D warnings
-cargo test --locked --all-targets --quiet
-cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
-```
+## Local verification
 
-The local completion gate above is the authoritative routine verification path. It compiles every
-target through the all-target test pass, marks the controlled smoke contract as an explicit ignored
-test, and runs it immediately afterward with focused output. Before that smoke run it also lists the
-harness's ignored tests and fails closed unless the smoke contract is exactly selectable, so a
-renamed/removed contract cannot silently erase the stage; `.\scripts\verify.ps1 -SelfTest` runs that
-selection check alone. Clippy intentionally covers production
-library code and the gameplay harness; the all-target test pass owns test-target compilation so the
-gate does not build the same test targets twice. No hosted runner or GitHub Actions workflow is part
-of verification. The routine gate does not run the long-form narrative batch or an optimized build
-on every change.
-Use the smoke harness for normal iteration. Running the example without a mode is also a fast
-smoke run; full calibration is always explicit:
+Use the narrowest lane that proves the change, then run the completion gate before handoff.
 
-```text
-cargo run --locked --quiet --example gameplay_harness -- --mode smoke
-```
+| Need | Command |
+| --- | --- |
+| Focus one library test | `cargo test-focused <filter>` |
+| Check library code | `cargo check-fast` |
+| Check the gameplay harness | `cargo check-harness` |
+| Run fast library tests | `cargo test-fast` |
+| Run the deterministic invariant soak | `cargo soak` |
+| Run the canonical harness smoke | `cargo harness-smoke` |
+| Run the full local gate | `.\scripts\verify.cmd` |
 
-The repository also provides Cargo aliases for the short loops:
+On Windows PowerShell, use `.\scripts\verify.cmd`; the script accepts `-Jobs N` to cap Cargo parallelism. `.\scripts\verify.cmd -Fast` is the short library lane, and `.\scripts\verify.cmd -Fast -Harness` is the short harness lane. These omit the broad Clippy/all-target work that belongs to the completion gate.
+
+The completion gate is owned by [`scripts/verify.ps1`](scripts/verify.ps1) and wrapped by [`scripts/verify.cmd`](scripts/verify.cmd). It runs formatting, strict library/harness Clippy, all-target tests, and the exact ignored harness smoke contract. Verification is local; hosted runners and GitHub Actions are not project authorities.
+
+When optimized compilation can change the relevant behavior, also run `cargo test --release --locked`.
+
+## Gameplay harness
+
+The harness is a bounded deterministic evaluation surface, not a human-play or UX test. Smoke is the normal iteration path:
 
 ```text
-cargo check-fast
-cargo check-harness
-cargo lint-fast
-cargo lint-harness
-cargo test-fast
-cargo soak
-cargo harness-smoke
-cargo harness-rush
-cargo harness-press
-cargo harness-recon
+cargo harness
 cargo harness -- --mode smoke --strategy press
 ```
 
-`cargo check-fast` and `cargo lint-fast` cover only the production library for the shortest edit
-loop. Run their `*-harness` counterparts when changing the example adapter or harness code.
-`cargo test-fast` skips only the named invariant soak; `cargo soak` runs that deliberate stress
-check explicitly, while the normal `cargo test` gate still includes it. Focused `--strategy` smoke
-runs skip the independent legal-foundation probe; the default smoke run and completion gate still execute it.
-
-When iterating on one policy branch, focus the smoke run without changing the default completion contract:
+Full comparison is explicit and bounded:
 
 ```text
-cargo run --locked --quiet --example gameplay_harness -- --mode smoke --strategy press
+cargo harness-full --samples 8
 ```
 
-When a change can differ under optimized compilation, especially assertions, indexing, arithmetic, or persistence-sensitive runtime behavior, also run:
-
-```text
-cargo test --release --locked
-```
-
-The explicit gameplay/integration lane is the controlled/calibration harness:
-
-```text
-cargo run --locked --example gameplay_harness -- --mode full --samples 8
-```
-
-`--samples` must be between 1 and 64. Full mode defaults to three samples, the minimum that
-exercises all three authored fixture variations; use a larger explicit count for deeper sensitivity
-evidence. Smoke accepts `--strategy all|rush|press|recon`; full mode always runs every strategy for
-matched comparison. `--seed` accepts a hexadecimal value and keeps matched
-strategy branches on the same simulation seed. The harness uses synthetic authored scenarios
-through production mutation paths, keeps player-visible policy inputs separate from `[DEV AUDIT]`
-diagnostics, and provides bounded deterministic strategy/sensitivity evidence rather than a
-natural-play or human-UX verdict. Full mode is deliberately more verbose and expensive; smoke mode
-is the local fast path. Each seed selects a small authored fixture variation, shared by all
-strategy branches for that seed, so batches exercise more than one fixed venue and patrol rhythm.
-The RUSH/PRESS burglary schedule also rotates with the simulation seed inside the authored patrol
-window, so each fixture runs a slightly different timing interplay instead of repeating the same
-minute forever. The harness validates structural and registry-aware state after setup and at every
-consequential observation boundary; fully routine minutes are not revalidated on each tick.
-Narrative sessions observe two simulated days of routine ticks; the press branch's player-run
-defector watch starts after its cold-case wait and can finish a short way past that boundary.
-Within that window every narrative branch also discovers a reopened second score at the same
-canonical minute, and the branches then diverge on purpose: RUSH rebuilds its lost crew through
-canonical executive recruitment and works the score in the morning lull, RECON re-invests in fresh
-surveillance and a patrol-safe window, and PRESS deliberately lets the score lapse as the price of
-standing down. Act-2 liquidation cash stays outside the branch-matched legitimate/enterprise
-financial comparison, so those nets remain identical across strategies.
-Batch sensitivity runs observe one day so repeated routine ticks do not dominate the evidence or runtime.
+Smoke accepts `all`, `rush`, `press`, or `recon`; full mode compares all strategies on matched seeds. The acting policy uses player-visible information and surfaced decisions. Developer-audit diagnostics do not feed action selection. See [`TESTING.md`](TESTING.md) for evidence rules and mode semantics.

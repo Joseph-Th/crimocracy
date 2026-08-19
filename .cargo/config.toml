@@ -3,6 +3,7 @@
 check-fast = ["check", "--locked", "--lib"]
 # Compile the gameplay harness explicitly when its adapter-facing surface changed.
 check-harness = ["check", "--locked", "--example", "gameplay_harness"]
+check-tests = ["check", "--locked", "--tests"]
 lint-fast = [
     "clippy",
     "--locked",
@@ -29,6 +30,7 @@ test-fast = [
     "--skip",
     "test_mixed_scenario_soak_preserves_invariants",
 ]
+test-focused = ["test", "--locked", "--lib", "--quiet"]
 soak = [
     "test",
     "--locked",
@@ -86,4 +88,16 @@ harness-recon = [
     "--strategy",
     "recon",
 ]
+# Default smoke run; pass example arguments after `--` when using this raw alias.
 harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
+# Full controlled comparison; alias arguments are already forwarded to the example.
+harness-full = [
+    "run",
+    "--locked",
+    "--quiet",
+    "--example",
+    "gameplay_harness",
+    "--",
+    "--mode",
+    "full",
+]

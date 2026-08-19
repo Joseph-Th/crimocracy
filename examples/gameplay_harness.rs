@@ -7,11 +7,10 @@
 //! Narrative sessions also run a player-earned defector watch after an accepted defection: the
 //! organization watches every known rival through canonical surveillance and confirms where the
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
-//! Timeline constants are derived from the authored registry (operation durations, autonomous
-//! recruitment cadence, cold-case window) where possible so session timing tracks the game instead
-//! of hard-coded minutes drifting from authored content. Batch runs vary the simulation seed only;
-//! each seed also rotates the RUSH/PRESS burglary schedule and fixture variation so the flat policy
-//! treatments still exercise slightly different timing, while matched branches stay on the same seed.
+//! Timeline anchors are derived from the authored registry (operation duration, autonomous
+//! recruitment cadence, and cold-case window) so session timing tracks the game instead of a
+//! second hard-coded ruleset. Batch runs vary the simulation seed; each seed rotates the fixture
+//! and bounded policy timing while matched branches stay on the same scenario timeline.
 
 use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
@@ -111,21 +110,6 @@ const CASE_HEAT_CHECK_DELAY_MINUTES: u64 = 60;
 /// Small deterministic margin past the authored cold-case shelf instant so the narrative re-check
 /// observes a case the simulation has already shelved, without depending on in-tick scheduling.
 const COLD_CASE_RECHECK_SLACK_MINUTES: u32 = 10;
-/// The canonical narrative minute at which the organization begins to notice the reopened second
-/// score on the alternate target, after the first day's law-enforcement beat has settled. All
-/// narrative branches discover this opportunity at the same minute so the branch difference is
-/// purely what leadership does with it.
-const SECOND_OPPORTUNITY_DISCOVERY_MINUTE: u64 = 1_450;
-/// Player-visible validity window for the second opportunity, measured from the canonical discovery
-/// minute: discovery + 12 hours, past the second day's dawn so PRESS's standing-down discipline
-/// visibly costs the score during the cold-case wait.
-const SECOND_OPPORTUNITY_VALIDITY_MINUTES: u64 = 720;
-/// RUSH act 2 works the second score during the second day's morning lull (day-2 clock 09:20),
-/// deliberately outside every authored patrol window, with the rebuilt crew and no fresh recon.
-const RUSH_ACT2_SCHEDULE_MINUTE: u64 = 2_000;
-/// RECON act 2 re-runs surveillance on the alternate target, then picks the first patrol-safe
-/// start from the fresh report.
-const RECON_ACT2_SURVEILLANCE_MINUTE: u64 = 1_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HarnessMode {
@@ -483,6 +467,66 @@ impl ScenarioProfile {
     }
 }
 
+/// Evaluation-owned policy timing anchored to authored runtime values. These are not additional
+/// game rules: they describe when this controlled treatment chooses to act. Matched strategy
+/// branches receive the same timeline, while the seed-derived offsets keep batch runs from
+/// replaying one exact clock sequence forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenarioTimeline {
+    initial_burglary_at: SimTime,
+    initial_opportunity_valid_until: SimTime,
+    second_opportunity_discovery_at: SimTime,
+    second_opportunity_valid_until: SimTime,
+    rush_second_act_at: SimTime,
+    recon_second_act_surveillance_at: SimTime,
+}
+
+impl ScenarioTimeline {
+    fn for_scenario(registry: &Registry, seed: u64) -> Self {
+        let campaign_day_minutes = u64::from(
+            registry
+                .recruitment()
+                .autonomous_attempt_cadence()
+                .as_minutes(),
+        );
+        let burglary_duration = u64::from(
+            registry
+                .get_operation(OperationKind::Burglary)
+                .execution()
+                .duration()
+                .as_minutes(),
+        );
+        let policy_variant = (seed / 3) % 5;
+        let initial_burglary_at = 120 + 10 * (seed % 5);
+        let initial_opportunity_window =
+            (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60));
+        let second_opportunity_discovery_at = campaign_day_minutes
+            .saturating_add(10)
+            .saturating_add(policy_variant * 10);
+        let second_opportunity_window =
+            (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60));
+        let second_opportunity_valid_until =
+            second_opportunity_discovery_at.saturating_add(second_opportunity_window);
+        let rush_second_act_at = second_opportunity_discovery_at
+            .saturating_add(campaign_day_minutes * 3 / 8)
+            .saturating_add(policy_variant * 10);
+        let recon_second_act_surveillance_at = second_opportunity_discovery_at
+            .saturating_add(50)
+            .saturating_add(policy_variant * 5);
+
+        Self {
+            initial_burglary_at: SimTime::from_minutes(initial_burglary_at),
+            initial_opportunity_valid_until: SimTime::from_minutes(initial_opportunity_window),
+            second_opportunity_discovery_at: SimTime::from_minutes(second_opportunity_discovery_at),
+            second_opportunity_valid_until: SimTime::from_minutes(second_opportunity_valid_until),
+            rush_second_act_at: SimTime::from_minutes(rush_second_act_at),
+            recon_second_act_surveillance_at: SimTime::from_minutes(
+                recon_second_act_surveillance_at,
+            ),
+        }
+    }
+}
+
 struct Scenario<'registry> {
     registry: &'registry Registry,
     state: AppState,
@@ -510,6 +554,7 @@ struct Scenario<'registry> {
     enterprise: EnterpriseId,
     investigation: Option<crimocracy::core::id::InvestigationId>,
     variation: FixtureVariation,
+    timeline: ScenarioTimeline,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1581,7 +1626,7 @@ fn play_session(
             targets: BTreeSet::from([EntityRef::Business(scenario.target)]),
             source_information: BTreeSet::from([scenario.opportunity_information]),
             summary: scenario.variation.opportunity_summary().to_owned(),
-            valid_until: Some(SimTime::from_minutes(720)),
+            valid_until: Some(scenario.timeline.initial_opportunity_valid_until),
         },
     )?
     .commit(&mut scenario.state)?;
@@ -1647,7 +1692,7 @@ fn play_session(
     }
 
     let scheduled_for = match strategy {
-        Strategy::Rush | Strategy::Press => choose_burglary_schedule(seed),
+        Strategy::Rush | Strategy::Press => scenario.timeline.initial_burglary_at,
         Strategy::Recon => {
             let patrol_summary = learned_patrol_summary.as_deref().ok_or(
                 "recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
@@ -1662,6 +1707,7 @@ fn play_session(
                 patrol_summary,
                 duration,
                 SimDuration::from_minutes(60),
+                scenario.timeline.initial_opportunity_valid_until,
             )?;
             if narrative {
                 println!(
@@ -1987,7 +2033,7 @@ fn play_session(
             // branch does, while it is still standing down. The branch then deliberately schedules
             // nothing on it: the discipline that protects the open case is also an opportunity cost.
             if !metrics.second_opportunity_discovered {
-                let discovery_at = SimTime::from_minutes(SECOND_OPPORTUNITY_DISCOVERY_MINUTE);
+                let discovery_at = scenario.timeline.second_opportunity_discovery_at;
                 if scenario.state.now() < discovery_at {
                     run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
                 }
@@ -2072,7 +2118,7 @@ fn play_session(
         // lapse as the price of standing down (PRESS, which already discovered it during the
         // cold-case wait above). Batch sessions keep the single-act window for performance.
         if narrative && !metrics.second_opportunity_discovered {
-            let discovery_at = SimTime::from_minutes(SECOND_OPPORTUNITY_DISCOVERY_MINUTE);
+            let discovery_at = scenario.timeline.second_opportunity_discovery_at;
             if scenario.state.now() < discovery_at {
                 run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
             }
@@ -2129,6 +2175,7 @@ fn build_scenario(
 ) -> Result<Scenario<'_>, Box<dyn Error>> {
     let mut state = AppState::new(seed);
     let variation = FixtureVariation::from_seed(seed);
+    let timeline = ScenarioTimeline::for_scenario(registry, seed);
 
     let player = insert_organization(
         registry,
@@ -2638,6 +2685,7 @@ fn build_scenario(
         enterprise,
         investigation: None,
         variation,
+        timeline,
     };
     validate_harness_state(scenario.registry, &scenario.state)?;
     Ok(scenario)
@@ -2759,12 +2807,10 @@ fn discover_second_opportunity(
 ) -> Result<OpportunityId, Box<dyn Error>> {
     let discovered_at = scenario.state.now();
     debug_assert!(
-        discovered_at.as_minutes() >= SECOND_OPPORTUNITY_DISCOVERY_MINUTE,
-        "second opportunity discovery must not be authored earlier than its canonical minute"
+        discovered_at >= scenario.timeline.second_opportunity_discovery_at,
+        "second opportunity discovery must not be authored earlier than its scenario timeline"
     );
-    let valid_until = SimTime::from_minutes(
-        SECOND_OPPORTUNITY_DISCOVERY_MINUTE + SECOND_OPPORTUNITY_VALIDITY_MINUTES,
-    );
+    let valid_until = scenario.timeline.second_opportunity_valid_until;
     let opportunity = validate_discover_operation_opportunity(
         scenario.registry,
         &scenario.state,
@@ -2919,7 +2965,7 @@ fn run_second_act(
     match strategy {
         Strategy::Rush => {
             let replacement = recruit_replacement(scenario, narrative, metrics)?;
-            let scheduled_for = SimTime::from_minutes(RUSH_ACT2_SCHEDULE_MINUTE);
+            let scheduled_for = scenario.timeline.rush_second_act_at;
             let title = format!(
                 "{} second-score burglary",
                 scenario.variation.alternate_target_name()
@@ -2963,7 +3009,7 @@ fn run_second_act(
                 scenario,
                 EntityRef::Business(alternate_target),
                 &title,
-                SimTime::from_minutes(RECON_ACT2_SURVEILLANCE_MINUTE),
+                scenario.timeline.recon_second_act_surveillance_at,
             )?;
             run_until_operation_terminal(scenario, recon, narrative, metrics)?;
             let resolution = scenario
@@ -3009,6 +3055,7 @@ fn run_second_act(
                 patrol_summary,
                 duration,
                 SimDuration::from_minutes(60),
+                scenario.timeline.second_opportunity_valid_until,
             )?;
             if narrative {
                 println!(
@@ -4583,7 +4630,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - The delegation pillar is still routine-only: the delegated enterprise and legitimate front run on their authored cadence, but the fixtures never ask the player to re-scope a mandate, replace a delegated manager, or respond to manager drift."
     );
     println!(
-        "  - The RUSH/PRESS/RECON policies are calibration treatments; the act-1 burglary schedule and the authored fixture rotate with the simulation seed inside the same patrol window so each run exercises a slightly different evening timing, while the act-2 (second-wind) discovery and branch schedules are fixed canonical minutes that all seeds share so the branches stay directly comparable. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."
+        "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."
     );
 }
 
@@ -4605,15 +4652,6 @@ fn terminal_label(metrics: &RunMetrics) -> String {
     } else {
         format!("completed {:?}", metrics.outcome)
     }
-}
-
-/// A small, seed-derived burglary schedule ladder for the RUSH/PRESS matched branches. Every
-/// candidate lands inside every authored night-trap patrol window (the narrowest one opens at
-/// minute 120), so each fixture still exercises the same guarded-abort or decision exception
-/// while a different seed gets a slightly different timing interplay instead of repeating the
-/// same fixed minute forever.
-fn choose_burglary_schedule(seed: u64) -> SimTime {
-    SimTime::from_minutes(120 + 10 * (seed % 5))
 }
 
 /// Renders an absolute campaign minute as the clock time the player would see on a report.
@@ -4662,6 +4700,7 @@ fn choose_safe_start_from_patrol_report(
     report: &str,
     operation_duration: SimDuration,
     uncertainty_buffer: SimDuration,
+    latest_start: SimTime,
 ) -> Result<SimTime, HarnessContractError> {
     let windows = parse_patrol_windows(report);
     if windows.is_empty() {
@@ -4670,8 +4709,12 @@ fn choose_safe_start_from_patrol_report(
     let duration = u64::from(operation_duration.as_minutes());
     let buffer = u64::from(uncertainty_buffer.as_minutes());
     let earliest = now.as_minutes().saturating_add(1);
+    let latest = latest_start.as_minutes().saturating_sub(duration);
     let first_candidate = earliest.div_ceil(30).saturating_mul(30);
-    for candidate in (first_candidate..first_candidate.saturating_add(2_880)).step_by(30) {
+    for candidate in (first_candidate..=latest)
+        .step_by(30)
+        .take_while(|candidate| *candidate < first_candidate.saturating_add(2_880))
+    {
         let operation_start = candidate % 1_440;
         let operation_end = operation_start.saturating_add(duration);
         if operation_end > 1_440 {
@@ -4743,7 +4786,8 @@ mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
         run_opportunity_portfolio_probe, run_smoke, FixtureVariation, HarnessCliError,
-        HarnessContractError, HarnessMode, HarnessOptions, ScenarioProfile, Strategy, DEFAULT_SEED,
+        HarnessContractError, HarnessMode, HarnessOptions, ScenarioProfile, ScenarioTimeline,
+        Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
 
@@ -4882,6 +4926,7 @@ mod tests {
             "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy).",
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
+            SimTime::from_minutes(720),
         )
         .expect("actionable patrol text should produce a safe candidate");
 
@@ -4895,6 +4940,7 @@ mod tests {
             "Patrol activity was observed, but no recurring window was established.",
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
+            SimTime::from_minutes(720),
         )
         .expect_err("the harness must not infer a safe time from vague surveillance");
 
@@ -4902,6 +4948,20 @@ mod tests {
             error,
             HarnessContractError::NoActionablePatrolWindows
         ));
+    }
+
+    #[test]
+    fn refuses_a_patrol_safe_start_after_opportunity_expiry() {
+        let error = choose_safe_start_from_patrol_report(
+            SimTime::from_minutes(1),
+            "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy).",
+            SimDuration::from_minutes(45),
+            SimDuration::from_minutes(60),
+            SimTime::from_minutes(200),
+        )
+        .expect_err("planning must respect the player-visible opportunity deadline");
+
+        assert!(matches!(error, HarnessContractError::NoSafeOperationWindow));
     }
 
     #[test]
@@ -4928,6 +4988,33 @@ mod tests {
         assert_ne!(
             clockwork.neighborhood_economy(),
             quiet.neighborhood_economy(),
+        );
+    }
+
+    #[test]
+    fn scenario_timeline_is_seed_varied_and_registry_anchored() {
+        let registry = crimocracy::build_registry();
+        let first = ScenarioTimeline::for_scenario(&registry, 0);
+        let matched = ScenarioTimeline::for_scenario(&registry, 0);
+        let varied = ScenarioTimeline::for_scenario(&registry, 3);
+        let burglary_duration = registry
+            .get_operation(crimocracy::operations::OperationKind::Burglary)
+            .execution()
+            .duration();
+
+        assert_eq!(first, matched, "matched branches must share one timeline");
+        assert_ne!(
+            first, varied,
+            "batch policy timing must not replay one exact clock sequence"
+        );
+        assert!(first.initial_burglary_at < first.initial_opportunity_valid_until);
+        assert!(
+            first.rush_second_act_at + burglary_duration < first.second_opportunity_valid_until,
+            "the authored operation must fit inside the derived second-score window"
+        );
+        assert!(
+            first.recon_second_act_surveillance_at > first.second_opportunity_discovery_at,
+            "fresh recon must follow the player-visible opportunity discovery"
         );
     }
 

@@ -1,12 +1,15 @@
-# GAME DESIGN DOCUMENT
+# Game Design
 
 ## Untitled Crime Organization Simulation
 
+**Document role:** Product intent and player-experience authority
 **Document status:** Core design specification  
 **Genre:** Systemic crime-organization strategy / management simulation  
 **Primary mode:** Single-player  
 **Platform assumptions:** Desktop PC, mouse and keyboard first  
 **Technical implementation:** Rust, intentionally outside the scope of this document  
+
+This document describes the intended game, not the implemented foundation. Use [`STATUS.md`](STATUS.md) for current capability and [`ARCHITECTURE.md`](ARCHITECTURE.md) for executable ownership and contracts. Examples in this document clarify design intent; they are not implementation evidence.
 
 ---
 
@@ -27,8 +30,6 @@ The player should feel like the head of an organization, not its dispatcher, acc
 ---
 
 # 2. Design Thesis
-
-Earlier crime simulations often contained excellent systems but required the player to operate those systems at the same level of detail as the simulation itself. Detailed plans required detailed movement instructions. Large organizations required large quantities of repeated orders. Deep investigations were represented by opaque meters or unexplained failures. Expanding an empire often expanded the player's workload faster than their authority.
 
 This game separates four kinds of complexity:
 

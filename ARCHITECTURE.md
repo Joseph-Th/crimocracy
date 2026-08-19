@@ -1,6 +1,6 @@
 # Architecture
 
-This document owns Crimocracy's implemented ownership, mutation, determinism, persistence, and invariant contracts. `STATUS.md` owns supported scope; `GAME_DESIGN.md` owns product intent; `TESTING.md` owns verification and gameplay-evidence rules.
+This document owns Crimocracy's implemented ownership, mutation, determinism, persistence, and invariant contracts. Use [`STATUS.md`](STATUS.md) for scope, [`TESTING.md`](TESTING.md) for proof, and [`GAME_DESIGN.md`](GAME_DESIGN.md) for product intent.
 
 ## Program model
 
@@ -14,6 +14,20 @@ Crimocracy uses an explicit Registry / AppState / Record / System model.
 - **Adapters** own filesystem, process, network, UI, and other external effects. Core systems receive explicit data and return explicit outcomes.
 
 Static definitions describe what may exist. Runtime records describe what does exist. Mutable progress must not live in registry definitions, and generated future-affecting state must not be reconstructed plausibly after load when exact continuation requires persistence.
+
+## Runtime flow
+
+The normal execution path is:
+
+1. `content::build_registry` constructs validated immutable definitions.
+2. `AppState::new(seed)` creates serializable runtime state and state-owned RNG streams.
+3. A domain system validates a request or derives a read-only decision from the registry and state.
+4. The validated operation commits through its owning system, preserving records and indexes atomically.
+5. `core::simulation::run_tick` advances one simulated minute and resolves due work in stable order.
+6. Reports, `TickOutcome`, read-only projections, or adapter responses expose consequences without exposing hidden state as player knowledge.
+7. Persistence serializes the state envelope; load validates it before the state becomes trusted runtime state.
+
+Simulation speed is an adapter concern. Calling the tick more or less often changes elapsed wall time, not the semantics of one canonical simulated minute.
 
 ## Source map
 
