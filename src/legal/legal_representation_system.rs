@@ -1080,7 +1080,7 @@ mod tests {
             .set_next_raw_for_test(IdKind::Report, u32::MAX);
 
         let validated = {
-            let draft = representation_draft(&mut fixture, 12_000, None);
+            let draft = representation_draft(&fixture, 12_000, None);
             validate_retain_legal_representation(&fixture.state, draft)
                 .expect("read-only validation must ignore ID exhaustion")
         };

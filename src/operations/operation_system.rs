@@ -110,6 +110,11 @@ pub enum OperationError {
     },
     #[error("property-acquisition objective target {0:?} is not a business")]
     InvalidPropertyTarget(EntityRef),
+    #[error("objective {objective:?} cannot target administrative entity {target:?}")]
+    InvalidObjectiveTarget {
+        objective: OperationObjectiveKind,
+        target: EntityRef,
+    },
     #[error("operation objective target {0:?} is inactive")]
     InactiveObjectiveTarget(EntityRef),
     #[error(
@@ -595,12 +600,34 @@ pub(crate) fn is_valid_operation_objective(
                     *target,
                 )
         }
-        OperationObjective::ObtainCash { .. }
-        | OperationObjective::Frighten { .. }
-        | OperationObjective::DestroyEquipment { .. }
-        | OperationObjective::MoveContraband { .. }
-        | OperationObjective::RemovePerson { .. } => kind != OperationKind::Surveillance,
+        OperationObjective::ObtainCash { target }
+        | OperationObjective::Frighten { target }
+        | OperationObjective::DestroyEquipment { target } => {
+            kind != OperationKind::Surveillance && is_world_objective_target(*target)
+        }
+        OperationObjective::MoveContraband {
+            origin,
+            destination,
+        } => {
+            kind != OperationKind::Surveillance
+                && is_world_objective_target(*origin)
+                && is_world_objective_target(*destination)
+        }
+        OperationObjective::RemovePerson { .. } => kind != OperationKind::Surveillance,
     }
+}
+
+// Field actions may reference concrete world subjects and locations, never control-plane
+// records such as operations, investigations, evidence, accounts, decisions, or mandates.
+fn is_world_objective_target(target: EntityRef) -> bool {
+    matches!(
+        target,
+        EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Business(_)
+            | EntityRef::Enterprise(_)
+    )
 }
 
 fn validate_operation_objective(
@@ -637,9 +664,39 @@ fn validate_operation_objective(
             ));
         }
     }
-    if kind != OperationKind::Surveillance
-        && objective.kind() == OperationObjectiveKind::GatherInformation
-    {
+    if !is_valid_operation_objective(kind, objective) {
+        if objective.kind() == OperationObjectiveKind::AcquireProperty {
+            return Err(OperationError::InvalidObjectiveForKind {
+                kind,
+                objective: objective.kind(),
+            });
+        }
+        if objective.kind() == OperationObjectiveKind::GatherInformation {
+            return Err(OperationError::InvalidObjectiveForKind {
+                kind,
+                objective: objective.kind(),
+            });
+        }
+        let invalid_target = match objective {
+            OperationObjective::ObtainCash { target }
+            | OperationObjective::Frighten { target }
+            | OperationObjective::DestroyEquipment { target } => Some(*target),
+            OperationObjective::MoveContraband {
+                origin,
+                destination,
+            } => [*origin, *destination]
+                .into_iter()
+                .find(|target| !is_world_objective_target(*target)),
+            OperationObjective::RemovePerson { .. }
+            | OperationObjective::AcquireProperty { .. }
+            | OperationObjective::GatherInformation { .. } => None,
+        };
+        if let Some(target) = invalid_target {
+            return Err(OperationError::InvalidObjectiveTarget {
+                objective: objective.kind(),
+                target,
+            });
+        }
         return Err(OperationError::InvalidObjectiveForKind {
             kind,
             objective: objective.kind(),
@@ -1244,6 +1301,7 @@ mod tests {
     use crate::build_registry;
     use crate::core::attention::AttentionClass;
     use crate::core::entity::EntityRef;
+    use crate::core::id::MandateId;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
     use crate::core::time::SimTime;
@@ -1474,6 +1532,38 @@ mod tests {
                 character: leader,
                 first_role: RoleKind::Lookout,
                 second_role: RoleKind::Coordinator,
+            }
+        );
+        assert_eq!(state.operations().operations().count(), 0);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_rejects_administrative_records_as_field_objective_targets() {
+        let (registry, state, organization, leader, _) = make_test_operation_state();
+        let draft = OperationDraft {
+            title: "Invalid mandate intimidation".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Mandate(MandateId::from_raw(1)),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::ZERO,
+        };
+
+        let error = validate_authorize_operation(&registry, &state, draft)
+            .expect_err("field operations must not target internal mandate records");
+        assert_eq!(
+            error,
+            OperationError::InvalidObjectiveTarget {
+                objective: OperationObjectiveKind::Frighten,
+                target: EntityRef::Mandate(MandateId::from_raw(1)),
             }
         );
         assert_eq!(state.operations().operations().count(), 0);
