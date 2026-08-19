@@ -67,6 +67,11 @@ pub enum OperationError {
     },
     #[error("character {0} assigned to an operation is not active")]
     InactiveParticipant(CharacterId),
+    #[error("character {character} is already committed to overlapping operation {operation}")]
+    ParticipantBusy {
+        character: CharacterId,
+        operation: OperationId,
+    },
     #[error(
         "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
     )]
@@ -179,12 +184,13 @@ pub enum OperationError {
 }
 
 #[derive(Debug)]
-pub struct ValidatedOperation {
+pub struct ValidatedOperation<'registry> {
     draft: OperationDraft,
     expected_participant_versions: BTreeMap<CharacterId, u32>,
+    registry: &'registry Registry,
 }
 
-impl ValidatedOperation {
+impl<'registry> ValidatedOperation<'registry> {
     pub fn commit(self, state: &mut AppState) -> Result<OperationId, OperationError> {
         if state.now() > self.draft.scheduled_for {
             return Err(OperationError::AuthorizationExpired {
@@ -240,6 +246,21 @@ impl ValidatedOperation {
             return Err(OperationError::InvalidLeader {
                 leader: self.draft.leader,
                 organization: self.draft.responsible_organization,
+            });
+        }
+        let mut participants = BTreeSet::from([self.draft.leader]);
+        participants.extend(self.draft.roles.values().copied());
+        if let Some((character, operation)) = find_busy_participant(
+            self.registry,
+            state,
+            self.draft.responsible_organization,
+            &participants,
+            self.draft.kind,
+            self.draft.scheduled_for,
+        ) {
+            return Err(OperationError::ParticipantBusy {
+                character,
+                operation,
             });
         }
 
@@ -307,11 +328,11 @@ impl ValidatedOperation {
     }
 }
 
-pub fn validate_authorize_operation(
-    registry: &Registry,
+pub fn validate_authorize_operation<'registry>(
+    registry: &'registry Registry,
     state: &AppState,
     draft: OperationDraft,
-) -> Result<ValidatedOperation, OperationError> {
+) -> Result<ValidatedOperation<'registry>, OperationError> {
     if draft.title.trim().is_empty() {
         return Err(OperationError::EmptyTitle);
     }
@@ -402,6 +423,21 @@ pub fn validate_authorize_operation(
         }
         expected_participant_versions.insert(*participant, record.version());
     }
+    let mut participants = BTreeSet::from([draft.leader]);
+    participants.extend(role_participants.keys().copied());
+    if let Some((character, operation)) = find_busy_participant(
+        registry,
+        state,
+        draft.responsible_organization,
+        &participants,
+        draft.kind,
+        draft.scheduled_for,
+    ) {
+        return Err(OperationError::ParticipantBusy {
+            character,
+            operation,
+        });
+    }
     for information in &draft.intelligence {
         let record = state
             .intelligence
@@ -450,7 +486,69 @@ pub fn validate_authorize_operation(
     Ok(ValidatedOperation {
         draft,
         expected_participant_versions,
+        registry,
     })
+}
+
+fn find_busy_participant(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    participants: &BTreeSet<CharacterId>,
+    requested_kind: OperationKind,
+    requested_start: SimTime,
+) -> Option<(CharacterId, OperationId)> {
+    participants.iter().find_map(|participant| {
+        state
+            .operations
+            .operations_for_organization(organization)
+            .find(|operation| {
+                operation_uses_character(operation, *participant)
+                    && operation_windows_overlap(
+                        registry,
+                        operation,
+                        requested_kind,
+                        requested_start,
+                    )
+            })
+            .map(|operation| (*participant, operation.id()))
+    })
+}
+
+fn operation_uses_character(operation: &OperationRecord, character: CharacterId) -> bool {
+    operation.leader() == character
+        || operation
+            .roles()
+            .values()
+            .any(|participant| *participant == character)
+}
+
+fn operation_windows_overlap(
+    registry: &Registry,
+    existing: &OperationRecord,
+    requested_kind: OperationKind,
+    requested_start: SimTime,
+) -> bool {
+    if matches!(
+        existing.status(),
+        OperationStatus::Completed | OperationStatus::Aborted
+    ) {
+        return false;
+    }
+    let existing_start = existing.started_at().unwrap_or(existing.scheduled_for());
+    let existing_duration = registry
+        .get_operation(existing.kind())
+        .execution()
+        .duration();
+    let existing_end = existing
+        .resolution_due_at()
+        .unwrap_or(existing_start + existing_duration);
+    let requested_end = requested_start
+        + registry
+            .get_operation(requested_kind)
+            .execution()
+            .duration();
+    requested_start < existing_end && existing_start < requested_end
 }
 
 pub(crate) fn is_information_subject_relevant(
@@ -1379,6 +1477,106 @@ mod tests {
             }
         );
         assert_eq!(state.operations().operations().count(), 0);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_rejects_overlapping_participant_assignment_until_prior_operation_is_terminal() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let first = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("first operation should validate")
+        .commit(&mut state)
+        .expect("first operation should commit");
+
+        let error = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect_err("one person must not be scheduled for overlapping operations");
+        assert_eq!(
+            error,
+            OperationError::ParticipantBusy {
+                character: leader,
+                operation: first,
+            }
+        );
+        assert_eq!(state.operations().operations().count(), 1);
+
+        validate_authority_abort_operation(&state, first)
+            .expect("the first operation should be cancellable before start")
+            .commit(&mut state)
+            .expect("the cancellation should commit");
+        validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("terminal operations must release their participants");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_allows_non_overlapping_future_assignment() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let first = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("first operation should validate")
+        .commit(&mut state)
+        .expect("first operation should commit");
+        let mut later = make_test_draft(organization, leader, target);
+        later.scheduled_for = state
+            .operations()
+            .get_operation(first)
+            .expect("first operation should persist")
+            .scheduled_for()
+            + registry
+                .get_operation(OperationKind::Intimidation)
+                .execution()
+                .duration();
+
+        validate_authorize_operation(&registry, &state, later)
+            .expect("a future operation after the prior window should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_commit_rechecks_participant_availability_after_validation() {
+        let (registry, mut state, organization, leader, target) = make_test_operation_state();
+        let first = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("first operation should validate");
+        let second = validate_authorize_operation(
+            &registry,
+            &state,
+            make_test_draft(organization, leader, target),
+        )
+        .expect("the second plan can validate against the same initial snapshot");
+        let first_id = first
+            .commit(&mut state)
+            .expect("the first plan should commit");
+
+        let error = second
+            .commit(&mut state)
+            .expect_err("commit must recheck a participant reservation created after validation");
+        assert_eq!(
+            error,
+            OperationError::ParticipantBusy {
+                character: leader,
+                operation: first_id,
+            }
+        );
+        assert_eq!(state.operations().operations().count(), 1);
         validate_invariants(&state);
     }
 

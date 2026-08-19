@@ -19,7 +19,7 @@ This document is the scope authority for the implemented Crimocracy foundation. 
 | Intelligence | Provenance-bearing information, typed topics, holder indexes, transfers, and lineage | `src/intelligence/`; `intelligence_system` |
 | Reports and history | Player-facing reports, executive briefs, financial reports, and entity-linked campaign events | `src/reports/`, `src/history/` |
 | Finance | Typed accounts and balanced multi-account ledger transactions | `src/finance/`; `finance_system` |
-| Operations | Semantic plans, objectives, approaches, roles, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, and property disposition | `src/operations/`; `operation_system` and `operation_execution` |
+| Operations | Semantic plans, objectives, approaches, roles, participant availability reservations, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, and property disposition | `src/operations/`; `operation_system` and `operation_execution` |
 | Opportunities | Information-backed discovery, open/dismissed/expired/converted lifecycle, provenance, and operation conversion | `src/opportunities/`; `opportunity_system` |
 | Decisions | Durable typed requests, recipient/context indexes, versioned resolution, and attention classes | `src/decisions/`; `decision_system` |
 | Delegation | Organization-owned mandates, responsibility scopes, policy overrides, budget authority, revision, revocation, and dependency checks | `src/delegation/`; `delegation_system` |
@@ -46,7 +46,7 @@ The current foundation does not model:
 
 - detailed city geography, transport topology, population simulation, broad institution networks, supply chains, inventory quantities, acquisition pricing, market competition, or dynamic citywide supply and demand;
 - broader employment, wages, family ties, secrets, injuries, general character needs, specialist affiliations, or universal autonomous behavior;
-- delegated role staffing, broad resource competition, diplomacy, territory strategy, multi-step rival planning, or general campaign-pressure generation;
+- delegated role staffing, broad resource competition beyond overlapping character assignments, diplomacy, territory strategy, multi-step rival planning, or general campaign-pressure generation;
 - reusable equipment and vehicles, tactical movement, combat control, pursuit, dispatch capacity, casualties, injuries, asset damage, or condition-specific tactical consequences;
 - autonomous investigative lead generation beyond the modeled evidence review and case-graph work, case merging, charging, bail, trial, conviction, acquittal, court procedure, corruption, political procedure, press behavior, or labor institutions;
 - a universal approval flag, generic legal-pressure meter, or generic mission-card generator. Modeled approvals, legal pressure, and opportunities remain typed and domain-owned.

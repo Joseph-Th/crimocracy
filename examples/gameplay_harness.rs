@@ -58,7 +58,7 @@ use crimocracy::legal::{
     JurisdictionDraft, LegalRepresentationDraft, PatrolDeploymentDraft, PatrolWindow,
     ProsecutionCaseDraft,
 };
-use crimocracy::operations::operation_system::validate_authorize_operation;
+use crimocracy::operations::operation_system::{validate_authorize_operation, OperationError};
 use crimocracy::operations::property_disposition::{
     validate_dispose_property, PropertyDispositionDraft,
 };
@@ -931,6 +931,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
     run_opportunity_portfolio_probe(&registry, seed)?;
+
+    println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
+    run_organizational_capacity_probe(&registry, seed)?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;
@@ -3348,6 +3351,138 @@ fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(),
     Ok(())
 }
 
+/// Proves that characters are a scarce organizational resource rather than infinitely reusable
+/// stat bundles. The probe attempts to commit one specialist to overlapping jobs, observes the
+/// typed rejection without mutating state, then retries after the first job reaches a terminal
+/// state and confirms that the specialist is available again.
+fn run_organizational_capacity_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let first_start = scenario.timeline.initial_burglary_at;
+    let target = scenario.target;
+    let opportunity_information = scenario.opportunity_information;
+    let burglar = scenario.burglar;
+    let first = authorize_burglary(
+        &mut scenario,
+        Strategy::Rush,
+        target,
+        "capacity probe first burglary",
+        first_start,
+        BTreeSet::from([opportunity_information]),
+        burglar,
+    )?;
+    let overlapping_start = first_start + SimDuration::from_minutes(1);
+    let overlapping = validate_authorize_operation(
+        registry,
+        &scenario.state,
+        OperationDraft {
+            title: "capacity probe overlapping burglary".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: scenario.player,
+            leader: scenario.boss,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(scenario.alternate_target),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, scenario.boss),
+                (RoleKind::EntrySpecialist, burglar),
+            ]),
+            intelligence: BTreeSet::from([scenario.alternate_opportunity_information]),
+            constraints: Vec::new(),
+            contingencies: vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+            scheduled_for: overlapping_start,
+        },
+    )
+    .expect_err("overlapping specialist assignments must be rejected");
+    let overlapping_debug = format!("{overlapping:?}");
+    let expected_rejection = matches!(
+        overlapping,
+        OperationError::ParticipantBusy {
+            character,
+            operation,
+        } if character == burglar && operation == first
+    );
+    if !expected_rejection {
+        return Err(format!(
+            "capacity probe returned the wrong rejection for overlapping specialist: observed {overlapping_debug}, expected ParticipantBusy {{ character: {burglar:?}, operation: {first:?} }}"
+        )
+        .into());
+    }
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[CAPACITY] {} was reserved for the first burglary; the overlapping second plan was rejected as {:?} without changing authoritative state.",
+        scenario
+            .state
+            .world()
+            .get_character(scenario.burglar)
+            .expect("capacity-probe specialist must persist")
+            .name(),
+        overlapping_debug,
+    );
+
+    let mut first_metrics = RunMetrics {
+        strategy: Some(Strategy::Rush),
+        variation: Some(scenario.variation),
+        burglary: Some(first),
+        ..RunMetrics::default()
+    };
+    run_until_operation_terminal(&mut scenario, first, false, &mut first_metrics)?;
+    capture_terminal_status(&scenario, first, &mut first_metrics);
+    let released_start = scenario.state.now() + SimDuration::ONE_MINUTE;
+    let alternate_target = scenario.alternate_target;
+    let alternate_opportunity_information = scenario.alternate_opportunity_information;
+    let second = authorize_burglary(
+        &mut scenario,
+        Strategy::Rush,
+        alternate_target,
+        "capacity probe released burglary",
+        released_start,
+        BTreeSet::from([alternate_opportunity_information]),
+        burglar,
+    )?;
+    let mut second_metrics = RunMetrics {
+        strategy: Some(Strategy::Rush),
+        variation: Some(scenario.variation),
+        burglary: Some(second),
+        ..RunMetrics::default()
+    };
+    run_until_operation_terminal(&mut scenario, second, false, &mut second_metrics)?;
+    capture_terminal_status(&scenario, second, &mut second_metrics);
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[CAPACITY] After the first burglary became {}, {} was released and the second plan authorized at minute {} (terminal {}).",
+        terminal_label(&first_metrics),
+        scenario
+            .state
+            .world()
+            .get_character(scenario.burglar)
+            .expect("capacity-probe specialist must persist")
+            .name(),
+        released_start.as_minutes(),
+        terminal_label(&second_metrics),
+    );
+    Ok(())
+}
+
+fn capture_terminal_status(scenario: &Scenario, operation: OperationId, metrics: &mut RunMetrics) {
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("capacity-probe operation must remain queryable");
+    metrics.aborted = record.status() == OperationStatus::Aborted;
+    metrics.outcome = record
+        .resolution()
+        .map(|resolution| resolution.objective_outcome());
+    if metrics.aborted {
+        let abort = record
+            .abort_record()
+            .expect("aborted capacity-probe operation must retain its cause");
+        metrics.abort_phase = Some(abort.phase());
+        metrics.abort_cause = Some(abort.cause());
+    }
+}
+
 fn run_until_operation_terminal(
     scenario: &mut Scenario,
     operation: OperationId,
@@ -3787,7 +3922,12 @@ fn observe_tick(
                 .reports()
                 .get_report(report)
                 .expect("executive brief must persist");
-            print_report_condensed("BRIEF GENERATED", report);
+            println!(
+                "[BRIEF GENERATED] {}: executive brief with {} player-visible entr{}; full brief appears in the final recap.",
+                stamp(outcome.now.as_minutes()),
+                report.entries().len(),
+                if report.entries().len() == 1 { "y" } else { "ies" },
+            );
         }
     }
     if tick_changed_observable_state(outcome) {
@@ -4621,7 +4761,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - The consequence arc now closes: an open case can be read, outlasted by standing down, and verified shelved. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
-        "  - The portfolio probe now covers prioritization and expiry across competing opportunities, but it still uses one operation type and does not test resource contention between simultaneous crews."
+        "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion. Broader resource competition remains outside this foundation."
     );
     println!(
         "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."

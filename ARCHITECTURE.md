@@ -44,7 +44,7 @@ Every `src/` subsystem owns its records and canonical mutation paths and is vali
 | `reports/` | Player-facing reports and synthesized briefs/financial reports | `report_system` validates and inserts; synthesis modules build artifacts |
 | `history/` | Durable entity-linked campaign events | `history_system` owns insertion/indexing |
 | `finance/` | Typed monetary accounts and balanced ledger | `finance_system` owns every financial mutation, including multi-account transactions |
-| `operations/` | Semantic operation plans, execution records, surveillance/police/property integrations | `operation_system` authorizes and commits lifecycle; `operation_execution` resolves outcomes deterministically |
+| `operations/` | Semantic operation plans, execution records, participant availability reservations, surveillance/police/property integrations | `operation_system` authorizes and commits lifecycle; `operation_execution` resolves outcomes deterministically |
 | `opportunities/` | Provenance-backed operation opportunities with lifecycle | `opportunity_system` owns discovery and lifecycle transitions |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` owns request resolution |
 | `delegation/` | Persistent manager mandates and responsibility indexes | `delegation_system` owns assignment, revision, revocation, policy resolution |
@@ -123,11 +123,12 @@ The state model preserves at least these invariant classes:
 5. Multi-record operations commit completely or not at all.
 6. Generated IDs, handles, events, and durable outcomes always have an owner and valid location.
 7. Deterministic selection uses stable ordering and tie-breaking.
-8. Static definitions contain no mutable runtime state.
-9. Save/load preserves all future-affecting state.
-10. Derived counters, summaries, caches, and projections agree with source records.
-11. External effects cross explicit adapter boundaries.
-12. Rejected operations preserve authoritative state except for explicitly modeled diagnostics or audit records.
+8. A character cannot be assigned to overlapping non-terminal operations; terminal operations release the participant.
+9. Static definitions contain no mutable runtime state.
+10. Save/load preserves all future-affecting state.
+11. Derived counters, summaries, caches, and projections agree with source records.
+12. External effects cross explicit adapter boundaries.
+13. Rejected operations preserve authoritative state except for explicitly modeled diagnostics or audit records.
 
 Maintain `validate_invariants(state)` for cheap structural checks and add the relevant assertion when adding a new invariant. The deterministic soak exercises mixed state under invariant validation; `TESTING.md` owns how it is run.
 

@@ -55,7 +55,7 @@ RUSH, PRESS, and RECON use the same seed-selected authored fixture and authored-
 
 `--samples` varies the simulation/world seed and bounded policy timing offsets and is bounded to 1..=64. Matched branches use the same seed, fixture, and timeline. Per-run events and `RunMetrics` are raw evidence beneath aggregate diagnostics; aggregate output is not a universal game-quality score or a human-UX verdict. Persisted evaluation artifacts must retain per-run seeds and raw metrics beneath derived findings.
 
-Structural and registry-aware validation runs at setup and consequential observation boundaries. Routine minutes are not revalidated on every tick. The harness also checks the narrative defection-surveillance and second-wind contracts described by its production scenarios; changes to those contracts require updating this section and the focused harness tests together.
+Structural and registry-aware validation runs at setup and consequential observation boundaries. Routine minutes are not revalidated on every tick. The harness also checks the narrative defection-surveillance, second-wind, opportunity-prioritization, and organizational-capacity contracts described by its production scenarios; changes to those contracts require updating this section and the focused harness tests together. The capacity probe proves that overlapping assignments are rejected atomically and become available after the prior operation reaches a terminal state.
 
 ## Completion checklist
 
