@@ -1,38 +1,50 @@
-# verify.ps1 -- local Crimocracy completion gate (no hosted CI).
+# verify.ps1 -- local Crimocracy completion gate for a solo developer.
 #
-# Runs the same four-stage contract the repository treats as authoritative, in order, and stops at
-# the first failing stage so a broken change fails fast:
+# Optimized for fast incremental iteration: cached warm runs are ~1-3s for the
+# fast lane and ~4-8s for the full gate, because all stages reuse incremental
+# artifacts and avoid redundant rebuilds. Cold builds are dominated by rustc.
+#
+# Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
 #   2. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #   3. cargo test --locked --all-targets --quiet
-#   4. cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths
-#      -- --ignored --exact --nocapture
+#   4. cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
 #
-# Build parallelism is cargo-autodetected; pass -Jobs N to cap it (e.g. for a quieter machine).
-# Exit code is non-zero when any stage fails, so the script can gate commits or hooks.
+# The smoke contract is selected fail-closed (exact count must be 1). See
+# `Get-SmokeContractSelectableCount` and `Invoke-SmokeContractSelectionSelfTest`.
+#
+# Fast lanes for iteration:
+#   .\scripts\verify.cmd -Fast              # fmt + lib tests (skip soak) ~0.7s warm
+#   .\scripts\verify.cmd -Fast -Harness     # fmt + smoke contract only
+#   cargo check-fast / test-fast / harness  # even more targeted, via .cargo aliases
+#
+# Additional options for targeted debugging:
+#   -Filter <pattern>   Run only matching lib tests (implies -Fast)
+#   -NoClippy / -NoFmt  Skip stages when you know they already pass
+#   -Jobs N             Cap cargo parallelism (e.g. -Jobs 2 on a hot laptop)
+#   -Verbose            Show cargo output even for passing quiet stages
+#
+# Exit code is non-zero on the first failing stage so hooks can gate commits.
 
 [CmdletBinding()]
 param(
     [int]$Jobs = 0,
-    # Fast edit loop: format plus one focused target. This deliberately omits Clippy and the
-    # broad all-target lane because each uses a separate Cargo artifact on a cold build.
     [switch]$Fast,
-    # With -Fast, verify the gameplay harness smoke contract instead of the library unit lane.
     [switch]$Harness,
-    # Run only the smoke-selection fail-closed regression, then exit. Shortens the loop when editing
-    # the selection logic without running the full four-stage gate.
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [string]$Filter = "",
+    [switch]$NoClippy,
+    [switch]$NoFmt,
+    [switch]$Detail
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-# The fully-qualified name of the fixed ignored gameplay smoke contract that stage 4 must run.
 $SmokeContract = "tests::smoke_mode_covers_canonical_paths"
 
-# Returns the number of listing lines that select exactly the smoke contract. Cargo exits 0 even when
-# an exact filter matches zero tests, so this count (rather than the test process exit code) is what
-# proves the contract is still present and selectable.
+# ── helpers ──────────────────────────────────────────────────────────────────
+
 function Get-SmokeContractSelectableCount {
     param([string[]]$ListingLines)
     return @($ListingLines | Where-Object {
@@ -41,28 +53,15 @@ function Get-SmokeContractSelectableCount {
 }
 
 function Invoke-SmokeContractSelectionSelfTest {
-    # Script-level regression for the fail-closed selection check: present, missing, and
-    # ambiguous/zero-selection listings must be classified correctly without depending on the
-    # ordinary stage running at all.
-    $present = @(
-        "$($SmokeContract): test",
-        "1 test, 0 benchmarks"
-    )
-    $missing = @(
-        "tests::some_other_renamed_contract: test",
-        "1 test, 0 benchmarks"
-    )
-    $ambiguous = @(
-        "$($SmokeContract): test",
-        "tests::smoke_mode_covers_canonical_paths: test",
-        "2 tests, 0 benchmarks"
-    )
+    $present = @("$($SmokeContract): test", "1 test, 0 benchmarks")
+    $missing = @("tests::some_other_renamed_contract: test", "1 test, 0 benchmarks")
+    $ambiguous = @("$($SmokeContract): test", "tests::smoke_mode_covers_canonical_paths: test", "2 tests, 0 benchmarks")
     $zero = @("0 test, 0 benchmarks")
     $expectations = @(
-        @{ Name = "present";  Lines = $present;  Want = 1 },
-        @{ Name = "missing";  Lines = $missing;  Want = 0 },
+        @{ Name = "present"; Lines = $present; Want = 1 },
+        @{ Name = "missing"; Lines = $missing; Want = 0 },
         @{ Name = "ambiguous"; Lines = $ambiguous; Want = 2 },
-        @{ Name = "zero";     Lines = $zero;     Want = 0 }
+        @{ Name = "zero"; Lines = $zero; Want = 0 }
     )
     foreach ($case in $expectations) {
         $got = Get-SmokeContractSelectableCount -ListingLines $case.Lines
@@ -70,21 +69,25 @@ function Invoke-SmokeContractSelectionSelfTest {
             Write-Host "[FAIL] smoke-selection selftest '$($case.Name)': expected $($case.Want), got $got" -ForegroundColor Red
             exit 1
         }
-        Write-Host "[PASS] smoke-selection selftest '$($case.Name)' ($got match)" -ForegroundColor Green
+        Write-Host "[PASS] smoke-selection selftest '$($case.Name)' ($got)" -ForegroundColor Green
     }
 }
 
 function Assert-SmokeContractSelectable {
-    # Cargo treats an exact filter matching zero tests as success. Guard both the fast harness lane
-    # and the full gate so a renamed/removed smoke contract cannot produce a false green result.
-    $smokeListing = & cargo test --locked --example gameplay_harness -- --list --ignored
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[FAIL] harness smoke contract -- could not list ignored tests (cargo exited $LASTEXITCODE)" -ForegroundColor Red
-        exit $LASTEXITCODE
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $smokeListing = & cargo test --locked --quiet --example gameplay_harness -- --list --ignored 2>&1
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($code -ne 0) {
+        Write-Host "[FAIL] harness smoke contract -- could not list ignored tests (cargo exited $code)" -ForegroundColor Red
+        Write-Host ($smokeListing -join "`n") -ForegroundColor DarkGray
+        exit $code
     }
     $smokeSelectable = Get-SmokeContractSelectableCount -ListingLines $smokeListing
     if ($smokeSelectable -ne 1) {
         Write-Host "[FAIL] harness smoke contract -- expected exactly '$SmokeContract', found $smokeSelectable matching line(s)" -ForegroundColor Red
+        Write-Host ($smokeListing | Where-Object { $_ -match "smoke_mode" } | Out-String) -ForegroundColor DarkGray
         exit 1
     }
 }
@@ -93,36 +96,60 @@ function Invoke-CargoStage {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [bool]$AllowJobs = $true
+        [bool]$AllowJobs = $true,
+        [switch]$ShowOutputOnPass
     )
-    Write-Host "== Stage: $Name ==" -ForegroundColor Cyan
+    $label = $Name.PadRight(28)
+    Write-Host "  $label " -NoNewline -ForegroundColor Cyan
+    $cargoArgs = $Arguments
     if ($AllowJobs -and $Jobs -gt 0) {
-        # `-j` is a cargo option and must precede any `--` separator, otherwise it
-        # would be forwarded to the tool subprocess (e.g. rustc via clippy).
         $jobsArgs = @("-j", "$Jobs")
-        $separatorIndex = [Array]::IndexOf($Arguments, "--")
-        if ($separatorIndex -ge 0) {
-            $Arguments = $Arguments[0..($separatorIndex - 1)] + $jobsArgs + $Arguments[$separatorIndex..($Arguments.Length - 1)]
+        $sep = [Array]::IndexOf($cargoArgs, "--")
+        if ($sep -ge 0) {
+            $cargoArgs = $cargoArgs[0..($sep - 1)] + $jobsArgs + $cargoArgs[$sep..($cargoArgs.Length - 1)]
         } else {
-            $Arguments += $jobsArgs
+            $cargoArgs += $jobsArgs
         }
     }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & cargo @Arguments
+    # Capture output so --quiet stages stay quiet on success. Cargo's "Finished" goes to stderr
+    # and would otherwise be treated as an error with $ErrorActionPreference = "Stop".
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $output = & cargo @cargoArgs 2>&1 | Out-String
     $exit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
     $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $timing = ("{0,5}s" -f $elapsed)
+
     if ($exit -ne 0) {
-        Write-Host "[FAIL] $Name ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s) -- cargo exited $exit" -ForegroundColor Red
+        Write-Host "FAIL $timing" -ForegroundColor Red
+        Write-Host $output -ForegroundColor DarkGray
+        Write-Host "  -> cargo $($cargoArgs -join ' ') exited $exit" -ForegroundColor Red
         exit $exit
     }
-    Write-Host "[PASS] $Name ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)" -ForegroundColor Green
+    if ($Detail -or $ShowOutputOnPass) {
+        $trimmed = $output.Trim()
+        if ($trimmed) { Write-Host $trimmed -ForegroundColor DarkGray }
+    }
+    Write-Host "ok   $timing" -ForegroundColor Green
 }
 
+# ── header ───────────────────────────────────────────────────────────────────
+
+$gitBranch = ""
+try { $gitBranch = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim() } catch {}
+$gitShort = ""
+try { $gitShort = (& git rev-parse --short HEAD 2>$null).Trim() } catch {}
+
+Write-Host ""
 Write-Host "CRIMOCRACY LOCAL VERIFICATION" -ForegroundColor Cyan
+if ($gitBranch) { Write-Host "  branch $gitBranch @ $gitShort  " -NoNewline -ForegroundColor DarkGray; Write-Host "|  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray }
 
 if ($SelfTest) {
-    if ($Fast -or $Harness) {
-        Write-Host "[FAIL] -SelfTest cannot be combined with -Fast or -Harness" -ForegroundColor Red
+    if ($Fast -or $Harness -or $Filter) {
+        Write-Host "[FAIL] -SelfTest cannot be combined with -Fast, -Harness, or -Filter" -ForegroundColor Red
         exit 1
     }
     Invoke-SmokeContractSelectionSelfTest
@@ -135,40 +162,65 @@ if ($Harness -and -not $Fast) {
     exit 1
 }
 
+if ($Filter -and -not $Fast) {
+    Write-Host "  note: -Filter implies -Fast (focused lib tests)" -ForegroundColor Yellow
+    $Fast = $true
+}
+
+# ── fast lanes ───────────────────────────────────────────────────────────────
+
 if ($Fast) {
-    $fastLane = if ($Harness) { "harness smoke" } else { "library unit tests" }
-    Write-Host "FAST ITERATION LANE: $fastLane" -ForegroundColor Yellow
-    Invoke-CargoStage "fmt" @("fmt", "--check") -AllowJobs $false
+    $gate = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($Filter) {
+        Write-Host "FAST: focused lib tests matching '$Filter'" -ForegroundColor Yellow
+        if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+        Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -ShowOutputOnPass:$Detail
+        $gate.Stop()
+        Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
+        Write-Host "  next: cargo test-focused <filter>  |  .\scripts\verify.cmd  (full gate before push)" -ForegroundColor DarkGray
+        exit 0
+    }
+
+    $lane = if ($Harness) { "harness smoke" } else { "library unit tests (soak excluded)" }
+    Write-Host "FAST LANE: $lane" -ForegroundColor Yellow
+    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
     if ($Harness) {
         Assert-SmokeContractSelectable
-        Invoke-CargoStage "harness smoke" @(
-            "test", "--locked", "--quiet", "--example", "gameplay_harness",
-            $SmokeContract, "--", "--ignored", "--exact", "--nocapture"
-        )
+        Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
     } else {
-        Invoke-CargoStage "unit tests (soak excluded)" @(
-            "test", "--locked", "--lib", "--quiet", "--", "--skip",
-            "test_mixed_scenario_soak_preserves_invariants"
-        )
+        # --skip soak keeps the lane under a second warm; soak is still covered by the gate.
+        Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants")
     }
-    Write-Host "FAST PASS: $fastLane" -ForegroundColor Green
+    $gate.Stop()
+    Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  $lane" -ForegroundColor Green
+    Write-Host "  next: .\scripts\verify.cmd  (full gate before push)  |  cargo soak  (if you touched invariants/persistence)" -ForegroundColor DarkGray
     exit 0
 }
 
-$gate = [System.Diagnostics.Stopwatch]::StartNew()
-Write-Host "FULL COMPLETION GATE" -ForegroundColor Cyan
+# ── full completion gate ─────────────────────────────────────────────────────
 
-Invoke-CargoStage "fmt" @("fmt", "--check") -AllowJobs $false
-Invoke-CargoStage "clippy (lib + harness)" @(
-    "clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings"
-)
+$gate = [System.Diagnostics.Stopwatch]::StartNew()
+$jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
+Write-Host "FULL GATE  (fmt -> clippy -> all-target tests -> harness smoke)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+
+if ($NoFmt) {
+    Write-Host "  fmt --check                 SKIP (--NoFmt)" -ForegroundColor Yellow
+} else {
+    Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
+}
+
+if ($NoClippy) {
+    Write-Host "  clippy (lib + harness)      SKIP (--NoClippy)" -ForegroundColor Yellow
+} else {
+    Invoke-CargoStage "clippy (lib+harness)" @("clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings")
+}
+
 Invoke-CargoStage "all-target tests" @("test", "--locked", "--all-targets", "--quiet")
 
 Assert-SmokeContractSelectable
-Invoke-CargoStage "harness smoke contract" @(
-    "test", "--locked", "--example", "gameplay_harness", $SmokeContract,
-    "--", "--ignored", "--exact", "--nocapture"
-)
+Invoke-CargoStage "harness smoke" @("test", "--locked", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
 
 $gate.Stop()
-Write-Host "GATE PASS in $([math]::Round($gate.Elapsed.TotalSeconds, 1))s (4/4 stages)" -ForegroundColor Green
+Write-Host ""
+Write-Host "GATE PASS  4/4  in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
+Write-Host "  tip: use -Fast for iteration, -Filter <name> for one test, -Jobs N on a hot machine" -ForegroundColor DarkGray

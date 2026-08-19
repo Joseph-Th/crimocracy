@@ -94,6 +94,9 @@ use crimocracy::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
+use std::time::Instant;
 
 const DEFAULT_BATCH_SAMPLES: u64 = 3;
 const MAX_BATCH_SAMPLES: u64 = 64;
@@ -129,12 +132,13 @@ impl HarnessMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct HarnessOptions {
     mode: HarnessMode,
     samples: u64,
     seed: u64,
     strategy: Option<Strategy>,
+    artifact_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -857,15 +861,18 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
 }
 
 fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
+    let wall_start = Instant::now();
     let HarnessOptions {
         mode,
         samples,
         seed,
         strategy,
+        artifact_dir,
     } = options;
     debug_assert_eq!(mode, HarnessMode::Full);
     debug_assert!(strategy.is_none());
     let registry = build_registry();
+    let artifact_dir = artifact_dir.unwrap_or_else(|| PathBuf::from("target/harness"));
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
@@ -940,8 +947,13 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
     println!("[BATCH] Running matched seeds for NIGHT TRAP...");
-    let (rush_aggregate, press_aggregate, recon_aggregate) =
-        run_strategy_batch(&registry, ScenarioProfile::NightTrap, samples, seed)?;
+    let (rush_aggregate, press_aggregate, recon_aggregate) = run_strategy_batch(
+        &registry,
+        ScenarioProfile::NightTrap,
+        samples,
+        seed,
+        Some(&artifact_dir),
+    )?;
     println!("[BATCH PASS] NIGHT TRAP matched-seed checks passed.");
     rush_aggregate.print("RUSH");
     press_aggregate.print("PRESS");
@@ -959,7 +971,8 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("\n--- SCENARIO SENSITIVITY ({samples} seeds per strategy/profile) ---");
     for profile in ScenarioProfile::SENSITIVITY_SET {
         println!("[BATCH] Running matched seeds for {}...", profile.label());
-        let (rush, press, recon) = run_strategy_batch(&registry, profile, samples, seed)?;
+        let (rush, press, recon) =
+            run_strategy_batch(&registry, profile, samples, seed, Some(&artifact_dir))?;
         println!("\n[{}]", profile.label());
         rush.print("RUSH");
         press.print("PRESS");
@@ -969,6 +982,33 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             profile.label()
         );
     }
+
+    // Persist per-run seeds and raw metrics beneath aggregate diagnostics.
+    // Full mode always writes artifacts; the directory defaults to target/harness.
+    println!("\n--- ARTIFACTS ---");
+    let narrative_runs = [(&rush, seed), (&press, seed), (&recon, seed)];
+    for (metrics, run_seed) in narrative_runs {
+        let _ = persist_run_artifact(&artifact_dir, run_seed, ScenarioProfile::NightTrap, metrics);
+    }
+    // Also capture the batch aggregate summary.
+    {
+        fs::create_dir_all(&artifact_dir)?;
+        let summary = serde_json::json!({
+            "mode": "full",
+            "seed": format!("{seed:#x}"),
+            "samples": samples,
+            "elapsed_secs": wall_start.elapsed().as_secs_f64(),
+            "note": "per-run JSON files retain per-run seeds and raw metrics beneath derived findings"
+        });
+        let path = artifact_dir.join(format!("summary-{seed:#x}.json"));
+        fs::write(&path, serde_json::to_string_pretty(&summary)?)?;
+        println!("[ARTIFACT] wrote {}", path.display());
+    }
+    println!(
+        "\n[HARNESS DONE] full suite in {:.1}s  artifacts: {}",
+        wall_start.elapsed().as_secs_f64(),
+        artifact_dir.display()
+    );
 
     Ok(())
 }
@@ -983,6 +1023,7 @@ fn parse_options(
     let mut strategy = None;
     let mut strategy_was_passed = false;
     let mut samples_were_explicit = false;
+    let mut artifact_dir: Option<PathBuf> = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--help" | "-h" => {
@@ -1032,6 +1073,12 @@ fn parse_options(
                 strategy = Strategy::parse(&value)?;
                 strategy_was_passed = true;
             }
+            "--artifact-dir" => {
+                let value = arguments.next().ok_or(HarnessCliError::MissingValue {
+                    flag: "--artifact-dir",
+                })?;
+                artifact_dir = Some(PathBuf::from(value));
+            }
             _ => {
                 return Err(HarnessCliError::UnsupportedArgument { argument });
             }
@@ -1050,16 +1097,18 @@ fn parse_options(
         samples,
         seed,
         strategy,
+        artifact_dir,
     }))
 }
 
 fn print_usage() {
     println!(
-        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX]"
+        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX] [--artifact-dir DIR]"
     );
     println!("  smoke  Fast canonical-path check for the local gate and iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
     println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
+    println!("         --artifact-dir writes per-run JSON artifacts (default: target/harness/).");
 }
 
 fn validate_run_metrics(
@@ -1537,6 +1586,7 @@ fn run_strategy_batch(
     profile: ScenarioProfile,
     samples: u64,
     seed: u64,
+    artifact_dir: Option<&PathBuf>,
 ) -> Result<(Aggregate, Aggregate, Aggregate), Box<dyn Error>> {
     let mut rush_aggregate = Aggregate::default();
     let mut press_aggregate = Aggregate::default();
@@ -1553,6 +1603,11 @@ fn run_strategy_batch(
         validate_strategy_evidence(profile, &press)?;
         validate_strategy_evidence(profile, &recon)?;
         validate_branch_financial_isolation(&rush, &press, &recon)?;
+        if let Some(dir) = artifact_dir {
+            let _ = persist_run_artifact(dir, sample_seed, profile, &rush);
+            let _ = persist_run_artifact(dir, sample_seed, profile, &press);
+            let _ = persist_run_artifact(dir, sample_seed, profile, &recon);
+        }
         rush_aggregate.add(&rush);
         press_aggregate.add(&press);
         recon_aggregate.add(&recon);
@@ -1594,6 +1649,60 @@ fn validate_branch_financial_isolation(
             ],
         });
     }
+    Ok(())
+}
+
+fn persist_run_artifact(
+    dir: &PathBuf,
+    seed: u64,
+    profile: ScenarioProfile,
+    metrics: &RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(dir)?;
+    let strategy_label = metrics
+        .strategy
+        .map(|s| s.label().to_lowercase())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let filename = format!(
+        "{}-{:016x}-{}-{}.json",
+        profile.label().to_lowercase().replace(' ', "-"),
+        seed,
+        strategy_label,
+        metrics
+            .variation
+            .map(|v| v.label().to_lowercase())
+            .unwrap_or_else(|| "unknown".to_owned())
+    );
+    let path = dir.join(filename);
+    let payload = serde_json::json!({
+        "seed": format!("{seed:#x}"),
+        "seed_dec": seed,
+        "profile": profile.label(),
+        "strategy": metrics.strategy.map(|s| s.label()),
+        "variation": metrics.variation.map(|v| v.label()),
+        "burglary": metrics.burglary.map(|id| format!("{id:?}")),
+        "outcome": metrics.outcome.map(|o| format!("{o:?}")),
+        "aborted": metrics.aborted,
+        "abort_phase": metrics.abort_phase.map(|p| format!("{p:?}")),
+        "abort_cause": metrics.abort_cause.map(|c| format!("{c:?}")),
+        "police_dispatched": metrics.police_dispatched,
+        "police_arrived": metrics.police_arrived,
+        "decision_requests": metrics.decision_requests,
+        "exposure_score": metrics.exposure_score,
+        "evidence_count": metrics.evidence_count,
+        "burglary_terminal_minute": metrics.burglary_terminal_minute,
+        "legitimate_net_cents": metrics.legitimate_net_cents,
+        "enterprise_net_cents": metrics.enterprise_net_cents,
+        "player_report_count": metrics.player_report_count,
+        "executive_brief_count": metrics.executive_brief_count,
+        "raw": {
+            "second_opportunity_discovered": metrics.second_opportunity_discovered,
+            "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),
+            "defector_trail_confirmed": metrics.defector_trail_confirmed,
+        }
+    });
+    fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
+    println!("[ARTIFACT] wrote {}", path.display());
     Ok(())
 }
 
@@ -4948,6 +5057,7 @@ mod tests {
                 samples: 1,
                 seed: 42,
                 strategy: None,
+                artifact_dir: None,
             }
         );
     }

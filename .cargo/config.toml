@@ -1,103 +1,55 @@
 [alias]
-# Fastest production-only type-check while editing library systems.
+# ── fast iteration (type-check only) ──────────────────────────────────────────
+# Quickest syntax + type check for library systems. No test harness, no lint.
 check-fast = ["check", "--locked", "--lib"]
-# Compile the gameplay harness explicitly when its adapter-facing surface changed.
+# Compile the gameplay harness surface (adapter-facing example) without tests.
 check-harness = ["check", "--locked", "--example", "gameplay_harness"]
+# Ensure test targets type-check when editing test fixtures.
 check-tests = ["check", "--locked", "--tests"]
-lint-fast = [
-    "clippy",
-    "--locked",
-    "--lib",
-    "--",
-    "-D",
-    "warnings",
-]
-lint-harness = [
-    "clippy",
-    "--locked",
-    "--example",
-    "gameplay_harness",
-    "--",
-    "-D",
-    "warnings",
-]
-test-fast = [
-    "test",
-    "--locked",
-    "--lib",
-    "--quiet",
-    "--",
-    "--skip",
-    "test_mixed_scenario_soak_preserves_invariants",
-]
+# Alias for the common "check everything" pre-clippy lane.
+check-all = ["check", "--locked", "--all-targets"]
+
+# ── lint ────────────────────────────────────────────────────────────────────
+lint-fast = ["clippy", "--locked", "--lib", "--", "-D", "warnings"]
+lint-harness = ["clippy", "--locked", "--example", "gameplay_harness", "--", "-D", "warnings"]
+# Combined library + harness clippy (used by the completion gate).
+lint = ["clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings"]
+lint-all = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
+
+# ── tests ───────────────────────────────────────────────────────────────────
+# Fast library lane: excludes the 5-second invariant soak.
+test-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants"]
+# All lib tests including soak (use sparingly).
+test-all = ["test", "--locked", "--lib"]
+# Focused filter lane: `cargo test-focused <filter>` runs matching lib tests verbosely.
 test-focused = ["test", "--locked", "--lib", "--quiet"]
-soak = [
-    "test",
-    "--locked",
-    "--lib",
-    "core::state::tests::test_mixed_scenario_soak_preserves_invariants",
-    "--",
-    "--exact",
-    "--nocapture",
-]
-harness-smoke = [
-    "test",
-    "--locked",
-    "--quiet",
-    "--example",
-    "gameplay_harness",
-    "tests::smoke_mode_covers_canonical_paths",
-    "--",
-    "--ignored",
-    "--exact",
-    "--nocapture",
-]
-harness-rush = [
-    "run",
-    "--locked",
-    "--quiet",
-    "--example",
-    "gameplay_harness",
-    "--",
-    "--mode",
-    "smoke",
-    "--strategy",
-    "rush",
-]
-harness-press = [
-    "run",
-    "--locked",
-    "--quiet",
-    "--example",
-    "gameplay_harness",
-    "--",
-    "--mode",
-    "smoke",
-    "--strategy",
-    "press",
-]
-harness-recon = [
-    "run",
-    "--locked",
-    "--quiet",
-    "--example",
-    "gameplay_harness",
-    "--",
-    "--mode",
-    "smoke",
-    "--strategy",
-    "recon",
-]
-# Default smoke run; pass example arguments after `--` when using this raw alias.
+# Single-threaded focused run for deterministic ordering checks.
+test-focused-single = ["test", "--locked", "--lib", "--quiet", "--", "--test-threads=1"]
+# Documentation contract and invariant lane.
+test-doc = ["test", "--locked", "--test", "documentation_contracts"]
+soak = ["test", "--locked", "--lib", "core::state::tests::test_mixed_scenario_soak_preserves_invariants", "--", "--exact", "--nocapture"]
+
+# ── gameplay harness ────────────────────────────────────────────────────────
+# Smoke contract as an ignored test (used by `verify` gate, fail-closed).
+harness-smoke = ["test", "--locked", "--quiet", "--example", "gameplay_harness", "tests::smoke_mode_covers_canonical_paths", "--", "--ignored", "--exact", "--nocapture"]
+# Direct harness executions (human-readable narrative output).
 harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
-# Full controlled comparison; alias arguments are already forwarded to the example.
-harness-full = [
-    "run",
-    "--locked",
-    "--quiet",
-    "--example",
-    "gameplay_harness",
-    "--",
-    "--mode",
-    "full",
-]
+harness-rush = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
+harness-press = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
+harness-recon = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
+# Full controlled comparison (bounded, deterministic, artifact-persisting).
+harness-full = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
+
+# ── formatting ──────────────────────────────────────────────────────────────
+fmt-check = ["fmt", "--check"]
+
+[build]
+# Use incremental compilation for local iteration. Let cargo autoselect jobs;
+# `verify.ps1 -Jobs N` caps parallelism when needed on a quieter machine.
+incremental = true
+
+[term]
+# Avoid redundant verbose cargo output for fast lanes; `verify.ps1` adds
+# explicit timing and stage summaries instead.
+quiet = false
+color = "auto"
