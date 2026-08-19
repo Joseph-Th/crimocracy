@@ -24,10 +24,16 @@ pub enum WorldError {
     EmptyName,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
+    #[error("organization {0} is not active")]
+    InactiveOrganization(OrganizationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
+    #[error("character {0} is not active")]
+    InactiveCharacter(CharacterId),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
+    #[error("neighborhood {0} is not active")]
+    InactiveNeighborhood(NeighborhoodId),
     #[error("business {0} does not exist")]
     MissingBusiness(BusinessId),
     #[error("business {0} is not active")]
@@ -96,6 +102,8 @@ pub enum WorldError {
         supervisor: CharacterId,
         arrest: ArrestId,
     },
+    #[error("supervisor {0} is not active")]
+    InactiveSupervisor(CharacterId),
     #[error(
         "character {character} is active informant {informant} for target handler organization {handler}"
     )]
@@ -161,6 +169,9 @@ pub fn designate_player_organization(
         .world
         .get_organization(organization)
         .ok_or(WorldError::MissingOrganization(organization))?;
+    if record.lifecycle() != Lifecycle::Active {
+        return Err(WorldError::InactiveOrganization(organization));
+    }
     if record.kind() != OrganizationKind::Criminal {
         return Err(WorldError::InvalidPlayerOrganization(organization));
     }
@@ -294,6 +305,9 @@ fn validate_reassignment_preconditions(
         .world
         .get_character(character)
         .ok_or(WorldError::MissingCharacter(character))?;
+    if record.lifecycle() != Lifecycle::Active {
+        return Err(WorldError::InactiveCharacter(character));
+    }
     if supervisor == Some(character) {
         return Err(WorldError::SelfSupervision { character });
     }
@@ -405,8 +419,12 @@ pub fn insert_business(
     if draft.name.trim().is_empty() {
         return Err(WorldError::EmptyName);
     }
-    if state.world.get_neighborhood(draft.neighborhood).is_none() {
-        return Err(WorldError::MissingNeighborhood(draft.neighborhood));
+    let neighborhood = state
+        .world
+        .get_neighborhood(draft.neighborhood)
+        .ok_or(WorldError::MissingNeighborhood(draft.neighborhood))?;
+    if neighborhood.lifecycle() != Lifecycle::Active {
+        return Err(WorldError::InactiveNeighborhood(draft.neighborhood));
     }
     registry.get_business(draft.kind);
     validate_business_owner(state, draft.owner)?;
@@ -577,14 +595,22 @@ fn validate_business_owner(state: &AppState, owner: BusinessOwner) -> Result<(),
     match owner {
         BusinessOwner::Independent => Ok(()),
         BusinessOwner::Organization(id) => {
-            if state.world.get_organization(id).is_none() {
-                return Err(WorldError::MissingOrganization(id));
+            let organization = state
+                .world
+                .get_organization(id)
+                .ok_or(WorldError::MissingOrganization(id))?;
+            if organization.lifecycle() != Lifecycle::Active {
+                return Err(WorldError::InactiveOrganization(id));
             }
             Ok(())
         }
         BusinessOwner::Character(id) => {
-            if state.world.get_character(id).is_none() {
-                return Err(WorldError::MissingCharacter(id));
+            let character = state
+                .world
+                .get_character(id)
+                .ok_or(WorldError::MissingCharacter(id))?;
+            if character.lifecycle() != Lifecycle::Active {
+                return Err(WorldError::InactiveCharacter(id));
             }
             Ok(())
         }
@@ -597,8 +623,12 @@ pub fn set_policy(
     organization: OrganizationId,
     setting: PolicySetting,
 ) -> Result<(), WorldError> {
-    if state.world.get_organization(organization).is_none() {
-        return Err(WorldError::MissingOrganization(organization));
+    let organization_record = state
+        .world
+        .get_organization(organization)
+        .ok_or(WorldError::MissingOrganization(organization))?;
+    if organization_record.lifecycle() != Lifecycle::Active {
+        return Err(WorldError::InactiveOrganization(organization));
     }
     registry.get_policy(setting.kind());
     state.world.set_policy(organization, setting);
@@ -611,8 +641,12 @@ fn validate_membership(
     supervisor: Option<CharacterId>,
 ) -> Result<(), WorldError> {
     if let Some(organization_id) = organization {
-        if state.world.get_organization(organization_id).is_none() {
-            return Err(WorldError::MissingOrganization(organization_id));
+        let organization_record = state
+            .world
+            .get_organization(organization_id)
+            .ok_or(WorldError::MissingOrganization(organization_id))?;
+        if organization_record.lifecycle() != Lifecycle::Active {
+            return Err(WorldError::InactiveOrganization(organization_id));
         }
     }
     if let Some(supervisor_id) = supervisor {
@@ -620,6 +654,9 @@ fn validate_membership(
             .world
             .get_character(supervisor_id)
             .ok_or(WorldError::MissingCharacter(supervisor_id))?;
+        if supervisor_record.lifecycle() != Lifecycle::Active {
+            return Err(WorldError::InactiveSupervisor(supervisor_id));
+        }
         if let Some(arrest) = state.legal.active_arrest_for_character(supervisor_id) {
             return Err(WorldError::DetainedSupervisor {
                 supervisor: supervisor_id,

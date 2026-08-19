@@ -3,12 +3,15 @@
 use crate::core::id::CharacterId;
 use crate::core::state::AppState;
 use crate::social::RelationshipDimensions;
+use crate::world::Lifecycle;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum RelationshipError {
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
+    #[error("character {0} is not active")]
+    InactiveCharacter(CharacterId),
     #[error("a character cannot have a relationship edge to itself")]
     SelfRelationship,
 }
@@ -34,11 +37,19 @@ pub fn validate_set_relationship(
     if from == to {
         return Err(RelationshipError::SelfRelationship);
     }
-    if state.world.get_character(from).is_none() {
-        return Err(RelationshipError::MissingCharacter(from));
+    let from_record = state
+        .world
+        .get_character(from)
+        .ok_or(RelationshipError::MissingCharacter(from))?;
+    if from_record.lifecycle() != Lifecycle::Active {
+        return Err(RelationshipError::InactiveCharacter(from));
     }
-    if state.world.get_character(to).is_none() {
-        return Err(RelationshipError::MissingCharacter(to));
+    let to_record = state
+        .world
+        .get_character(to)
+        .ok_or(RelationshipError::MissingCharacter(to))?;
+    if to_record.lifecycle() != Lifecycle::Active {
+        return Err(RelationshipError::InactiveCharacter(to));
     }
     Ok(ValidatedRelationship {
         from,

@@ -8,6 +8,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::enterprises::EnterpriseStatus;
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
@@ -45,6 +46,8 @@ pub enum OperationError {
     EmptyTitle,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
+    #[error("organization {0} is not active")]
+    InactiveOrganization(OrganizationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
     #[error("entity {0:?} does not exist")]
@@ -210,7 +213,7 @@ impl<'registry> ValidatedOperation<'registry> {
                 self.draft.responsible_organization,
             ))?;
         if organization.lifecycle() != Lifecycle::Active {
-            return Err(OperationError::MissingOrganization(
+            return Err(OperationError::InactiveOrganization(
                 self.draft.responsible_organization,
             ));
         }
@@ -348,7 +351,7 @@ pub fn validate_authorize_operation<'registry>(
             draft.responsible_organization,
         ))?;
     if organization.lifecycle() != Lifecycle::Active {
-        return Err(OperationError::MissingOrganization(
+        return Err(OperationError::InactiveOrganization(
             draft.responsible_organization,
         ));
     }
@@ -630,6 +633,93 @@ fn is_world_objective_target(target: EntityRef) -> bool {
     )
 }
 
+// Historical intelligence and after-action records may refer to inactive entities, so the
+// general `is_entity_present` check remains existence-only. Action objectives have a stricter
+// contract: their concrete world subjects must still be actionable when the operation is
+// authorized.
+fn validate_active_field_objective_targets(
+    state: &AppState,
+    objective: &OperationObjective,
+) -> Result<(), OperationError> {
+    match objective {
+        OperationObjective::ObtainCash { target }
+        | OperationObjective::Frighten { target }
+        | OperationObjective::DestroyEquipment { target } => {
+            validate_active_field_objective_target(state, *target)
+        }
+        OperationObjective::MoveContraband {
+            origin,
+            destination,
+        } => {
+            validate_active_field_objective_target(state, *origin)?;
+            validate_active_field_objective_target(state, *destination)
+        }
+        OperationObjective::RemovePerson { target } => {
+            validate_active_field_objective_target(state, EntityRef::Character(*target))
+        }
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::GatherInformation { .. } => Ok(()),
+    }
+}
+
+fn validate_active_field_objective_target(
+    state: &AppState,
+    target: EntityRef,
+) -> Result<(), OperationError> {
+    let active = match target {
+        EntityRef::Organization(id) => {
+            state
+                .world
+                .get_organization(id)
+                .ok_or(OperationError::MissingEntity(target))?
+                .lifecycle()
+                == Lifecycle::Active
+        }
+        EntityRef::Character(id) => {
+            state
+                .world
+                .get_character(id)
+                .ok_or(OperationError::MissingEntity(target))?
+                .lifecycle()
+                == Lifecycle::Active
+        }
+        EntityRef::Neighborhood(id) => {
+            state
+                .world
+                .get_neighborhood(id)
+                .ok_or(OperationError::MissingEntity(target))?
+                .lifecycle()
+                == Lifecycle::Active
+        }
+        EntityRef::Business(id) => {
+            state
+                .world
+                .get_business(id)
+                .ok_or(OperationError::MissingEntity(target))?
+                .lifecycle()
+                == Lifecycle::Active
+        }
+        EntityRef::Enterprise(id) => {
+            state
+                .enterprises
+                .get_enterprise(id)
+                .ok_or(OperationError::MissingEntity(target))?
+                .status()
+                == EnterpriseStatus::Active
+        }
+        EntityRef::Operation(_)
+        | EntityRef::Investigation(_)
+        | EntityRef::Evidence(_)
+        | EntityRef::FinancialAccount(_)
+        | EntityRef::DecisionRequest(_)
+        | EntityRef::Mandate(_) => true,
+    };
+    if !active {
+        return Err(OperationError::InactiveObjectiveTarget(target));
+    }
+    Ok(())
+}
+
 fn validate_operation_objective(
     state: &AppState,
     kind: OperationKind,
@@ -702,6 +792,7 @@ fn validate_operation_objective(
             objective: objective.kind(),
         });
     }
+    validate_active_field_objective_targets(state, objective)?;
     Ok(())
 }
 

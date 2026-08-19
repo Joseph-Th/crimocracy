@@ -38,13 +38,13 @@ Every `src/` subsystem owns its records and canonical mutation paths and is vali
 | `core/` | Deterministic `SimTime`/`SimDuration`, typed persistent IDs, entity refs, attention classes, serializable `AppState`, persistence envelope, top-level tick, invariant validation | `core::simulation` runs the deterministic tick pipeline; `core::state` is the single owner of generated state |
 | `registry/` | Immutable authored definitions and validated lookup tables (`typedef`-safe `Registry`) | Read-only after construction; `content::build_registry` assembles it |
 | `content/` | Code-owned authored definitions for the startup registry | `build_registry` |
-| `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, organization designation | `world_system` owns insertion and designation mutations |
-| `social/` | Directional character relationships with source/target indexes | `relationship_system` is the sole relationship mutation path |
+| `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, organization designation | `world_system` owns insertion and designation mutations; current assignments, owners, policies, and business locations require active records |
+| `social/` | Directional character relationships with source/target indexes | `relationship_system` is the sole relationship mutation path and accepts only active character endpoints |
 | `intelligence/` | Provenance-bearing information records and holder/topic indexes | `intelligence_system` records knowledge and executes canonical transfers |
 | `reports/` | Player-facing reports and synthesized briefs/financial reports | `report_system` validates and inserts; synthesis modules build artifacts |
 | `history/` | Durable entity-linked campaign events | `history_system` owns insertion/indexing |
 | `finance/` | Typed monetary accounts and balanced ledger | `finance_system` owns every financial mutation, including multi-account transactions |
-| `operations/` | Semantic operation plans, execution records, participant availability reservations, surveillance/police/property integrations | `operation_system` authorizes and commits lifecycle; `operation_execution` resolves outcomes deterministically |
+| `operations/` | Semantic operation plans, execution records, participant availability reservations, surveillance/police/property integrations | `operation_system` authorizes and commits lifecycle, requiring active action targets while preserving inactive historical observation targets; `operation_execution` resolves outcomes deterministically |
 | `opportunities/` | Provenance-backed operation opportunities with lifecycle | `opportunity_system` owns discovery and lifecycle transitions |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` owns request resolution |
 | `delegation/` | Persistent manager mandates and responsibility indexes | `delegation_system` owns assignment, revision, revocation, policy resolution |

@@ -30,7 +30,7 @@ use crate::recruitment::recruitment_system::{
 };
 use crate::recruitment::RecruitmentDraft;
 use crate::registry::Registry;
-use crate::world::{ApprovalPolicy, PolicyKind, PolicySetting};
+use crate::world::{ApprovalPolicy, Lifecycle, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -44,6 +44,8 @@ pub enum DecisionError {
     MissingOperation(OperationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
+    #[error("character {0} is not active")]
+    InactiveRequester(CharacterId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("operation {operation} is not in progress")]
@@ -545,8 +547,12 @@ fn validate_request_metadata(
             return Err(DecisionError::InvalidAttention);
         }
     }
-    if state.world.get_character(requester).is_none() {
-        return Err(DecisionError::MissingCharacter(requester));
+    let requester_record = state
+        .world
+        .get_character(requester)
+        .ok_or(DecisionError::MissingCharacter(requester))?;
+    if requester_record.lifecycle() != Lifecycle::Active {
+        return Err(DecisionError::InactiveRequester(requester));
     }
     Ok(())
 }
