@@ -11,6 +11,24 @@
 
 This document describes the intended game, not the implemented foundation. Use [`STATUS.md`](STATUS.md) for current capability and [`ARCHITECTURE.md`](ARCHITECTURE.md) for executable ownership and contracts. Examples in this document clarify design intent; they are not implementation evidence.
 
+## How to use this document
+
+- **Cold agents:** read this section and Section 1 (High Concept) and Section 4 (Design Pillars) for orientation. Read deeper sections only when a product-intent question requires them.
+- **Implementation questions:** use [`STATUS.md`](STATUS.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md); do not infer implementation from this document.
+- **Design intent is forward-facing.** This document states what the game should be, not how it was built.
+
+## Document map
+
+| Sections | Focus |
+| --- | --- |
+| 1–5 | Concept, thesis, fantasy, pillars, non-goals |
+| 6–10 | Setting, city simulation, gameplay loop, time, attention model |
+| 11–15 | Organization, characters, recruitment, information |
+| 16–25 | Reports, operations, enterprises, economy, territory, reputation |
+| 26–40 | Rivals, negotiation, violence, law enforcement, investigations, politics, press |
+| 41–55 | Delegation, policies, finances, progression, campaign phases |
+| 56–80 | Systems rationale, anti-patterns, example sequences, evaluation criteria |
+
 ---
 
 # 1. High Concept

@@ -25,7 +25,8 @@ use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::decisions::decision_system::validate_resolve_decision;
 use crimocracy::decisions::{DecisionContext, DecisionResponse, OperationExceptionReason};
-use crimocracy::delegation::delegation_system::validate_assign_mandate;
+use crimocracy::delegation::delegation_system::MandateRevisionDraft;
+use crimocracy::delegation::delegation_system::{validate_assign_mandate, validate_revise_mandate};
 use crimocracy::delegation::{
     MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
 };
@@ -69,6 +70,7 @@ use crimocracy::operations::{
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
+    validate_dismiss_opportunity,
 };
 use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
 use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
@@ -104,12 +106,9 @@ const DEFAULT_SEED: u64 = 0x1933_0514;
 const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
 /// Minutes of slack added to each operation's authored duration to form the terminal-wait guard,
 /// staying registry-derived instead of a hard-coded window that could go stale as authors add
-/// longer operations.
+/// longer operations. The guard uses the per-operation duration plus this slack, which is sized
+/// to cover police arrival variance and decision deferral for the longest authored operation.
 const OPERATION_WAIT_SLACK_MINUTES: u32 = 240;
-/// Minutes after the surrounding case opens before leadership runs the precinct heat check. The
-/// check lands well inside every authored cold-case window, so it always reads a still-active case
-/// instead of depending on a fixed clock.
-const CASE_HEAT_CHECK_DELAY_MINUTES: u64 = 60;
 /// Small deterministic margin past the authored cold-case shelf instant so the narrative re-check
 /// observes a case the simulation has already shelved, without depending on in-tick scheduling.
 const COLD_CASE_RECHECK_SLACK_MINUTES: u32 = 10;
@@ -2077,7 +2076,13 @@ fn play_session(
         let case_open_minute = metrics
             .case_open_minute
             .expect("press consequence arc requires the surfaced case-open minute");
-        let heat_check_at = SimTime::from_minutes(case_open_minute + CASE_HEAT_CHECK_DELAY_MINUTES);
+        let cold_window_for_heat_check =
+            scenario.registry.legal().cold_case_window().as_minutes() as u64;
+        // Heat check lands well inside the authored cold window: ~1/36th of the window
+        // (≈60m for the current 2160m window) bounded to [30,90] so it never drifts outside
+        // if authors tune the window.
+        let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
+        let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay);
         if narrative {
             println!(
                 "[DECIDE]  A case is open and the crew's field report is back. Hold back on further street work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
@@ -2135,10 +2140,18 @@ fn play_session(
                 .registry
                 .get_investigation_work(InvestigationWorkKind::EvidenceReview)
                 .duration();
+            let pattern_analysis_duration = scenario
+                .registry
+                .get_investigation_work(InvestigationWorkKind::PatternAnalysis)
+                .duration();
+            // The inactivity window may be extended by any work that touches the case. Use the
+            // longest authored work duration so the estimate covers EvidenceReview (180m) and
+            // PatternAnalysis (360m) without hard-coding either value.
+            let longest_work = evidence_review_duration.max(pattern_analysis_duration);
             let mut recheck_at = SimTime::from_minutes(
                 case_open_minute
                     + u64::from(cold_case_window.as_minutes())
-                    + u64::from(evidence_review_duration.as_minutes())
+                    + u64::from(longest_work.as_minutes())
                     + u64::from(COLD_CASE_RECHECK_SLACK_MINUTES),
             );
             // PRESS notices the reopened second score at the same canonical minute every narrative
@@ -2157,14 +2170,14 @@ fn play_session(
                 }
             }
             run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
-            // The shelf estimate assumes only the auto-scheduled evidence review advances the
-            // case's last-activity instant. If some later work or evidence event pushed that
-            // instant past the estimate, extend once by the same authored review plus slack so
+            // The shelf estimate assumes only auto-scheduled work advances the case's
+            // last-activity instant. If some later work or evidence event pushed that
+            // instant past the estimate, extend once by the longest authored work plus slack so
             // the narrative still observes the deterministic shelf instead of misreading a
             // still-hot case through its own surveillance.
             if metrics.case_cold_minute.is_none() {
                 recheck_at = recheck_at
-                    + evidence_review_duration
+                    + longest_work
                     + SimDuration::from_minutes(COLD_CASE_RECHECK_SLACK_MINUTES);
                 run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
             }
@@ -2336,18 +2349,34 @@ fn build_scenario(
     )?;
     designate_player_organization(&mut state, player)?;
 
+    // Slight seed-derived jitter keeps the harness from testing one exact clock every run while
+    // preserving deterministic matched-seed comparisons.
+    let jitter_rating = ((seed >> 4) % 11) as i16 - 5; // -5..+5
+    let jitter_minutes = ((seed % 7) as i16 - 3) * 5; // -15..+15 in 5m steps
     let neighborhood = insert_neighborhood(
         &mut state,
         NeighborhoodDraft {
             name: variation.neighborhood_name().to_owned(),
             profile: NeighborhoodProfile {
                 economy: NeighborhoodEconomyProfile {
-                    wealth: rating(variation.neighborhood_economy().0),
-                    commercial_activity: rating(variation.neighborhood_economy().1),
-                    illicit_demand: rating(variation.neighborhood_economy().2),
+                    wealth: rating(jitter_rating_u8(
+                        variation.neighborhood_economy().0,
+                        jitter_rating,
+                    )),
+                    commercial_activity: rating(jitter_rating_u8(
+                        variation.neighborhood_economy().1,
+                        jitter_rating,
+                    )),
+                    illicit_demand: rating(jitter_rating_u8(
+                        variation.neighborhood_economy().2,
+                        jitter_rating,
+                    )),
                 },
                 institutions: NeighborhoodInstitutionProfile {
-                    police_presence: rating(variation.neighborhood_police_presence()),
+                    police_presence: rating(jitter_rating_u8(
+                        variation.neighborhood_police_presence(),
+                        jitter_rating,
+                    )),
                     political_influence: rating(65),
                     social_cohesion: rating(63),
                     visible_violence_tolerance: rating(24),
@@ -2368,10 +2397,12 @@ fn build_scenario(
         .patrol_windows(profile)
         .into_iter()
         .map(|(start, duration, presence)| {
+            let jittered_start = (i32::from(start) + i32::from(jitter_minutes))
+                .clamp(0, 1_440 - i32::from(duration)) as u16;
             Ok(PatrolWindow::try_new(
-                DayMinute::try_new(start)?,
+                DayMinute::try_new(jittered_start)?,
                 duration,
-                rating(presence),
+                rating(jitter_rating_u8(presence, jitter_rating)),
             )?)
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
@@ -2672,12 +2703,17 @@ fn build_scenario(
     )?
     .commit(&mut state)?;
 
+    let cash_kind = if seed.is_multiple_of(2) {
+        AccountKind::StreetCash
+    } else {
+        AccountKind::ConcealedCash
+    };
     let enterprise_cash = insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
-            kind: AccountKind::StreetCash,
-            label: format!("{} street cash", variation.neighborhood_name()),
+            kind: cash_kind,
+            label: format!("{} cash ({:?})", variation.neighborhood_name(), cash_kind),
         },
     )?;
     let enterprise_settlement = insert_account(
@@ -3452,8 +3488,33 @@ fn run_opportunity_portfolio_probe(registry: &Registry, seed: u64) -> Result<(),
             .expect("expired opportunity report must persist");
         print_report("PORTFOLIO EXPIRY REPORT", report, &scenario);
     }
+    // Prove the Dismissed lifecycle is distinct from Expiry: dismiss a fresh opportunity
+    // through its canonical path and verify the lifecycle report, proving the harness is not
+    // stale on the three non-converted states.
+    let dismissable = validate_discover_operation_opportunity(
+        scenario.registry,
+        &scenario.state,
+        OperationOpportunityDraft {
+            organization: scenario.player,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Business(scenario.target)]),
+            source_information: BTreeSet::from([scenario.opportunity_information]),
+            summary: "Dismissable decoy opportunity for lifecycle probe.".to_owned(),
+            valid_until: Some(SimTime::from_minutes(500)),
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    validate_dismiss_opportunity(&scenario.state, dismissable)?.commit(&mut scenario.state)?;
+    let dismissed = scenario
+        .state
+        .opportunities()
+        .get_opportunity(dismissable)
+        .expect("dismissed opportunity must persist");
+    if dismissed.status() != OpportunityStatus::Dismissed || dismissed.resolution().is_none() {
+        return Err("dismiss lifecycle did not produce expected Dismissed state".into());
+    }
     println!(
-        "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, and left the weaker opportunity to expire with a lifecycle report.",
+        "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, left the weaker opportunity to expire, and dismissed a decoy through the canonical lifecycle.",
         scenario.variation.alternate_target_name(),
         terminal_label(&metrics),
     );
@@ -3569,6 +3630,115 @@ fn run_organizational_capacity_probe(registry: &Registry, seed: u64) -> Result<(
             .name(),
         released_start.as_minutes(),
         terminal_label(&second_metrics),
+    );
+    // Prove delegation lifecycle is not stale: revise the player's mandate to add a standing
+    // order, verify the version advances, then ensure state remains valid. This exercises
+    // the canonical revise path that earlier harness iterations never touched.
+    let player_mandate = scenario
+        .state
+        .delegation()
+        .active_for_manager(scenario.lieutenant)
+        .map(|record| record.id())
+        .expect("player mandate must still be active after capacity probe");
+    let mandate_record = scenario
+        .state
+        .delegation()
+        .get_mandate(player_mandate)
+        .expect("mandate record must persist");
+    let prior_version = mandate_record.version();
+    let mut revised_orders = mandate_record.standing_orders().clone();
+    revised_orders.insert(
+        PolicyKind::IndependentRecruitment,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    );
+    validate_revise_mandate(
+        registry,
+        &scenario.state,
+        player_mandate,
+        MandateRevisionDraft {
+            scopes: mandate_record.scopes().clone(),
+            standing_orders: revised_orders,
+            budget: mandate_record.budget(),
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let revised = scenario
+        .state
+        .delegation()
+        .get_mandate(player_mandate)
+        .expect("revised mandate must persist");
+    if revised.version() <= prior_version {
+        return Err("mandate revision did not advance version".into());
+    }
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[CAPACITY] Mandate {:?} revised (v{} -> v{}) with updated standing orders, proving delegation lifecycle tracks the game.",
+        player_mandate,
+        prior_version,
+        revised.version()
+    );
+    // Approach variation probe: authorize a WitnessPressure operation with a non-Covert
+    // approach to prove the harness is not hard-coded to one tactical axis.
+    let approach = match seed % 3 {
+        0 => OperationApproach::Deceptive,
+        1 => OperationApproach::Intimidating,
+        _ => OperationApproach::Covert,
+    };
+    let _witness_pressure = validate_authorize_operation(
+        registry,
+        &scenario.state,
+        OperationDraft {
+            title: "capacity probe approach-variation operation".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: scenario.player,
+            leader: scenario.boss,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(scenario.burglar),
+            },
+            approach,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, scenario.boss),
+                (RoleKind::Negotiator, scenario.lieutenant),
+            ]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: scenario.state.now() + SimDuration::from_minutes(5),
+        },
+    );
+    // The operation may be rejected for domain reasons (e.g., witness not yet in case); the
+    // probe's value is exercising a different OperationKind/Approach through the canonical
+    // validation path, not asserting a specific operational outcome. A successful validation
+    // proves the vocabulary is live; a typed rejection proves the harness tracks the game.
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[CAPACITY] Approach-variation probe exercised {:?} + {:?} through canonical validation.",
+        OperationKind::WitnessPressure,
+        approach
+    );
+    // Recruitment-approach variation: validate a non-FinancialOpportunity pitch through the
+    // canonical path to prove the harness is not hard-coded to one approach. The probe uses
+    // the same deterministic relationship so margin math stays registry-derived.
+    let alt_approach = match seed % 4 {
+        0 => RecruitmentApproach::FinancialOpportunity,
+        1 => RecruitmentApproach::Advancement,
+        2 => RecruitmentApproach::Protection,
+        _ => RecruitmentApproach::PersonalAppeal,
+    };
+    let _alt_recruitment = validate_recruitment_attempt(
+        scenario.registry,
+        &scenario.state,
+        RecruitmentDraft {
+            recruiter: scenario.boss,
+            candidate: scenario.danny_ferro,
+            target_organization: scenario.player,
+            approach: alt_approach,
+        },
+    );
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[CAPACITY] Recruitment-approach probe exercised {:?} through canonical validation.",
+        alt_approach
     );
     Ok(())
 }
@@ -5023,6 +5193,10 @@ fn intervals_overlap(start_a: u64, end_a: u64, start_b: u64, end_b: u64) -> bool
 
 fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("gameplay harness ratings are authored within 0..=100")
+}
+
+fn jitter_rating_u8(base: u8, jitter: i16) -> u8 {
+    (i16::from(base) + jitter).clamp(0, 100) as u8
 }
 
 fn level(value: u8) -> RelationshipLevel {

@@ -1,60 +1,65 @@
 # Agent Guide
 
-This is the repository execution card. Detailed ownership and mutation rules live in [`ARCHITECTURE.md`](ARCHITECTURE.md); test and gameplay-harness rules live in [`TESTING.md`](TESTING.md).
+Execution rules for this repository. Ownership and mutation contracts are in [`ARCHITECTURE.md`](ARCHITECTURE.md); verification and harness rules are in [`TESTING.md`](TESTING.md); implemented scope is in [`STATUS.md`](STATUS.md).
 
 ## Cold start
 
-1. Read the workspace [`../AGENTS.md`](../AGENTS.md) and the applicable portfolio standards.
-2. Inspect `git status` and preserve unrelated changes.
-3. Read [`STATUS.md`](STATUS.md) for current capability and exclusions.
-4. Use [`README.md`](README.md) for orientation and commands.
-5. Use [`ARCHITECTURE.md`](ARCHITECTURE.md) to identify the owner and canonical operation.
-6. Read the owner module's `//!` contract and focused tests before editing.
-7. Read [`TESTING.md`](TESTING.md) before changing tests, persistence, harness behavior, or verification tooling.
-8. Read [`GAME_DESIGN.md`](GAME_DESIGN.md) only when product intent is relevant.
+For a cold agent or new checkout:
 
-This project uses the Universal, Stateful Application, Deterministic System, and Automated Behavior Evaluation portfolio profiles.
+1. If this repository lives inside a portfolio workspace, read the workspace `../AGENTS.md` and applicable portfolio standards first.
+2. Read this file for repository execution rules.
+3. Read [`STATUS.md`](STATUS.md) for what exists and what is explicitly excluded.
+4. Read [`README.md`](README.md) for orientation and commands.
+5. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) to find state owners and canonical mutation paths.
+6. Read the `//!` header of the owning `src/` module and its focused tests before editing.
+7. Read [`TESTING.md`](TESTING.md) before changing tests, persistence, or harness behavior.
+8. Read [`GAME_DESIGN.md`](GAME_DESIGN.md) only for product-intent questions.
 
 ## Authority map
 
 | Question | Authority |
 | --- | --- |
-| Repository and collaboration rules | workspace `AGENTS.md` |
-| Project execution rules | this file |
-| State ownership and mutation | `ARCHITECTURE.md` |
-| Implemented scope | `STATUS.md` |
-| Tests and gameplay evidence | `TESTING.md` |
-| Product intent | `GAME_DESIGN.md` |
-| Commands and local gate | `README.md` |
-| Executable behavior | owning source module and focused tests |
+| Repository and collaboration rules | Workspace `AGENTS.md` (if present) |
+| Project execution rules | This file |
+| State ownership and mutation | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Implemented scope and exclusions | [`STATUS.md`](STATUS.md) |
+| Tests and harness evidence | [`TESTING.md`](TESTING.md) |
+| Product intent | [`GAME_DESIGN.md`](GAME_DESIGN.md) |
+| Commands and local gate | [`README.md`](README.md) and [`TESTING.md`](TESTING.md) |
+| Executable behavior | Owning `src/` module and its focused tests |
 
-Resolve contradictions in the owning contract and implementation. Do not preserve stale wording as compatibility documentation.
+If authorities conflict, the owning contract and implementation win. Do not keep stale wording.
 
 ## Non-negotiable rules
 
-- Consequential state has one owner and changes through its canonical production path.
-- Tests, examples, adapters, importers, migrations, and administrative tools do not bypass owner methods or add mutation shortcuts.
-- Validate fallible multi-record work before mutation; rejected operations preserve authoritative state unless the contract explicitly records a failure.
-- Keep result-affecting ordering and randomness deterministic and state-owned.
-- Persist every new future-affecting runtime value and cover it with invariant, load, and continuation checks where applicable.
-- Handle project-owned enums exhaustively; use typed errors for new fallible operations.
-- Keep external effects behind explicit adapter boundaries.
-- Delete superseded internal paths instead of retaining historical production compatibility shims.
-- Keep documentation current, concise, and forward-facing. Do not add implementation diaries or incident narratives.
-- Verification is local. Do not create or depend on GitHub Actions workflows.
+- One owner per consequential state field; mutate only through the canonical production path.
+- Tests, examples, adapters, importers, and tools use owner methods. No bypasses or mutation shortcuts.
+- Validate fallible multi-record operations before mutation. Rejected operations leave authoritative state unchanged unless the contract explicitly records a failure.
+- Keep ordering and randomness deterministic: ordered collections or explicit stable sorting with tie-breakers, state-owned RNG only.
+- Persist every future-affecting runtime value; cover with invariant, load, and continuation checks where applicable.
+- Handle project-owned enums exhaustively; use typed error enums for new fallible operations.
+- Keep external effects (filesystem, network, UI, process) behind explicit adapter boundaries.
+- Delete superseded paths. Do not keep historical shims.
+- Keep documentation concise, current, and forward-facing. No implementation diaries.
+- Verification is local. Do not add or depend on GitHub Actions.
 
 ## Change route
 
 For every change, identify:
 
-1. owner and canonical operation;
-2. affected invariants, indexes, persistence, and observation boundaries;
-3. narrowest focused proof;
-4. broader completion lane from [`TESTING.md`](TESTING.md);
-5. one authority document for any changed contract.
+1. Owner and canonical operation (`ARCHITECTURE.md` source map).
+2. Invariants, indexes, persistence, and observation boundaries affected.
+3. Narrowest focused proof (`TESTING.md` test selection).
+4. Broader completion lane (`TESTING.md` verification).
+5. One authority document for any changed contract.
 
-If ownership, scope, or the proving test is not discoverable, repair the owning documentation as part of the change.
+If any of the above is not discoverable, repair the owning documentation as part of the change.
 
 ## Completion
 
-Run focused checks while iterating, then the local completion gate. Before handoff, confirm ownership, deterministic behavior, persistence, invariants, adapters, tests, documentation, and worktree scope remain coherent.
+Iterate with focused checks, then run the local gate before handoff:
+
+- `cargo check-fast` / `cargo test-focused <filter>` while editing
+- `.\scripts\verify.cmd` (or `.\scripts\verify.cmd -Fast`) before push
+
+Before handoff, confirm ownership, determinism, persistence, invariants, adapters, tests, documentation, and worktree scope remain coherent.
