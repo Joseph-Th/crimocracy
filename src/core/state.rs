@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 41;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 42;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -37,6 +37,7 @@ struct SimulationRuntime {
     investigation_rng: ChaCha8Rng,
     business_rng: ChaCha8Rng,
     enterprise_rng: ChaCha8Rng,
+    recruitment_rng: ChaCha8Rng,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -81,6 +82,7 @@ impl AppState {
                 investigation_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x494E_5653)),
                 business_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x4255_5349)),
                 enterprise_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x454E_5452)),
+                recruitment_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x5245_4352)),
             },
             campaign: CampaignRuntime::default(),
             ids: IdCounters::new(),
@@ -213,6 +215,10 @@ impl AppState {
 
     pub(crate) fn enterprise_rng_mut(&mut self) -> &mut ChaCha8Rng {
         &mut self.simulation.enterprise_rng
+    }
+
+    pub(crate) fn recruitment_rng_mut(&mut self) -> &mut ChaCha8Rng {
+        &mut self.simulation.recruitment_rng
     }
 }
 

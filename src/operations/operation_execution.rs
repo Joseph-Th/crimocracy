@@ -898,15 +898,48 @@ fn resolve_target_neighborhoods(
                     neighborhoods.insert(business.neighborhood());
                 }
             }
-            EntityRef::Organization(_)
-            | EntityRef::Character(_)
-            | EntityRef::Operation(_)
+            EntityRef::Organization(id) => {
+                for business in state.world.businesses_owned_by_organization(id) {
+                    neighborhoods.insert(business.neighborhood());
+                }
+                if let Some(jurisdiction) = state.legal.get_jurisdiction(id) {
+                    for neighborhood in jurisdiction.neighborhoods() {
+                        neighborhoods.insert(*neighborhood);
+                    }
+                }
+            }
+            EntityRef::Character(id) => {
+                if let Some(character) = state.world.get_character(id) {
+                    if let Some(org) = character.organization() {
+                        for business in state.world.businesses_owned_by_organization(org) {
+                            neighborhoods.insert(business.neighborhood());
+                        }
+                    }
+                }
+                for business in state.world.businesses_owned_by_character(id) {
+                    neighborhoods.insert(business.neighborhood());
+                }
+            }
+            EntityRef::Enterprise(id) => {
+                if let Some(enterprise) = state.enterprises.get_enterprise(id) {
+                    match enterprise.location() {
+                        crate::enterprises::EnterpriseLocation::Neighborhood(n) => {
+                            neighborhoods.insert(n);
+                        }
+                        crate::enterprises::EnterpriseLocation::Business(b) => {
+                            if let Some(business) = state.world.get_business(b) {
+                                neighborhoods.insert(business.neighborhood());
+                            }
+                        }
+                    }
+                }
+            }
+            EntityRef::Operation(_)
             | EntityRef::Investigation(_)
             | EntityRef::Evidence(_)
             | EntityRef::FinancialAccount(_)
             | EntityRef::DecisionRequest(_)
-            | EntityRef::Mandate(_)
-            | EntityRef::Enterprise(_) => {}
+            | EntityRef::Mandate(_) => {}
         }
     }
     neighborhoods

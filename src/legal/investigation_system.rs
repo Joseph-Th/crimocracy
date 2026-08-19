@@ -371,14 +371,19 @@ pub(crate) fn process_cold_case_decay(
         if record.origin_operation().is_none() {
             continue;
         }
-        // A case that connected its evidence to a concrete person is a real, actionable lead;
-        // the authority does not shelve a case that knows who the suspect is.
-        if record
+        let has_identified_subject = record
             .subjects()
             .iter()
-            .any(|subject| matches!(subject, EntityRef::Character(_)))
-        {
-            continue;
+            .any(|subject| matches!(subject, EntityRef::Character(_)));
+        if has_identified_subject {
+            let extended_window = u64::from(cold_case_window.as_minutes()) + 60 * 24 * 60;
+            let elapsed = state
+                .now()
+                .as_minutes()
+                .saturating_sub(record.last_activity_at().as_minutes());
+            if elapsed < extended_window {
+                continue;
+            }
         }
         let transition = validate_transition_investigation(
             state,

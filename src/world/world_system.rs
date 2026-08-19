@@ -322,7 +322,9 @@ fn validate_reassignment_preconditions(
         });
     }
 
-    if organization != record.organization() {
+    let organization_changed = organization != record.organization();
+    let supervisor_changed = supervisor != record.supervisor();
+    if organization_changed {
         if let Some(case) = state
             .legal
             .prosecution_cases_for_lead(character)
@@ -358,6 +360,8 @@ fn validate_reassignment_preconditions(
                 });
             }
         }
+    }
+    if organization_changed || supervisor_changed {
         if let Some(mandate) = state.delegation.active_for_manager(character) {
             return Err(WorldError::ActiveMandateAssignment {
                 character,
@@ -390,11 +394,13 @@ fn validate_reassignment_preconditions(
                 OperationStatus::Completed | OperationStatus::Aborted => {}
             }
         }
-        if let Some(direct_report) = state.world.direct_reports(character).next() {
-            return Err(WorldError::DirectReportAssignment {
-                character,
-                direct_report: direct_report.id(),
-            });
+        if organization_changed {
+            if let Some(direct_report) = state.world.direct_reports(character).next() {
+                return Err(WorldError::DirectReportAssignment {
+                    character,
+                    direct_report: direct_report.id(),
+                });
+            }
         }
     }
 

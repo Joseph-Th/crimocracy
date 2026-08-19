@@ -318,12 +318,17 @@ pub(crate) fn resolve_due_autonomous_recruitment(
             continue;
         }
         let approach = autonomous_recruitment_approach(manager_record);
-        let Some(candidate) = find_recruitment_candidates(registry, state, organization, manager)
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-        else {
+        let mut candidates =
+            find_recruitment_candidates(registry, state, organization, manager).unwrap_or_default();
+        if candidates.is_empty() {
             continue;
+        }
+        let candidate = {
+            let index =
+                decide_candidate_index(state.recruitment_rng_mut(), candidates.len()).unwrap_or(0);
+            // Stabilize order before RNG selection so determinism does not depend on BTree iteration quirks.
+            candidates.sort_unstable();
+            candidates[index]
         };
         let authority = MandateAuthority {
             mandate,
@@ -1363,6 +1368,20 @@ fn candidate_pressure_information_ids(
         })
         .map(InformationRecord::id)
         .collect()
+}
+
+fn decide_candidate_index(rng: &mut impl rand_core::RngCore, choice_count: usize) -> Option<usize> {
+    if choice_count == 0 {
+        return None;
+    }
+    let bound = u64::try_from(choice_count).expect("candidate count must fit u64");
+    let rejection_zone = u64::MAX - (u64::MAX % bound);
+    loop {
+        let draw = rng.next_u64();
+        if draw < rejection_zone {
+            return Some((draw % bound) as usize);
+        }
+    }
 }
 
 fn validate_relationship_snapshot(

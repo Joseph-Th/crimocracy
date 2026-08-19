@@ -23,7 +23,7 @@ use crate::finance::finance_system::{
     validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
 };
 use crate::finance::{
-    AccountKind, AccountLifecycle, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
+    AccountKind, AccountLifecycle, FinancialOwner, LedgerTransactionDraft, Money,
 };
 use crate::intelligence::intelligence_system::{
     validate_record_information, IntelligenceError, ValidatedInformation,
@@ -506,6 +506,14 @@ pub fn validate_enterprise_cycle_plan(
     let ledger = if plan.economics.net_cash == Money::ZERO {
         None
     } else {
+        let postings = crate::finance::helpers::build_settlement_postings(
+            plan.accounts.cash_account,
+            plan.accounts.settlement_account,
+            plan.economics.net_cash,
+        )
+        .ok_or(EnterpriseError::ArithmeticOverflow(
+            plan.snapshot.enterprise,
+        ))?;
         Some(validate_record_transaction(
             state,
             LedgerTransactionDraft {
@@ -514,20 +522,7 @@ pub fn validate_enterprise_cycle_plan(
                     "Routine enterprise settlement for {}",
                     plan.snapshot.enterprise
                 ),
-                postings: vec![
-                    LedgerPosting {
-                        account: plan.accounts.cash_account,
-                        amount: plan.economics.net_cash,
-                    },
-                    LedgerPosting {
-                        account: plan.accounts.settlement_account,
-                        amount: Money::from_cents(
-                            plan.economics.net_cash.cents().checked_neg().ok_or(
-                                EnterpriseError::ArithmeticOverflow(plan.snapshot.enterprise),
-                            )?,
-                        ),
-                    },
-                ],
+                postings: postings.to_vec(),
                 authorization: None,
             },
         )?)
@@ -1115,11 +1110,8 @@ fn weighted_rating(
     per_point: Money,
     rating: Rating,
 ) -> Result<Money, EnterpriseError> {
-    let cents = per_point
-        .cents()
-        .checked_mul(i64::from(rating.value()))
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    Ok(Money::from_cents(cents))
+    crate::finance::helpers::weighted_rating(per_point, rating.value())
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
 fn apply_basis_point_variance(
@@ -1127,14 +1119,8 @@ fn apply_basis_point_variance(
     amount: Money,
     basis_points: i16,
 ) -> Result<Money, EnterpriseError> {
-    let factor = 10_000_i128 + i128::from(basis_points);
-    let adjusted = i128::from(amount.cents())
-        .checked_mul(factor)
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?
-        / 10_000_i128;
-    let cents =
-        i64::try_from(adjusted).map_err(|_| EnterpriseError::ArithmeticOverflow(enterprise))?;
-    Ok(Money::from_cents(cents))
+    crate::finance::helpers::apply_basis_point_variance(amount, basis_points)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
 #[cfg(test)]

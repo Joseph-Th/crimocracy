@@ -1,6 +1,7 @@
 //! Durable monetary accounts and balanced ledger records; `finance_system` owns all financial mutation.
 
 pub mod finance_system;
+pub mod helpers;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
@@ -8,10 +9,13 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::delegation::{MandateAuthority, ResponsibilityScope};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
 pub struct Money(i64);
 
 impl Money {
@@ -31,15 +35,6 @@ impl Money {
 
     pub fn checked_sub(self, other: Self) -> Option<Self> {
         self.0.checked_sub(other.0).map(Self)
-    }
-}
-
-impl<'de> Deserialize<'de> for Money {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Self(i64::deserialize(deserializer)?))
     }
 }
 

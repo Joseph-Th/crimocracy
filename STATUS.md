@@ -4,7 +4,7 @@ This document is the scope authority for the implemented Crimocracy foundation. 
 
 ## Runtime foundation
 
-- `AppState` owns serializable campaign state, simulation time, typed ID counters, attention settings, and independent deterministic RNG streams for generic, operation, investigation, business, and enterprise work.
+- `AppState` owns serializable campaign state, simulation time, typed ID counters, attention settings, and independent deterministic RNG streams for generic, operation, investigation, business, enterprise, and recruitment work.
 - `Registry` contains immutable Rust-authored definitions. Runtime records and generated values belong to `AppState` and its domain owners.
 - Save/load validates the envelope, state schema, authored content revision, registry references, cross-references, indexes, and ID high-water marks before accepting state. Compatibility is current-version only; there is no implicit migration or defaulting path.
 - [`core::simulation::run_tick`](src/core/simulation.rs) is the canonical one-minute pipeline. It processes due work in stable order and returns a structured `TickOutcome`.
@@ -57,6 +57,6 @@ These exclusions are scope boundaries, not implementation evidence for unmodeled
 
 The current authored content revision is 16.
 
-The current in-memory state schema version is 41.
+The current in-memory state schema version is 42.
 
 The compiled operation vocabulary contains only constraints and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.

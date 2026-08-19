@@ -340,7 +340,7 @@ mod tests {
         AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     };
     use crate::world::world_system::{
-        insert_character, insert_organization, validate_reassign_character,
+        insert_character, insert_organization, validate_reassign_character, WorldError,
     };
     use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
     use std::collections::{BTreeMap, BTreeSet};
@@ -575,34 +575,30 @@ mod tests {
             },
         )
         .expect("supervisor fixture should validate");
-        validate_reassign_character(
+        let error = validate_reassign_character(
             &state,
             authorization.manager,
             Some(organization),
             Some(supervisor),
         )
-        .expect("same-organization hierarchy change should validate")
-        .commit(&mut state)
-        .expect("hierarchy change should commit");
-
-        let error = transaction
-            .commit(&mut state)
-            .expect_err("manager-dependent transaction must reject a stale manager snapshot");
+        .expect_err("active mandate must prevent same-organization supervisor reassignment");
         assert_eq!(
             error,
-            FinanceError::Delegation(DelegationError::StaleManager {
-                manager: authorization.manager,
-                expected: 1,
-                found: 2,
-            })
+            WorldError::ActiveMandateAssignment {
+                character: authorization.manager,
+                mandate,
+            }
         );
+        transaction
+            .commit(&mut state)
+            .expect("blocked hierarchy change leaves mandate snapshot still valid");
         assert_eq!(
             state
                 .finance()
                 .get_account(funding)
                 .expect("funding account should exist")
                 .balance(),
-            Money::ZERO
+            Money::from_cents(-500)
         );
         assert_eq!(
             state
@@ -610,7 +606,7 @@ mod tests {
                 .get_account(destination)
                 .expect("destination account should exist")
                 .balance(),
-            Money::ZERO
+            Money::from_cents(500)
         );
         validate_invariants(&state);
     }
