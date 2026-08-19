@@ -865,6 +865,8 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationPartialPropertyRecovery(OperationKind),
     #[error("operation {0:?} property liquidation recovery must be in 1..=10000 basis points")]
     InvalidOperationPropertyLiquidationRecovery(OperationKind),
+    #[error("operation {0:?} property-proceeds definition does not match its objective contract")]
+    OperationPropertyObjectiveContractMismatch(OperationKind),
     #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
     MissingOperationRoleCapability {
         operation: OperationKind,
@@ -1359,6 +1361,9 @@ impl RegistryBuilder {
             if !(1..=10_000).contains(&property.liquidation_recovery_basis_points) {
                 return Err(RegistryBuildError::InvalidOperationPropertyLiquidationRecovery(kind));
             }
+        }
+        if execution.property_proceeds.is_some() != kind.supports_property_acquisition() {
+            return Err(RegistryBuildError::OperationPropertyObjectiveContractMismatch(kind));
         }
         for role in &required_roles {
             if !execution.difficulty.role_capabilities.contains_key(role) {

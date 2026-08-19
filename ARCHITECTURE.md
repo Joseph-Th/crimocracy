@@ -40,7 +40,7 @@ Every `src/` subsystem owns its records and canonical mutation paths and is vali
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` owns establishment, termination, disclosure |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` owns candidate discovery, decisions, and membership |
 
-Adapters, the gameplay harness (`examples/gameplay_harness.rs`), and verification tooling (`scripts/verify.ps1`) live outside `src/` and must go through the canonical production paths above.
+Adapters, the gameplay harness (`examples/gameplay_harness.rs`), and verification tooling (`scripts/verify.cmd` / `scripts/verify.ps1`) live outside `src/` and must go through the canonical production paths above.
 
 ## Canonical operations
 

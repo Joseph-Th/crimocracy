@@ -489,7 +489,7 @@ pub(crate) fn is_valid_operation_objective(
 ) -> bool {
     match objective {
         OperationObjective::AcquireProperty { target } => {
-            matches!(target, EntityRef::Business(_))
+            kind.supports_property_acquisition() && matches!(target, EntityRef::Business(_))
         }
         OperationObjective::GatherInformation { target } => {
             kind == OperationKind::Surveillance
@@ -511,6 +511,12 @@ fn validate_operation_objective(
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     if let OperationObjective::AcquireProperty { target } = objective {
+        if !kind.supports_property_acquisition() {
+            return Err(OperationError::InvalidObjectiveForKind {
+                kind,
+                objective: OperationObjectiveKind::AcquireProperty,
+            });
+        }
         let EntityRef::Business(business) = target else {
             return Err(OperationError::InvalidPropertyTarget(*target));
         };

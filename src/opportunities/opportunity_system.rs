@@ -8,7 +8,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::intelligence::KnowledgeHolder;
-use crate::operations::{OperationKind, OperationStatus};
+use crate::operations::{OperationKind, OperationObjective, OperationStatus};
 use crate::opportunities::{
     OperationOpportunityContext, OperationOpportunityDraft, OpportunityContext, OpportunityRecord,
     OpportunityStatus,
@@ -123,6 +123,8 @@ pub enum OpportunityError {
     },
     #[error("operation {operation} targets do not exactly match opportunity targets")]
     OperationTargetsMismatch { operation: OperationId },
+    #[error("operation {operation} does not use the property-acquisition objective required by its opportunity")]
+    OperationObjectiveMismatch { operation: OperationId },
     #[error("operation {operation} is already linked to opportunity {opportunity}")]
     OperationAlreadyLinked {
         operation: OperationId,
@@ -439,6 +441,16 @@ fn validate_conversion_match(
             opportunity_kind: context.operation_kind(),
         });
     }
+    if context.operation_kind().supports_property_acquisition()
+        && !matches!(
+            operation.objective(),
+            OperationObjective::AcquireProperty { .. }
+        )
+    {
+        return Err(OpportunityError::OperationObjectiveMismatch {
+            operation: operation.id(),
+        });
+    }
     let operation_targets: BTreeSet<_> = operation
         .objective()
         .referenced_entities()
@@ -729,7 +741,10 @@ mod tests {
         }
     }
 
-    fn authorize_matching_operation(fixture: &mut OpportunityFixture) -> OperationId {
+    fn authorize_operation(
+        fixture: &mut OpportunityFixture,
+        objective: OperationObjective,
+    ) -> OperationId {
         validate_authorize_operation(
             &fixture.registry,
             &fixture.state,
@@ -738,9 +753,7 @@ mod tests {
                 kind: OperationKind::Burglary,
                 responsible_organization: fixture.organization,
                 leader: fixture.leader,
-                objective: OperationObjective::AcquireProperty {
-                    target: EntityRef::Business(fixture.business),
-                },
+                objective,
                 approach: OperationApproach::Covert,
                 roles: BTreeMap::from([
                     (RoleKind::Coordinator, fixture.leader),
@@ -755,6 +768,15 @@ mod tests {
         .expect("matching opportunity operation should validate")
         .commit(&mut fixture.state)
         .expect("matching opportunity operation should commit")
+    }
+
+    fn authorize_matching_operation(fixture: &mut OpportunityFixture) -> OperationId {
+        authorize_operation(
+            fixture,
+            OperationObjective::AcquireProperty {
+                target: EntityRef::Business(fixture.business),
+            },
+        )
     }
 
     #[test]
@@ -1337,6 +1359,87 @@ mod tests {
             .is_none());
         validate_state(&fixture.state)
             .expect("mismatched conversion rejection must leave valid state");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn property_opportunity_rejects_same_kind_non_property_operation() {
+        let mut fixture = make_fixture();
+        let opportunity = validate_discover_operation_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            opportunity_draft(&fixture, SimTime::from_minutes(120)),
+        )
+        .expect("burglary opportunity should validate")
+        .commit(&mut fixture.state)
+        .expect("burglary opportunity should commit");
+        let business = fixture.business;
+        let operation = authorize_operation(
+            &mut fixture,
+            OperationObjective::Frighten {
+                target: EntityRef::Business(business),
+            },
+        );
+
+        assert_eq!(
+            validate_convert_opportunity(&fixture.state, opportunity, operation)
+                .err()
+                .expect("property opportunity must require property objective"),
+            OpportunityError::OperationObjectiveMismatch { operation }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .opportunities()
+                .get_opportunity(opportunity)
+                .expect("rejected conversion must preserve opportunity")
+                .status(),
+            OpportunityStatus::Open
+        );
+        assert!(fixture
+            .state
+            .opportunities()
+            .opportunity_for_operation(operation)
+            .is_none());
+        validate_state(&fixture.state)
+            .expect("rejected conversion must leave structurally valid state");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn operations_without_property_effects_reject_property_objectives() {
+        let fixture = make_fixture();
+        let error = validate_authorize_operation(
+            &fixture.registry,
+            &fixture.state,
+            OperationDraft {
+                title: "Invalid intimidation seizure".to_owned(),
+                kind: OperationKind::Intimidation,
+                responsible_organization: fixture.organization,
+                leader: fixture.leader,
+                objective: OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(fixture.business),
+                },
+                approach: OperationApproach::Intimidating,
+                roles: BTreeMap::from([(RoleKind::Coordinator, fixture.leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: fixture.state.now(),
+            },
+        )
+        .expect_err("an operation without a property effect must reject property acquisition");
+
+        assert_eq!(
+            error,
+            crate::operations::operation_system::OperationError::InvalidObjectiveForKind {
+                kind: OperationKind::Intimidation,
+                objective: crate::operations::OperationObjectiveKind::AcquireProperty,
+            }
+        );
+        assert_eq!(fixture.state.operations().operations().count(), 0);
+        validate_state(&fixture.state)
+            .expect("rejected property objective must leave structurally valid state");
         validate_invariants(&fixture.state);
     }
 

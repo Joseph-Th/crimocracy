@@ -39,8 +39,11 @@ Use the smallest focused test while editing. The one-command local gate runs the
 completion contract with clear per-stage output and timing:
 
 ```text
-.\scripts\verify.ps1
+.\scripts\verify.cmd
 ```
+
+The `verify.cmd` shim invokes the same `verify.ps1` gate with a process-local PowerShell execution
+policy, so the documented command also works on machines that block direct `.ps1` invocation.
 
 It runs the four canonical steps below in order, stops at the first failing stage, and exits
 non-zero on failure. Build parallelism is cargo-autodetected; pass `-Jobs N` to cap it when you want
@@ -74,7 +77,9 @@ The repository also provides Cargo aliases for the short loops:
 
 ```text
 cargo check-fast
+cargo check-harness
 cargo lint-fast
+cargo lint-harness
 cargo test-fast
 cargo soak
 cargo harness-smoke
@@ -84,6 +89,8 @@ cargo harness-recon
 cargo harness -- --mode smoke --strategy press
 ```
 
+`cargo check-fast` and `cargo lint-fast` cover only the production library for the shortest edit
+loop. Run their `*-harness` counterparts when changing the example adapter or harness code.
 `cargo test-fast` skips only the named invariant soak; `cargo soak` runs that deliberate stress
 check explicitly, while the normal `cargo test` gate still includes it. Focused `--strategy` smoke
 runs skip the independent legal-foundation probe; the default smoke run and completion gate still execute it.

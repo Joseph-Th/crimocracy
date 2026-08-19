@@ -7,10 +7,10 @@ This document owns Crimocracy's test organization, gameplay-harness evidence con
 Use the narrowest test that proves the changed behavior. The repository provides short Cargo aliases such as `cargo test-fast`, focused harness modes, and the local completion gate:
 
 ```text
-.\scripts\verify.ps1
+.\scripts\verify.cmd
 ```
 
-The gate runs formatting, strict production/harness Clippy, all-target tests, and the controlled smoke harness contract. Before the smoke stage it also lists the harness's ignored tests and fails closed unless exactly `tests::smoke_mode_covers_canonical_paths` is selectable, so a renamed/removed contract cannot silently erase the stage while Cargo still exits 0; `scripts/verify.ps1 -SelfTest` runs that fail-closed selection regression in isolation. The all-target pass includes `tests/documentation_contracts.rs`, which protects the current authority set, local documentation links and concrete routes, documented Cargo entrypoints, and the published state-schema and authored-content-revision values. `README.md` owns the current raw command expansion and operator examples; this document owns test semantics.
+The gate runs formatting, strict production/harness Clippy, all-target tests, and the controlled smoke harness contract. Before the smoke stage it also lists the harness's ignored tests and fails closed unless exactly `tests::smoke_mode_covers_canonical_paths` is selectable, so a renamed/removed contract cannot silently erase the stage while Cargo still exits 0; `scripts/verify.ps1 -SelfTest` runs that fail-closed selection regression in isolation. The `.cmd` entrypoint is only an execution-policy-safe wrapper around that PowerShell owner. The all-target pass includes `tests/documentation_contracts.rs`, which protects the current authority set, local documentation links and concrete routes, documented Cargo entrypoints, and the published state-schema and authored-content-revision values. `README.md` owns the current raw command expansion and operator examples; this document owns test semantics.
 
 Repository verification is local. GitHub Actions and hosted runners are not verification authorities.
 
@@ -51,7 +51,7 @@ The deterministic invariant soak remains an explicit stress lane rather than a s
 Before committing a normal change:
 
 - run the narrowest focused test during iteration;
-- run `.\scripts\verify.ps1`;
+- run `.\scripts\verify.cmd`;
 - run the soak or full harness only when the changed contract requires that evidence;
 - keep `cargo check`/Clippy warning-free without broad suppressions;
 - confirm generated output is not staged;

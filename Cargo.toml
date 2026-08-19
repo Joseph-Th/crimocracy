@@ -20,4 +20,3 @@ unsafe_code = "forbid"
 debug_assert_with_mut_call = "deny"
 wildcard_enum_match_arm = "deny"
 match_wildcard_for_single_variants = "deny"
-

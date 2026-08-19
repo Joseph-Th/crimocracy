@@ -250,6 +250,10 @@ enum HarnessContractError {
         observed: usize,
         required: usize,
     },
+    #[error("surveillance report did not contain actionable recurring patrol windows")]
+    NoActionablePatrolWindows,
+    #[error("no safe operation window was derivable from the surveillance report")]
+    NoSafeOperationWindow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4658,13 +4662,10 @@ fn choose_safe_start_from_patrol_report(
     report: &str,
     operation_duration: SimDuration,
     uncertainty_buffer: SimDuration,
-) -> Result<SimTime, Box<dyn Error>> {
+) -> Result<SimTime, HarnessContractError> {
     let windows = parse_patrol_windows(report);
     if windows.is_empty() {
-        return Err(format!(
-            "surveillance report did not contain actionable recurring patrol windows: {report}"
-        )
-        .into());
+        return Err(HarnessContractError::NoActionablePatrolWindows);
     }
     let duration = u64::from(operation_duration.as_minutes());
     let buffer = u64::from(uncertainty_buffer.as_minutes());
@@ -4685,7 +4686,7 @@ fn choose_safe_start_from_patrol_report(
             return Ok(SimTime::from_minutes(candidate));
         }
     }
-    Err("no safe operation window was derivable from the surveillance report".into())
+    Err(HarnessContractError::NoSafeOperationWindow)
 }
 
 fn parse_patrol_windows(report: &str) -> Vec<(u64, u64)> {
@@ -4741,8 +4742,8 @@ fn level(value: u8) -> RelationshipLevel {
 mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
-        run_opportunity_portfolio_probe, run_smoke, FixtureVariation, HarnessCliError, HarnessMode,
-        HarnessOptions, ScenarioProfile, Strategy, DEFAULT_SEED,
+        run_opportunity_portfolio_probe, run_smoke, FixtureVariation, HarnessCliError,
+        HarnessContractError, HarnessMode, HarnessOptions, ScenarioProfile, Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
 
@@ -4897,9 +4898,10 @@ mod tests {
         )
         .expect_err("the harness must not infer a safe time from vague surveillance");
 
-        assert!(error
-            .to_string()
-            .contains("did not contain actionable recurring patrol windows"));
+        assert!(matches!(
+            error,
+            HarnessContractError::NoActionablePatrolWindows
+        ));
     }
 
     #[test]

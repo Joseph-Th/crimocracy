@@ -37,6 +37,14 @@ pub enum OperationKind {
     RivalInfiltration,
 }
 
+impl OperationKind {
+    /// Whether this kind has an authored property-proceeds effect and therefore may
+    /// authorize a property-acquisition objective.
+    pub(crate) const fn supports_property_acquisition(self) -> bool {
+        matches!(self, Self::Burglary | Self::Hijacking | Self::DocumentTheft)
+    }
+}
+
 pub const ALL_OPERATION_KINDS: [OperationKind; 15] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
