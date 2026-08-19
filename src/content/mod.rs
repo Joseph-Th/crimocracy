@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 16;
+pub const CURRENT_CONTENT_REVISION: u32 = 17;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();

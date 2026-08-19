@@ -682,9 +682,11 @@ pub fn validate_state_against_registry(
                 )?;
                 let expected_realized = calculate_property_liquidation_value(
                     registry,
+                    state,
                     operation.kind(),
                     proceeds.estimated_value(),
                     operation.id(),
+                    disposition.venue(),
                 )
                 .map_err(|_| {
                     StateValidationError::InvalidOperationPropertyDisposition {

@@ -338,7 +338,13 @@ pub fn decide_enterprise_cycle(
         resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
     let gross_revenue =
         apply_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
-    let operating_cost = resolve_operating_cost(enterprise, economics, neighborhood)?;
+    let operating_cost = resolve_operating_cost(
+        state,
+        enterprise,
+        economics,
+        neighborhood,
+        record.location(),
+    )?;
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
@@ -1080,18 +1086,57 @@ fn resolve_gross_before_variance(
 }
 
 fn resolve_operating_cost(
+    state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
+    location: EnterpriseLocation,
 ) -> Result<Money, EnterpriseError> {
-    economics
-        .base_operating_cost()
-        .checked_add(weighted_rating(
-            enterprise,
-            economics.police_cost_per_point(),
-            profile.institutions.police_presence,
-        )?)
+    let base = economics.base_operating_cost().checked_add(weighted_rating(
+        enterprise,
+        economics.police_cost_per_point(),
+        profile.institutions.police_presence,
+    )?);
+    let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    let heat = resolve_investigation_heat_surcharge(state, location);
+    base.checked_add(heat)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
+}
+
+fn resolve_investigation_heat_surcharge(
+    state: &crate::core::state::AppState,
+    location: EnterpriseLocation,
+) -> Money {
+    let neighborhood = match location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(business_id) => {
+            let Some(business) = state.world.get_business(business_id) else {
+                return Money::ZERO;
+            };
+            business.neighborhood()
+        }
+    };
+    let Some(authority) =
+        crate::legal::jurisdiction_system::resolve_case_intake_authority(state, neighborhood)
+    else {
+        return Money::ZERO;
+    };
+    let active = state
+        .legal
+        .investigations_for_owner(authority)
+        .filter(|investigation| {
+            investigation.status() == crate::legal::InvestigationStatus::Active
+                && investigation.origin_operation().is_some()
+        })
+        .count();
+    if active == 0 {
+        Money::ZERO
+    } else {
+        // $25 per active case in the district: street heat makes the racket more expensive
+        // to run (bribes, lookouts, missed nights). The surcharge is deliberately linear
+        // so one hot investigation hurts but does not instantly bankrupt a gambling enterprise.
+        Money::from_cents((active as i64) * 2_500)
+    }
 }
 
 fn weighted_optional_rating(

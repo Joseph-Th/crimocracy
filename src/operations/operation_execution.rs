@@ -3468,11 +3468,11 @@ mod tests {
             },
         )
         .expect("held burglary property should be disposable through a resale venue");
-        assert_eq!(disposition.realized_value().cents(), 36_660);
+        assert_eq!(disposition.realized_value().cents(), 32_148);
         let disposition_outcome = disposition
             .commit(&mut achieved_state)
             .expect("property disposition should commit atomically");
-        assert_eq!(disposition_outcome.realized_value.cents(), 36_660);
+        assert_eq!(disposition_outcome.realized_value.cents(), 32_148);
         assert_eq!(
             achieved_state
                 .finance()
@@ -3480,7 +3480,7 @@ mod tests {
                 .expect("cash account should persist")
                 .balance()
                 .cents(),
-            36_660
+            32_148
         );
         assert_eq!(
             achieved_state
@@ -3489,7 +3489,7 @@ mod tests {
                 .expect("settlement account should persist")
                 .balance()
                 .cents(),
-            -36_660
+            -32_148
         );
         assert!(matches!(
             validate_dispose_property(
@@ -3522,13 +3522,13 @@ mod tests {
         ));
         assert!(liquidated_report.entries()[0]
             .summary
-            .contains("Liquidated operation property during period: 1 disposition(s), realized cash 36660 cents"));
+            .contains("Liquidated operation property during period: 1 disposition(s), realized cash 32148 cents"));
         assert!(liquidated_report.entries().iter().any(|entry| {
             entry.entities.contains(&EntityRef::Operation(operation))
                 && entry
                     .summary
                     .contains("liquidated through Fixture Pawn Exchange")
-                && entry.summary.contains("36660 cents")
+                && entry.summary.contains("32148 cents")
         }));
         let restored = restore_save(
             &registry,
@@ -3540,7 +3540,7 @@ mod tests {
             .get_operation(operation)
             .and_then(|record| record.property_disposition())
             .expect("property disposition should survive save restoration");
-        assert_eq!(restored_disposition.realized_value().cents(), 36_660);
+        assert_eq!(restored_disposition.realized_value().cents(), 32_148);
         assert_eq!(restored_disposition.venue(), resale_venue);
         validate_state_against_registry(&registry, &restored)
             .expect("restored property disposition should remain registry-valid");
@@ -3648,7 +3648,7 @@ mod tests {
         assert_eq!(operation_entries.len(), 1);
         assert!(operation_entries[0]
             .summary
-            .contains("it was later liquidated through Fixture Pawn Exchange for 36660 cents"));
+            .contains("it was later liquidated through Fixture Pawn Exchange for 32148 cents"));
         assert!(!same_window_report
             .entries()
             .iter()
@@ -3708,7 +3708,7 @@ mod tests {
             entry.summary.starts_with("Property from ")
                 && entry
                     .summary
-                    .contains("liquidated through Fixture Pawn Exchange for 36660 cents")
+                    .contains("liquidated through Fixture Pawn Exchange for 32148 cents")
         }));
         assert!(!second_report
             .entries()

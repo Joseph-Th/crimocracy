@@ -932,7 +932,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     print_experience_readout(&rush, &press, &recon);
     validate_branch_financial_isolation(&rush, &press, &recon)?;
     println!(
-        "[HARNESS CHECK] Unchanged legitimate and delegated-enterprise systems produced identical cashflow across strategy branches."
+        "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by the district heat surcharge from an active investigation (PRESS penalized while hot)."
     );
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
@@ -1632,9 +1632,44 @@ fn validate_branch_financial_isolation(
 ) -> Result<(), HarnessContractError> {
     let same_legitimate_cashflow = rush.legitimate_net_cents == press.legitimate_net_cents
         && press.legitimate_net_cents == recon.legitimate_net_cents;
-    let same_enterprise_cashflow = rush.enterprise_net_cents == press.enterprise_net_cents
-        && press.enterprise_net_cents == recon.enterprise_net_cents;
-    if !same_legitimate_cashflow || !same_enterprise_cashflow {
+    if !same_legitimate_cashflow {
+        return Err(HarnessContractError::FinancialBranchMismatch {
+            legitimate: [
+                rush.legitimate_net_cents,
+                press.legitimate_net_cents,
+                recon.legitimate_net_cents,
+            ],
+            enterprise: [
+                rush.enterprise_net_cents,
+                press.enterprise_net_cents,
+                recon.enterprise_net_cents,
+            ],
+        });
+    }
+    // Enterprise cashflow is intentionally not isolated: active investigations in the
+    // district add a heat surcharge to delegated gambling, so PRESS (which created a
+    // case) should earn less than RECON in the same district while the case is hot.
+    // The second-day narrative shell (case shelved) then converges again; the bound
+    // check here keeps the design intentional rather than silent drift.
+    let press_penalized =
+        press.enterprise_net_cents.unwrap_or(0) <= recon.enterprise_net_cents.unwrap_or(0);
+    let rush_penalized =
+        rush.enterprise_net_cents.unwrap_or(0) <= recon.enterprise_net_cents.unwrap_or(0);
+    if !press_penalized && press.investigation_created {
+        return Err(HarnessContractError::FinancialBranchMismatch {
+            legitimate: [
+                rush.legitimate_net_cents,
+                press.legitimate_net_cents,
+                recon.legitimate_net_cents,
+            ],
+            enterprise: [
+                rush.enterprise_net_cents,
+                press.enterprise_net_cents,
+                recon.enterprise_net_cents,
+            ],
+        });
+    }
+    if !rush_penalized && rush.investigation_created {
         return Err(HarnessContractError::FinancialBranchMismatch {
             legitimate: [
                 rush.legitimate_net_cents,
@@ -4856,7 +4891,7 @@ fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, autonomous recruitment {}, player departures {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, departures {}, legit {}, enterprise {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -4888,6 +4923,8 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.executive_brief_count,
         metrics.autonomous_recruitment_attempts,
         metrics.player_personnel_departures,
+        optional_cents(metrics.legitimate_net_cents),
+        optional_cents(metrics.enterprise_net_cents),
     );
     println!(
         "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}",
@@ -4995,13 +5032,33 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         defector_trail_shown,
         "after a departure, the organization can confirm where the defector landed through its own canonical surveillance channel instead of the report leaking the rival",
     );
+    let legitimate_isolated = rush.legitimate_net_cents == press.legitimate_net_cents
+        && press.legitimate_net_cents == recon.legitimate_net_cents;
+    let enterprise_heat_shown = press.enterprise_net_cents.unwrap_or(0)
+        < recon.enterprise_net_cents.unwrap_or(0)
+        && press.investigation_created
+        && !recon.investigation_created;
     print_loop_checkpoint(
         "routine",
-        rush.legitimate_net_cents == press.legitimate_net_cents
-            && press.legitimate_net_cents == recon.legitimate_net_cents
-            && rush.enterprise_net_cents == press.enterprise_net_cents
-            && press.enterprise_net_cents == recon.enterprise_net_cents,
-        "delegated legitimate and illicit enterprises continue while leadership focuses on exceptions",
+        legitimate_isolated,
+        "legitimate front continues identically while leadership focuses on exceptions",
+    );
+    print_loop_checkpoint(
+        "heat cost",
+        enterprise_heat_shown,
+        "an active investigation in the district raises the delegated enterprise's operating cost",
+    );
+    let liquidation_varies = rush
+        .second_act_property_realized_cash_cents
+        .zip(recon.second_act_property_realized_cash_cents)
+        .map(|(a, b)| a != b)
+        .unwrap_or(false)
+        || recon.property_realized_cash_cents.is_some()
+            && press.property_realized_cash_cents.is_none();
+    print_loop_checkpoint(
+        "venue choice",
+        liquidation_varies || recon.property_realized_cash_cents.is_some(),
+        "liquidated resale value reflects the venue's district police presence",
     );
     println!("Observed decision leverage:");
     println!(
@@ -5023,11 +5080,13 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; RECON realized {} of resale cash.",
+        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; enterprise heat cut gambling net to {} vs RECON {} while hot, then recovered after the shelf; RECON realized {} of resale cash via a low-police venue.",
         press.evidence_count,
         press.player_legal_activity_information,
         press.counterintelligence_scheduled_at.unwrap_or_default(),
         press.case_cold_minute.unwrap_or_default(),
+        optional_dollars(press.enterprise_net_cents),
+        optional_dollars(recon.enterprise_net_cents),
         optional_dollars(recon.property_realized_cash_cents),
     );
     println!(
@@ -5037,16 +5096,16 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The consequence arc now closes: an open case can be read, outlasted by standing down, and verified shelved. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
+        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's heat surcharge and reduces resale value in heavily patrolled districts. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
-        "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion. Broader resource competition remains outside this foundation."
+        "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
     );
     println!(
         "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
-        "  - The delegation pillar is still routine-only: the delegated enterprise and legitimate front run on their authored cadence, but the fixtures never ask the player to re-scope a mandate, replace a delegated manager, or respond to manager drift."
+        "  - The delegation pillar is now measurably hot: enterprise heat is visible, but the fixtures still never ask the player to re-scope a mandate, replace a delegated manager mid-crisis, or respond to manager drift beyond the capacity-probe revision."
     );
     println!(
         "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."

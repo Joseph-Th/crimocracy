@@ -215,9 +215,11 @@ pub fn validate_dispose_property(
     )?;
     let realized_value = calculate_property_liquidation_value(
         registry,
+        state,
         operation.kind(),
         proceeds.estimated_value(),
         draft.operation,
+        draft.venue,
     )?;
     let negative_value = Money::from_cents(realized_value.cents().checked_neg().ok_or(
         PropertyDispositionError::ArithmeticOverflow(draft.operation),
@@ -376,17 +378,32 @@ fn validate_accounts(
 
 pub(crate) fn calculate_property_liquidation_value(
     registry: &Registry,
+    state: &crate::core::state::AppState,
     kind: OperationKind,
     estimated_value: Money,
     operation: OperationId,
+    venue: BusinessId,
 ) -> Result<Money, PropertyDispositionError> {
     let definition = registry
         .get_operation(kind)
         .execution()
         .property_proceeds()
         .ok_or(PropertyDispositionError::NoHeldProperty(operation))?;
+    let mut recovery_basis = i32::from(definition.liquidation_recovery_basis_points());
+    if let Some(venue_record) = state.world.get_business(venue) {
+        if let Some(neighborhood) = state.world.get_neighborhood(venue_record.neighborhood()) {
+            // Police presence makes fencing harder (scrutiny); commercial activity would
+            // help but the harness's fixtures tie commerce to police, so we weight police
+            // more heavily to preserve variation. A quiet district with low police
+            // presence meaningfully improves resale compared with a crowded, heavily
+            // patrolled one.
+            let police = i32::from(neighborhood.profile().institutions.police_presence.value());
+            let police_adjustment = (50 - police) * 20;
+            recovery_basis = (recovery_basis + police_adjustment).clamp(3_000, 9_000);
+        }
+    }
     let value = i128::from(estimated_value.cents())
-        .checked_mul(i128::from(definition.liquidation_recovery_basis_points()))
+        .checked_mul(i128::from(recovery_basis))
         .ok_or(PropertyDispositionError::ArithmeticOverflow(operation))?
         / 10_000_i128;
     let cents = i64::try_from(value)
