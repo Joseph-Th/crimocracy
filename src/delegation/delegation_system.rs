@@ -213,6 +213,57 @@ impl ValidatedMandateRevision {
             self.expected_manager_version,
         )?;
         validate_enterprise_scope_dependencies(state, self.mandate, &self.draft.scopes)?;
+        // Revalidate budget and scope liveness that could have changed between validation and commit.
+        for scope in &self.draft.scopes {
+            match scope {
+                ResponsibilityScope::Neighborhood(id) => {
+                    let rec = state
+                        .world
+                        .get_neighborhood(*id)
+                        .ok_or(DelegationError::MissingNeighborhood(*id))?;
+                    if rec.lifecycle() != Lifecycle::Active {
+                        return Err(DelegationError::InactiveNeighborhood(*id));
+                    }
+                }
+                ResponsibilityScope::Business(id) => {
+                    let rec = state
+                        .world
+                        .get_business(*id)
+                        .ok_or(DelegationError::MissingBusiness(*id))?;
+                    if rec.lifecycle() != Lifecycle::Active {
+                        return Err(DelegationError::InactiveBusiness(*id));
+                    }
+                }
+                ResponsibilityScope::Function(_) => {}
+            }
+        }
+        for (kind, setting) in &self.draft.standing_orders {
+            if setting.kind() != *kind {
+                return Err(DelegationError::PolicyKindMismatch {
+                    expected: *kind,
+                    actual: setting.kind(),
+                });
+            }
+        }
+        if let Some(budget) = self.draft.budget {
+            if budget.limit.cents() < 0 {
+                return Err(DelegationError::NegativeBudgetLimit);
+            }
+            let account = state.finance.get_account(budget.funding_account).ok_or(
+                DelegationError::MissingBudgetAccount(budget.funding_account),
+            )?;
+            if account.lifecycle() != AccountLifecycle::Open {
+                return Err(DelegationError::BudgetAccountNotOpen(
+                    budget.funding_account,
+                ));
+            }
+            if account.owner() != FinancialOwner::Organization(self.organization) {
+                return Err(DelegationError::BudgetAccountOwnerMismatch {
+                    account: budget.funding_account,
+                    organization: self.organization,
+                });
+            }
+        }
         let MandateRevisionDraft {
             scopes,
             standing_orders,

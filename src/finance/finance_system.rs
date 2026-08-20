@@ -124,6 +124,21 @@ impl ValidatedLedgerTransaction {
         if let Some(snapshot) = self.authority_snapshot {
             validate_mandate_authority_snapshot(state, snapshot)?;
         }
+        if let Some(usage) = self.budget_usage {
+            let summary = resolve_budget_usage(state, usage.mandate(), self.draft.occurred_at)?;
+            let next_used = summary
+                .used
+                .checked_add(usage.amount())
+                .ok_or(FinanceError::BudgetOverflow(usage.mandate()))?;
+            if next_used > summary.limit {
+                return Err(FinanceError::BudgetExceeded {
+                    mandate: usage.mandate(),
+                    limit_cents: summary.limit.cents(),
+                    used_cents: summary.used.cents(),
+                    requested_cents: usage.amount().cents(),
+                });
+            }
+        }
         let id = state.ids.next_ledger_transaction()?;
         let LedgerTransactionDraft {
             occurred_at,
@@ -160,7 +175,7 @@ pub fn validate_record_transaction(
     }
 
     let mut seen = BTreeSet::new();
-    let mut net_cents = 0_i64;
+    let mut net_cents: i128 = 0;
     let mut balances = BTreeMap::new();
     let mut expected_versions = BTreeMap::new();
     for posting in &draft.postings {
@@ -170,12 +185,16 @@ pub fn validate_record_transaction(
         if posting.amount == Money::ZERO {
             return Err(FinanceError::ZeroPosting(posting.account));
         }
-        net_cents =
-            net_cents
-                .checked_add(posting.amount.cents())
-                .ok_or(FinanceError::Unbalanced {
-                    net_cents: posting.amount.cents(),
-                })?;
+        net_cents = net_cents
+            .checked_add(i128::from(posting.amount.cents()))
+            .ok_or(FinanceError::Unbalanced {
+                net_cents: posting.amount.cents(),
+            })?;
+        if net_cents > i128::from(i64::MAX) || net_cents < i128::from(i64::MIN) {
+            return Err(FinanceError::Unbalanced {
+                net_cents: posting.amount.cents(),
+            });
+        }
         let account = state
             .finance
             .get_account(posting.account)
@@ -191,7 +210,11 @@ pub fn validate_record_transaction(
         expected_versions.insert(posting.account, account.version());
     }
     if net_cents != 0 {
-        return Err(FinanceError::Unbalanced { net_cents });
+        let diagnostic =
+            i64::try_from(net_cents).unwrap_or(if net_cents > 0 { i64::MAX } else { i64::MIN });
+        return Err(FinanceError::Unbalanced {
+            net_cents: diagnostic,
+        });
     }
     let budget_validation = resolve_transaction_budget(state, &draft)?;
     Ok(ValidatedLedgerTransaction {

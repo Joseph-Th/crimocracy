@@ -140,7 +140,7 @@ pub(crate) struct IdCounters {
     economy: EconomyIdCounters,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum IdKind {
     Organization,
     Character,
@@ -335,8 +335,19 @@ impl IdCounters {
 
     /// Pre-flight availability check for a whole budget of kinds resolved as one atomic unit.
     pub(crate) fn reserve_many(&self, budget: &[(IdKind, u32)]) -> Result<(), IdExhaustionError> {
+        let mut aggregated: std::collections::BTreeMap<IdKind, u32> =
+            std::collections::BTreeMap::new();
         for (kind, count) in budget {
-            self.reserve(*kind, *count)?;
+            let entry = aggregated.entry(*kind).or_insert(0);
+            *entry = entry
+                .checked_add(*count)
+                .ok_or(IdExhaustionError::Exhausted {
+                    kind: kind.label(),
+                    next: self.next_raw(*kind),
+                })?;
+        }
+        for (kind, total) in aggregated {
+            self.reserve(kind, total)?;
         }
         Ok(())
     }

@@ -224,6 +224,8 @@ struct EnterpriseCycleSnapshot {
     authority: ResolvedMandateAuthority,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
+    supporting_business_versions: BTreeMap<BusinessId, u32>,
+    host_business_version: Option<(BusinessId, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +361,18 @@ pub fn decide_enterprise_cycle(
     } else {
         AttentionClass::Routine
     };
+    let supporting_business_versions =
+        snapshot_supporting_business_versions(state, record.supporting_businesses())?;
+    let host_business_version = match record.location() {
+        EnterpriseLocation::Business(business_id) => {
+            let business = state
+                .world
+                .get_business(business_id)
+                .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+            Some((business_id, business.version()))
+        }
+        EnterpriseLocation::Neighborhood(_) => None,
+    };
     Ok(EnterpriseCyclePlan {
         snapshot: EnterpriseCycleSnapshot {
             enterprise,
@@ -369,6 +383,8 @@ pub fn decide_enterprise_cycle(
             // retroactively paid out in a burst after release. Re-anchor the next cycle to the
             // actual settlement instant so routine work resumes at its authored cadence.
             next_cycle_at: state.now() + economics.cycle(),
+            supporting_business_versions,
+            host_business_version,
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,
@@ -430,6 +446,29 @@ impl ValidatedEnterpriseCycle {
             });
         }
         validate_mandate_authority_snapshot(state, self.plan.snapshot.authority)?;
+        validate_supporting_business_versions(
+            state,
+            &self.plan.snapshot.supporting_business_versions,
+        )?;
+        if let Some((business_id, expected)) = self.plan.snapshot.host_business_version {
+            let business = state
+                .world
+                .get_business(business_id)
+                .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+            if business.version() != expected {
+                return Err(EnterpriseError::StaleSupportingBusiness {
+                    business: business_id,
+                    expected,
+                    found: business.version(),
+                });
+            }
+        }
+        validate_supporting_businesses(
+            state,
+            record.organization(),
+            record.location(),
+            record.supporting_businesses(),
+        )?;
         validate_enterprise_accounts(
             state,
             record.organization(),
@@ -502,6 +541,26 @@ pub fn validate_enterprise_cycle_plan(
         });
     }
     validate_mandate_authority_snapshot(state, plan.snapshot.authority)?;
+    validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;
+    if let Some((business_id, expected)) = plan.snapshot.host_business_version {
+        let business = state
+            .world
+            .get_business(business_id)
+            .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+        if business.version() != expected {
+            return Err(EnterpriseError::StaleSupportingBusiness {
+                business: business_id,
+                expected,
+                found: business.version(),
+            });
+        }
+    }
+    validate_supporting_businesses(
+        state,
+        record.organization(),
+        record.location(),
+        record.supporting_businesses(),
+    )?;
     validate_enterprise_accounts(
         state,
         record.organization(),
@@ -1099,7 +1158,14 @@ fn resolve_operating_cost(
     )?);
     let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let heat = resolve_investigation_heat_surcharge(state, location);
+    let support_cost = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .map(|record| record.supporting_businesses().len() as i64 * 5_000)
+        .unwrap_or(0);
+    let support_surcharge = Money::from_cents(support_cost);
     base.checked_add(heat)
+        .and_then(|total| total.checked_add(support_surcharge))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
@@ -1743,8 +1809,8 @@ mod tests {
         let plan = decide_enterprise_cycle(&registry, &restored, enterprise, 0)
             .expect("valid alcohol distribution network should resolve a due cycle");
         assert_eq!(plan.gross_revenue(), Money::from_cents(31_100));
-        assert_eq!(plan.operating_cost(), Money::from_cents(11_600));
-        assert_eq!(plan.net_cash(), Money::from_cents(19_500));
+        assert_eq!(plan.operating_cost(), Money::from_cents(21_600));
+        assert_eq!(plan.net_cash(), Money::from_cents(9_500));
         validate_enterprise_cycle_plan(&restored, plan)
             .expect("fresh alcohol distribution cycle should validate")
             .commit(&mut restored)

@@ -19,6 +19,12 @@ pub enum ArrestError {
     MissingCharacter(CharacterId),
     #[error("character {0} is not active and cannot enter a new custody record")]
     InactiveCharacter(CharacterId),
+    #[error("arrest evidence {evidence} is too weak for custody: strength {strength:?}, reliability {reliability:?}")]
+    InsufficientEvidence {
+        evidence: EvidenceId,
+        strength: crate::legal::EvidenceStrength,
+        reliability: crate::legal::EvidenceReliability,
+    },
     #[error("investigation {0} does not exist")]
     MissingInvestigation(InvestigationId),
     #[error("investigation {0} is not active")]
@@ -235,6 +241,13 @@ fn validate_arrest_dependencies(
             return Err(ArrestError::EvidenceSubjectMismatch {
                 evidence: *evidence_id,
                 character: draft.character,
+            });
+        }
+        if evidence.strength() == crate::legal::EvidenceStrength::Weak {
+            return Err(ArrestError::InsufficientEvidence {
+                evidence: *evidence_id,
+                strength: evidence.strength(),
+                reliability: evidence.reliability(),
             });
         }
     }

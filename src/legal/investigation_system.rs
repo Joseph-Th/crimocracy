@@ -376,14 +376,7 @@ pub(crate) fn process_cold_case_decay(
             .iter()
             .any(|subject| matches!(subject, EntityRef::Character(_)));
         if has_identified_subject {
-            let extended_window = u64::from(cold_case_window.as_minutes()) + 60 * 24 * 60;
-            let elapsed = state
-                .now()
-                .as_minutes()
-                .saturating_sub(record.last_activity_at().as_minutes());
-            if elapsed < extended_window {
-                continue;
-            }
+            continue;
         }
         let transition = validate_transition_investigation(
             state,
