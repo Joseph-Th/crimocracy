@@ -15,18 +15,22 @@ thiserror = "1.0"
 bincode = "1.3.3"
 
 # Tuned for solo local iteration: keep panic locations (line-tables-only) but
-# maximize incremental throughput and parallel codegen. `split-debuginfo = off`
-# would be slightly faster, but line tables are kept for useful failure sites.
+# balance incremental throughput and link time for a single-crate workspace.
+# codegen-units=32 gives ~4x fewer object files than 256, cutting link/PDB time
+# dramatically while still keeping incremental rebuilds under a second warm.
+# split-debuginfo=off avoids per-CU PDB writes on Windows.
 [profile.dev]
 debug = "line-tables-only"
+split-debuginfo = "off"
 incremental = true
-codegen-units = 256
+codegen-units = 32
 overflow-checks = true
 
 [profile.test]
 debug = "line-tables-only"
+split-debuginfo = "off"
 incremental = true
-codegen-units = 256
+codegen-units = 32
 overflow-checks = true
 
 [lints.rust]

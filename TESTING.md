@@ -36,8 +36,8 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 | Lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | One test / module | `cargo test-focused <filter>` | ~0.5s |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~1s |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~2s |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s |
+| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s |
 | Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s |
 
 `cargo check-fast` and `cargo test-focused` are the inner loop. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
@@ -52,15 +52,17 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 The gate runs fail-fast in order:
 
 1. `cargo fmt --check`
-2. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
-3. `cargo test --locked --all-targets --quiet`
-4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed)
+2. `cargo test --locked --lib --tests --quiet`
+3. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed, `--quiet` + captured output)
+4. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
+
+Tests run before clippy so the incremental test cache is hot; clippy is last so lint failure still preserves test signal.
 
 [`scripts/verify.ps1`](scripts/verify.ps1) is the owner; [`scripts/verify.cmd`](scripts/verify.cmd) is the wrapper. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
 
-The gate is not the inner loop. Iterate with a fast lane and run the gate once before handoff. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass.
+The gate is not the inner loop. Iterate with a fast lane and run the gate once before handoff. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
 
-Cargo profiles use `debug = "line-tables-only"`, `incremental = true`, and `codegen-units = 256` so warm builds reuse artifacts while keeping useful panic locations. The verify script reports per-stage timing and a total, and hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose`).
+Cargo profiles use `debug = "line-tables-only"`, `split-debuginfo = "off"`, `incremental = true`, and `codegen-units = 256` so warm builds reuse artifacts while keeping useful panic locations. The verify script reports per-stage timing and a total, and hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`).
 
 ## Gameplay-harness evidence
 

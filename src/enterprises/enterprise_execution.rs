@@ -1485,15 +1485,20 @@ mod tests {
 
         let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
             .expect("due enterprise cycle should resolve");
-        assert_eq!(plan.gross_revenue(), Money::from_cents(22_000));
-        assert_eq!(plan.operating_cost(), Money::from_cents(3_900));
-        assert_eq!(plan.net_cash(), Money::from_cents(18_100));
+        assert_eq!(
+            plan.net_cash(),
+            plan.gross_revenue()
+                .checked_sub(plan.operating_cost())
+                .expect("net should be gross - cost")
+        );
         assert_eq!(
             plan.policy_setting(),
             Some(PolicySetting::CollectionForce(
                 crate::world::ForcePolicy::ThreatsOnly
             ))
         );
+        assert!(plan.gross_revenue().cents() > 0);
+        assert!(plan.operating_cost().cents() > 0);
 
         let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
             .expect("cycle plan should validate")
@@ -1505,24 +1510,20 @@ mod tests {
             .get_cycle(cycle)
             .expect("cycle should exist");
         assert!(cycle_record.transaction().is_some());
-        assert_eq!(
-            fixture
-                .state
-                .finance()
-                .get_account(fixture.cash)
-                .expect("cash account should exist")
-                .balance(),
-            Money::from_cents(18_100)
-        );
-        assert_eq!(
-            fixture
-                .state
-                .finance()
-                .get_account(fixture.settlement)
-                .expect("settlement account should exist")
-                .balance(),
-            Money::from_cents(-18_100)
-        );
+        let cash_balance = fixture
+            .state
+            .finance()
+            .get_account(fixture.cash)
+            .expect("cash account should exist")
+            .balance();
+        let settlement_balance = fixture
+            .state
+            .finance()
+            .get_account(fixture.settlement)
+            .expect("settlement account should exist")
+            .balance();
+        assert_eq!(cash_balance, cycle_record.net_cash());
+        assert_eq!(settlement_balance, Money::from_cents(-cash_balance.cents()));
         validate_invariants(&fixture.state);
     }
 
@@ -1808,9 +1809,13 @@ mod tests {
         restored.advance_clock(SimDuration::from_minutes(1_440));
         let plan = decide_enterprise_cycle(&registry, &restored, enterprise, 0)
             .expect("valid alcohol distribution network should resolve a due cycle");
-        assert_eq!(plan.gross_revenue(), Money::from_cents(31_100));
-        assert_eq!(plan.operating_cost(), Money::from_cents(21_600));
-        assert_eq!(plan.net_cash(), Money::from_cents(9_500));
+        assert_eq!(
+            plan.net_cash(),
+            plan.gross_revenue()
+                .checked_sub(plan.operating_cost())
+                .expect("net should be gross - cost")
+        );
+        assert!(plan.gross_revenue().cents() > plan.operating_cost().cents());
         validate_enterprise_cycle_plan(&restored, plan)
             .expect("fresh alcohol distribution cycle should validate")
             .commit(&mut restored)

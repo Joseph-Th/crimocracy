@@ -1012,6 +1012,38 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn split_flag_value(arg: &str) -> Option<(&str, &str)> {
+    let (flag, value) = arg.split_once('=')?;
+    if flag.starts_with("--") {
+        Some((flag, value))
+    } else {
+        None
+    }
+}
+
+fn parse_seed_value(raw: &str) -> Result<u64, HarnessCliError> {
+    let value = raw.to_owned();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|_| HarnessCliError::InvalidValue {
+            flag: "--seed",
+            value,
+        })
+    } else if raw.chars().all(|c| c.is_ascii_digit()) && !raw.is_empty() {
+        // Decimal fast-path for ergonomics; fall back to hex if it looks hex.
+        raw.parse::<u64>()
+            .map_err(|_| HarnessCliError::InvalidValue {
+                flag: "--seed",
+                value,
+            })
+    } else {
+        // Try hex without prefix for backwards compatibility.
+        u64::from_str_radix(raw, 16).map_err(|_| HarnessCliError::InvalidValue {
+            flag: "--seed",
+            value,
+        })
+    }
+}
+
 fn parse_options(
     arguments: impl IntoIterator<Item = String>,
 ) -> Result<Option<HarnessOptions>, HarnessCliError> {
@@ -1024,58 +1056,68 @@ fn parse_options(
     let mut samples_were_explicit = false;
     let mut artifact_dir: Option<PathBuf> = None;
     while let Some(argument) = arguments.next() {
-        match argument.as_str() {
+        // Support both --flag value and --flag=value forms.
+        let (flag, inline_value) = if let Some((f, v)) = split_flag_value(&argument) {
+            (f.to_owned(), Some(v.to_owned()))
+        } else {
+            (argument.clone(), None)
+        };
+        match flag.as_str() {
             "--help" | "-h" => {
                 print_usage();
                 return Ok(None);
             }
             "--mode" => {
-                let value = arguments
-                    .next()
-                    .ok_or(HarnessCliError::MissingValue { flag: "--mode" })?;
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue { flag: "--mode" });
+                }
                 mode = HarnessMode::parse(&value)?;
             }
             "--samples" => {
                 samples_were_explicit = true;
-                let value = arguments
-                    .next()
-                    .ok_or(HarnessCliError::MissingValue { flag: "--samples" })?;
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue { flag: "--samples" });
+                }
                 samples = value
                     .parse::<u64>()
                     .map_err(|_| HarnessCliError::InvalidValue {
                         flag: "--samples",
-                        value,
+                        value: value.clone(),
                     })?;
                 if !(1..=MAX_BATCH_SAMPLES).contains(&samples) {
                     return Err(HarnessCliError::SampleCountOutOfRange { value: samples });
                 }
             }
             "--seed" => {
-                let value = arguments
-                    .next()
-                    .ok_or(HarnessCliError::MissingValue { flag: "--seed" })?;
-                let normalized = value
-                    .strip_prefix("0x")
-                    .or_else(|| value.strip_prefix("0X"))
-                    .unwrap_or(&value);
-                seed = u64::from_str_radix(normalized, 16).map_err(|_| {
-                    HarnessCliError::InvalidValue {
-                        flag: "--seed",
-                        value,
-                    }
-                })?;
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue { flag: "--seed" });
+                }
+                seed = parse_seed_value(&value)?;
             }
             "--strategy" => {
-                let value = arguments
-                    .next()
-                    .ok_or(HarnessCliError::MissingValue { flag: "--strategy" })?;
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue { flag: "--strategy" });
+                }
                 strategy = Strategy::parse(&value)?;
                 strategy_was_passed = true;
             }
             "--artifact-dir" => {
-                let value = arguments.next().ok_or(HarnessCliError::MissingValue {
-                    flag: "--artifact-dir",
-                })?;
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue {
+                        flag: "--artifact-dir",
+                    });
+                }
+                if value.is_empty() {
+                    return Err(HarnessCliError::InvalidValue {
+                        flag: "--artifact-dir",
+                        value: value.clone(),
+                    });
+                }
                 artifact_dir = Some(PathBuf::from(value));
             }
             _ => {
@@ -1102,10 +1144,11 @@ fn parse_options(
 
 fn print_usage() {
     println!(
-        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX] [--artifact-dir DIR]"
+        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX|DEC] [--artifact-dir DIR]"
     );
     println!("  smoke  Fast canonical-path check for the local gate and iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
+    println!("         --seed accepts 0xHEX or decimal; --flag=value form also supported.");
     println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
     println!("         --artifact-dir writes per-run JSON artifacts (default: target/harness/).");
 }

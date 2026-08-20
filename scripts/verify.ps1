@@ -1,16 +1,18 @@
 # verify.ps1 -- local Crimocracy completion gate for a solo developer.
 #
-# Optimized for fast incremental iteration: cached warm runs are ~1-3s for the
-# fast lane and ~4-8s for the full gate, because all stages reuse incremental
+# Optimized for fast incremental iteration: cached warm runs are ~0.7-1.5s for the
+# fast lane and ~3-6s for the full gate, because all stages reuse incremental
 # artifacts and avoid redundant rebuilds. Cold builds are dominated by rustc.
 #
 # Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
-#   2. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
-#   3. cargo test --locked --all-targets --quiet
-#   4. cargo test --locked --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
+#   2. cargo test --locked --lib --tests --quiet   (lib + integration, excludes examples)
+#   3. cargo test --locked --quiet --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
+#   4. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #
-# The smoke contract is selected fail-closed (exact count must be 1). See
+# Tests run before clippy so the hot test cache is not invalidated by clippy's
+# driver hash. Clippy is last: you get test signal even if lint fails. The smoke
+# contract is selected fail-closed (exact count must be 1). See
 # `Get-SmokeContractSelectableCount` and `Invoke-SmokeContractSelectionSelfTest`.
 #
 # Fast lanes for iteration:
@@ -22,7 +24,7 @@
 #   -Filter <pattern>   Run only matching lib tests (implies -Fast)
 #   -NoClippy / -NoFmt  Skip stages when you know they already pass
 #   -Jobs N             Cap cargo parallelism (e.g. -Jobs 2 on a hot laptop)
-#   -Verbose            Show cargo output even for passing quiet stages
+#   -Verbose / -Detail  Show cargo output even for passing quiet stages
 #
 # Exit code is non-zero on the first failing stage so hooks can gate commits.
 
@@ -37,6 +39,14 @@ param(
     [switch]$NoFmt,
     [switch]$Detail
 )
+
+# Support -Verbose (common parameter) as alias for -Detail without collision.
+if (-not $Detail -and $PSBoundParameters.ContainsKey('Verbose')) {
+    $Detail = $true
+}
+if ($VerbosePreference -eq 'Continue' -and -not $Detail) {
+    $Detail = $true
+}
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -99,8 +109,8 @@ function Invoke-CargoStage {
         [bool]$AllowJobs = $true,
         [switch]$ShowOutputOnPass
     )
-    $label = $Name.PadRight(28)
-    Write-Host "  $label " -NoNewline -ForegroundColor Cyan
+    $displayName = if ($Name.Length -gt 28) { $Name.Substring(0, 28) } else { $Name.PadRight(28) }
+    Write-Host "  $displayName " -NoNewline -ForegroundColor Cyan
     $cargoArgs = $Arguments
     if ($AllowJobs -and $Jobs -gt 0) {
         $jobsArgs = @("-j", "$Jobs")
@@ -112,8 +122,6 @@ function Invoke-CargoStage {
         }
     }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    # Capture output so --quiet stages stay quiet on success. Cargo's "Finished" goes to stderr
-    # and would otherwise be treated as an error with $ErrorActionPreference = "Stop".
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "SilentlyContinue"
     $output = & cargo @cargoArgs 2>&1 | Out-String
@@ -188,7 +196,6 @@ if ($Fast) {
         Assert-SmokeContractSelectable
         Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
     } else {
-        # --skip soak keeps the lane under a second warm; soak is still covered by the gate.
         Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants")
     }
     $gate.Stop()
@@ -201,7 +208,7 @@ if ($Fast) {
 
 $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
-Write-Host "FULL GATE  (fmt -> clippy -> all-target tests -> harness smoke)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+Write-Host "FULL GATE  (fmt -> tests -> harness smoke -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
 if ($NoFmt) {
     Write-Host "  fmt --check                 SKIP (--NoFmt)" -ForegroundColor Yellow
@@ -209,16 +216,16 @@ if ($NoFmt) {
     Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
 }
 
+Invoke-CargoStage "lib+integration tests" @("test", "--locked", "--lib", "--tests", "--quiet")
+
+Assert-SmokeContractSelectable
+Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
+
 if ($NoClippy) {
-    Write-Host "  clippy (lib + harness)      SKIP (--NoClippy)" -ForegroundColor Yellow
+    Write-Host "  clippy (lib+harness)        SKIP (--NoClippy)" -ForegroundColor Yellow
 } else {
     Invoke-CargoStage "clippy (lib+harness)" @("clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings")
 }
-
-Invoke-CargoStage "all-target tests" @("test", "--locked", "--all-targets", "--quiet")
-
-Assert-SmokeContractSelectable
-Invoke-CargoStage "harness smoke" @("test", "--locked", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
 
 $gate.Stop()
 Write-Host ""

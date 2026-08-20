@@ -19,20 +19,22 @@ lint-all = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
 # ── tests ───────────────────────────────────────────────────────────────────
 # Fast library lane: excludes the 5-second invariant soak.
 test-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants"]
-# All lib tests including soak (use sparingly).
+# All lib tests including soak (use sparingly). Note: lib-only, not --all-targets (gate uses lib+tests).
 test-all = ["test", "--locked", "--lib"]
-# Focused filter lane: `cargo test-focused <filter>` runs matching lib tests verbosely.
+# Focused filter lane: `cargo test-focused <filter>` runs matching lib tests. Filter is positional after alias.
 test-focused = ["test", "--locked", "--lib", "--quiet"]
 # Single-threaded focused run for deterministic ordering checks.
 test-focused-single = ["test", "--locked", "--lib", "--quiet", "--", "--test-threads=1"]
 # Documentation contract and invariant lane.
 test-doc = ["test", "--locked", "--test", "documentation_contracts"]
+# Integration tests (tests/ + doc contracts) without examples.
+test-integration = ["test", "--locked", "--tests", "--quiet"]
 soak = ["test", "--locked", "--lib", "core::state::tests::test_mixed_scenario_soak_preserves_invariants", "--", "--exact", "--nocapture"]
 
 # ── gameplay harness ────────────────────────────────────────────────────────
 # Smoke contract as an ignored test (used by `verify` gate, fail-closed).
 harness-smoke = ["test", "--locked", "--quiet", "--example", "gameplay_harness", "tests::smoke_mode_covers_canonical_paths", "--", "--ignored", "--exact", "--nocapture"]
-# Direct harness executions (human-readable narrative output).
+# Direct harness executions (human-readable narrative output). Use --quiet to keep output concise.
 harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
 harness-rush = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
 harness-press = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
@@ -42,6 +44,8 @@ harness-full = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "
 
 # ── formatting ──────────────────────────────────────────────────────────────
 fmt-check = ["fmt", "--check"]
+# Gate shortcut: fmt + fast lib tests.
+verify-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants"]
 
 [build]
 # Use incremental compilation for local iteration. Let cargo autoselect jobs;

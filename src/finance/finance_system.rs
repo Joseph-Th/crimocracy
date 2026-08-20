@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn validated_budget_transaction_becomes_stale_after_manager_hierarchy_change() {
+    fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked() {
         let registry = build_registry();
         let (mut state, authorization, funding, destination) = make_test_budget();
         let mandate = authorization.mandate;

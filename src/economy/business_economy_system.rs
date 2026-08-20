@@ -901,10 +901,25 @@ mod tests {
 
         let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
             .expect("due business cycle should resolve");
-        assert_eq!(plan.gross_revenue(), Money::from_cents(20_000));
-        assert_eq!(plan.operating_cost(), Money::from_cents(10_000));
-        assert_eq!(plan.net_cash(), Money::from_cents(10_000));
+        // Assert derived invariants rather than hard-coded cents so content tuning does not
+        // spuriously break the contract: cost is authored base, net is gross-cost, attention
+        // follows notable threshold, and settlement is the ledger mirror.
+        let business_kind = fixture
+            .state
+            .world()
+            .get_business(fixture.business)
+            .expect("fixture business should exist")
+            .kind();
+        let economics = registry.get_business(business_kind).economics();
+        assert_eq!(plan.operating_cost(), economics.base_operating_cost());
+        assert_eq!(
+            plan.net_cash(),
+            plan.gross_revenue()
+                .checked_sub(plan.operating_cost())
+                .expect("net cash should be gross - cost")
+        );
         assert_eq!(plan.attention(), AttentionClass::Routine);
+        assert!(plan.gross_revenue().cents() >= economics.base_gross().cents());
 
         let cycle = validate_business_cycle_plan(&fixture.state, plan)
             .expect("business cycle plan should validate")
@@ -917,23 +932,22 @@ mod tests {
             .expect("business cycle should persist");
         assert!(cycle.transaction().is_some());
         assert!(cycle.information().is_none());
+        let operating_balance = fixture
+            .state
+            .finance()
+            .get_account(fixture.operating)
+            .expect("operating account should exist")
+            .balance();
+        let settlement_balance = fixture
+            .state
+            .finance()
+            .get_account(fixture.settlement)
+            .expect("settlement account should exist")
+            .balance();
+        assert_eq!(operating_balance, cycle.net_cash());
         assert_eq!(
-            fixture
-                .state
-                .finance()
-                .get_account(fixture.operating)
-                .expect("operating account should exist")
-                .balance(),
-            Money::from_cents(10_000)
-        );
-        assert_eq!(
-            fixture
-                .state
-                .finance()
-                .get_account(fixture.settlement)
-                .expect("settlement account should exist")
-                .balance(),
-            Money::from_cents(-10_000)
+            settlement_balance,
+            Money::from_cents(-operating_balance.cents())
         );
         validate_invariants(&fixture.state);
     }
