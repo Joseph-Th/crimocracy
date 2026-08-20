@@ -439,7 +439,8 @@ pub(super) fn validate_recruitment_against_registry(
             });
         if expected_factors != Some(attempt.factors())
             || attempt.pressure_information() != expected_pressure_information
-            || attempt.margin() != calculate_recruitment_margin(definition, attempt.factors())
+            || attempt.margin()
+                != calculate_recruitment_margin(definition, attempt.factors(), attempt.approach())
             || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {

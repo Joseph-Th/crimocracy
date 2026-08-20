@@ -591,6 +591,7 @@ pub struct BusinessEconomicsDefinition {
     pub(crate) base_operating_cost: Money,
     pub(crate) wealth_revenue_per_point: Money,
     pub(crate) commerce_revenue_per_point: Money,
+    pub(crate) police_cost_per_point: Money,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
 }
@@ -610,6 +611,9 @@ impl BusinessEconomicsDefinition {
     }
     pub fn commerce_revenue_per_point(&self) -> Money {
         self.commerce_revenue_per_point
+    }
+    pub fn police_cost_per_point(&self) -> Money {
+        self.police_cost_per_point
     }
     pub fn gross_variance_basis_points(&self) -> u16 {
         self.gross_variance_basis_points
@@ -1481,6 +1485,7 @@ impl RegistryBuilder {
             economics.base_operating_cost,
             economics.wealth_revenue_per_point,
             economics.commerce_revenue_per_point,
+            economics.police_cost_per_point,
         ];
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeBusinessEconomicValue(kind));

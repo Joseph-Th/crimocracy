@@ -1161,7 +1161,7 @@ fn resolve_operating_cost(
     let support_cost = state
         .enterprises
         .get_enterprise(enterprise)
-        .map(|record| record.supporting_businesses().len() as i64 * 5_000)
+        .map(|record| record.supporting_businesses().len() as i64 * 7_500)
         .unwrap_or(0);
     let support_surcharge = Money::from_cents(support_cost);
     base.checked_add(heat)
@@ -1198,10 +1198,11 @@ fn resolve_investigation_heat_surcharge(
     if active == 0 {
         Money::ZERO
     } else {
-        // $25 per active case in the district: street heat makes the racket more expensive
-        // to run (bribes, lookouts, missed nights). The surcharge is deliberately linear
-        // so one hot investigation hurts but does not instantly bankrupt a gambling enterprise.
-        Money::from_cents((active as i64) * 2_500)
+        // $50 per active case in the district: street heat makes the racket more expensive
+        // to run (bribes, lookouts, missed nights). Linear surcharge doubles the original
+        // $25 to meaningfully erode daily net without instantly bankrupting a gambling
+        // enterprise; a 5-case heat costs $250/day, enough to flip marginal rackets.
+        Money::from_cents((active as i64) * 5_000)
     }
 }
 

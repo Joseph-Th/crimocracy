@@ -415,7 +415,7 @@ pub(crate) fn decide_recruitment_attempt(
         had_previous_organization: candidate.organization().is_some(),
     })
     .expect("validated recruitment must retain a candidate-to-recruiter relationship snapshot");
-    let margin = calculate_recruitment_margin(registry.recruitment(), factors);
+    let margin = calculate_recruitment_margin(registry.recruitment(), factors, draft.approach);
     let outcome = classify_recruitment_outcome(margin);
     Ok(RecruitmentPlan {
         draft,
@@ -1155,8 +1155,18 @@ fn recruitment_trait_adjustment(
 pub(crate) fn calculate_recruitment_margin(
     definition: &RecruitmentDefinition,
     factors: RecruitmentFactors,
+    approach: RecruitmentApproach,
 ) -> i16 {
     let weights = definition.weights();
+    // Legal pressure is approach-sensitive: only Protection offers genuinely
+    // leverage fear of prosecution. Financial/Advancement pitches do not benefit
+    // from a target being "wanted", which would otherwise reward poaching the
+    // most-investigated characters with money alone.
+    let legal_weight = if approach == RecruitmentApproach::Protection {
+        i16::from(weights.perceived_legal_pressure)
+    } else {
+        0
+    };
     let score = definition.base_willingness()
         + weighted(
             factors.recruiter_influence(),
@@ -1174,10 +1184,7 @@ pub(crate) fn calculate_recruitment_margin(
             factors.incumbent_resentment(),
             i16::from(weights.incumbent_resentment),
         )
-        + weighted(
-            factors.perceived_legal_pressure(),
-            i16::from(weights.perceived_legal_pressure),
-        )
+        + weighted(factors.perceived_legal_pressure(), legal_weight)
         - weighted(
             factors.incumbent_attachment(),
             i16::from(weights.incumbent_attachment),
@@ -1293,7 +1300,7 @@ fn validate_plan_definition(
     .expect("validated recruitment plan must preserve its recruiter relationship");
     debug_assert_eq!(factors, plan.context.factors);
     debug_assert_eq!(
-        calculate_recruitment_margin(definition, factors),
+        calculate_recruitment_margin(definition, factors, plan.draft.approach),
         plan.context.margin
     );
     debug_assert_eq!(

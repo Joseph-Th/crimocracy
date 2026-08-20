@@ -55,7 +55,7 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 17.
+The current authored content revision is 18.
 
 The current in-memory state schema version is 42.
 

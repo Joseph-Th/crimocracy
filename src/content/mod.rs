@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 17;
+pub const CURRENT_CONTENT_REVISION: u32 = 18;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -48,7 +48,7 @@ pub fn build_registry() -> Registry {
     }
     register_recruitment(&mut builder);
     builder
-        .register_legal(SimDuration::from_minutes(2_160))
+        .register_legal(SimDuration::from_minutes(10_080))
         .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);
     let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
@@ -287,6 +287,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(10_000),
                 wealth_revenue_per_point: Money::from_cents(40),
                 commerce_revenue_per_point: Money::from_cents(80),
+                police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 1_000,
                 notable_variance_basis_points: 800,
             },
@@ -305,6 +306,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(12_000),
                 wealth_revenue_per_point: Money::from_cents(60),
                 commerce_revenue_per_point: Money::from_cents(90),
+                police_cost_per_point: Money::from_cents(30),
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
             },
@@ -323,6 +325,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(11_000),
                 wealth_revenue_per_point: Money::from_cents(50),
                 commerce_revenue_per_point: Money::from_cents(70),
+                police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 700,
             },
@@ -342,6 +345,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(15_000),
                 wealth_revenue_per_point: Money::from_cents(40),
                 commerce_revenue_per_point: Money::from_cents(100),
+                police_cost_per_point: Money::from_cents(35),
                 gross_variance_basis_points: 700,
                 notable_variance_basis_points: 600,
             },
@@ -359,6 +363,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(7_500),
                 wealth_revenue_per_point: Money::from_cents(10),
                 commerce_revenue_per_point: Money::from_cents(60),
+                police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 500,
                 notable_variance_basis_points: 450,
             },
@@ -377,6 +382,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(11_000),
                 wealth_revenue_per_point: Money::from_cents(100),
                 commerce_revenue_per_point: Money::from_cents(40),
+                police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 900,
                 notable_variance_basis_points: 700,
             },
@@ -771,9 +777,6 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             }),
             OperationKind::DocumentTheft => Some(OperationPropertyProceedsDefinition {
                 business_gross_basis_points: 12_500,
-                // Stolen documents capture a large share on a partial grab (50%) but resell for
-                // much less (40%) because recovered paperwork has poor resale value compared with
-                // resalable inventoried goods — an intentional inversion from Burglary/Hijacking.
                 partial_recovery_basis_points: 5_000,
                 liquidation_recovery_basis_points: 4_000,
             }),

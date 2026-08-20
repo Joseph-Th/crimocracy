@@ -255,7 +255,15 @@ pub fn decide_business_cycle(
     let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
     let gross_revenue =
         apply_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
-    let operating_cost = economics.base_operating_cost();
+    let police_cost = weighted_rating(
+        business,
+        economics.police_cost_per_point(),
+        profile.institutions.police_presence.value(),
+    )?;
+    let operating_cost = economics
+        .base_operating_cost()
+        .checked_add(police_cost)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
@@ -911,7 +919,26 @@ mod tests {
             .expect("fixture business should exist")
             .kind();
         let economics = registry.get_business(business_kind).economics();
-        assert_eq!(plan.operating_cost(), economics.base_operating_cost());
+        let business = fixture
+            .state
+            .world()
+            .get_business(fixture.business)
+            .expect("fixture business should exist");
+        let neighborhood = fixture
+            .state
+            .world()
+            .get_neighborhood(business.neighborhood())
+            .expect("business neighborhood should exist");
+        let expected_police = crate::finance::helpers::weighted_rating(
+            economics.police_cost_per_point(),
+            neighborhood.profile().institutions.police_presence.value(),
+        )
+        .expect("police cost should not overflow");
+        let expected_cost = economics
+            .base_operating_cost()
+            .checked_add(expected_police)
+            .expect("business cost should not overflow");
+        assert_eq!(plan.operating_cost(), expected_cost);
         assert_eq!(
             plan.net_cash(),
             plan.gross_revenue()
