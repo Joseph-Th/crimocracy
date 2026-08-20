@@ -6,12 +6,14 @@ Owns test selection, harness evidence, and local verification. Ownership is in [
 
 Use the narrowest proof that covers the change:
 
-| Change | First proof | Broader lane |
+| Change | Focused feedback | Completion lane |
 | --- | --- | --- |
-| One library behavior | `cargo test-focused <filter>` | `cargo test-fast` |
+| One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
 | Harness filter | `cargo harness -- --mode smoke --strategy rush` or `cargo harness-press` | `.\scripts\verify.cmd -Fast -Harness` |
-| Persistence, invariants, or cross-domain behavior | Focused owner test plus load/continuation evidence | `.\scripts\verify.cmd` (full gate) |
+| Persistence, invariants, or cross-domain behavior | Focused owner test or load/continuation diagnosis | `.\scripts\verify.cmd` (broad gate) |
+
+The two columns are not a required sequence. Use focused feedback while the implementation is moving or when isolating a failure; when the change is ready for its completion lane, go directly to that lane if it already compiles and exercises the same owner coverage.
 
 Tests prove observable production behavior: calculations, transitions, transactions, invariants, serialization, deterministic continuation, and failure paths.
 
@@ -42,7 +44,7 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 
 `cargo check-fast` and `cargo test-focused` are the inner loop. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
 
-### Completion gate (run before push)
+### Broad completion gate
 
 ```text
 .\scripts\verify.cmd
@@ -60,7 +62,7 @@ Tests run before clippy so the incremental test cache is hot; clippy is last so 
 
 [`scripts/verify.ps1`](scripts/verify.ps1) is the owner; [`scripts/verify.cmd`](scripts/verify.cmd) is the wrapper. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
 
-The gate is not the inner loop. Iterate with a fast lane and run the gate once before handoff. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
+The broad gate is not the routine finishing step. Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work uses `.\scripts\verify.cmd -Fast -Harness`. Run the broad gate when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Do not run a fast lane and then the broad lane solely for reassurance. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
 
 Cargo profiles use `debug = "line-tables-only"`, `split-debuginfo = "off"`, `incremental = true`, and `codegen-units = 256` so warm builds reuse artifacts while keeping useful panic locations. The verify script reports per-stage timing and a total, and hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`).
 
@@ -90,9 +92,9 @@ cargo harness-full -- --samples 8 --artifact-dir target/my-run
 
 Before handoff:
 
-- Run the narrowest focused proof.
-- Run the applicable fast lane (`cargo test-fast` or `.\scripts\verify.cmd -Fast`).
-- Run `.\scripts\verify.cmd`.
+- Use the narrowest focused proof beforehand only when it provided useful iteration or failure-isolation feedback.
+- Run exactly the smallest scripted completion lane that covers the changed surface: normally `.\scripts\verify.cmd -Fast`, or `.\scripts\verify.cmd -Fast -Harness` for harness work. Do not rerun an overlapping focused proof immediately before that lane merely because both commands are documented.
+- Run `.\scripts\verify.cmd` only when the changed contract requires the broad gate.
 - Run `cargo soak` or `cargo harness-full --samples 8` when the changed contract requires that evidence.
 - Review `git diff --check`, generated output, and the final worktree.
 

@@ -57,9 +57,11 @@ If any of the above is not discoverable, repair the owning documentation as part
 
 ## Completion
 
-Iterate with focused checks, then run the local gate before handoff:
+Use focused checks while editing when they shorten feedback or isolate a failure. For completion, run the smallest lane that covers the changed surface; if the implementation is already ready for that lane, go directly to it instead of forcing a focused build first:
 
 - `cargo check-fast` / `cargo test-focused <filter>` while editing
-- `.\scripts\verify.cmd` (or `.\scripts\verify.cmd -Fast`) before push
+- `.\scripts\verify.cmd -Fast` for ordinary library work
+- `.\scripts\verify.cmd -Fast -Harness` when the harness surface changes
+- `.\scripts\verify.cmd` only for persistence/invariant/cross-domain work, verification infrastructure, or an explicit broad checkpoint
 
 Before handoff, confirm ownership, determinism, persistence, invariants, adapters, tests, documentation, and worktree scope remain coherent.

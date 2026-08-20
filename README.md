@@ -28,7 +28,7 @@ Source ownership and mutation patterns are in [`ARCHITECTURE.md`](ARCHITECTURE.m
 
 ## Local verification
 
-Fast iteration uses the cheapest lane that proves the change; full gate runs once before push. Lane ownership is in [`TESTING.md`](TESTING.md); the gate is owned by [`scripts/verify.ps1`](scripts/verify.ps1) and wrapped by [`scripts/verify.cmd`](scripts/verify.cmd).
+Fast iteration uses the cheapest lane that proves the change. Routine completion uses the smallest scripted lane selected by the changed surface; the full gate is reserved for contracts that require its broader harness/Clippy coverage or for an explicit broad checkpoint. Lane ownership is in [`TESTING.md`](TESTING.md); the gate is owned by [`scripts/verify.ps1`](scripts/verify.ps1) and wrapped by [`scripts/verify.cmd`](scripts/verify.cmd).
 
 | Need | Command | Warm |
 | --- | --- | --- |
@@ -38,9 +38,9 @@ Fast iteration uses the cheapest lane that proves the change; full gate runs onc
 | Fast lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~1s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
-| Full local gate | `.\scripts\verify.cmd` | ~4-8s |
+| Broad local gate | `.\scripts\verify.cmd` | ~4-8s |
 
-The gate runs `cargo fmt --check`, strict Clippy for `lib` + `gameplay_harness`, `cargo test --all-targets`, and the exact ignored harness smoke contract selected fail-closed. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test --release --locked`.
+The broad gate runs `cargo fmt --check`, strict Clippy for `lib` + `gameplay_harness`, `cargo test --all-targets`, and the exact ignored harness smoke contract selected fail-closed. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test --release --locked`.
 
 ## Gameplay harness
 
