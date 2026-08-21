@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[package.metadata.git-wizard.validation]
+quick = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Fast"
+standard = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Fast"
+full = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
+
 [dependencies]
 rand_chacha = { version = "0.3.1", features = ["serde1"] }
 rand_core = "0.6.4"
