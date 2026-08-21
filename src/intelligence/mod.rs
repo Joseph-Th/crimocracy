@@ -184,16 +184,6 @@ impl IntelligenceState {
             .flatten()
             .filter_map(|id| self.records.get(id))
     }
-    pub fn information_about(
-        &self,
-        subject: EntityRef,
-    ) -> impl Iterator<Item = &InformationRecord> {
-        self.by_subject
-            .get(&subject)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
     pub fn information_derived_from(
         &self,
         source: InformationId,

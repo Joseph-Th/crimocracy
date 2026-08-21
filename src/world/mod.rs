@@ -877,15 +877,6 @@ impl WorldState {
         })
     }
 
-    pub fn business_owner_at_version(
-        &self,
-        business: BusinessId,
-        version: u32,
-    ) -> Option<BusinessOwner> {
-        self.get_business_ownership_change_for_version(business, version)
-            .map(BusinessOwnershipChangeRecord::new_owner)
-    }
-
     pub fn get_business_ownership_change_for_version(
         &self,
         business: BusinessId,

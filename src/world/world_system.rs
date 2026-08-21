@@ -68,6 +68,8 @@ pub enum WorldError {
         supervisor: CharacterId,
         organization: Option<OrganizationId>,
     },
+    #[error("character {character} cannot have a supervisor without belonging to an organization")]
+    SupervisorWithoutOrganization { character: CharacterId },
     #[error("character {character} cannot supervise itself")]
     SelfSupervision { character: CharacterId },
     #[error("reassignment would create a supervision cycle involving character {character}")]
@@ -655,7 +657,14 @@ fn validate_membership(
             return Err(WorldError::InactiveOrganization(organization_id));
         }
     }
+    // A supervision chain is an organization hierarchy; an unassigned character cannot report
+    // to a supervisor because no organization would own the relationship.
     if let Some(supervisor_id) = supervisor {
+        if organization.is_none() {
+            return Err(WorldError::SupervisorWithoutOrganization {
+                character: supervisor_id,
+            });
+        }
         let supervisor_record = state
             .world
             .get_character(supervisor_id)
@@ -1143,11 +1152,54 @@ mod tests {
 
         assert_eq!(
             error,
-            WorldError::SupervisorOrganizationMismatch {
-                supervisor,
-                organization: None,
+            WorldError::SupervisorWithoutOrganization {
+                character: supervisor,
             }
         );
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn unassigned_character_cannot_have_unassigned_supervisor() {
+        let registry = build_registry();
+        let mut state = AppState::new(13);
+        let supervisor = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Unassigned Supervisor".to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("unassigned supervisor fixture should validate");
+
+        let error = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Unassigned".to_owned(),
+                organization: None,
+                supervisor: Some(supervisor),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect_err("unassigned character must not enter an organization hierarchy");
+
+        assert_eq!(
+            error,
+            WorldError::SupervisorWithoutOrganization {
+                character: supervisor,
+            }
+        );
+        assert_eq!(state.world.direct_reports(supervisor).count(), 0);
         validate_invariants(&state);
     }
 

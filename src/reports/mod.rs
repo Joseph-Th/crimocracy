@@ -12,16 +12,15 @@ use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Types of player-facing reports the simulation can generate. Only variants
+/// actually produced by systems are represented here; unused slots were deleted
+/// to preserve exhaustive-match discipline per ARCHITECTURE.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReportKind {
     ExecutiveBrief,
     Financial,
-    Surveillance,
     PoliceIntelligence,
-    Newspaper,
     Legal,
-    Accounting,
-    Informant,
     AfterAction,
     Opportunity,
 }

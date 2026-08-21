@@ -324,7 +324,8 @@ impl IdCounters {
     /// allocation is when the counter reads `u32::MAX - 1`.
     pub(crate) fn reserve(&self, kind: IdKind, count: u32) -> Result<(), IdExhaustionError> {
         let next = self.next_raw(kind);
-        if next == 0 || next.checked_add(count).is_none() {
+        debug_assert!(next >= 1, "ID counters start at 1 and only increment");
+        if next.checked_add(count).is_none() {
             return Err(IdExhaustionError::Exhausted {
                 kind: kind.label(),
                 next,

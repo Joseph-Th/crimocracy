@@ -79,7 +79,7 @@ pub fn validate_organization_financial_report(
         period_end,
     )?;
     let (property_operation_count, held_property_value) =
-        resolve_held_operation_property(state, recipient, period_start, period_end)?;
+        resolve_held_operation_property(state, recipient, period_end)?;
     let (property_disposition_count, realized_property_cash) =
         resolve_liquidated_operation_property(state, recipient, period_start, period_end)?;
     let mut entries = vec![ReportEntry {
@@ -144,7 +144,6 @@ pub fn validate_organization_financial_report(
 fn resolve_held_operation_property(
     state: &AppState,
     recipient: OrganizationId,
-    _period_start: SimTime,
     period_end: SimTime,
 ) -> Result<(u32, Money), OrganizationFinancialReportError> {
     let mut count = 0_u32;

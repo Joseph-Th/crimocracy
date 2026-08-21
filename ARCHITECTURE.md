@@ -122,6 +122,8 @@ Save/load preserves every value required for continuation: IDs, relationships, l
 
 Maintain `validate_invariants(state)` for structural checks. The soak exercises mixed state under invariant validation; [`TESTING.md`](TESTING.md) owns how it is run.
 
+The ledger enforces balance and overflow, not solvency: a validated settlement may drive an operating account negative, recording an obligation rather than rejecting the cycle. Domain owners decide suspension or closure consequences; the ledger itself never silently clamps balances.
+
 ## API and representation
 
 - Prefer explicit structs and project-owned enums over string-keyed registries for closed vocabularies.

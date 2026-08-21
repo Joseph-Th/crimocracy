@@ -6,7 +6,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::reports::{ReportDraft, ReportRecord};
+use crate::reports::{ReportDraft, ReportKind, ReportRecord};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -26,6 +26,8 @@ pub enum ReportError {
     },
     #[error("entity {0:?} does not exist")]
     MissingEntity(EntityRef),
+    #[error("report kind {0:?} is reserved for its owning synthesis path")]
+    ReservedKind(ReportKind),
     #[error("decision request {0} does not exist")]
     MissingDecision(DecisionRequestId),
     #[error("decision request {decision} belongs to organization {decision_recipient}, not report recipient {report_recipient}")]
@@ -57,6 +59,18 @@ impl ValidatedReport {
 }
 
 pub fn validate_record_report(
+    state: &AppState,
+    draft: ReportDraft,
+) -> Result<ValidatedReport, ReportError> {
+    // Executive briefs are produced only by their owning synthesis path, which enforces the
+    // one-brief-per-cadence-boundary invariant; a forged brief could panic or desync it.
+    if draft.kind == ReportKind::ExecutiveBrief {
+        return Err(ReportError::ReservedKind(draft.kind));
+    }
+    validate_report_draft(state, draft)
+}
+
+pub(crate) fn validate_report_draft(
     state: &AppState,
     draft: ReportDraft,
 ) -> Result<ValidatedReport, ReportError> {
@@ -123,6 +137,48 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn generic_report_path_cannot_forge_an_executive_brief() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_F194);
+        let recipient = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Brief Recipient".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient fixture should validate");
+
+        let error = match validate_record_report(
+            &state,
+            ReportDraft {
+                recipient,
+                kind: ReportKind::ExecutiveBrief,
+                title: "Forged brief".to_owned(),
+                entries: vec![ReportEntry {
+                    attention: AttentionClass::Notable,
+                    summary: "Only the synthesis path may produce briefs.".to_owned(),
+                    sources: Vec::new(),
+                    entities: BTreeSet::new(),
+                    decision: None,
+                }],
+            },
+        ) {
+            Ok(_) => panic!("generic report path must reject executive briefs"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ReportError::ReservedKind(ReportKind::ExecutiveBrief));
+        assert!(
+            state
+                .reports()
+                .latest_for_kind(recipient, ReportKind::ExecutiveBrief)
+                .is_none(),
+            "forged brief must not be recorded"
+        );
+    }
+
+    #[test]
     fn report_cannot_cite_information_held_by_another_organization() {
         let registry = build_registry();
         let mut state = AppState::new(0xB12E_F193);
@@ -166,7 +222,7 @@ mod tests {
             &state,
             ReportDraft {
                 recipient,
-                kind: ReportKind::ExecutiveBrief,
+                kind: ReportKind::Financial,
                 title: "Leaked intelligence".to_owned(),
                 entries: vec![ReportEntry {
                     attention: AttentionClass::Notable,

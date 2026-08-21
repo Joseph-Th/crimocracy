@@ -945,6 +945,22 @@ fn resolve_target_neighborhoods(
     neighborhoods
 }
 
+/// Neighborhoods an investigation targets, derived from its subjects and, for
+/// operation-originated cases, the originating operation's objective entities. Read-only
+/// derivation used by district-scoped consumers such as enterprise heat surcharges.
+pub(crate) fn resolve_investigation_target_neighborhoods(
+    state: &AppState,
+    investigation: &crate::legal::InvestigationRecord,
+) -> BTreeSet<NeighborhoodId> {
+    let mut entities: Vec<EntityRef> = investigation.subjects().iter().copied().collect();
+    if let Some(origin) = investigation.origin_operation() {
+        if let Some(operation) = state.operations.get_operation(origin) {
+            entities.extend(operation.objective().referenced_entities());
+        }
+    }
+    resolve_target_neighborhoods(state, entities)
+}
+
 fn calculate_exposure_plan(
     registry: &Registry,
     state: &AppState,
@@ -1511,7 +1527,7 @@ mod tests {
         validate_establish_patrol_deployment, validate_revise_patrol_deployment,
     };
     use crate::legal::{DayMinute, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow};
-    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::operation_system::{validate_authorize_operation, OperationError};
     use crate::operations::property_disposition::{
         validate_dispose_property, PropertyDispositionDraft, PropertyDispositionError,
     };
@@ -2072,6 +2088,105 @@ mod tests {
         assert_eq!(outcome.now, SimTime::from_minutes(31));
         assert_eq!(outcome.resolved_operations, vec![operation]);
         validate_state(&state).expect("resumed operation state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn resume_rejects_participant_booked_into_the_pause_extension_window() {
+        let (registry, mut state, organization, operation) = make_operation_fixture();
+        for _ in 0..5 {
+            run_tick(&registry, &mut state);
+        }
+        let leader = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should exist")
+            .leader();
+        let target = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should exist")
+            .objective()
+            .referenced_entities()
+            .into_iter()
+            .find_map(|entity| match entity {
+                EntityRef::Organization(organization) => Some(organization),
+                _ => None,
+            })
+            .expect("fixture objective should reference its target organization");
+
+        // Authorized before the pause: this window sits past the first operation's original
+        // resolution deadline, so authorization sees no conflict.
+        let follow_up = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Follow-up assignment".to_owned(),
+                kind: OperationKind::Intimidation,
+                responsible_organization: organization,
+                leader,
+                objective: OperationObjective::Frighten {
+                    target: EntityRef::Organization(target),
+                },
+                approach: OperationApproach::Intimidating,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::from_minutes(25),
+            },
+        )
+        .expect("follow-up operation should validate")
+        .commit(&mut state)
+        .expect("follow-up operation should commit");
+
+        let decision = validate_request_decision(
+            &state,
+            DecisionRequestDraft {
+                requester: leader,
+                context: DecisionContext::OperationException {
+                    operation,
+                    reason: OperationExceptionReason::UnexpectedCondition,
+                },
+                attention: AttentionClass::Exception,
+                summary: "Execution encountered a condition outside standing authority.".to_owned(),
+            },
+        )
+        .expect("operation exception should validate")
+        .commit(&mut state)
+        .expect("validated operation exception should commit");
+
+        // Ten paused minutes shift the first operation's deadline from 21 to 31, past the
+        // follow-up's scheduled start at 25.
+        for _ in 0..10 {
+            run_tick(&registry, &mut state);
+        }
+        let error = match validate_resolve_decision(
+            &registry,
+            &state,
+            decision.decision,
+            organization,
+            DecisionResponse::Continue,
+        ) {
+            Ok(_) => panic!("resume must reject a participant double-booked by the shift"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            DecisionError::Operation(OperationError::ParticipantBusy {
+                character: leader,
+                operation: follow_up,
+            })
+        );
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("paused operation should persist")
+                .status(),
+            OperationStatus::AwaitingDecision
+        );
+        validate_state(&state).expect("rejected resume state should validate");
         validate_invariants(&state);
     }
 

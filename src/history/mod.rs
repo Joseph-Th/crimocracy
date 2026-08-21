@@ -8,19 +8,13 @@ use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Persistent campaign event categories actually produced by simulation systems.
+/// Unused slots were deleted to preserve exhaustive-match discipline per ARCHITECTURE.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryEventKind {
     Operation,
-    Arrest,
-    Business,
-    Organization,
-    Relationship,
-    Political,
     Investigation,
-    Violence,
-    Promotion,
     Recruitment,
-    Other,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

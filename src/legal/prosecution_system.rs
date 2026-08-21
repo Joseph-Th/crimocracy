@@ -50,6 +50,10 @@ pub enum ProsecutionError {
     DetainedLeadProsecutor(CharacterId),
     #[error("lead prosecutor {0} has no LegalKnowledge capability")]
     MissingLegalKnowledge(CharacterId),
+    #[error("defendant {0} does not exist")]
+    MissingDefendant(CharacterId),
+    #[error("defendant {0} is not active")]
+    InactiveDefendant(CharacterId),
     #[error("arrest {arrest} already has open prosecution case {case} in office {office}")]
     DuplicateOpenCase {
         arrest: ArrestId,
@@ -242,6 +246,15 @@ fn validate_opening_dependencies(
         .legal
         .get_arrest(draft.arrest)
         .ok_or(ProsecutionError::MissingArrest(draft.arrest))?;
+    // The defendant is the subject of every artifact this case produces; opening a case against
+    // an inactive person would assert the office reviewed someone who no longer exists.
+    let defendant = state
+        .world
+        .get_character(arrest.character())
+        .ok_or(ProsecutionError::MissingDefendant(arrest.character()))?;
+    if defendant.lifecycle() != Lifecycle::Active {
+        return Err(ProsecutionError::InactiveDefendant(arrest.character()));
+    }
     if let Some(existing) = state
         .legal
         .open_prosecution_case_for(draft.arrest, draft.prosecutor_office)
@@ -712,6 +725,15 @@ fn validate_resolution_dependencies(
         ));
     }
     validate_lead_prosecutor(state, case.prosecutor_office(), case.lead_prosecutor())?;
+    // Resolving the case emits defendant-named artifacts; an inactive defendant cannot be
+    // meaningfully reviewed, so resolution must not proceed against one.
+    let defendant = state
+        .world
+        .get_character(case.defendant())
+        .ok_or(ProsecutionError::MissingDefendant(case.defendant()))?;
+    if defendant.lifecycle() != Lifecycle::Active {
+        return Err(ProsecutionError::InactiveDefendant(case.defendant()));
+    }
     Ok(case)
 }
 

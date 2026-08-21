@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 42;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 43;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -32,7 +32,6 @@ struct StateMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SimulationRuntime {
     now: SimTime,
-    rng: ChaCha8Rng,
     operation_rng: ChaCha8Rng,
     investigation_rng: ChaCha8Rng,
     business_rng: ChaCha8Rng,
@@ -77,7 +76,6 @@ impl AppState {
             },
             simulation: SimulationRuntime {
                 now: SimTime::ZERO,
-                rng: ChaCha8Rng::seed_from_u64(seed),
                 operation_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x4F50_4552)),
                 investigation_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x494E_5653)),
                 business_rng: ChaCha8Rng::seed_from_u64(domain_seed(seed, 0x4255_5349)),
@@ -196,11 +194,6 @@ impl AppState {
         self.simulation.now = self.simulation.now + duration;
     }
 
-    #[cfg(test)]
-    pub(crate) fn rng_mut(&mut self) -> &mut ChaCha8Rng {
-        &mut self.simulation.rng
-    }
-
     pub(crate) fn operation_rng_mut(&mut self) -> &mut ChaCha8Rng {
         &mut self.simulation.operation_rng
     }
@@ -244,7 +237,7 @@ mod tests {
     use crate::core::id::IdKind;
     use crate::core::invariants::{validate_state, StateValidationError};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
-    use crate::core::simulation::{decide_index, run_tick};
+    use crate::core::simulation::run_tick;
     use crate::decisions::decision_system::{
         validate_request_decision, validate_resolve_decision, DecisionError,
     };
@@ -869,7 +862,7 @@ mod tests {
                         &state,
                         ReportDraft {
                             recipient,
-                            kind: ReportKind::ExecutiveBrief,
+                            kind: ReportKind::PoliceIntelligence,
                             title: "Decision required".to_owned(),
                             entries: vec![ReportEntry {
                                 attention: AttentionClass::Exception,
@@ -1497,7 +1490,7 @@ mod tests {
             &state,
             ReportDraft {
                 recipient,
-                kind: ReportKind::ExecutiveBrief,
+                kind: ReportKind::PoliceIntelligence,
                 title: "Pending guidance".to_owned(),
                 entries: vec![ReportEntry {
                     attention: AttentionClass::Exception,
@@ -1598,7 +1591,8 @@ mod tests {
             run_tick(&registry, &mut state);
         }
         for _ in 0..16 {
-            decide_index(&mut state, 23).expect("non-empty random choice should resolve");
+            // Advance a domain stream so the save carries consumed RNG positions.
+            state.operation_rng_mut().next_u64();
         }
         validate_state(&state).expect("pre-save state should be structurally valid");
         crate::core::invariants::validate_invariants(&state);
@@ -1620,10 +1614,6 @@ mod tests {
         validate_state(&restored).expect("restored state should remain structurally valid");
         crate::core::invariants::validate_invariants(&restored);
         for _ in 0..256 {
-            assert_eq!(
-                decide_index(&mut state, 97).expect("choice should resolve"),
-                decide_index(&mut restored, 97).expect("restored choice should resolve")
-            );
             assert_eq!(
                 state.operation_rng_mut().next_u64(),
                 restored.operation_rng_mut().next_u64(),

@@ -208,30 +208,6 @@ impl ContactState {
             .filter_map(|id| self.contacts.get(id))
     }
 
-    pub fn contacts_for_institution(
-        &self,
-        institution: OrganizationId,
-    ) -> impl Iterator<Item = &InstitutionalContactRecord> {
-        self.indexes
-            .by_institution
-            .get(&institution)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.contacts.get(id))
-    }
-
-    pub fn contacts_for_character(
-        &self,
-        contact: CharacterId,
-    ) -> impl Iterator<Item = &InstitutionalContactRecord> {
-        self.indexes
-            .by_contact
-            .get(&contact)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.contacts.get(id))
-    }
-
     pub fn disclosures_for_contact(
         &self,
         contact: ContactId,

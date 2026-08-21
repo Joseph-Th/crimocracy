@@ -795,6 +795,13 @@ impl ValidatedDecisionResolution {
                 match next_status {
                     OperationStatus::InProgress => {
                         debug_assert!(abort.is_none());
+                        // Re-check at commit: the pause may have lengthened since validation,
+                        // extending the post-resume window past a conflicting authorization.
+                        crate::operations::operation_system::validate_operation_resume_participants(
+                            state,
+                            operation,
+                            state.now(),
+                        )?;
                         state.decisions.resolve(
                             self.decision,
                             build_resolution(self.response, state.now(), self.resolver),
@@ -915,6 +922,15 @@ pub fn validate_resolve_decision(
                     return Err(DecisionError::InvalidResponse { decision, response });
                 }
             };
+            if next_status == OperationStatus::InProgress {
+                // Resuming shifts the operation's window; a participant may have been booked
+                // into the gap while the operation was paused.
+                crate::operations::operation_system::validate_operation_resume_participants(
+                    state,
+                    operation,
+                    state.now(),
+                )?;
+            }
             let abort = match response {
                 DecisionResponse::Abort => Some(Box::new(
                     if has_missed_operation_deadline(state, operation) {
@@ -951,13 +967,6 @@ pub fn validate_resolve_decision(
             let attempt = match response {
                 DecisionResponse::Approve => {
                     validate_recruitment_approval_authority_snapshot(state, context)?;
-                    if state
-                        .recruitment
-                        .attempt_for_approval_decision(decision)
-                        .is_some()
-                    {
-                        return Err(DecisionError::DecisionNotPending(decision));
-                    }
                     Some(Box::new(validate_approved_recruitment_attempt(
                         registry,
                         state,

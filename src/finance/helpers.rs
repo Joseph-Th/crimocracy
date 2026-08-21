@@ -10,9 +10,12 @@ pub fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
 }
 
 /// Applies a basis-point variance (-10000..+10000 maps to 0..200%) to an amount.
+/// Rounds half away from zero so upside and downside variances are symmetric.
 pub fn apply_basis_point_variance(amount: Money, basis_points: i16) -> Option<Money> {
     let factor = 10_000_i128 + i128::from(basis_points);
-    let adjusted = i128::from(amount.cents()).checked_mul(factor)? / 10_000_i128;
+    let scaled = i128::from(amount.cents()).checked_mul(factor)?;
+    let sign = if scaled < 0 { -1 } else { 1 };
+    let adjusted = (scaled.abs() + 5_000) / 10_000 * sign;
     let cents = i64::try_from(adjusted).ok()?;
     Some(Money::from_cents(cents))
 }

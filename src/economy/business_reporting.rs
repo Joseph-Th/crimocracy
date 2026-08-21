@@ -1,6 +1,6 @@
 //! Read-only legitimate business financial aggregation over persisted operating cycle history.
 
-use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};
+use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::Money;
@@ -36,8 +36,6 @@ pub enum BusinessReportingError {
     MissingBusiness(BusinessId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("neighborhood {0} does not exist")]
-    MissingNeighborhood(NeighborhoodId),
     #[error("business financial aggregation overflowed")]
     ArithmeticOverflow,
 }
@@ -90,33 +88,6 @@ pub fn resolve_organization_business_financial_summary(
         period_start,
         period_end,
         Some(owner),
-    )
-}
-
-pub fn resolve_neighborhood_business_financial_summary(
-    state: &AppState,
-    neighborhood: NeighborhoodId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<BusinessFinancialSummary, BusinessReportingError> {
-    validate_window(state, period_start, period_end)?;
-    if state.world().get_neighborhood(neighborhood).is_none() {
-        return Err(BusinessReportingError::MissingNeighborhood(neighborhood));
-    }
-    resolve_summary(
-        state,
-        state
-            .world()
-            .businesses_in_neighborhood(neighborhood)
-            .filter(|business| {
-                state
-                    .economy()
-                    .get_business_economy(business.id())
-                    .is_some()
-            }),
-        period_start,
-        period_end,
-        None,
     )
 }
 

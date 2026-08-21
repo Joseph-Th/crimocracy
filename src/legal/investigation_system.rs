@@ -888,6 +888,11 @@ fn validate_incident_intake_dependencies(
         if evidence.kind == crate::legal::EvidenceKind::ForensicAnalysis {
             return Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork);
         }
+        // Incident intake inserts evidence with `source: None`; informant statements
+        // may only exist as products of the canonical informant-disclosure path.
+        if evidence.kind == crate::legal::EvidenceKind::InformantStatement {
+            return Err(InvestigationError::InformantStatementRequiresDisclosure);
+        }
         if !is_entity_present(state, evidence.subject) {
             return Err(InvestigationError::MissingEntity(evidence.subject));
         }
@@ -953,6 +958,66 @@ mod tests {
             },
         )
         .expect("investigator fixture should validate")
+    }
+
+    #[test]
+    fn incident_intake_cannot_forge_informant_statement() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x14F0_5EED);
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Intake Bureau".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let criminal = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Intake Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("criminal fixture should validate");
+
+        let error = match validate_incident_intake(
+            &state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: "Forged statement inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+                evidence: vec![crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Organization(criminal),
+                    origin: None,
+                    kind: EvidenceKind::InformantStatement,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::Credible,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                }],
+                origin_operation: None,
+                notified_organizations: BTreeSet::new(),
+            },
+        ) {
+            Ok(_) => panic!("incident intake must reject informant statements"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            InvestigationError::InformantStatementRequiresDisclosure
+        );
+        assert_eq!(
+            state
+                .legal()
+                .evidence_of_kind(EvidenceKind::InformantStatement)
+                .count(),
+            0
+        );
+        assert!(state.legal().investigations().next().is_none());
+        validate_invariants(&state);
     }
 
     #[test]

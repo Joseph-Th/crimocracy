@@ -324,10 +324,11 @@ pub(crate) fn resolve_due_autonomous_recruitment(
             continue;
         }
         let candidate = {
+            // Stabilize order before the RNG draw so determinism does not depend on BTree
+            // iteration quirks; the drawn index must address the sorted candidate list.
+            candidates.sort_unstable();
             let index =
                 decide_candidate_index(state.recruitment_rng_mut(), candidates.len()).unwrap_or(0);
-            // Stabilize order before RNG selection so determinism does not depend on BTree iteration quirks.
-            candidates.sort_unstable();
             candidates[index]
         };
         let authority = MandateAuthority {

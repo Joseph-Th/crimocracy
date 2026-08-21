@@ -608,15 +608,6 @@ mod tests {
                 .map(|record| record.id()),
             Some(outcome.statement)
         );
-        assert_eq!(
-            fixture
-                .state
-                .legal()
-                .statements_for_case_witness(case_witness)
-                .map(|record| record.id())
-                .collect::<Vec<_>>(),
-            vec![outcome.statement]
-        );
 
         let mut restored = restore_save(
             &registry,

@@ -1,7 +1,7 @@
 //! Read-only financial aggregation over enterprise cycle history; ledger-backed cycle records remain the source of truth.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{BusinessId, CharacterId, EnterpriseId, NeighborhoodId, OrganizationId};
+use crate::core::id::{CharacterId, EnterpriseId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseRecord};
@@ -41,8 +41,6 @@ pub enum EnterpriseReportingError {
     MissingManager(CharacterId),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
-    #[error("business {0} does not exist")]
-    MissingBusiness(BusinessId),
     #[error("enterprise financial aggregation overflowed")]
     ArithmeticOverflow,
 }
@@ -94,43 +92,6 @@ pub fn resolve_manager_enterprise_financial_summary(
     resolve_summary(
         state,
         state.enterprises().enterprises_for_manager(manager),
-        period_start,
-        period_end,
-    )
-}
-
-pub fn resolve_location_enterprise_financial_summary(
-    state: &AppState,
-    location: EnterpriseLocation,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<EnterpriseFinancialSummary, EnterpriseReportingError> {
-    validate_window(state, period_start, period_end)?;
-    match location {
-        EnterpriseLocation::Neighborhood(id) => {
-            if state.world().get_neighborhood(id).is_none() {
-                return Err(EnterpriseReportingError::MissingNeighborhood(id));
-            }
-        }
-        EnterpriseLocation::Business(id) => {
-            let business = state
-                .world()
-                .get_business(id)
-                .ok_or(EnterpriseReportingError::MissingBusiness(id))?;
-            if state
-                .world()
-                .get_neighborhood(business.neighborhood())
-                .is_none()
-            {
-                return Err(EnterpriseReportingError::MissingNeighborhood(
-                    business.neighborhood(),
-                ));
-            }
-        }
-    }
-    resolve_summary(
-        state,
-        state.enterprises().enterprises_at(location),
         period_start,
         period_end,
     )

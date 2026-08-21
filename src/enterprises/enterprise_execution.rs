@@ -346,6 +346,7 @@ pub fn decide_enterprise_cycle(
         economics,
         neighborhood,
         record.location(),
+        record.supporting_businesses().len(),
     )?;
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
@@ -1150,6 +1151,7 @@ fn resolve_operating_cost(
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
     location: EnterpriseLocation,
+    supporting_business_count: usize,
 ) -> Result<Money, EnterpriseError> {
     let base = economics.base_operating_cost().checked_add(weighted_rating(
         enterprise,
@@ -1158,12 +1160,7 @@ fn resolve_operating_cost(
     )?);
     let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let heat = resolve_investigation_heat_surcharge(state, location);
-    let support_cost = state
-        .enterprises
-        .get_enterprise(enterprise)
-        .map(|record| record.supporting_businesses().len() as i64 * 7_500)
-        .unwrap_or(0);
-    let support_surcharge = Money::from_cents(support_cost);
+    let support_surcharge = Money::from_cents(supporting_business_count as i64 * 7_500);
     base.checked_add(heat)
         .and_then(|total| total.checked_add(support_surcharge))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
@@ -1176,9 +1173,12 @@ fn resolve_investigation_heat_surcharge(
     let neighborhood = match location {
         EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(business_id) => {
-            let Some(business) = state.world.get_business(business_id) else {
-                return Money::ZERO;
-            };
+            // The host business was validated as existing and active earlier in the same
+            // decide cycle, so a missing record here would mean corrupted state.
+            let business = state
+                .world
+                .get_business(business_id)
+                .expect("validated enterprise host business must exist");
             business.neighborhood()
         }
     };
@@ -1187,12 +1187,19 @@ fn resolve_investigation_heat_surcharge(
     else {
         return Money::ZERO;
     };
+    // Only cases whose subjects or originating operation target this enterprise's neighborhood
+    // generate local street heat; an authority spanning several districts must not tax rackets
+    // in districts its cases never touched.
     let active = state
         .legal
         .investigations_for_owner(authority)
         .filter(|investigation| {
             investigation.status() == crate::legal::InvestigationStatus::Active
                 && investigation.origin_operation().is_some()
+                && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
+                    state, investigation,
+                )
+                .contains(&neighborhood)
         })
         .count();
     if active == 0 {
@@ -1259,10 +1266,18 @@ mod tests {
     use crate::finance::finance_system::insert_account;
     use crate::finance::{FinancialAccountDraft, FinancialOwner};
     use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
-    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::investigation_system::{
+        validate_add_evidence, validate_incident_intake, validate_open_investigation,
+    };
+    use crate::legal::jurisdiction_system::validate_set_jurisdiction;
     use crate::legal::{
         Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
-        EvidenceStrength, InvestigationDraft,
+        EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
+        JurisdictionDraft,
+    };
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{
+        OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
     };
     use crate::reports::enterprise_financial_report::validate_enterprise_financial_report;
     use crate::reports::ReportKind;
@@ -1525,6 +1540,146 @@ mod tests {
             .balance();
         assert_eq!(cash_balance, cycle_record.net_cash());
         assert_eq!(settlement_balance, Money::from_cents(-cash_balance.cents()));
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
+        let registry = build_registry();
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        let local_neighborhood = match fixture.location {
+            EnterpriseLocation::Neighborhood(neighborhood) => neighborhood,
+            EnterpriseLocation::Business(_) => {
+                panic!("enterprise fixture should be located in a neighborhood")
+            }
+        };
+        let other_neighborhood = insert_neighborhood(
+            &mut fixture.state,
+            NeighborhoodDraft {
+                name: "Dock Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(60),
+                        commercial_activity: rating(70),
+                        illicit_demand: rating(50),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(40),
+                        political_influence: rating(55),
+                        social_cohesion: rating(65),
+                        visible_violence_tolerance: rating(25),
+                    },
+                },
+            },
+        )
+        .expect("other neighborhood fixture should validate");
+        let police = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Metro Police Authority".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        validate_set_jurisdiction(
+            &fixture.state,
+            JurisdictionDraft {
+                organization: police,
+                neighborhoods: BTreeSet::from([local_neighborhood, other_neighborhood]),
+                case_intake_priority: rating(80),
+            },
+        )
+        .expect("spanning jurisdiction should validate")
+        .commit(&mut fixture.state)
+        .expect("spanning jurisdiction should commit");
+        let manager = fixture.authority.manager;
+
+        let open_heat_case = |fixture: &mut EnterpriseFixture, title: &str, target| {
+            let origin = validate_authorize_operation(
+                &registry,
+                &fixture.state,
+                OperationDraft {
+                    title: format!("{title} origin patrol"),
+                    kind: OperationKind::Surveillance,
+                    responsible_organization: fixture.organization,
+                    leader: manager,
+                    objective: OperationObjective::GatherInformation { target },
+                    approach: OperationApproach::Covert,
+                    roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
+                    intelligence: BTreeSet::new(),
+                    constraints: Vec::new(),
+                    contingencies: Vec::new(),
+                    scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+                },
+            )
+            .expect("origin operation should validate")
+            .commit(&mut fixture.state)
+            .expect("origin operation should commit");
+            validate_incident_intake(
+                &fixture.state,
+                IncidentIntakeDraft {
+                    owner: police,
+                    title: title.to_owned(),
+                    subjects: BTreeSet::from([
+                        EntityRef::Operation(origin),
+                        EntityRef::Character(manager),
+                    ]),
+                    evidence: vec![IncidentEvidenceDraft {
+                        subject: EntityRef::Character(manager),
+                        origin: Some(EntityRef::Operation(origin)),
+                        kind: EvidenceKind::Surveillance,
+                        strength: EvidenceStrength::Weak,
+                        reliability: EvidenceReliability::Questionable,
+                        admissibility: Admissibility::Unknown,
+                        discovered_at: fixture.state.now(),
+                    }],
+                    origin_operation: Some(origin),
+                    notified_organizations: BTreeSet::from([fixture.organization]),
+                },
+            )
+            .expect("incident intake should validate")
+            .commit(&mut fixture.state)
+            .expect("incident intake should commit");
+        };
+        let due_operating_cost = |fixture: &mut EnterpriseFixture| {
+            fixture
+                .state
+                .advance_clock(SimDuration::from_minutes(1_440));
+            let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
+                .expect("due enterprise cycle should resolve");
+            let cost = plan.operating_cost();
+            validate_enterprise_cycle_plan(&fixture.state, plan)
+                .expect("cycle plan should validate")
+                .commit(&mut fixture.state)
+                .expect("cycle settlement should commit");
+            cost
+        };
+
+        let baseline = due_operating_cost(&mut fixture);
+        // A case targeting another district of the same authority must not tax this racket.
+        open_heat_case(
+            &mut fixture,
+            "Dock ward inquiry",
+            EntityRef::Neighborhood(other_neighborhood),
+        );
+        let cross_district = due_operating_cost(&mut fixture);
+        assert_eq!(cross_district, baseline);
+        // A case targeting the enterprise's own district raises the daily cost by $50.
+        open_heat_case(
+            &mut fixture,
+            "Market ward inquiry",
+            EntityRef::Neighborhood(local_neighborhood),
+        );
+        let local = due_operating_cost(&mut fixture);
+        assert_eq!(
+            local,
+            cross_district
+                .checked_add(Money::from_cents(5_000))
+                .expect("heat surcharge arithmetic should not overflow")
+        );
+        validate_state(&fixture.state).expect("district heat state should validate");
         validate_invariants(&fixture.state);
     }
 

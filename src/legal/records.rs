@@ -1080,7 +1080,6 @@ impl JurisdictionRecord {
 pub struct DayMinute(u16);
 
 impl DayMinute {
-    pub const MIN: u16 = 0;
     pub const MAX: u16 = 1_439;
 
     pub fn try_new(value: u16) -> Result<Self, DayMinuteError> {

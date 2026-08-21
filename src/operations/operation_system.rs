@@ -7,7 +7,7 @@ use crate::core::id::{
     OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::enterprises::EnterpriseStatus;
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
@@ -473,7 +473,14 @@ pub fn validate_authorize_operation<'registry>(
     }
     for constraint in &draft.constraints {
         let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;
-        if *deadline <= draft.scheduled_for {
+        // The deadline must leave room for the crew to reach the entry milestone; a deadline at
+        // or before entry would resolve the operation before its modeled approach begins.
+        let earliest_resolution = draft.scheduled_for
+            + definition
+                .execution()
+                .operation_entry_offset()
+                .unwrap_or(SimDuration::from_minutes(0));
+        if *deadline <= earliest_resolution {
             return Err(OperationError::DeadlineBeforeStart);
         }
     }
@@ -506,17 +513,23 @@ fn find_busy_participant(
     requested_kind: OperationKind,
     requested_start: SimTime,
 ) -> Option<(CharacterId, OperationId)> {
+    let requested_end = requested_start
+        + registry
+            .get_operation(requested_kind)
+            .execution()
+            .duration();
     participants.iter().find_map(|participant| {
         state
             .operations
             .operations_for_organization(organization)
             .find(|operation| {
                 operation_uses_character(operation, *participant)
-                    && operation_windows_overlap(
+                    && operation_window_overlaps(
                         registry,
                         operation,
-                        requested_kind,
+                        state.now(),
                         requested_start,
+                        requested_end,
                     )
             })
             .map(|operation| (*participant, operation.id()))
@@ -531,11 +544,103 @@ fn operation_uses_character(operation: &OperationRecord, character: CharacterId)
             .any(|participant| *participant == character)
 }
 
-fn operation_windows_overlap(
+/// Validates that resuming a decision-blocked operation at `resumed_at` does not double-book any
+/// of its participants. Resuming shifts the resolution deadline forward by the pause duration, so
+/// the post-resume window can collide with operations authorized while this one was paused.
+///
+/// Operations that have not yet begun keep no persisted end time, so an authorized operation whose
+/// start falls inside the resumed window is treated as a conflict; its duration cannot shorten the
+/// overlap because a start inside the window always overlaps it.
+pub(crate) fn validate_operation_resume_participants(
+    state: &AppState,
+    operation_id: OperationId,
+    resumed_at: SimTime,
+) -> Result<(), OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation_id)
+        .ok_or(OperationError::MissingOperation(operation_id))?;
+    let paused_at = record
+        .awaiting_decision_since()
+        .expect("resume validation requires a decision-blocked operation");
+    let due_at = record
+        .resolution_due_at()
+        .expect("decision-blocked operation must retain its resolution due time");
+    let paused_minutes = resumed_at
+        .as_minutes()
+        .checked_sub(paused_at.as_minutes())
+        .expect("operation cannot resume before its decision pause began");
+    let shifted_due_at = SimTime::from_minutes(
+        due_at
+            .as_minutes()
+            .checked_add(paused_minutes)
+            .expect("operation resolution time overflowed u64 minutes"),
+    );
+    let window_start = record.started_at().unwrap_or(record.scheduled_for());
+    let mut participants = BTreeSet::from([record.leader()]);
+    participants.extend(record.roles().values().copied());
+    for participant in participants {
+        let conflict = state
+            .operations
+            .operations_for_organization(record.responsible_organization())
+            .find(|other| {
+                other.id() != operation_id
+                    && operation_uses_character(other, participant)
+                    && match projected_operation_window(other, resumed_at) {
+                        Some((start, end)) => window_start < end && start < shifted_due_at,
+                        // Authorized and not yet begun: any start inside the resumed window
+                        // conflicts because the operation's duration keeps it running past it.
+                        None => other.scheduled_for() < shifted_due_at,
+                    }
+            })
+            .map(|other| other.id());
+        if let Some(conflicting_operation) = conflict {
+            return Err(OperationError::ParticipantBusy {
+                character: participant,
+                operation: conflicting_operation,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Effective occupancy window of a non-terminal operation, projecting the deadline shift a
+/// decision-blocked operation will experience if it resumes at `now`. Returns `None` for terminal
+/// operations (never occupy) and for authorized operations that have not begun (no persisted end).
+fn projected_operation_window(
+    existing: &OperationRecord,
+    now: SimTime,
+) -> Option<(SimTime, SimTime)> {
+    if matches!(
+        existing.status(),
+        OperationStatus::Completed | OperationStatus::Aborted
+    ) {
+        return None;
+    }
+    let start = existing.started_at().unwrap_or(existing.scheduled_for());
+    let mut end = existing.resolution_due_at()?;
+    if existing.status() == OperationStatus::AwaitingDecision {
+        if let Some(paused_at) = existing.awaiting_decision_since() {
+            let paused_minutes = now
+                .as_minutes()
+                .checked_sub(paused_at.as_minutes())
+                .expect("current time cannot precede an operation's decision pause");
+            end = SimTime::from_minutes(
+                end.as_minutes()
+                    .checked_add(paused_minutes)
+                    .expect("projected operation resolution time overflowed u64 minutes"),
+            );
+        }
+    }
+    Some((start, end))
+}
+
+fn operation_window_overlaps(
     registry: &Registry,
     existing: &OperationRecord,
-    requested_kind: OperationKind,
+    now: SimTime,
     requested_start: SimTime,
+    requested_end: SimTime,
 ) -> bool {
     if matches!(
         existing.status(),
@@ -543,17 +648,15 @@ fn operation_windows_overlap(
     ) {
         return false;
     }
-    let existing_start = existing.started_at().unwrap_or(existing.scheduled_for());
-    let existing_duration = registry
-        .get_operation(existing.kind())
-        .execution()
-        .duration();
-    let existing_end = existing
-        .resolution_due_at()
-        .unwrap_or(existing_start + existing_duration);
-    let requested_end = requested_start
+    if let Some((existing_start, existing_end)) = projected_operation_window(existing, now) {
+        return requested_start < existing_end && existing_start < requested_end;
+    }
+    // Authorized and not yet begun: the window runs from the scheduled start for the authored
+    // duration until `begin` persists the actual resolution deadline.
+    let existing_start = existing.scheduled_for();
+    let existing_end = existing_start
         + registry
-            .get_operation(requested_kind)
+            .get_operation(existing.kind())
             .execution()
             .duration();
     requested_start < existing_end && existing_start < requested_end
@@ -707,12 +810,18 @@ fn validate_active_field_objective_target(
                 .status()
                 == EnterpriseStatus::Active
         }
+        // Control-plane records never reach this match: `is_valid_operation_objective` rejects
+        // them before activation checks run, so reaching this arm means a caller skipped that gate.
         EntityRef::Operation(_)
         | EntityRef::Investigation(_)
         | EntityRef::Evidence(_)
         | EntityRef::FinancialAccount(_)
         | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_) => true,
+        | EntityRef::Mandate(_) => {
+            unreachable!(
+                "administrative objective targets are rejected by is_valid_operation_objective"
+            )
+        }
     };
     if !active {
         return Err(OperationError::InactiveObjectiveTarget(target));

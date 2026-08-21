@@ -275,14 +275,6 @@ pub enum RandomDecisionError {
     EmptyChoiceSet,
 }
 
-#[cfg(test)]
-pub(crate) fn decide_index(
-    state: &mut AppState,
-    choice_count: usize,
-) -> Result<usize, RandomDecisionError> {
-    decide_index_from_rng(state.rng_mut(), choice_count)
-}
-
 fn decide_index_from_rng(
     rng: &mut impl RngCore,
     choice_count: usize,

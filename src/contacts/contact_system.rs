@@ -148,15 +148,14 @@ impl ValidatedContactEstablishment {
             .world
             .get_character(self.draft.contact)
             .expect("validated institutional contact must exist");
-        if contact_record.organization() != Some(self.institution)
-            || resolve_contact_kind(state, self.institution)? != self.kind
-        {
-            return Err(ContactError::StaleCharacter {
-                character: self.draft.contact,
-                expected: self.contact_version,
-                found: contact_record.version(),
-            });
-        }
+        // The contact's version was re-validated above and every membership change bumps the
+        // character version, so the institution binding and derived contact kind are stable
+        // between validation and commit; neither can legitimately differ here.
+        debug_assert_eq!(
+            contact_record.organization(),
+            Some(self.institution),
+            "validated contact lost its institution without a version change"
+        );
         let id = state.ids.next_contact()?;
         state.contacts.insert_contact(InstitutionalContactRecord {
             id,

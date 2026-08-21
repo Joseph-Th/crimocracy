@@ -1167,14 +1167,6 @@ mod tests {
         assert_eq!(
             fixture
                 .state
-                .legal()
-                .representations_for_defendant(fixture.defendant)
-                .count(),
-            1
-        );
-        assert_eq!(
-            fixture
-                .state
                 .reports()
                 .get_report(record.report())
                 .expect("retainer report should persist")

@@ -475,7 +475,7 @@ mod tests {
             &state,
             ReportDraft {
                 recipient: organization,
-                kind: ReportKind::ExecutiveBrief,
+                kind: ReportKind::PoliceIntelligence,
                 title: "Unreported member knowledge".to_owned(),
                 entries: vec![ReportEntry {
                     attention: AttentionClass::Notable,
@@ -553,7 +553,7 @@ mod tests {
             &state,
             ReportDraft {
                 recipient: organization,
-                kind: ReportKind::ExecutiveBrief,
+                kind: ReportKind::PoliceIntelligence,
                 title: "Reported member knowledge".to_owned(),
                 entries: vec![ReportEntry {
                     attention: AttentionClass::Notable,

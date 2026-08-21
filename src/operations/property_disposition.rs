@@ -57,6 +57,11 @@ pub enum PropertyDispositionError {
     AlreadyDisposed(OperationId),
     #[error("business {0} does not exist")]
     MissingVenue(BusinessId),
+    #[error("venue {venue} neighborhood {neighborhood} does not exist")]
+    MissingVenueNeighborhood {
+        venue: BusinessId,
+        neighborhood: crate::core::id::NeighborhoodId,
+    },
     #[error("business {0} is not active")]
     InactiveVenue(BusinessId),
     #[error("business {0} does not provide resale-market access")]
@@ -83,6 +88,8 @@ pub enum PropertyDispositionError {
     SameAccount,
     #[error("operation {0} property liquidation arithmetic overflowed")]
     ArithmeticOverflow(OperationId),
+    #[error("operation {0} held property value is too small to liquidate")]
+    NegligibleValue(OperationId),
     #[error("operation {operation} changed after disposition validation; expected version {expected}, found {found}")]
     StaleOperation {
         operation: OperationId,
@@ -390,18 +397,25 @@ pub(crate) fn calculate_property_liquidation_value(
         .property_proceeds()
         .ok_or(PropertyDispositionError::NoHeldProperty(operation))?;
     let mut recovery_basis = i32::from(definition.liquidation_recovery_basis_points());
-    if let Some(venue_record) = state.world.get_business(venue) {
-        if let Some(neighborhood) = state.world.get_neighborhood(venue_record.neighborhood()) {
-            // Police presence makes fencing harder (scrutiny); commercial activity would
-            // help but the harness's fixtures tie commerce to police, so we weight police
-            // more heavily to preserve variation. A quiet district with low police
-            // presence meaningfully improves resale compared with a crowded, heavily
-            // patrolled one.
-            let police = i32::from(neighborhood.profile().institutions.police_presence.value());
-            let police_adjustment = (50 - police) * 20;
-            recovery_basis = (recovery_basis + police_adjustment).clamp(3_000, 9_000);
-        }
-    }
+    let venue_record = state
+        .world
+        .get_business(venue)
+        .ok_or(PropertyDispositionError::MissingVenue(venue))?;
+    let neighborhood = state
+        .world
+        .get_neighborhood(venue_record.neighborhood())
+        .ok_or(PropertyDispositionError::MissingVenueNeighborhood {
+            venue,
+            neighborhood: venue_record.neighborhood(),
+        })?;
+    // Police presence makes fencing harder (scrutiny); commercial activity would
+    // help but the harness's fixtures tie commerce to police, so we weight police
+    // more heavily to preserve variation. A quiet district with low police
+    // presence meaningfully improves resale compared with a crowded, heavily
+    // patrolled one.
+    let police = i32::from(neighborhood.profile().institutions.police_presence.value());
+    let police_adjustment = (50 - police) * 20;
+    recovery_basis = (recovery_basis + police_adjustment).clamp(3_000, 9_000);
     let value = i128::from(estimated_value.cents())
         .checked_mul(i128::from(recovery_basis))
         .ok_or(PropertyDispositionError::ArithmeticOverflow(operation))?
@@ -409,7 +423,9 @@ pub(crate) fn calculate_property_liquidation_value(
     let cents = i64::try_from(value)
         .map_err(|_| PropertyDispositionError::ArithmeticOverflow(operation))?;
     if cents <= 0 {
-        return Err(PropertyDispositionError::ArithmeticOverflow(operation));
+        // Integer division legitimately rounds a tiny estimated value to zero; that is a
+        // mundane small-haul case, not an overflow.
+        return Err(PropertyDispositionError::NegligibleValue(operation));
     }
     Ok(Money::from_cents(cents))
 }
