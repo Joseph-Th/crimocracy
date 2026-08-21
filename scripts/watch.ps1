@@ -1,0 +1,138 @@
+# watch.ps1 -- zero-touch targeted iteration loop for a solo developer.
+#
+# Watches repository sources (*.rs and Cargo.toml, target\ ignored) for saves
+# and reruns one focused lane, so you edit-and-save instead of retyping
+# commands. Each run reuses cargo's warm cache; only the lane you chose is
+# ever built.
+#
+# Usage:
+#   powershell -NoProfile -File scripts\watch.ps1                  # fast lib tests (soak excluded)
+#   powershell -NoProfile -File scripts\watch.ps1 -Filter <name>   # matching lib tests only
+#   powershell -NoProfile -File scripts\watch.ps1 -Harness         # harness smoke contract
+#   powershell -NoProfile -File scripts\watch.ps1 -Check           # type-check lib + harness only
+#
+# The first run starts immediately; later runs start ~300ms after your last
+# save. Press Ctrl+C to stop. Works on both Windows PowerShell 5.1 and pwsh.
+# For anything beyond these presets, use scripts\verify.cmd directly.
+
+[CmdletBinding()]
+param(
+    [string]$Filter = "",
+    [switch]$Harness,
+    [switch]$Check,
+    [switch]$Clear
+)
+
+$ErrorActionPreference = "Stop"
+Set-Location (Split-Path -Parent $PSScriptRoot)
+$env:CARGO_INCREMENTAL = "0"
+
+# ── resolve the lane once ────────────────────────────────────────────────────
+
+$title = if ($Filter) {
+    "focused tests: $Filter"
+} elseif ($Harness) {
+    "harness smoke contract"
+} elseif ($Check) {
+    "type-check (lib + harness)"
+} else {
+    "fast lib tests (soak excluded)"
+}
+
+$cargoArgs = if ($Filter) {
+    @("test", "--locked", "--lib", "--quiet", $Filter)
+} elseif ($Harness) {
+    @("test", "--locked", "--quiet", "--example", "gameplay_harness",
+        "tests::smoke_mode_covers_canonical_paths", "--", "--ignored", "--exact")
+} elseif ($Check) {
+    @("check", "--locked", "--quiet", "--lib", "--example", "gameplay_harness")
+} else {
+    @("test", "--locked", "--lib", "--quiet", "--", "--skip",
+        "test_mixed_scenario_soak_preserves_invariants")
+}
+
+function Invoke-Lane {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $output = & cargo @cargoArgs 2>&1 | Out-String
+    $exit = $LASTEXITCODE
+    $sw.Stop()
+    [pscustomobject]@{
+        Exit    = $exit
+        Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Output  = $output.Trim()
+    }
+}
+
+# ── watcher setup (PS 5.1 compatible: single Filter, global event state) ─────
+
+$global:WatchPending = $false
+$global:WatchOverflow = $false
+
+$watcher = New-Object System.IO.FileSystemWatcher
+$watcher.Path = (Get-Location).Path
+$watcher.IncludeSubdirectories = $true
+$watcher.Filter = '*.*'
+$watcher.InternalBufferSize = 65536
+
+$onChange = {
+    $path = $Event.SourceEventArgs.FullPath
+    if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml)$') {
+        $global:WatchPending = $true
+    }
+}
+$onOverflow = { $global:WatchOverflow = $true }
+
+$subscriptions = @(
+    (Register-ObjectEvent $watcher Changed -Action $onChange),
+    (Register-ObjectEvent $watcher Created -Action $onChange),
+    (Register-ObjectEvent $watcher Renamed -Action $onChange),
+    (Register-ObjectEvent $watcher Error -Action $onOverflow)
+)
+
+try {
+    $watcher.EnableRaisingEvents = $true
+    Write-Host "CRIMOCRACY WATCH" -ForegroundColor Cyan
+    Write-Host "  lane: $title   (save a file to rerun, Ctrl+C to stop)" -ForegroundColor DarkGray
+
+    while ($true) {
+        Write-Host ""
+        Write-Host ("[{0}] running: {1}" -f (Get-Date -Format 'HH:mm:ss'), $title) -ForegroundColor Yellow
+        $result = Invoke-Lane
+        $status = if ($result.Exit -eq 0) { "PASS" } else { "FAIL" }
+        $color = if ($result.Exit -eq 0) { "Green" } else { "Red" }
+        Write-Host ("{0}  {1,5}s" -f $status, $result.Seconds) -ForegroundColor $color
+        if ($result.Output -and ($result.Exit -ne 0 -or $Filter)) {
+            # Show failures in full; focused filters show their test lines too.
+            Write-Host $result.Output -ForegroundColor DarkGray
+        }
+
+        if ($Clear) { Clear-Host }
+        # Wait for the first change, then let editors finish writing (~300ms).
+        $triggered = $false
+        do {
+            $global:WatchPending = $false
+            $global:WatchOverflow = $false
+            $idle = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $global:WatchPending -and -not $global:WatchOverflow -and
+                    $idle.Elapsed.TotalMinutes -lt 30) {
+                Start-Sleep -Milliseconds 120   # sleeps yield so queued events fire
+            }
+            if ($global:WatchOverflow) {
+                $triggered = $true              # buffer overflow: rerun defensively
+                break
+            }
+            if ($global:WatchPending) {
+                Start-Sleep -Milliseconds 300   # let editors finish writing
+                $global:WatchPending = $false
+                $triggered = $true
+            }
+        } until ($triggered)
+    }
+}
+finally {
+    $watcher.EnableRaisingEvents = $false
+    $watcher.Dispose()
+    foreach ($subscription in $subscriptions) {
+        Unregister-Event -SubscriptionId $subscription.Id -ErrorAction SilentlyContinue
+    }
+}

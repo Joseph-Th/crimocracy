@@ -17,7 +17,7 @@ lint = ["clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-
 lint-all = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
 
 # ── tests ───────────────────────────────────────────────────────────────────
-# Fast library lane: excludes the 5-second invariant soak.
+# Fast library lane: excludes the invariant soak (~1s warm).
 test-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants"]
 # All lib tests including soak (use sparingly). Note: lib-only, not --all-targets (gate uses lib+tests).
 test-all = ["test", "--locked", "--lib"]
@@ -29,6 +29,9 @@ test-focused-single = ["test", "--locked", "--lib", "--quiet", "--", "--test-thr
 test-doc = ["test", "--locked", "--test", "documentation_contracts"]
 # Integration tests (tests/ + doc contracts) without examples.
 test-integration = ["test", "--locked", "--tests", "--quiet"]
+# Optimized-behavior lane: run when optimized compilation could change behavior
+# (overflow arithmetic, wrapping, or float paths that dev and release share).
+test-release = ["test", "--locked", "--release", "--quiet"]
 soak = ["test", "--locked", "--lib", "core::state::tests::test_mixed_scenario_soak_preserves_invariants", "--", "--exact", "--nocapture"]
 
 # ── gameplay harness ────────────────────────────────────────────────────────

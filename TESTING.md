@@ -37,12 +37,13 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 | Type-check harness | `cargo check-harness` | ~1s |
 | Lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | One test / module | `cargo test-focused <filter>` | ~0.5s |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run warm cost of the chosen lane |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~1s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s |
 | Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s |
 | Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s |
 
-`cargo check-fast` and `cargo test-focused` are the inner loop. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
+`cargo check-fast` and `cargo test-focused` are the inner loop. `scripts/watch.ps1` is the hands-free form of that loop: it reruns one focused lane on every save and never builds more than that lane. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
 
 ### Broad completion gate
 
@@ -65,7 +66,9 @@ Tests run before clippy so the hot test artifacts stay reused; clippy is last so
 
 The broad gate is not the routine finishing step. Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work uses `.\scripts\verify.cmd -Fast -Harness`. Run the broad gate when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Do not run a fast lane and then the broad lane solely for reassurance. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
 
-Cargo profiles are tuned by measurement for this machine and crate (`debug = false`, `incremental = false`, `codegen-units = 32`); see the profile notes in [`Cargo.toml`](Cargo.toml) for the alternatives that lost. Panic messages keep file/line through the `Location` API without debuginfo; only RUST_BACKTRACE source lines degrade. A small library edit costs roughly ~17s to re-check and ~50s to rebuild+link tests; unchanged sources re-run in under a second. The verify script reports per-stage timing and a total, hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`), and pins `CARGO_INCREMENTAL=0`. If rebuilds ever feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
+Cargo profiles are tuned by measurement for this machine and crate (`debug = false`, `incremental = false`, `codegen-units = 32`); see the profile notes in [`Cargo.toml`](Cargo.toml) for the alternatives that lost. Panic messages keep file/line through the `Location` API without debuginfo; only RUST_BACKTRACE source lines degrade. A small library edit costs roughly ~7-16s to re-check and ~23-31s to rebuild+link tests (machine-load dependent); unchanged sources re-run in under a second. The verify script reports per-stage timing and a total, hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`), and pins `CARGO_INCREMENTAL=0`. If rebuilds ever feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
+
+When optimized compilation could change behavior, run `cargo test-release` (documented in the README); it is not part of any routine gate.
 
 ## Gameplay-harness evidence
 

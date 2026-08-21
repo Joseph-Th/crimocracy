@@ -36,11 +36,12 @@ Fast iteration uses the cheapest lane that proves the change. Routine completion
 | Type-check harness | `cargo check-harness` | ~1s |
 | One focused test | `cargo test-focused <filter>` | ~0.5s |
 | Fast lib tests (no soak) | `cargo test-fast` | ~0.7s |
+| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <pattern> \| -Harness \| -Check]` | per-run warm cost of the chosen lane |
 | Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~1s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
 | Broad local gate | `.\scripts\verify.cmd` | ~5-20s |
 
-The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test --release --locked`.
+The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test-release`.
 
 ## Gameplay harness
 

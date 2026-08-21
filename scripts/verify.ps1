@@ -1,9 +1,9 @@
 # verify.ps1 -- local Crimocracy completion gate for a solo developer.
 #
 # Optimized for fast incremental iteration: cached warm runs are ~0.7-1.5s for the
-# fast lane and ~3-6s for the full gate, because all stages reuse artifacts and
-# avoid redundant rebuilds. A small library edit costs ~17s to re-check and
-# ~50s to rebuild+link tests (see Cargo.toml profile notes for measured tuning).
+# fast lane and ~3-8s for the full gate, because all stages reuse artifacts and
+# avoid redundant rebuilds. A small library edit costs ~7-16s to re-check and
+# ~23-31s to rebuild+link tests (see Cargo.toml profile notes for measured tuning).
 # Cold builds are dominated by rustc.
 #
 # Incremental compilation is pinned OFF here (and disabled in [profile.dev]):

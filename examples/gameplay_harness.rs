@@ -840,7 +840,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m; {}; police {}; evidence {}; legal intel {}; police intel {}; follow-up {:?}; case hot {:?}; cold {:?}; intelligence {:?}; recruit attempts {}; departures {}",
+            "[SMOKE] {:<5} terminal {:>4}m | {} | police {} | evidence {} | intel legal {} / police {} / burglary {} | counter-intel {} | follow-up case {} | cold case {} | recruitment {} attempts / {} departures",
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
             terminal_label(&metrics),
@@ -848,10 +848,10 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             metrics.evidence_count,
             metrics.player_legal_activity_information,
             metrics.player_police_activity_information,
-            metrics.counterintelligence_outcome,
-            metrics.followup_case_active,
-            metrics.cold_case_confirmed,
-            metrics.burglary_information_quality,
+            optional_scalar(metrics.burglary_information_quality),
+            objective_label(metrics.counterintelligence_outcome).unwrap_or("-"),
+            tri_state(metrics.followup_case_active),
+            tri_state(metrics.cold_case_confirmed),
             metrics.autonomous_recruitment_attempts,
             metrics.player_personnel_departures,
         );
@@ -5237,12 +5237,65 @@ fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) {
 
 fn terminal_label(metrics: &RunMetrics) -> String {
     if metrics.aborted {
-        format!(
-            "aborted {:?} / {:?}",
-            metrics.abort_phase, metrics.abort_cause
-        )
+        let phase = metrics
+            .abort_phase
+            .map(abort_phase_label)
+            .unwrap_or("at unknown phase");
+        let cause = metrics
+            .abort_cause
+            .map(abort_cause_label)
+            .unwrap_or_else(|| "unknown cause".to_owned());
+        format!("aborted {phase} by {cause}")
     } else {
-        format!("completed {:?}", metrics.outcome)
+        format!(
+            "completed {}",
+            objective_label(metrics.outcome).unwrap_or("unresolved outcome")
+        )
+    }
+}
+
+fn abort_phase_label(phase: OperationAbortPhase) -> &'static str {
+    match phase {
+        OperationAbortPhase::BeforeStart => "before start",
+        OperationAbortPhase::InProgress => "in progress",
+        OperationAbortPhase::AwaitingDecision => "while awaiting decision",
+    }
+}
+
+fn abort_cause_label(cause: OperationAbortCause) -> String {
+    match cause {
+        OperationAbortCause::AuthorityOrder => "authority order".to_owned(),
+        OperationAbortCause::Decision(id) => format!("decision request {id}"),
+        OperationAbortCause::PoliceArrival(id) => format!("police arrival {id}"),
+        OperationAbortCause::DeadlineMissed => "missed deadline".to_owned(),
+    }
+}
+
+/// Renders an objective outcome as a lowercase label; `None` means the operation
+/// never reached a terminal objective state.
+fn objective_label(outcome: Option<OperationObjectiveOutcome>) -> Option<&'static str> {
+    match outcome {
+        None => None,
+        Some(OperationObjectiveOutcome::Achieved) => Some("achieved"),
+        Some(OperationObjectiveOutcome::Partial) => Some("partial"),
+        Some(OperationObjectiveOutcome::Failed) => Some("failed"),
+    }
+}
+
+/// Renders an optional tri-state as `yes` / `no` / `-` for one-line readouts.
+fn tri_state(value: Option<bool>) -> &'static str {
+    match value {
+        None => "-",
+        Some(true) => "yes",
+        Some(false) => "no",
+    }
+}
+
+/// Renders an optional scalar as its value or `-` when absent.
+fn optional_scalar<T: std::fmt::Display>(value: Option<T>) -> String {
+    match value {
+        None => "-".to_owned(),
+        Some(value) => value.to_string(),
     }
 }
 
