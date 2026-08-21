@@ -38,9 +38,9 @@ Fast iteration uses the cheapest lane that proves the change. Routine completion
 | Fast lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~1s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
-| Broad local gate | `.\scripts\verify.cmd` | ~4-8s |
+| Broad local gate | `.\scripts\verify.cmd` | ~5-20s |
 
-The broad gate runs `cargo fmt --check`, strict Clippy for `lib` + `gameplay_harness`, `cargo test --all-targets`, and the exact ignored harness smoke contract selected fail-closed. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test --release --locked`.
+The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test --release --locked`.
 
 ## Gameplay harness
 

@@ -48,9 +48,10 @@ fmt-check = ["fmt", "--check"]
 verify-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants"]
 
 [build]
-# Use incremental compilation for local iteration. Let cargo autoselect jobs;
+# Incremental compilation is disabled in [profile.dev] (measured slower than a
+# plain rebuild on this crate). `verify.ps1` also pins CARGO_INCREMENTAL=0 so
+# an inherited environment variable cannot silently re-enable it.
 # `verify.ps1 -Jobs N` caps parallelism when needed on a quieter machine.
-incremental = true
 
 [term]
 # Avoid redundant verbose cargo output for fast lanes; `verify.ps1` adds

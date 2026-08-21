@@ -56,15 +56,16 @@ The gate runs fail-fast in order:
 1. `cargo fmt --check`
 2. `cargo test --locked --lib --tests --quiet`
 3. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed, `--quiet` + captured output)
-4. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
+4. Gameplay-harness full mode with one sample (`--mode full --samples 1`): exercises the narrative arcs, probes, and cross-branch contracts that smoke mode skips, in seconds
+5. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
 
-Tests run before clippy so the incremental test cache is hot; clippy is last so lint failure still preserves test signal.
+Tests run before clippy so the hot test artifacts stay reused; clippy is last so lint failure still preserves test signal.
 
 [`scripts/verify.ps1`](scripts/verify.ps1) is the owner; [`scripts/verify.cmd`](scripts/verify.cmd) is the wrapper. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
 
 The broad gate is not the routine finishing step. Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work uses `.\scripts\verify.cmd -Fast -Harness`. Run the broad gate when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Do not run a fast lane and then the broad lane solely for reassurance. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
 
-Cargo profiles use `debug = "line-tables-only"`, `split-debuginfo = "off"`, `incremental = true`, and `codegen-units = 256` so warm builds reuse artifacts while keeping useful panic locations. The verify script reports per-stage timing and a total, and hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`).
+Cargo profiles are tuned by measurement for this machine and crate (`debug = false`, `incremental = false`, `codegen-units = 32`); see the profile notes in [`Cargo.toml`](Cargo.toml) for the alternatives that lost. Panic messages keep file/line through the `Location` API without debuginfo; only RUST_BACKTRACE source lines degrade. A small library edit costs roughly ~17s to re-check and ~50s to rebuild+link tests; unchanged sources re-run in under a second. The verify script reports per-stage timing and a total, hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`), and pins `CARGO_INCREMENTAL=0`. If rebuilds ever feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
 
 ## Gameplay-harness evidence
 
@@ -79,7 +80,7 @@ RUSH, PRESS, and RECON use the same seed-selected authored fixture and scenario 
 
 `--samples` varies simulation/world seed and bounded timing offsets, range 1..=64. Matched branches share seed, fixture, and timeline. Per-run events and `RunMetrics` are raw evidence beneath aggregates; aggregates are not universal quality scores. Persisted artifacts retain per-run seeds and raw metrics. `full` mode writes per-run JSON to `--artifact-dir` (default `target/harness/`) with a `summary-<seed>.json`.
 
-Structural and registry-aware validation runs at setup and observation boundaries, not on every tick. The harness checks the narrative defection-surveillance, second-wind, opportunity-prioritization, and organizational-capacity contracts defined by its scenarios; changing those contracts requires updating this section and the focused harness tests together. The capacity probe proves overlapping assignments are rejected atomically and become available after the prior operation reaches a terminal state.
+Structural and registry-aware validation runs at setup and observation boundaries, not on every tick. The harness checks the narrative defection-surveillance, second-wind, opportunity-prioritization, organizational-capacity, and cross-branch financial contracts defined by its scenarios; changing those contracts requires updating this section and the focused harness tests together. The capacity probe proves overlapping assignments are rejected atomically and become available after the prior operation reaches a terminal state. Cross-branch financial evidence is window-honest: each branch snapshots cumulative finances at the shared campaign-day boundary before its arc extends (the PRESS arc deliberately waits out the authored cold-case window), and the contract asserts legitimate-business isolation, identical enterprise economics across unheated branches, and that an investigation-active branch never out-earns an unheated one over the same window.
 
 `cargo harness` runs smoke by default. For explicit comparison:
 

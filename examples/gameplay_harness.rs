@@ -214,8 +214,10 @@ enum HarnessContractError {
         strategy: Strategy,
         evidence: &'static str,
     },
+    #[error("{strategy:?} run never reached its matched financial boundary minute")]
+    MissingMatchedFinancialSnapshot { strategy: Strategy },
     #[error(
-        "unrelated financial variance changed across strategy branches: legitimate {legitimate:?}; enterprise {enterprise:?}"
+        "cross-branch matched-window financial contract violated: legitimate {legitimate:?}; enterprise {enterprise:?}"
     )]
     FinancialBranchMismatch {
         legitimate: [Option<i64>; 3],
@@ -595,6 +597,11 @@ struct RunMetrics {
     liquidation_minute: Option<u64>,
     legitimate_net_cents: Option<i64>,
     enterprise_net_cents: Option<i64>,
+    /// Cumulative finances snapshotted at the shared campaign-day boundary before any
+    /// branch-specific arc extension, so cross-branch comparisons stay window-honest.
+    matched_financial_boundary_minute: Option<u64>,
+    matched_legitimate_net_cents: Option<i64>,
+    matched_enterprise_net_cents: Option<i64>,
     discovered_surveillance_information: usize,
     player_legal_activity_information: usize,
     player_report_count: usize,
@@ -1673,58 +1680,81 @@ fn validate_branch_financial_isolation(
     press: &RunMetrics,
     recon: &RunMetrics,
 ) -> Result<(), HarnessContractError> {
-    let same_legitimate_cashflow = rush.legitimate_net_cents == press.legitimate_net_cents
-        && press.legitimate_net_cents == recon.legitimate_net_cents;
-    if !same_legitimate_cashflow {
-        return Err(HarnessContractError::FinancialBranchMismatch {
-            legitimate: [
-                rush.legitimate_net_cents,
-                press.legitimate_net_cents,
-                recon.legitimate_net_cents,
+    // End-of-run totals are not cross-branch comparable: the PRESS arc deliberately waits out
+    // the authored cold-case window before its readout, so it observes more enterprise cycles
+    // than RUSH or RECON. Every branch instead snapshots cumulative finances at the shared
+    // campaign-day boundary (`maybe_capture_matched_financials`), and the contract below is
+    // window-honest by construction:
+    //   1. legitimate business economics are isolated from legal state: identical everywhere;
+    //   2. branches without a created investigation share identical enterprise economics;
+    //   3. a branch whose investigation went active pays the district heat surcharge, so its
+    //      enterprise net never exceeds an unheated branch's over the same window.
+    let matched = |run: &RunMetrics| {
+        let strategy = run.strategy.expect("run must record its strategy");
+        match (
+            run.matched_legitimate_net_cents,
+            run.matched_enterprise_net_cents,
+        ) {
+            (Some(legitimate), Some(enterprise)) => Ok((legitimate, enterprise)),
+            _ => Err(HarnessContractError::MissingMatchedFinancialSnapshot { strategy }),
+        }
+    };
+    let (rush_legit, rush_enterprise) = matched(rush)?;
+    let (press_legit, press_enterprise) = matched(press)?;
+    let (recon_legit, recon_enterprise) = matched(recon)?;
+
+    let mismatch = |legitimate, enterprise| HarnessContractError::FinancialBranchMismatch {
+        legitimate,
+        enterprise,
+    };
+    if rush_legit != press_legit || press_legit != recon_legit {
+        return Err(mismatch(
+            [Some(rush_legit), Some(press_legit), Some(recon_legit)],
+            [
+                Some(rush_enterprise),
+                Some(press_enterprise),
+                Some(recon_enterprise),
             ],
-            enterprise: [
-                rush.enterprise_net_cents,
-                press.enterprise_net_cents,
-                recon.enterprise_net_cents,
-            ],
-        });
+        ));
     }
-    // Enterprise cashflow is intentionally not isolated: active investigations in the
-    // district add a heat surcharge to delegated gambling, so PRESS (which created a
-    // case) should earn less than RECON in the same district while the case is hot.
-    // The second-day narrative shell (case shelved) then converges again; the bound
-    // check here keeps the design intentional rather than silent drift.
-    let press_penalized =
-        press.enterprise_net_cents.unwrap_or(0) <= recon.enterprise_net_cents.unwrap_or(0);
-    let rush_penalized =
-        rush.enterprise_net_cents.unwrap_or(0) <= recon.enterprise_net_cents.unwrap_or(0);
-    if !press_penalized && press.investigation_created {
-        return Err(HarnessContractError::FinancialBranchMismatch {
-            legitimate: [
-                rush.legitimate_net_cents,
-                press.legitimate_net_cents,
-                recon.legitimate_net_cents,
+
+    let branches = [
+        (rush.investigation_created, rush_enterprise),
+        (press.investigation_created, press_enterprise),
+        (recon.investigation_created, recon_enterprise),
+    ];
+    let unheated_nets: Vec<i64> = branches
+        .iter()
+        .filter(|(heated, _)| !heated)
+        .map(|(_, net)| *net)
+        .collect();
+    // Unheated branches ran identical authored economics over an identical window.
+    if unheated_nets.iter().any(|net| *net != unheated_nets[0]) {
+        return Err(mismatch(
+            [Some(rush_legit), Some(press_legit), Some(recon_legit)],
+            [
+                Some(rush_enterprise),
+                Some(press_enterprise),
+                Some(recon_enterprise),
             ],
-            enterprise: [
-                rush.enterprise_net_cents,
-                press.enterprise_net_cents,
-                recon.enterprise_net_cents,
-            ],
-        });
+        ));
     }
-    if !rush_penalized && rush.investigation_created {
-        return Err(HarnessContractError::FinancialBranchMismatch {
-            legitimate: [
-                rush.legitimate_net_cents,
-                press.legitimate_net_cents,
-                recon.legitimate_net_cents,
-            ],
-            enterprise: [
-                rush.enterprise_net_cents,
-                press.enterprise_net_cents,
-                recon.enterprise_net_cents,
-            ],
-        });
+    // Heat may only lower an enterprise net relative to unheated branches.
+    for (heated, net) in branches {
+        if heated
+            && unheated_nets
+                .first()
+                .is_some_and(|unheated| net > *unheated)
+        {
+            return Err(mismatch(
+                [Some(rush_legit), Some(press_legit), Some(recon_legit)],
+                [
+                    Some(rush_enterprise),
+                    Some(press_enterprise),
+                    Some(recon_enterprise),
+                ],
+            ));
+        }
     }
     Ok(())
 }
@@ -1770,6 +1800,9 @@ fn persist_run_artifact(
         "burglary_terminal_minute": metrics.burglary_terminal_minute,
         "legitimate_net_cents": metrics.legitimate_net_cents,
         "enterprise_net_cents": metrics.enterprise_net_cents,
+        "matched_financial_boundary_minute": metrics.matched_financial_boundary_minute,
+        "matched_legitimate_net_cents": metrics.matched_legitimate_net_cents,
+        "matched_enterprise_net_cents": metrics.matched_enterprise_net_cents,
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
         "raw": {
@@ -1797,6 +1830,17 @@ fn play_session(
         variation: Some(scenario.variation),
         ..RunMetrics::default()
     };
+    // Matched financial boundary: narrative sessions observe two campaign days and batch
+    // sessions observe one (mirroring the observation windows below). Every branch crosses
+    // this minute before its arc extends, so a snapshot here compares identical windows.
+    let campaign_day_minutes = u64::from(
+        registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes(),
+    );
+    metrics.matched_financial_boundary_minute =
+        Some(campaign_day_minutes * if narrative { 2 } else { 1 });
 
     if narrative {
         println!(
@@ -3889,6 +3933,7 @@ fn run_until_operation_terminal(
         }
         let outcome = run_tick(scenario.registry, &mut scenario.state);
         observe_tick(scenario, &outcome, narrative, metrics)?;
+        maybe_capture_matched_financials(scenario, metrics)?;
     }
 }
 
@@ -3901,7 +3946,30 @@ fn run_until(
     while scenario.state.now() < until {
         let outcome = run_tick(scenario.registry, &mut scenario.state);
         observe_tick(scenario, &outcome, narrative, metrics)?;
+        maybe_capture_matched_financials(scenario, metrics)?;
     }
+    maybe_capture_matched_financials(scenario, metrics)?;
+    Ok(())
+}
+
+/// Snapshot cumulative finances the first time a session reaches the shared campaign-day
+/// boundary. Branch arcs that extend past it (the PRESS cold-case wait) still capture an
+/// identical-window view, so `validate_branch_financial_isolation` never compares totals
+/// from different observation lengths.
+fn maybe_capture_matched_financials(
+    scenario: &mut Scenario,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    let boundary_reached = match metrics.matched_financial_boundary_minute {
+        Some(boundary) => scenario.state.now().as_minutes() >= boundary,
+        None => false,
+    };
+    if !boundary_reached || metrics.matched_legitimate_net_cents.is_some() {
+        return Ok(());
+    }
+    let view = resolve_financial_view(scenario)?;
+    metrics.matched_legitimate_net_cents = Some(view.legitimate_net_cents);
+    metrics.matched_enterprise_net_cents = Some(view.enterprise_net_cents);
     Ok(())
 }
 
@@ -4934,7 +5002,7 @@ fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, departures {}, legit {}, enterprise {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -4968,6 +5036,9 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.player_personnel_departures,
         optional_cents(metrics.legitimate_net_cents),
         optional_cents(metrics.enterprise_net_cents),
+        optional_minute(metrics.matched_financial_boundary_minute),
+        optional_cents(metrics.matched_legitimate_net_cents),
+        optional_cents(metrics.matched_enterprise_net_cents),
     );
     println!(
         "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}",
@@ -5310,9 +5381,9 @@ fn level(value: u8) -> RelationshipLevel {
 mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
-        run_opportunity_portfolio_probe, run_smoke, FixtureVariation, HarnessCliError,
-        HarnessContractError, HarnessMode, HarnessOptions, ScenarioProfile, ScenarioTimeline,
-        Strategy, DEFAULT_SEED,
+        run_opportunity_portfolio_probe, run_smoke, validate_branch_financial_isolation,
+        FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
+        RunMetrics, ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
 
@@ -5542,6 +5613,92 @@ mod tests {
             first.recon_second_act_surveillance_at > first.second_opportunity_discovery_at,
             "fresh recon must follow the player-visible opportunity discovery"
         );
+    }
+
+    #[test]
+    fn matched_window_financials_pass_healthy_branches() {
+        let rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, true, Some((19_775, 35_120)));
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 45_120)));
+
+        validate_branch_financial_isolation(&rush, &press, &recon)
+            .expect("isolated legitimate income and heat-only enterprise divergence should pass");
+    }
+
+    #[test]
+    fn rejects_legitimate_income_drift_between_branches() {
+        let rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, true, Some((71_979, 35_120)));
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 45_120)));
+
+        let error = validate_branch_financial_isolation(&rush, &press, &recon)
+            .expect_err("legitimate income must stay isolated from legal state");
+        assert!(matches!(
+            error,
+            HarnessContractError::FinancialBranchMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_unheated_enterprise_divergence() {
+        let rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, true, Some((19_775, 35_120)));
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 46_120)));
+
+        let error = validate_branch_financial_isolation(&rush, &press, &recon)
+            .expect_err("unheated branches must share identical enterprise economics");
+        assert!(matches!(
+            error,
+            HarnessContractError::FinancialBranchMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_heated_branch_out_earning_unheated_branches() {
+        let rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, true, Some((19_775, 124_923)));
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 45_120)));
+
+        let error = validate_branch_financial_isolation(&rush, &press, &recon)
+            .expect_err("an investigation-active branch pays the heat surcharge and cannot out-earn an unheated one");
+        assert!(matches!(
+            error,
+            HarnessContractError::FinancialBranchMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn requires_matched_window_snapshots_from_every_branch() {
+        let rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, true, None);
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 45_120)));
+
+        let error = validate_branch_financial_isolation(&rush, &press, &recon)
+            .expect_err("every branch must snapshot its matched financial window");
+        assert!(matches!(
+            error,
+            HarnessContractError::MissingMatchedFinancialSnapshot {
+                strategy: Strategy::Press
+            }
+        ));
+    }
+
+    fn branch_metrics(
+        strategy: Strategy,
+        investigation_created: bool,
+        matched: Option<(i64, i64)>,
+    ) -> RunMetrics {
+        let mut metrics = RunMetrics {
+            strategy: Some(strategy),
+            investigation_created,
+            matched_financial_boundary_minute: Some(2_880),
+            ..RunMetrics::default()
+        };
+        if let Some((legitimate, enterprise)) = matched {
+            metrics.matched_legitimate_net_cents = Some(legitimate);
+            metrics.matched_enterprise_net_cents = Some(enterprise);
+        }
+        metrics
     }
 
     #[test]
