@@ -6,6 +6,7 @@ use crate::core::id::{
     PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::decisions::{
     build_recruitment_approval_authority_snapshot, build_recruitment_approval_context,
     build_resolution, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
@@ -38,6 +39,8 @@ use thiserror::Error;
 pub enum DecisionError {
     #[error("decision summary must not be empty")]
     EmptySummary,
+    #[error("decision resolution was validated at {expected:?} but committed at {found:?}")]
+    StaleResolutionTime { expected: SimTime, found: SimTime },
     #[error("decision attention must be Exception or Crisis")]
     InvalidAttention,
     #[error("operation {0} does not exist")]
@@ -638,15 +641,7 @@ pub fn validate_request_recruitment_approval(
     }
     let policy =
         resolve_policy_for_manager(state, draft.recruiter, PolicyKind::IndependentRecruitment)?;
-    let approval = match policy.setting {
-        PolicySetting::IndependentRecruitment(approval) => approval,
-        PolicySetting::CollectionForce(_)
-        | PolicySetting::PatrolBribery(_)
-        | PolicySetting::CasualtyResponse(_)
-        | PolicySetting::AssociateLegalSupport(_) => {
-            unreachable!("policy kind resolution returned the wrong policy variant")
-        }
-    };
+    let approval = policy.independent_recruitment_approval();
     if approval != ApprovalPolicy::RequireApproval {
         return Err(DecisionError::RecruitmentApprovalPolicyMismatch { policy: approval });
     }
@@ -729,6 +724,7 @@ pub struct ValidatedDecisionResolution {
     response: DecisionResponse,
     resolver: OrganizationId,
     expected_decision_version: u32,
+    validated_at: SimTime,
     action: DecisionResolutionAction,
 }
 
@@ -763,6 +759,14 @@ impl ValidatedDecisionResolution {
         }
         if decision.status() != DecisionStatus::Pending {
             return Err(DecisionError::DecisionNotPending(self.decision));
+        }
+        // The abort-vs-deadline classification is fixed at validation; reject clock drift so a
+        // resolution cannot commit under conditions that changed after validation.
+        if state.now() != self.validated_at {
+            return Err(DecisionError::StaleResolutionTime {
+                expected: self.validated_at,
+                found: state.now(),
+            });
         }
 
         let mut decision_request = None;
@@ -993,6 +997,7 @@ pub fn validate_resolve_decision(
         response,
         resolver,
         expected_decision_version: record.version(),
+        validated_at: state.now(),
         action,
     })
 }

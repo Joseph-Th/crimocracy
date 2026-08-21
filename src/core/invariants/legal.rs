@@ -12,10 +12,11 @@ use crate::intelligence::{
 };
 use crate::legal::informant_system::{informant_reliability, informant_strength};
 use crate::legal::investigation_work_execution::{
-    improve_evidence_reliability, is_reviewable_evidence_kind, source_evidence_forms_simple_path,
+    is_reviewable_evidence_kind, resolve_improved_evidence_reliability,
+    source_evidence_forms_simple_path,
 };
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
-use crate::legal::witness_system::{witness_reliability, witness_strength};
+use crate::legal::witness_system::{resolve_witness_reliability, resolve_witness_strength};
 use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
     InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
@@ -804,6 +805,7 @@ pub(super) fn validate_legal_reports_and_history(
                 });
             }
         }
+        // Exhaustiveness canary: a new InvestigationStatus must update the lifecycle checks above.
         match investigation.status() {
             InvestigationStatus::Active
             | InvestigationStatus::Suspended
@@ -988,7 +990,7 @@ pub(super) fn validate_legal_reports_and_history(
                             || derived.origin() != source.origin()
                             || derived.strength() != source.strength()
                             || derived.reliability()
-                                != improve_evidence_reliability(source.reliability())
+                                != resolve_improved_evidence_reliability(source.reliability())
                             || derived.admissibility() != source.admissibility()
                             || derived.discovered_at() != resolution.resolved_at()
                             || derived.derived_from() != &BTreeSet::from([source_id])
@@ -1074,6 +1076,8 @@ pub(super) fn validate_legal_reports_and_history(
                 witness: witness.id(),
             });
         }
+        // Exhaustiveness canary: a new WitnessCooperation variant must be classified in
+        // `discount_band` before persisted statements remain validatable.
         match witness.cooperation() {
             WitnessCooperation::Hostile
             | WitnessCooperation::Reluctant
@@ -1119,8 +1123,10 @@ pub(super) fn validate_legal_reports_and_history(
             || evidence.origin() != statement.origin()
             || evidence.source() != Some(EntityRef::Character(case_witness.witness()))
             || evidence.kind() != EvidenceKind::WitnessTestimony
-            || evidence.strength() != witness_strength(statement.confidence())
-            || evidence.reliability() != witness_reliability(statement.confidence())
+            || evidence.strength()
+                != resolve_witness_strength(statement.confidence(), statement.cooperation())
+            || evidence.reliability()
+                != resolve_witness_reliability(statement.confidence(), statement.cooperation())
             || evidence.admissibility() != Admissibility::Unknown
             || evidence.discovered_at() != statement.recorded_at()
             || !evidence.derived_from().is_empty()

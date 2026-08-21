@@ -8,7 +8,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_economy_system::{
-    estimate_business_gross_potential, BusinessEconomyError,
+    resolve_business_gross_potential, BusinessEconomyError,
 };
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
@@ -270,7 +270,7 @@ pub(crate) fn decide_operation_resolution(
         state.now(),
     );
     let target_police_presence = police_snapshot.target_presence;
-    let police_response_arrived = did_police_response_arrive_by(state, record, state.now());
+    let police_response_arrived = has_police_response_arrived_by(state, record, state.now());
     let police_response = record.police_response().map(|response_id| {
         let response = state
             .legal
@@ -302,7 +302,7 @@ pub(crate) fn decide_operation_resolution(
         variance: randomness.execution_variance(),
     };
     let execution_margin = calculate_execution_margin(execution, factors);
-    let objective_outcome = classify_objective_outcome(execution, execution_margin);
+    let objective_outcome = resolve_objective_outcome(execution, execution_margin);
     let exposure = calculate_exposure_plan(
         registry,
         state,
@@ -781,7 +781,7 @@ fn validate_plan_snapshot(
         }
     });
     if current_police_response != plan.snapshot.police_response
-        || did_police_response_arrive_by(state, record, plan.snapshot.resolved_at)
+        || has_police_response_arrived_by(state, record, plan.snapshot.resolved_at)
             != plan.outcome.factors.police_response_arrived()
     {
         return Err(OperationResolutionError::StalePoliceResponseContext {
@@ -883,6 +883,11 @@ fn resolve_target_police_snapshot_from(
     }
 }
 
+/// Venue proxy for operations against entities with no modeled meeting point: every
+/// neighborhood an objective entity occupies, including the full asset footprint of
+/// organization and character targets. Exposure incidents, patrol snapshots, and
+/// investigation heat all attribute through this one derivation so the three consumers
+/// agree on where an operation "happened".
 fn resolve_target_neighborhoods(
     state: &AppState,
     entities: Vec<EntityRef>,
@@ -994,7 +999,7 @@ fn calculate_exposure_plan(
         variance,
     };
     let score = calculate_exposure_score(execution, factors);
-    let level = classify_exposure_level(execution, score);
+    let level = resolve_exposure_level(execution, score);
     let identified_character = if level == OperationExposureLevel::Identifying {
         most_exposed_participant(state, record)
     } else {
@@ -1035,7 +1040,7 @@ pub(crate) fn calculate_exposure_score(
         + i16::from(factors.variance())
 }
 
-pub(crate) fn classify_exposure_level(
+pub(crate) fn resolve_exposure_level(
     execution: &OperationExecutionDefinition,
     score: i16,
 ) -> OperationExposureLevel {
@@ -1050,17 +1055,11 @@ pub(crate) fn classify_exposure_level(
     }
 }
 
-fn operation_participants(record: &crate::operations::OperationRecord) -> BTreeSet<CharacterId> {
-    let mut participants = BTreeSet::from([record.leader()]);
-    participants.extend(record.roles().values().copied());
-    participants
-}
-
 fn resolve_stealth_average(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Rating {
-    let participants = operation_participants(record);
+    let participants = record.participants();
     let total = participants.iter().fold(0_u32, |total, character| {
         total
             + state
@@ -1115,7 +1114,7 @@ pub(crate) fn calculate_operation_police_alert_context(
     }
 }
 
-pub(crate) fn did_police_response_arrive_by(
+pub(crate) fn has_police_response_arrived_by(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     at: SimTime,
@@ -1131,18 +1130,20 @@ fn most_exposed_participant(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Option<CharacterId> {
-    operation_participants(record)
-        .into_iter()
-        .min_by_key(|character| {
-            let stealth = state
-                .world
-                .get_character(*character)
-                .and_then(|record| record.capability(CapabilityKind::Stealth))
-                .map(Rating::value)
-                .unwrap_or(0);
-            (stealth, *character)
-        })
+    record.participants().into_iter().min_by_key(|character| {
+        let stealth = state
+            .world
+            .get_character(*character)
+            .and_then(|record| record.capability(CapabilityKind::Stealth))
+            .map(Rating::value)
+            .unwrap_or(0);
+        (stealth, *character)
+    })
 }
+
+/// Maximum normalized time pressure; the producer clamps to this bound and the persisted-state
+/// validator rejects factors above it, so both must reference one shared constant.
+pub(crate) const MAX_TIME_PRESSURE: u8 = 30;
 
 fn resolve_time_pressure(started_at: SimTime, due_at: SimTime, base_duration: u32) -> u8 {
     let available = due_at.as_minutes().saturating_sub(started_at.as_minutes());
@@ -1151,8 +1152,11 @@ fn resolve_time_pressure(started_at: SimTime, due_at: SimTime, base_duration: u3
         return 0;
     }
     let shortfall = base - available;
-    let pressure = shortfall.saturating_mul(30).div_ceil(base);
-    u8::try_from(pressure.min(30)).expect("bounded time pressure must fit u8")
+    let pressure = shortfall
+        .saturating_mul(u64::from(MAX_TIME_PRESSURE))
+        .div_ceil(base);
+    u8::try_from(pressure.min(u64::from(MAX_TIME_PRESSURE)))
+        .expect("bounded time pressure must fit u8")
 }
 
 fn weighted_ability(role_average: Rating, leader_capability: Option<Rating>) -> i16 {
@@ -1296,7 +1300,7 @@ pub(crate) fn calculate_execution_margin(
     ability - difficulty + i16::from(factors.variance())
 }
 
-pub(crate) fn classify_objective_outcome(
+pub(crate) fn resolve_objective_outcome(
     execution: &OperationExecutionDefinition,
     execution_margin: i16,
 ) -> OperationObjectiveOutcome {
@@ -1332,7 +1336,7 @@ pub(crate) fn calculate_property_proceeds(
         return Ok(None);
     }
 
-    let gross = estimate_business_gross_potential(registry, state, *business)?;
+    let gross = resolve_business_gross_potential(registry, state, *business)?;
     let full_value = i128::from(gross.cents())
         .checked_mul(i128::from(definition.business_gross_basis_points()))
         .ok_or(OperationResolutionError::PropertyProceedsOverflow {
@@ -3243,7 +3247,7 @@ mod tests {
         .expect("due operation should be plannable before response processing");
         assert!(!stale_plan.outcome.factors.police_response_arrived());
         let response_outcome =
-            crate::operations::police_response_integration::process_due_police_responses(
+            crate::operations::police_response_integration::apply_due_police_response_arrivals(
                 &mut response_state,
             )
             .expect("due response should process");

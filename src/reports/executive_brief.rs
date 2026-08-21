@@ -301,7 +301,13 @@ fn refresh_operation_financial_state(
             venue.name(),
             disposition.realized_value().cents(),
         );
-        refreshed.summary = refreshed.summary.replace(&prior, &current);
+        // Refresh exactly one clause occurrence per operation so two operations sharing an
+        // identical estimated value each get their own clause liquidated instead of the
+        // second silently skipping.
+        if let Some(position) = refreshed.summary.find(&prior) {
+            let end = position + prior.len();
+            refreshed.summary.replace_range(position..end, &current);
+        }
     }
     refreshed
 }

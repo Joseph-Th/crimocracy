@@ -9,7 +9,7 @@ use crate::delegation::{
     build_mandate_record, BudgetAuthority, MandateAuthority, MandateDraft, MandateStatus,
     ResolvedMandateAuthority, ResponsibilityScope,
 };
-use crate::finance::{AccountLifecycle, FinancialOwner};
+use crate::finance::FinancialOwner;
 use crate::registry::Registry;
 use crate::world::{Lifecycle, PolicyKind, PolicySetting};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,8 +57,6 @@ pub enum DelegationError {
     NegativeBudgetLimit,
     #[error("budget funding account {0} does not exist")]
     MissingBudgetAccount(crate::core::id::FinancialAccountId),
-    #[error("budget funding account {0} is not open")]
-    BudgetAccountNotOpen(crate::core::id::FinancialAccountId),
     #[error("budget funding account {account} is not owned by organization {organization}")]
     BudgetAccountOwnerMismatch {
         account: crate::core::id::FinancialAccountId,
@@ -252,11 +250,6 @@ impl ValidatedMandateRevision {
             let account = state.finance.get_account(budget.funding_account).ok_or(
                 DelegationError::MissingBudgetAccount(budget.funding_account),
             )?;
-            if account.lifecycle() != AccountLifecycle::Open {
-                return Err(DelegationError::BudgetAccountNotOpen(
-                    budget.funding_account,
-                ));
-            }
             if account.owner() != FinancialOwner::Organization(self.organization) {
                 return Err(DelegationError::BudgetAccountOwnerMismatch {
                     account: budget.funding_account,
@@ -515,6 +508,22 @@ fn build_resolved_policy(
     Ok(ResolvedPolicy { setting, source })
 }
 
+impl ResolvedPolicy {
+    /// Destructures a policy resolved for [`PolicyKind::IndependentRecruitment`]; the kind
+    /// match is already guaranteed by `build_resolved_policy`.
+    pub fn independent_recruitment_approval(&self) -> crate::world::ApprovalPolicy {
+        match self.setting {
+            PolicySetting::IndependentRecruitment(approval) => approval,
+            PolicySetting::CollectionForce(_)
+            | PolicySetting::PatrolBribery(_)
+            | PolicySetting::CasualtyResponse(_)
+            | PolicySetting::AssociateLegalSupport(_) => {
+                unreachable!("independent-recruitment resolution returned another policy kind")
+            }
+        }
+    }
+}
+
 fn validate_manager(
     state: &AppState,
     manager: CharacterId,
@@ -615,11 +624,6 @@ fn validate_mandate_content(
         let account = state.finance.get_account(budget.funding_account).ok_or(
             DelegationError::MissingBudgetAccount(budget.funding_account),
         )?;
-        if account.lifecycle() != AccountLifecycle::Open {
-            return Err(DelegationError::BudgetAccountNotOpen(
-                budget.funding_account,
-            ));
-        }
         if account.owner() != FinancialOwner::Organization(organization) {
             return Err(DelegationError::BudgetAccountOwnerMismatch {
                 account: budget.funding_account,

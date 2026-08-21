@@ -4,9 +4,13 @@ use crate::core::attention::AttentionClass;
 use crate::core::id::{CharacterId, EnterpriseId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseRecord};
+#[cfg(test)]
+use crate::enterprises::EnterpriseLocation;
+use crate::enterprises::{EnterpriseKind, EnterpriseRecord};
 use crate::finance::Money;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +49,8 @@ pub enum EnterpriseReportingError {
     ArithmeticOverflow,
 }
 
+/// Test-only drill-down: production reporting aggregates at the organization level.
+#[cfg(test)]
 pub fn resolve_enterprise_financial_summary(
     state: &AppState,
     enterprise: EnterpriseId,
@@ -79,6 +85,8 @@ pub fn resolve_organization_enterprise_financial_summary(
     )
 }
 
+/// Test-only drill-down: production reporting aggregates at the organization level.
+#[cfg(test)]
 pub fn resolve_manager_enterprise_financial_summary(
     state: &AppState,
     manager: CharacterId,
@@ -97,6 +105,8 @@ pub fn resolve_manager_enterprise_financial_summary(
     )
 }
 
+/// Test-only drill-down: production reporting aggregates at the organization level.
+#[cfg(test)]
 pub fn resolve_neighborhood_enterprise_financial_summary(
     state: &AppState,
     neighborhood: NeighborhoodId,

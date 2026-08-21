@@ -121,6 +121,8 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                 }
             }
         }
+        // Exhaustiveness canary: a new OperationContingency must be classified in the
+        // resolution and abort paths before persisted operations remain validatable.
         for contingency in operation.contingencies() {
             match contingency {
                 OperationContingency::AbortOnPoliceArrivalBeforeEntry
@@ -736,9 +738,11 @@ fn validate_operation_abort_links(
                     OperationConstraint::CompleteBefore(deadline) => *deadline,
                 })
                 .min();
+            // Deadline-miss fires at `now >= deadline`, so an abort on the exact deadline
+            // minute is valid — the same boundary the InProgress phase accepts.
             if operation.started_at().is_some()
                 || operation.resolution_due_at().is_some()
-                || deadline.is_none_or(|deadline| deadline >= abort.aborted_at())
+                || deadline.is_none_or(|deadline| deadline > abort.aborted_at())
             {
                 return Err(StateValidationError::InvalidOperationAbort {
                     operation: operation.id(),

@@ -775,7 +775,7 @@ impl ValidatedInvestigationWorkResolution {
                     origin: source.origin(),
                     kind: EvidenceKind::ForensicAnalysis,
                     strength: source.strength(),
-                    reliability: improve_evidence_reliability(source.reliability()),
+                    reliability: resolve_improved_evidence_reliability(source.reliability()),
                     admissibility: source.admissibility(),
                     derived_from: BTreeSet::from([source_id]),
                 })
@@ -826,7 +826,7 @@ impl ValidatedInvestigationWorkResolution {
     }
 }
 
-pub(crate) fn improve_evidence_reliability(
+pub(crate) fn resolve_improved_evidence_reliability(
     reliability: EvidenceReliability,
 ) -> EvidenceReliability {
     match reliability {
@@ -838,7 +838,7 @@ pub(crate) fn improve_evidence_reliability(
     }
 }
 
-pub(crate) fn schedule_initial_evidence_reviews(
+pub(crate) fn apply_initial_evidence_reviews(
     registry: &Registry,
     state: &mut AppState,
     staffed: &[(InvestigationId, CharacterId)],

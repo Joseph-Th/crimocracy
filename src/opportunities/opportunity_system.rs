@@ -24,6 +24,11 @@ use thiserror::Error;
 pub enum OpportunityError {
     #[error("opportunity summary must not be empty")]
     EmptySummary,
+    #[error("operation {operation} cites none of the information that discovered opportunity {opportunity}")]
+    OperationLacksSourceIntelligence {
+        operation: crate::core::id::OperationId,
+        opportunity: OpportunityId,
+    },
     #[error("opportunity organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("opportunity organization {0} is not active")]
@@ -461,6 +466,18 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
+    // Conversion preserves the discovery provenance chain: the operation must actually cite
+    // information the opportunity was discovered through, not merely match its shape.
+    if !operation
+        .intelligence()
+        .iter()
+        .any(|information| opportunity.source_information().contains(information))
+    {
+        return Err(OpportunityError::OperationLacksSourceIntelligence {
+            operation: operation.id(),
+            opportunity: opportunity.id(),
+        });
+    }
     // The opportunity window is meaningful: converting must bind an operation that will actually
     // execute inside the window, not one scheduled after the opportunity has closed. Otherwise the
     // "valid until" deadline could be consumed by an operation that never runs while the situation
@@ -572,11 +589,14 @@ pub(crate) fn expire_due_opportunities(
     let due = state.opportunities.due_expiring_at_or_before(state.now());
     let mut expired = Vec::with_capacity(due.len());
     for opportunity in due {
-        validate_expire_opportunity(registry, state, opportunity)
-            .expect("due opportunity must validate an expiry transaction")
-            .commit(state)
-            .expect("validated opportunity expiry must commit atomically");
-        expired.push(opportunity);
+        // Like autonomous recruitment and staffing, expiry is an autonomous pass: one record
+        // that fails validation must not abort due work everywhere else in the same minute.
+        let Ok(transaction) = validate_expire_opportunity(registry, state, opportunity) else {
+            continue;
+        };
+        if transaction.commit(state).is_ok() {
+            expired.push(opportunity);
+        }
     }
     expired
 }

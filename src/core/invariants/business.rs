@@ -8,7 +8,7 @@ use crate::core::state::AppState;
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
-use crate::finance::{AccountKind, AccountLifecycle, FinancialOwner, Money};
+use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
 use crate::world::{BusinessOwner, Lifecycle};
 use std::collections::BTreeSet;
@@ -78,13 +78,6 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                     || neighborhood.lifecycle() != Lifecycle::Active
                 {
                     return Err(StateValidationError::InvalidBusinessEconomy {
-                        business: economy.business(),
-                    });
-                }
-                if operating.lifecycle() != AccountLifecycle::Open
-                    || settlement.lifecycle() != AccountLifecycle::Open
-                {
-                    return Err(StateValidationError::InvalidBusinessEconomyAccounts {
                         business: economy.business(),
                     });
                 }
@@ -368,13 +361,6 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                     })
                 {
                     return Err(StateValidationError::InvalidEnterpriseAuthority {
-                        enterprise: enterprise.id(),
-                    });
-                }
-                if cash.lifecycle() != AccountLifecycle::Open
-                    || settlement.lifecycle() != AccountLifecycle::Open
-                {
-                    return Err(StateValidationError::InvalidEnterpriseAccounts {
                         enterprise: enterprise.id(),
                     });
                 }

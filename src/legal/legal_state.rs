@@ -15,7 +15,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::legal::records::{
-    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceKind, EvidenceRecord,
+    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceKind, EvidenceRecord, EvidenceStrength,
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
     InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
     InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
@@ -100,18 +100,6 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.informants.get(id))
     }
-    pub fn informants_for_handler(
-        &self,
-        handler: OrganizationId,
-    ) -> impl Iterator<Item = &InformantRecord> {
-        self.indexes
-            .informants
-            .by_handler
-            .get(&handler)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.informants.get(id))
-    }
     pub fn informant_disclosures_from_information(
         &self,
         information: InformationId,
@@ -178,18 +166,6 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.arrests.get(id))
     }
-    pub fn arrests_for_authority(
-        &self,
-        authority: OrganizationId,
-    ) -> impl Iterator<Item = &ArrestRecord> {
-        self.indexes
-            .arrests
-            .by_authority
-            .get(&authority)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.arrests.get(id))
-    }
     pub fn get_legal_representation(
         &self,
         id: LegalRepresentationId,
@@ -206,6 +182,9 @@ impl LegalState {
             .get(&arrest)
             .and_then(|id| self.legal_representations.get(id))
     }
+    /// Test-only observation surface: production code reads representations through
+    /// `active_representation_for_arrest`.
+    #[cfg(test)]
     pub fn representations_for_arrest(
         &self,
         arrest: ArrestId,
@@ -262,30 +241,6 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.prosecution_cases.get(id))
     }
-    pub fn prosecution_cases_for_defendant(
-        &self,
-        defendant: CharacterId,
-    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
-        self.indexes
-            .prosecutions
-            .cases_by_defendant
-            .get(&defendant)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.prosecution_cases.get(id))
-    }
-    pub fn prosecution_cases_for_office(
-        &self,
-        office: OrganizationId,
-    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
-        self.indexes
-            .prosecutions
-            .cases_by_office
-            .get(&office)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.prosecution_cases.get(id))
-    }
     pub fn prosecution_cases_for_lead(
         &self,
         lead: CharacterId,
@@ -316,6 +271,9 @@ impl LegalState {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
+    /// Test-only observation surface: production code reads active deployments through
+    /// `active_patrol_deployments_for_neighborhood`.
+    #[cfg(test)]
     pub fn patrol_deployments_for_neighborhood(
         &self,
         neighborhood: NeighborhoodId,
@@ -372,6 +330,8 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.evidence.get(id))
     }
+    /// Test-only observation surface: production evidence reads go through case-scoped getters.
+    #[cfg(test)]
     pub fn evidence_from_source(&self, source: EntityRef) -> impl Iterator<Item = &EvidenceRecord> {
         self.indexes
             .evidence
@@ -415,18 +375,6 @@ impl LegalState {
             .case_witness_by_case_character
             .get(&(investigation, witness))
             .and_then(|id| self.case_witnesses.get(id))
-    }
-    pub fn case_witnesses_for_character(
-        &self,
-        witness: CharacterId,
-    ) -> impl Iterator<Item = &CaseWitnessRecord> {
-        self.indexes
-            .witnesses
-            .case_witnesses_by_character
-            .get(&witness)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.case_witnesses.get(id))
     }
     pub fn case_witnesses_for_investigation(
         &self,
@@ -703,12 +651,6 @@ impl LegalState {
             .entry(record.character())
             .or_default()
             .insert(id);
-        self.indexes
-            .informants
-            .by_handler
-            .entry(record.handler())
-            .or_default()
-            .insert(id);
         let previous = self.informants.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -803,18 +745,25 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before evidence commit");
-        investigation.subjects.insert(record.subject());
+        // A named character becomes an identified suspect — unlocking arrest eligibility and
+        // cold-case exemption — only through evidence whose assessment is actionable. Weak
+        // material stays in the case graph without promoting anyone to suspect status.
+        if !matches!(record.subject(), EntityRef::Character(_))
+            || record.strength() != EvidenceStrength::Weak
+        {
+            investigation.subjects.insert(record.subject());
+            self.indexes
+                .investigations
+                .investigations_by_subject
+                .entry(record.subject())
+                .or_default()
+                .insert(record.investigation());
+        }
         investigation.evidence.insert(record.id());
         investigation.version = investigation
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        self.indexes
-            .investigations
-            .investigations_by_subject
-            .entry(record.subject())
-            .or_default()
-            .insert(record.investigation());
         self.indexes
             .evidence
             .evidence_by_subject
@@ -874,12 +823,6 @@ impl LegalState {
             previous_key.is_none(),
             "Ownership Exclusivity: duplicate witness registration inserted for one investigation"
         );
-        self.indexes
-            .witnesses
-            .case_witnesses_by_character
-            .entry(record.witness())
-            .or_default()
-            .insert(id);
         self.indexes
             .witnesses
             .case_witnesses_by_investigation
@@ -1487,12 +1430,6 @@ impl LegalState {
             .entry(record.investigation())
             .or_default()
             .insert(id);
-        self.indexes
-            .arrests
-            .by_authority
-            .entry(record.authority())
-            .or_default()
-            .insert(id);
         let previous_active = self
             .indexes
             .arrests
@@ -1658,20 +1595,8 @@ impl LegalState {
             .insert(case_id);
         self.indexes
             .prosecutions
-            .cases_by_defendant
-            .entry(case.defendant())
-            .or_default()
-            .insert(case_id);
-        self.indexes
-            .prosecutions
             .cases_by_source_investigation
             .entry(case.source_investigation())
-            .or_default()
-            .insert(case_id);
-        self.indexes
-            .prosecutions
-            .cases_by_office
-            .entry(case.prosecutor_office())
             .or_default()
             .insert(case_id);
         self.indexes

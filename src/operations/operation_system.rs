@@ -577,9 +577,7 @@ pub(crate) fn validate_operation_resume_participants(
             .expect("operation resolution time overflowed u64 minutes"),
     );
     let window_start = record.started_at().unwrap_or(record.scheduled_for());
-    let mut participants = BTreeSet::from([record.leader()]);
-    participants.extend(record.roles().values().copied());
-    for participant in participants {
+    for participant in record.participants() {
         let conflict = state
             .operations
             .operations_for_organization(record.responsible_organization())
@@ -1403,7 +1401,7 @@ fn build_abort_summary(
                     operation: operation.id(),
                 })?;
             Ok(format!(
-                "{} was aborted under its standing contingency when {} response reached the target before entry. Objective resolution was not completed.",
+                "{} was aborted under its standing contingency when a {} response was due to reach the target before entry. Objective resolution was not completed.",
                 operation.title(),
                 authority.name()
             ))

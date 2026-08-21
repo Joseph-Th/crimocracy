@@ -433,10 +433,8 @@ pub struct ProsecutionReferralDraft {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ProsecutionIndexes {
     pub(super) cases_by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
-    pub(super) cases_by_defendant: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_source_investigation:
         BTreeMap<InvestigationId, BTreeSet<ProsecutionCaseId>>,
-    pub(super) cases_by_office: BTreeMap<OrganizationId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionCaseId>>,
     pub(super) open_by_arrest_office: BTreeMap<(ArrestId, OrganizationId), ProsecutionCaseId>,
@@ -454,7 +452,6 @@ pub enum InvestigatorRole {
 pub(super) struct ArrestIndexes {
     pub(super) by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
     pub(super) by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
-    pub(super) by_authority: BTreeMap<OrganizationId, BTreeSet<ArrestId>>,
     pub(super) active_by_character: BTreeMap<CharacterId, ArrestId>,
 }
 
@@ -687,7 +684,8 @@ pub enum EvidenceKind {
     ForensicAnalysis,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered weakest to strongest so assessments can be compared against gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EvidenceStrength {
     Weak,
     Corroborating,
@@ -695,7 +693,8 @@ pub enum EvidenceStrength {
     Direct,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered least to most reliable so assessments can be compared against gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EvidenceReliability {
     Questionable,
     Mixed,
@@ -766,6 +765,9 @@ pub struct WitnessStatementRecord {
     pub(super) subject: EntityRef,
     pub(super) origin: Option<EntityRef>,
     pub(super) confidence: Rating,
+    /// Cooperation in effect when the statement was recorded. Later cooperation changes
+    /// must not retroactively re-grade already-persisted testimony.
+    pub(super) cooperation: WitnessCooperation,
     pub(super) summary: String,
     pub(super) evidence: EvidenceId,
     pub(super) recorded_at: SimTime,
@@ -790,6 +792,10 @@ impl WitnessStatementRecord {
 
     pub fn confidence(&self) -> Rating {
         self.confidence
+    }
+
+    pub fn cooperation(&self) -> WitnessCooperation {
+        self.cooperation
     }
 
     pub fn summary(&self) -> &str {
@@ -1365,7 +1371,6 @@ pub(super) struct EvidenceIndexes {
 pub(super) struct WitnessIndexes {
     pub(super) case_witness_by_case_character:
         BTreeMap<(InvestigationId, CharacterId), CaseWitnessId>,
-    pub(super) case_witnesses_by_character: BTreeMap<CharacterId, BTreeSet<CaseWitnessId>>,
     pub(super) case_witnesses_by_investigation: BTreeMap<InvestigationId, BTreeSet<CaseWitnessId>>,
     pub(super) witness_statement_by_evidence: BTreeMap<EvidenceId, WitnessStatementId>,
 }
@@ -1374,7 +1379,6 @@ pub(super) struct WitnessIndexes {
 pub(super) struct InformantIndexes {
     pub(super) active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
     pub(super) by_character: BTreeMap<CharacterId, BTreeSet<InformantId>>,
-    pub(super) by_handler: BTreeMap<OrganizationId, BTreeSet<InformantId>>,
     pub(super) disclosures_by_informant: BTreeMap<InformantId, BTreeSet<InformantDisclosureId>>,
     pub(super) disclosure_by_evidence: BTreeMap<EvidenceId, InformantDisclosureId>,
     pub(super) disclosures_by_information: BTreeMap<InformationId, BTreeSet<InformantDisclosureId>>,

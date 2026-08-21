@@ -124,7 +124,7 @@ pub(crate) fn decide_operation_police_response_start(
     })
 }
 
-pub(crate) fn process_due_police_responses(
+pub(crate) fn apply_due_police_response_arrivals(
     state: &mut AppState,
 ) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
     let due = due_dispatched_police_responses(state);
@@ -215,12 +215,7 @@ fn validate_participant_police_pressure_information(
         .world
         .get_organization(authority)
         .map_or("law enforcement", |record| record.name());
-    let mut participants = operation
-        .roles()
-        .values()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    participants.insert(operation.leader());
+    let participants = operation.participants();
     participants
         .into_iter()
         .map(|participant| {

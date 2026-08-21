@@ -462,7 +462,7 @@ pub fn validate_assign_investigator(
     })
 }
 
-pub(crate) fn staff_unassigned_active_investigations(
+pub(crate) fn apply_autonomous_investigator_staffing(
     state: &mut AppState,
 ) -> Result<Vec<(InvestigationId, CharacterId)>, InvestigationError> {
     let investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
@@ -480,7 +480,14 @@ pub(crate) fn staff_unassigned_active_investigations(
             .filter_map(|investigator| {
                 let record = state.world.get_character(*investigator)?;
                 let capability = record.capability(CapabilityKind::Investigation)?;
+                // Investigators already attached to this case are exempt from the one-case
+                // exclusion; attachment to any other active case disqualifies them.
+                let case_is_this_one = state
+                    .legal
+                    .active_investigation_for_investigator(*investigator)
+                    .is_none_or(|active| active.id() == investigation_id);
                 (record.lifecycle() == Lifecycle::Active
+                    && case_is_this_one
                     && record.organization() == Some(owner)
                     && state
                         .legal
@@ -518,13 +525,19 @@ pub(crate) fn staff_unassigned_active_investigations(
             continue;
         };
 
-        validate_assign_investigator(
+        // An autonomous staffing pass must not abort the tick: a case whose best candidate
+        // fails canonical validation stays unstaffed for a later minute, like cold-case decay.
+        let Ok(assignment) = validate_assign_investigator(
             state,
             investigation_id,
             investigator,
             InvestigatorRole::Lead,
-        )?
-        .commit(state)?;
+        ) else {
+            continue;
+        };
+        if assignment.commit(state).is_err() {
+            continue;
+        }
         staffed.push((investigation_id, investigator));
     }
     Ok(staffed)
@@ -726,19 +739,39 @@ pub fn validate_add_evidence(
     Ok(ValidatedEvidence { draft })
 }
 
+/// Work-derived evidence kinds and informant statements may only be created through their
+/// canonical production paths, never hand-drafted onto a case.
+fn validate_evidence_kind_allowed(
+    kind: crate::legal::EvidenceKind,
+) -> Result<(), InvestigationError> {
+    match kind {
+        crate::legal::EvidenceKind::PatternLink => {
+            Err(InvestigationError::PatternLinkRequiresInvestigationWork)
+        }
+        crate::legal::EvidenceKind::ForensicAnalysis => {
+            Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork)
+        }
+        crate::legal::EvidenceKind::InformantStatement => {
+            Err(InvestigationError::InformantStatementRequiresDisclosure)
+        }
+        crate::legal::EvidenceKind::WitnessTestimony
+        | crate::legal::EvidenceKind::VehicleDescription
+        | crate::legal::EvidenceKind::Fingerprint
+        | crate::legal::EvidenceKind::RecoveredProperty
+        | crate::legal::EvidenceKind::FinancialRecord
+        | crate::legal::EvidenceKind::Surveillance
+        | crate::legal::EvidenceKind::CommunicationRecord
+        | crate::legal::EvidenceKind::KnownAssociation
+        | crate::legal::EvidenceKind::Document
+        | crate::legal::EvidenceKind::Ballistics => Ok(()),
+    }
+}
+
 fn validate_evidence_draft(
     state: &AppState,
     draft: &EvidenceDraft,
 ) -> Result<(), InvestigationError> {
-    if draft.kind == crate::legal::EvidenceKind::PatternLink {
-        return Err(InvestigationError::PatternLinkRequiresInvestigationWork);
-    }
-    if draft.kind == crate::legal::EvidenceKind::ForensicAnalysis {
-        return Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork);
-    }
-    if draft.kind == crate::legal::EvidenceKind::InformantStatement {
-        return Err(InvestigationError::InformantStatementRequiresDisclosure);
-    }
+    validate_evidence_kind_allowed(draft.kind)?;
     let investigation = state.legal.get_investigation(draft.investigation).ok_or(
         InvestigationError::MissingInvestigation(draft.investigation),
     )?;
@@ -882,17 +915,9 @@ fn validate_incident_intake_dependencies(
         }
     }
     for evidence in &draft.evidence {
-        if evidence.kind == crate::legal::EvidenceKind::PatternLink {
-            return Err(InvestigationError::PatternLinkRequiresInvestigationWork);
-        }
-        if evidence.kind == crate::legal::EvidenceKind::ForensicAnalysis {
-            return Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork);
-        }
-        // Incident intake inserts evidence with `source: None`; informant statements
-        // may only exist as products of the canonical informant-disclosure path.
-        if evidence.kind == crate::legal::EvidenceKind::InformantStatement {
-            return Err(InvestigationError::InformantStatementRequiresDisclosure);
-        }
+        // Incident intake inserts evidence with `source: None`; work-derived kinds and
+        // informant statements may only exist through their canonical production paths.
+        validate_evidence_kind_allowed(evidence.kind)?;
         if !is_entity_present(state, evidence.subject) {
             return Err(InvestigationError::MissingEntity(evidence.subject));
         }
@@ -1062,7 +1087,7 @@ mod tests {
         )
         .expect("unstaffed case index should survive save restoration");
 
-        let staffed = staff_unassigned_active_investigations(&mut state)
+        let staffed = apply_autonomous_investigator_staffing(&mut state)
             .expect("available detectives should staff the first case");
         assert_eq!(staffed, vec![(first, senior)]);
         assert_eq!(
@@ -1085,7 +1110,7 @@ mod tests {
         .expect("second case should validate")
         .commit(&mut state)
         .expect("second case should commit");
-        let staffed = staff_unassigned_active_investigations(&mut state)
+        let staffed = apply_autonomous_investigator_staffing(&mut state)
             .expect("remaining detective should staff the second case");
         assert_eq!(staffed, vec![(second, junior)]);
         assert_eq!(
@@ -1096,7 +1121,7 @@ mod tests {
                 .lead_investigator(),
             Some(junior)
         );
-        assert!(staff_unassigned_active_investigations(&mut state)
+        assert!(apply_autonomous_investigator_staffing(&mut state)
             .expect("already staffed cases should be a no-op")
             .is_empty());
         validate_state(&state).expect("autonomous staffing state should validate");
@@ -2047,6 +2072,110 @@ mod tests {
             .commit(&mut state)
             .expect("resume should commit");
         validate_state(&state).expect("resumed cold case state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x0DD_555);
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Promotion Bureau".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let suspect = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Ray Cusack".to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("suspect fixture should validate");
+        let outfit = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Promotion Outfit".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("outfit fixture should validate");
+        let investigation = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "Weak tip inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Organization(outfit)]),
+            },
+        )
+        .expect("investigation should validate")
+        .commit(&mut state)
+        .expect("investigation should commit");
+
+        let weak_tip = validate_add_evidence(
+            &state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(suspect),
+                origin: None,
+                kind: EvidenceKind::Document,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            },
+        )
+        .expect("weak evidence should validate")
+        .commit(&mut state)
+        .expect("weak evidence should commit");
+        assert!(
+            !state
+                .legal()
+                .get_investigation(investigation)
+                .expect("investigation should exist")
+                .subjects()
+                .contains(&EntityRef::Character(suspect)),
+            "weak evidence must not promote a character to case subject"
+        );
+
+        let corroboration = validate_add_evidence(
+            &state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(suspect),
+                origin: None,
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::Mixed,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            },
+        )
+        .expect("corroborating evidence should validate")
+        .commit(&mut state)
+        .expect("corroborating evidence should commit");
+        assert!(state
+            .legal()
+            .get_investigation(investigation)
+            .expect("investigation should exist")
+            .subjects()
+            .contains(&EntityRef::Character(suspect)));
+        assert_ne!(weak_tip, corroboration);
+
+        validate_state(&state).expect("subject promotion state should validate");
         validate_invariants(&state);
     }
 }

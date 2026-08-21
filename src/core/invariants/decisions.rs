@@ -9,7 +9,7 @@ use crate::decisions::{
     DecisionContext, DecisionResponse, DecisionStatus, OperationExceptionReason,
 };
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
-use crate::finance::{AccountLifecycle, FinancialOwner};
+use crate::finance::FinancialOwner;
 use crate::legal::PoliceResponseStatus;
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationContingency, OperationStatus,
@@ -442,7 +442,7 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
                 ResponsibilityScope::Function(_) => {}
             }
         }
-        let budget_account = if let Some(budget) = mandate.budget() {
+        if let Some(budget) = mandate.budget() {
             if budget.limit.cents() < 0 {
                 return Err(StateValidationError::NegativeMandateBudget {
                     mandate: mandate.id(),
@@ -460,10 +460,7 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
                     account: budget.funding_account,
                 });
             }
-            Some(account)
-        } else {
-            None
-        };
+        }
         match mandate.status() {
             MandateStatus::Active => {
                 if organization.lifecycle() != Lifecycle::Active
@@ -473,14 +470,6 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
                         mandate: mandate.id(),
                         manager: mandate.manager(),
                     });
-                }
-                if let Some(account) = budget_account {
-                    if account.lifecycle() != AccountLifecycle::Open {
-                        return Err(StateValidationError::ActiveMandateBudgetAccountNotOpen {
-                            mandate: mandate.id(),
-                            account: account.id(),
-                        });
-                    }
                 }
             }
             MandateStatus::Revoked => {}

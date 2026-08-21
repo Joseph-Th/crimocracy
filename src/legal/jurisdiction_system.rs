@@ -87,9 +87,12 @@ pub fn validate_set_jurisdiction(
     })
 }
 
-pub fn resolve_case_intake_authority(
+/// Highest-priority active authority over a neighborhood whose kind is in `kinds`, with a
+/// deterministic organization-ID tie-break.
+fn resolve_jurisdiction_priority(
     state: &AppState,
     neighborhood: NeighborhoodId,
+    kinds: &[OrganizationKind],
 ) -> Option<OrganizationId> {
     state
         .legal
@@ -100,10 +103,7 @@ pub fn resolve_case_intake_authority(
                 .get_organization(jurisdiction.organization())
                 .is_some_and(|organization| {
                     organization.lifecycle() == Lifecycle::Active
-                        && matches!(
-                            organization.kind(),
-                            OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
-                        )
+                        && kinds.contains(&organization.kind())
                 })
         })
         .fold(None, |best, jurisdiction| match best {
@@ -121,35 +121,25 @@ pub fn resolve_case_intake_authority(
         .map(JurisdictionRecord::organization)
 }
 
+pub fn resolve_case_intake_authority(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+) -> Option<OrganizationId> {
+    resolve_jurisdiction_priority(
+        state,
+        neighborhood,
+        &[
+            OrganizationKind::LawEnforcement,
+            OrganizationKind::LegalAuthority,
+        ],
+    )
+}
+
 pub fn resolve_police_response_authority(
     state: &AppState,
     neighborhood: NeighborhoodId,
 ) -> Option<OrganizationId> {
-    state
-        .legal
-        .jurisdictions_for_neighborhood(neighborhood)
-        .filter(|jurisdiction| {
-            state
-                .world
-                .get_organization(jurisdiction.organization())
-                .is_some_and(|organization| {
-                    organization.lifecycle() == Lifecycle::Active
-                        && organization.kind() == OrganizationKind::LawEnforcement
-                })
-        })
-        .fold(None, |best, jurisdiction| match best {
-            None => Some(jurisdiction),
-            Some(current)
-                if jurisdiction.case_intake_priority().value()
-                    > current.case_intake_priority().value()
-                    || (jurisdiction.case_intake_priority() == current.case_intake_priority()
-                        && jurisdiction.organization() < current.organization()) =>
-            {
-                Some(jurisdiction)
-            }
-            Some(current) => Some(current),
-        })
-        .map(JurisdictionRecord::organization)
+    resolve_jurisdiction_priority(state, neighborhood, &[OrganizationKind::LawEnforcement])
 }
 
 fn validate_jurisdiction_dependencies(

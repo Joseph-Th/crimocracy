@@ -17,18 +17,6 @@ pub struct SaveEnvelope {
     state: AppState,
 }
 
-impl SaveEnvelope {
-    pub fn format_version(&self) -> u16 {
-        self.format_version
-    }
-    pub fn content_revision(&self) -> u32 {
-        self.content_revision
-    }
-    pub fn state(&self) -> &AppState {
-        &self.state
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum SaveError {
     #[error("cannot save invalid application state: {0}")]

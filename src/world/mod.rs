@@ -124,7 +124,6 @@ pub const ALL_DRIVE_KINDS: [DriveKind; 9] = [
 pub struct Rating(u8);
 
 impl Rating {
-    pub const MIN: u8 = 0;
     pub const MAX: u8 = 100;
 
     pub fn try_new(value: u8) -> Result<Self, RatingError> {

@@ -15,13 +15,13 @@ use crate::decisions::DecisionResponse;
 use crate::enterprises::EnterpriseLocation;
 use crate::legal::investigation_work_execution::{
     calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
-    find_superseding_evidence, improve_evidence_reliability, minimum_source_reliability,
+    find_superseding_evidence, minimum_source_reliability, resolve_improved_evidence_reliability,
 };
 use crate::legal::{EvidenceKind, InvestigationWorkKind, InvestigationWorkOutcome};
 use crate::operations::operation_execution::{
     calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
-    calculate_property_proceeds, classify_exposure_level, classify_objective_outcome,
-    did_police_response_arrive_by,
+    calculate_property_proceeds, has_police_response_arrived_by, resolve_exposure_level,
+    resolve_objective_outcome,
 };
 use crate::operations::property_disposition::calculate_property_liquidation_value;
 use crate::operations::{OperationContingency, OperationStatus};
@@ -225,11 +225,6 @@ pub enum StateValidationError {
     NegativeMandateBudget { mandate: MandateId },
     #[error("mandate {mandate} budget account {account} is not owned by its organization")]
     MandateBudgetAccountOwnerMismatch {
-        mandate: MandateId,
-        account: crate::core::id::FinancialAccountId,
-    },
-    #[error("active mandate {mandate} budget account {account} is not open")]
-    ActiveMandateBudgetAccountNotOpen {
         mandate: MandateId,
         account: crate::core::id::FinancialAccountId,
     },
@@ -636,7 +631,7 @@ pub fn validate_state_against_registry(
         if let Some(resolution) = operation.resolution() {
             let factors = resolution.factors();
             let expected_margin = calculate_execution_margin(execution, factors);
-            let expected_outcome = classify_objective_outcome(execution, expected_margin);
+            let expected_outcome = resolve_objective_outcome(execution, expected_margin);
             let (
                 expected_intelligence_quality,
                 expected_intelligence_adjustment,
@@ -644,7 +639,7 @@ pub fn validate_state_against_registry(
                 expected_intelligence_topics_relevant,
             ) = calculate_intelligence_factors(registry, state, operation.id());
             let expected_police_response_arrived =
-                did_police_response_arrive_by(state, operation, resolution.resolved_at());
+                has_police_response_arrived_by(state, operation, resolution.resolved_at());
             let expected_property_proceeds = calculate_property_proceeds(
                 registry,
                 state,
@@ -655,7 +650,8 @@ pub fn validate_state_against_registry(
                 operation: operation.id(),
             })?;
             if factors.variance().unsigned_abs() > execution.variance_limit()
-                || factors.time_pressure() > 30
+                || factors.time_pressure()
+                    > crate::operations::operation_execution::MAX_TIME_PRESSURE
                 || factors.approach_adjustment()
                     != execution
                         .approach_difficulty_adjustment(operation.approach())
@@ -708,7 +704,7 @@ pub fn validate_state_against_registry(
                     / 100;
             let expected_exposure_score = calculate_exposure_score(execution, exposure_factors);
             let expected_exposure_level =
-                classify_exposure_level(execution, expected_exposure_score);
+                resolve_exposure_level(execution, expected_exposure_score);
             if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
                 || exposure_factors.approach_adjustment()
                     != execution
@@ -840,7 +836,8 @@ pub fn validate_state_against_registry(
                     || evidence.subject() != source.subject()
                     || evidence.origin() != source.origin()
                     || evidence.strength() != source.strength()
-                    || evidence.reliability() != improve_evidence_reliability(source.reliability())
+                    || evidence.reliability()
+                        != resolve_improved_evidence_reliability(source.reliability())
                     || evidence.admissibility() != source.admissibility()
                     || evidence.derived_from() != &BTreeSet::from([source_id])
                 {
@@ -865,9 +862,6 @@ pub fn validate_state_against_registry(
                 }
             }
         }
-    }
-    for business in state.world.businesses() {
-        registry.get_business(business.kind());
     }
     for cycle in state.economy.cycles() {
         let business = state

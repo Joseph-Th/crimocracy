@@ -189,7 +189,7 @@ pub(crate) fn decide_surveillance_intelligence(
     }
     let observed_at = state.now();
     let surveiller = operation.responsible_organization();
-    let snapshot = capture_target_snapshot(state, *target, observed_at, surveiller)?;
+    let snapshot = resolve_target_snapshot(state, *target, observed_at, surveiller)?;
     let observations = build_observations(&snapshot, outcome, observed_at);
     Ok(Some(SurveillanceIntelligencePlan {
         target: *target,
@@ -210,7 +210,7 @@ pub(crate) fn validate_surveillance_plan_snapshot(
     let surveiller = plan
         .surveiller
         .expect("validated surveillance plan must carry its surveiller");
-    let current = capture_target_snapshot(state, plan.target, plan.observed_at, surveiller)?;
+    let current = resolve_target_snapshot(state, plan.target, plan.observed_at, surveiller)?;
     if current != plan.snapshot {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
@@ -293,57 +293,10 @@ pub(crate) fn is_valid_persisted_surveillance_information(
     {
         return false;
     }
-    let OperationObjective::GatherInformation { target } = operation.objective() else {
-        return false;
-    };
-    match *target {
-        EntityRef::Neighborhood(neighborhood) => {
-            information.topic() == InformationTopic::PoliceActivity
-                && information.subject() == EntityRef::Neighborhood(neighborhood)
-        }
-        EntityRef::Business(business) => {
-            (resolution.objective_outcome() == OperationObjectiveOutcome::Achieved
-                && information.topic() == InformationTopic::MarketAccess
-                && information.subject() == EntityRef::Business(business))
-                || (information.topic() == InformationTopic::PoliceActivity
-                    && state.world.get_business(business).is_some_and(|record| {
-                        information.subject() == EntityRef::Neighborhood(record.neighborhood())
-                    }))
-        }
-        EntityRef::Character(character) => {
-            information.topic() == InformationTopic::Personnel
-                && information.subject() == EntityRef::Character(character)
-        }
-        EntityRef::Organization(organization) => {
-            let is_law_enforcement = state
-                .world
-                .get_organization(organization)
-                .is_some_and(|record| is_law_enforcement_authority(record.kind()));
-            if is_law_enforcement {
-                information.topic() == InformationTopic::LegalActivity
-                    && information.subject() == EntityRef::Organization(organization)
-            } else {
-                information.topic() == InformationTopic::Personnel
-                    && information.subject() == EntityRef::Organization(organization)
-            }
-        }
-        EntityRef::Investigation(investigation) => {
-            information.topic() == InformationTopic::LegalActivity
-                && information.subject() == EntityRef::Investigation(investigation)
-        }
-        EntityRef::Enterprise(enterprise) => {
-            information.topic() == InformationTopic::Personnel
-                && information.subject() == EntityRef::Enterprise(enterprise)
-        }
-        EntityRef::Operation(target_operation) => {
-            information.topic() == InformationTopic::OperationalOutcome
-                && information.subject() == EntityRef::Operation(target_operation)
-        }
-        EntityRef::Evidence(_)
-        | EntityRef::FinancialAccount(_)
-        | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_) => false,
-    }
+    // One source of truth for the target→(topic, subject) table: persisted surveillance
+    // intelligence is valid exactly when its signature is in the expected set.
+    expected_persisted_surveillance_signatures(state, operation)
+        .is_some_and(|expected| expected.contains(&(information.topic(), information.subject())))
 }
 
 pub(crate) fn expected_persisted_surveillance_signatures(
@@ -427,7 +380,7 @@ pub(crate) fn expected_persisted_surveillance_signatures(
     Some(expected)
 }
 
-fn capture_target_snapshot(
+fn resolve_target_snapshot(
     state: &AppState,
     target: EntityRef,
     at: SimTime,
@@ -443,7 +396,7 @@ fn capture_target_snapshot(
                 id,
                 name: neighborhood.name().to_owned(),
                 lifecycle: neighborhood.lifecycle(),
-                patrol: capture_patrol_pattern(state, id, at),
+                patrol: resolve_patrol_pattern(state, id, at),
             })
         }
         EntityRef::Business(id) => {
@@ -462,7 +415,7 @@ fn capture_target_snapshot(
                 functions: business.functions().clone(),
                 neighborhood: business.neighborhood(),
                 neighborhood_name: neighborhood.name().to_owned(),
-                patrol: capture_patrol_pattern(state, business.neighborhood(), at),
+                patrol: resolve_patrol_pattern(state, business.neighborhood(), at),
             })
         }
         EntityRef::Character(id) => {
@@ -601,7 +554,7 @@ fn capture_target_snapshot(
     }
 }
 
-fn capture_patrol_pattern(
+fn resolve_patrol_pattern(
     state: &AppState,
     neighborhood: NeighborhoodId,
     at: SimTime,

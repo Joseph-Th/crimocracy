@@ -614,6 +614,14 @@ impl OperationRecord {
         &self.command.roles
     }
 
+    /// Every participant bound to the record — leader plus all role holders. Participant
+    /// release and double-booking checks depend on this union being defined exactly once.
+    pub fn participants(&self) -> BTreeSet<CharacterId> {
+        let mut participants = BTreeSet::from([self.command.leader]);
+        participants.extend(self.command.roles.values().copied());
+        participants
+    }
+
     pub fn intelligence(&self) -> &BTreeSet<InformationId> {
         &self.command.intelligence
     }

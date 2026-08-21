@@ -1,6 +1,6 @@
 //! Release-safe structural validation for the world, social, and contact subsystems.
 
-use crate::contacts::contact_system::{expected_contact_kind, information_source_kind};
+use crate::contacts::contact_system::{expected_contact_kind, resolve_information_source_kind};
 use crate::contacts::ContactRelationshipSnapshot;
 use crate::contacts::ContactStatus;
 use crate::core::entity::{is_entity_present, EntityRef};
@@ -401,7 +401,7 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
             || source.recorded_at() > disclosure.disclosed_at()
             || source.observed_at() > disclosure.disclosed_at()
             || disclosed.holder() != KnowledgeHolder::Organization(contact.sponsor())
-            || disclosed.source_kind() != information_source_kind(contact.kind())
+            || disclosed.source_kind() != resolve_information_source_kind(contact.kind())
             || disclosed.source_entity() != Some(EntityRef::Character(contact.contact()))
             || disclosed.topic() != source.topic()
             || disclosed.subject() != source.subject()

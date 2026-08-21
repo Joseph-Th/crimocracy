@@ -246,8 +246,6 @@ impl RecruitmentAttemptRecord {
 pub struct RecruitmentState {
     records: BTreeMap<RecruitmentAttemptId, RecruitmentAttemptRecord>,
     by_candidate: BTreeMap<CharacterId, BTreeSet<RecruitmentAttemptId>>,
-    by_recruiter: BTreeMap<CharacterId, BTreeSet<RecruitmentAttemptId>>,
-    by_target_organization: BTreeMap<OrganizationId, BTreeSet<RecruitmentAttemptId>>,
     by_candidate_organization:
         BTreeMap<(CharacterId, OrganizationId), BTreeSet<RecruitmentAttemptId>>,
     by_approval_decision: BTreeMap<DecisionRequestId, RecruitmentAttemptId>,
@@ -268,28 +266,6 @@ impl RecruitmentState {
     ) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
         self.by_candidate
             .get(&candidate)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
-    pub fn attempts_for_recruiter(
-        &self,
-        recruiter: CharacterId,
-    ) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
-        self.by_recruiter
-            .get(&recruiter)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
-    pub fn attempts_for_organization(
-        &self,
-        organization: OrganizationId,
-    ) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
-        self.by_target_organization
-            .get(&organization)
             .into_iter()
             .flatten()
             .filter_map(|id| self.records.get(id))
@@ -337,14 +313,6 @@ impl RecruitmentState {
             .entry(record.candidate())
             .or_default()
             .insert(id);
-        self.by_recruiter
-            .entry(record.recruiter())
-            .or_default()
-            .insert(id);
-        self.by_target_organization
-            .entry(record.target_organization())
-            .or_default()
-            .insert(id);
         self.by_candidate_organization
             .entry((record.candidate(), record.target_organization()))
             .or_default()
@@ -374,14 +342,6 @@ impl RecruitmentState {
                 .get(&record.candidate())
                 .is_some_and(|ids| ids.contains(&id))
                 || !self
-                    .by_recruiter
-                    .get(&record.recruiter())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .by_target_organization
-                    .get(&record.target_organization())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
                     .by_candidate_organization
                     .get(&(record.candidate(), record.target_organization()))
                     .is_some_and(|ids| ids.contains(&id))
@@ -404,28 +364,6 @@ impl RecruitmentState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.candidate() == *candidate)
-                {
-                    return false;
-                }
-            }
-        }
-        for (recruiter, ids) in &self.by_recruiter {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.recruiter() == *recruiter)
-                {
-                    return false;
-                }
-            }
-        }
-        for (organization, ids) in &self.by_target_organization {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.target_organization() == *organization)
                 {
                     return false;
                 }
@@ -467,18 +405,6 @@ impl RecruitmentState {
                     .get(&record.candidate())
                     .is_some_and(|ids| ids.contains(&record.id())),
                 "Index Completeness: recruitment candidate index is missing an attempt"
-            );
-            debug_assert!(
-                self.by_recruiter
-                    .get(&record.recruiter())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: recruitment recruiter index is missing an attempt"
-            );
-            debug_assert!(
-                self.by_target_organization
-                    .get(&record.target_organization())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: recruitment organization index is missing an attempt"
             );
             debug_assert!(
                 self.by_candidate_organization

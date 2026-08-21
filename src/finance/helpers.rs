@@ -1,12 +1,11 @@
-//! Shared financial arithmetic helpers used by enterprise and business economy cycles.
+//! Shared financial arithmetic used by enterprise and business economy cycles.
 
 use crate::core::id::FinancialAccountId;
 use crate::finance::{LedgerPosting, Money};
 
 /// Weighted contribution of a rating point value without overflow.
 pub fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
-    let cents = per_point.cents().checked_mul(i64::from(rating))?;
-    Some(Money::from_cents(cents))
+    per_point.checked_mul(i64::from(rating))
 }
 
 /// Applies a basis-point variance (-10000..+10000 maps to 0..200%) to an amount.
@@ -27,7 +26,6 @@ pub fn build_settlement_postings(
     settlement: FinancialAccountId,
     net: Money,
 ) -> Option<[LedgerPosting; 2]> {
-    let negated = net.cents().checked_neg()?;
     Some([
         LedgerPosting {
             account: cash,
@@ -35,7 +33,7 @@ pub fn build_settlement_postings(
         },
         LedgerPosting {
             account: settlement,
-            amount: Money::from_cents(negated),
+            amount: net.checked_neg()?,
         },
     ])
 }

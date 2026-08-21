@@ -66,6 +66,13 @@ pub enum RecruitmentError {
         recruiter: CharacterId,
         organization: OrganizationId,
     },
+    #[error("executive recruitment is reserved for organization heads; recruiter {recruiter} reports to {supervisor}")]
+    ExecutiveRecruiterSupervised {
+        recruiter: CharacterId,
+        supervisor: CharacterId,
+    },
+    #[error("recruitment approval decision {decision} is already pending for this candidate")]
+    PendingRecruitmentApproval { decision: DecisionRequestId },
     #[error("candidate {0} does not exist")]
     MissingCandidate(CharacterId),
     #[error("candidate {0} is not active")]
@@ -328,7 +335,7 @@ pub(crate) fn resolve_due_autonomous_recruitment(
             // iteration quirks; the drawn index must address the sorted candidate list.
             candidates.sort_unstable();
             let index =
-                decide_candidate_index(state.recruitment_rng_mut(), candidates.len()).unwrap_or(0);
+                draw_candidate_index(state.recruitment_rng_mut(), candidates.len()).unwrap_or(0);
             candidates[index]
         };
         let authority = MandateAuthority {
@@ -448,6 +455,26 @@ pub fn validate_recruitment_attempt(
     state: &AppState,
     draft: RecruitmentDraft,
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
+    // The executive channel bypasses manager recruitment policies, so it is reserved for
+    // organization heads; supervised members recruit through delegated or approved channels.
+    let recruiter_record = state
+        .world
+        .get_character(draft.recruiter)
+        .ok_or(RecruitmentError::MissingRecruiter(draft.recruiter))?;
+    if let Some(supervisor) = recruiter_record.supervisor() {
+        return Err(RecruitmentError::ExecutiveRecruiterSupervised {
+            recruiter: draft.recruiter,
+            supervisor,
+        });
+    }
+    if let Some(pending) = state.decisions().pending_for_recruitment_approval(
+        draft.target_organization,
+        draft.recruiter,
+        draft.candidate,
+    ) {
+        // An approval request already covers this candidate; a direct attempt must not race it.
+        return Err(RecruitmentError::PendingRecruitmentApproval { decision: pending });
+    }
     validate_recruitment_plan_with_authority(
         registry,
         state,
@@ -457,12 +484,19 @@ pub fn validate_recruitment_attempt(
     )
 }
 
-pub fn validate_delegated_recruitment_attempt(
-    registry: &Registry,
+/// Shared authority prelude for mandate-backed recruitment channels: manager identity, personnel
+/// scope, organization match, and the manager's independent-recruitment policy.
+fn validate_personnel_authority(
     state: &AppState,
     authority: MandateAuthority,
-    draft: RecruitmentDraft,
-) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
+    draft: &RecruitmentDraft,
+) -> Result<
+    (
+        ResolvedMandateAuthority,
+        crate::delegation::delegation_system::ResolvedPolicy,
+    ),
+    RecruitmentError,
+> {
     if authority.manager != draft.recruiter {
         return Err(RecruitmentError::DelegatedRecruiterMismatch {
             recruiter: draft.recruiter,
@@ -485,15 +519,17 @@ pub fn validate_delegated_recruitment_attempt(
     }
     let policy =
         resolve_policy_for_manager(state, authority.manager, PolicyKind::IndependentRecruitment)?;
-    let approval = match policy.setting {
-        PolicySetting::IndependentRecruitment(approval) => approval,
-        PolicySetting::CollectionForce(_)
-        | PolicySetting::PatrolBribery(_)
-        | PolicySetting::CasualtyResponse(_)
-        | PolicySetting::AssociateLegalSupport(_) => {
-            unreachable!("policy kind resolution returned the wrong policy variant")
-        }
-    };
+    Ok((resolved_authority, policy))
+}
+
+pub fn validate_delegated_recruitment_attempt(
+    registry: &Registry,
+    state: &AppState,
+    authority: MandateAuthority,
+    draft: RecruitmentDraft,
+) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
+    let (resolved_authority, policy) = validate_personnel_authority(state, authority, &draft)?;
+    let approval = policy.independent_recruitment_approval();
     if approval != ApprovalPolicy::Delegated {
         return Err(RecruitmentError::IndependentRecruitmentNotDelegated {
             manager: authority.manager,
@@ -529,37 +565,8 @@ pub(crate) fn validate_approved_recruitment_attempt(
     authority: MandateAuthority,
     draft: RecruitmentDraft,
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
-    if authority.manager != draft.recruiter {
-        return Err(RecruitmentError::DelegatedRecruiterMismatch {
-            recruiter: draft.recruiter,
-            manager: authority.manager,
-        });
-    }
-    if authority.scope != ResponsibilityScope::Function(ResponsibilityFunction::Personnel) {
-        return Err(
-            RecruitmentError::DelegatedRecruitmentRequiresPersonnelScope {
-                scope: authority.scope,
-            },
-        );
-    }
-    let resolved_authority = resolve_mandate_authority(state, authority)?;
-    if resolved_authority.organization() != draft.target_organization {
-        return Err(RecruitmentError::DelegatedOrganizationMismatch {
-            authority_organization: resolved_authority.organization(),
-            target_organization: draft.target_organization,
-        });
-    }
-    let policy =
-        resolve_policy_for_manager(state, authority.manager, PolicyKind::IndependentRecruitment)?;
-    let approval = match policy.setting {
-        PolicySetting::IndependentRecruitment(approval) => approval,
-        PolicySetting::CollectionForce(_)
-        | PolicySetting::PatrolBribery(_)
-        | PolicySetting::CasualtyResponse(_)
-        | PolicySetting::AssociateLegalSupport(_) => {
-            unreachable!("policy kind resolution returned the wrong policy variant")
-        }
-    };
+    let (resolved_authority, policy) = validate_personnel_authority(state, authority, &draft)?;
+    let approval = policy.independent_recruitment_approval();
     if approval != ApprovalPolicy::RequireApproval {
         return Err(
             RecruitmentError::IndependentRecruitmentApprovalNotRequired {
@@ -979,16 +986,15 @@ fn candidate_organization_is_recruitable(
     })
 }
 
+/// One cooldown rule, two shapes: the discovery filter asks the predicate form, the
+/// transaction path needs the typed error with the exact next-eligible instant.
 fn recruitment_is_on_cooldown(
     definition: &RecruitmentDefinition,
     state: &AppState,
     candidate: CharacterId,
     organization: OrganizationId,
 ) -> bool {
-    state
-        .recruitment
-        .latest_attempt_for(candidate, organization)
-        .is_some_and(|attempt| state.now() < attempt.occurred_at() + definition.cooldown())
+    validate_cooldown(definition, state, candidate, organization).is_err()
 }
 
 fn validate_cooldown(
@@ -1317,17 +1323,11 @@ pub(crate) fn select_perceived_legal_pressure_at(
     candidate: CharacterId,
     at: SimTime,
 ) -> (Option<InformationId>, u8) {
-    state
-        .intelligence
-        .information_for_holder_by_topic(
-            KnowledgeHolder::Character(candidate),
-            InformationTopic::PoliceActivity,
-        )
-        .filter(|information| {
-            information.subject() == EntityRef::Character(candidate)
-                && information.recorded_at() <= at
-                && information.observed_at() <= at
-        })
+    // Selection runs over exactly the ID set the staleness token captures, so a fresh plan
+    // can never spuriously fail with `StalePressureKnowledge`.
+    let selected = candidate_pressure_information_ids(state, candidate, at)
+        .into_iter()
+        .filter_map(|id| state.intelligence.get_information(id))
         .map(|information| {
             (
                 information.id(),
@@ -1337,9 +1337,9 @@ pub(crate) fn select_perceived_legal_pressure_at(
         })
         .filter(|(_, score, _)| *score > 0)
         .max_by_key(|(id, score, observed_at)| (*score, *observed_at, *id))
-        .map_or((None, 0), |(id, score, _)| (Some(id), score))
+        .map_or((None, 0), |(id, score, _)| (Some(id), score));
+    selected
 }
-
 fn perceived_legal_pressure_score(
     definition: &RecruitmentDefinition,
     information: &InformationRecord,
@@ -1358,6 +1358,8 @@ fn perceived_legal_pressure_score(
         .expect("bounded perceived legal pressure must fit u8")
 }
 
+/// The single staleness predicate for candidate pressure knowledge: both the plan's snapshot
+/// and the commit-time revalidation must agree through this one derivation.
 fn candidate_pressure_information_ids(
     state: &AppState,
     candidate: CharacterId,
@@ -1378,7 +1380,7 @@ fn candidate_pressure_information_ids(
         .collect()
 }
 
-fn decide_candidate_index(rng: &mut impl rand_core::RngCore, choice_count: usize) -> Option<usize> {
+fn draw_candidate_index(rng: &mut impl rand_core::RngCore, choice_count: usize) -> Option<usize> {
     if choice_count == 0 {
         return None;
     }
@@ -1608,6 +1610,56 @@ mod tests {
             candidate: fixture.candidate,
             approach: RecruitmentApproach::Protection,
         }
+    }
+
+    #[test]
+    fn executive_channel_rejects_supervised_recruiters() {
+        let registry = build_registry();
+        let mut fixture = fixture();
+        let supervised = insert_character(
+            &registry,
+            &mut fixture.state,
+            CharacterDraft {
+                name: "Supervised Soldier".to_owned(),
+                organization: Some(fixture.target),
+                supervisor: Some(fixture.recruiter),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(CapabilityKind::Negotiation, rating(80))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("supervised member should validate");
+        let error = match validate_recruitment_attempt(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentDraft {
+                target_organization: fixture.target,
+                recruiter: supervised,
+                candidate: fixture.candidate,
+                approach: RecruitmentApproach::Protection,
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("supervised members must not bypass recruitment policy"),
+        };
+        assert_eq!(
+            error,
+            RecruitmentError::ExecutiveRecruiterSupervised {
+                recruiter: supervised,
+                supervisor: fixture.recruiter,
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_character(fixture.candidate)
+                .expect("candidate should persist")
+                .organization(),
+            Some(fixture.source)
+        );
+        validate_state(&fixture.state).expect("rejected recruitment state should be unchanged");
     }
 
     #[test]

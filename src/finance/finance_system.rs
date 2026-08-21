@@ -24,8 +24,6 @@ pub enum FinanceError {
     MissingEntity(EntityRef),
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
-    #[error("financial account {0} is not open")]
-    AccountNotOpen(FinancialAccountId),
     #[error("ledger transaction must contain at least two postings")]
     TooFewPostings,
     #[error("ledger transaction repeats account {0}")]
@@ -199,9 +197,6 @@ pub fn validate_record_transaction(
             .finance
             .get_account(posting.account)
             .ok_or(FinanceError::MissingAccount(posting.account))?;
-        if account.lifecycle() != AccountLifecycle::Open {
-            return Err(FinanceError::AccountNotOpen(posting.account));
-        }
         let next = account
             .balance()
             .checked_add(posting.amount)

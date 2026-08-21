@@ -36,6 +36,14 @@ impl Money {
     pub fn checked_sub(self, other: Self) -> Option<Self> {
         self.0.checked_sub(other.0).map(Self)
     }
+
+    pub fn checked_mul(self, factor: i64) -> Option<Self> {
+        self.0.checked_mul(factor).map(Self)
+    }
+
+    pub fn checked_neg(self) -> Option<Self> {
+        self.0.checked_neg().map(Self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -66,11 +74,11 @@ impl FinancialOwner {
     }
 }
 
+/// Accounts are opened once and never transition; freeze/close flows are out of modeled scope,
+/// so no lifecycle other than `Open` can exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountLifecycle {
     Open,
-    Frozen,
-    Closed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

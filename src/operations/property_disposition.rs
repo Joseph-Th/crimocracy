@@ -11,9 +11,7 @@ use crate::core::time::SimTime;
 use crate::finance::finance_system::{
     validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
 };
-use crate::finance::{
-    AccountKind, AccountLifecycle, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
-};
+use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
     validate_record_information, IntelligenceError, ValidatedInformation,
 };
@@ -82,8 +80,6 @@ pub enum PropertyDispositionError {
     InvalidCashAccountKind(FinancialAccountId),
     #[error("property liquidation settlement account {0} must be a settlement account")]
     InvalidSettlementAccountKind(FinancialAccountId),
-    #[error("property liquidation account {0} is not open")]
-    AccountNotOpen(FinancialAccountId),
     #[error("property liquidation cash and settlement accounts must be distinct")]
     SameAccount,
     #[error("operation {0} property liquidation arithmetic overflowed")]
@@ -363,9 +359,6 @@ fn validate_accounts(
                 organization,
             });
         }
-        if account.lifecycle() != AccountLifecycle::Open {
-            return Err(PropertyDispositionError::AccountNotOpen(account.id()));
-        }
     }
     if !matches!(
         cash.kind(),
@@ -408,11 +401,9 @@ pub(crate) fn calculate_property_liquidation_value(
             venue,
             neighborhood: venue_record.neighborhood(),
         })?;
-    // Police presence makes fencing harder (scrutiny); commercial activity would
-    // help but the harness's fixtures tie commerce to police, so we weight police
-    // more heavily to preserve variation. A quiet district with low police
-    // presence meaningfully improves resale compared with a crowded, heavily
-    // patrolled one.
+    // Fencing conditions adjust the authored recovery rate: police scrutiny in the venue's
+    // district suppresses recovery, quiet districts improve it. The clamp keeps the effective
+    // rate inside the range the ledger and reporting arithmetic are validated for.
     let police = i32::from(neighborhood.profile().institutions.police_presence.value());
     let police_adjustment = (50 - police) * 20;
     recovery_basis = (recovery_basis + police_adjustment).clamp(3_000, 9_000);

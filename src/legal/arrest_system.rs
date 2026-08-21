@@ -25,6 +25,11 @@ pub enum ArrestError {
         strength: crate::legal::EvidenceStrength,
         reliability: crate::legal::EvidenceReliability,
     },
+    #[error("arrest evidence {evidence} is inadmissible and cannot justify custody")]
+    InadmissibleEvidence {
+        evidence: EvidenceId,
+        admissibility: crate::legal::Admissibility,
+    },
     #[error("investigation {0} does not exist")]
     MissingInvestigation(InvestigationId),
     #[error("investigation {0} is not active")]
@@ -241,6 +246,12 @@ fn validate_arrest_dependencies(
             return Err(ArrestError::EvidenceSubjectMismatch {
                 evidence: *evidence_id,
                 character: draft.character,
+            });
+        }
+        if evidence.admissibility() == crate::legal::Admissibility::Inadmissible {
+            return Err(ArrestError::InadmissibleEvidence {
+                evidence: *evidence_id,
+                admissibility: evidence.admissibility(),
             });
         }
         if evidence.strength() == crate::legal::EvidenceStrength::Weak {

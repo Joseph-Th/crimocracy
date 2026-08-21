@@ -12,9 +12,7 @@ use crate::economy::{
 use crate::finance::finance_system::{
     validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
 };
-use crate::finance::{
-    AccountKind, AccountLifecycle, FinancialOwner, LedgerTransactionDraft, Money,
-};
+use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
     validate_record_information, IntelligenceError, ValidatedInformation,
 };
@@ -48,8 +46,6 @@ pub enum BusinessEconomyError {
     InvalidOperatingAccountKind(FinancialAccountId),
     #[error("business settlement account {0} must be a settlement account")]
     InvalidSettlementAccountKind(FinancialAccountId),
-    #[error("business economy account {0} is not open")]
-    AccountNotOpen(FinancialAccountId),
     #[error("settlement account {account} is already assigned to business {business}")]
     SettlementAccountInUse {
         account: FinancialAccountId,
@@ -436,6 +432,9 @@ pub fn validate_business_cycle_plan(
         plan.accounts.settlement_account,
         Some(plan.snapshot.business),
     )?;
+    // A balanced settlement moves no money, and the ledger rejects zero-value postings, so
+    // net-zero cycles record their modeled gross/cost financials without a ledger transaction
+    // (see `core::invariants::business` for the matching validity rule).
     let ledger = if plan.economics.net_cash == Money::ZERO {
         None
     } else {
@@ -632,11 +631,11 @@ pub fn validate_close_business_economy(
     })
 }
 
-pub(crate) fn due_active_businesses(state: &AppState) -> Vec<BusinessId> {
+pub(crate) fn find_due_businesses(state: &AppState) -> Vec<BusinessId> {
     state.economy.due_at_or_before(state.now())
 }
 
-pub(crate) fn estimate_business_gross_potential(
+pub(crate) fn resolve_business_gross_potential(
     registry: &Registry,
     state: &AppState,
     business: BusinessId,
@@ -692,9 +691,6 @@ fn validate_accounts(
                 account: account.id(),
             });
         }
-        if account.lifecycle() != AccountLifecycle::Open {
-            return Err(BusinessEconomyError::AccountNotOpen(account.id()));
-        }
     }
     if operating.kind() != AccountKind::LegitimateOperating {
         return Err(BusinessEconomyError::InvalidOperatingAccountKind(
@@ -702,11 +698,6 @@ fn validate_accounts(
         ));
     }
     if settlement.kind() != AccountKind::Settlement {
-        return Err(BusinessEconomyError::InvalidSettlementAccountKind(
-            settlement_account,
-        ));
-    }
-    if operating_account == settlement_account {
         return Err(BusinessEconomyError::InvalidSettlementAccountKind(
             settlement_account,
         ));
@@ -1323,7 +1314,7 @@ mod tests {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));
-        assert!(due_active_businesses(&fixture.state).is_empty());
+        assert!(find_due_businesses(&fixture.state).is_empty());
         validate_invariants(&fixture.state);
     }
 

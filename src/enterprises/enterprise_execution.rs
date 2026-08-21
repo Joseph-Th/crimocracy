@@ -22,9 +22,7 @@ use crate::enterprises::{
 use crate::finance::finance_system::{
     validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
 };
-use crate::finance::{
-    AccountKind, AccountLifecycle, FinancialOwner, LedgerTransactionDraft, Money,
-};
+use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
     validate_record_information, IntelligenceError, ValidatedInformation,
 };
@@ -33,8 +31,7 @@ use crate::intelligence::{
 };
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
 use crate::world::{
-    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile, PolicySetting,
-    Rating,
+    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile, Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -97,8 +94,6 @@ pub enum EnterpriseError {
     InvalidCashAccountKind(FinancialAccountId),
     #[error("enterprise settlement account {0} must be a settlement account")]
     InvalidSettlementAccountKind(FinancialAccountId),
-    #[error("enterprise financial account {0} is not open")]
-    AccountNotOpen(FinancialAccountId),
     #[error("settlement account {account} is already reserved by enterprise {enterprise}")]
     SettlementAccountInUse {
         account: FinancialAccountId,
@@ -238,12 +233,6 @@ struct EnterpriseCycleEconomics {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct EnterpriseCycleManagement {
-    manager_management: Option<Rating>,
-    policy_setting: Option<PolicySetting>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct EnterpriseCycleAccounts {
     cash_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
@@ -253,7 +242,6 @@ struct EnterpriseCycleAccounts {
 pub struct EnterpriseCyclePlan {
     snapshot: EnterpriseCycleSnapshot,
     economics: EnterpriseCycleEconomics,
-    management: EnterpriseCycleManagement,
     accounts: EnterpriseCycleAccounts,
 }
 
@@ -275,9 +263,6 @@ impl EnterpriseCyclePlan {
     }
     pub fn attention(&self) -> AttentionClass {
         self.economics.attention
-    }
-    pub fn policy_setting(&self) -> Option<PolicySetting> {
-        self.management.policy_setting
     }
 }
 
@@ -351,10 +336,11 @@ pub fn decide_enterprise_cycle(
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let policy_setting = match definition.policy() {
-        Some(kind) => Some(resolve_policy_for_manager(state, record.manager(), kind)?.setting),
-        None => None,
-    };
+    // Validate that the manager still holds the authored policy authority for this enterprise
+    // kind. The resolved setting is delegation-owned state and is never persisted on the cycle.
+    if let Some(policy_kind) = definition.policy() {
+        resolve_policy_for_manager(state, record.manager(), policy_kind)?;
+    }
     let attention = if i32::from(variance_basis_points).unsigned_abs()
         >= u32::from(economics.notable_variance_basis_points())
     {
@@ -393,10 +379,6 @@ pub fn decide_enterprise_cycle(
             net_cash,
             variance_basis_points,
             attention,
-        },
-        management: EnterpriseCycleManagement {
-            manager_management,
-            policy_setting,
         },
         accounts: EnterpriseCycleAccounts {
             cash_account: record.cash_account(),
@@ -501,8 +483,6 @@ impl ValidatedEnterpriseCycle {
                 },
                 artifacts: super::EnterpriseCycleArtifacts {
                     attention: self.plan.economics.attention,
-                    manager_management: self.plan.management.manager_management,
-                    policy_setting: self.plan.management.policy_setting,
                 },
                 provenance: super::EnterpriseCycleProvenance {
                     transaction,
@@ -569,6 +549,9 @@ pub fn validate_enterprise_cycle_plan(
         plan.accounts.settlement_account,
         Some(record.id()),
     )?;
+    // A balanced settlement moves no money, and the ledger rejects zero-value postings, so
+    // net-zero cycles record their modeled gross/cost financials without a ledger transaction
+    // (see `core::invariants::business` for the matching validity rule).
     let ledger = if plan.economics.net_cash == Money::ZERO {
         None
     } else {
@@ -788,7 +771,7 @@ pub fn validate_close_enterprise(
     })
 }
 
-pub(crate) fn due_active_enterprises(state: &AppState) -> Vec<EnterpriseId> {
+pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
     state
         .enterprises
         .due_at_or_before(state.now())
@@ -1067,9 +1050,6 @@ fn validate_enterprise_accounts(
                 organization,
             });
         }
-        if account.lifecycle() != AccountLifecycle::Open {
-            return Err(EnterpriseError::AccountNotOpen(account.id()));
-        }
     }
     match cash.kind() {
         AccountKind::StreetCash | AccountKind::ConcealedCash => {}
@@ -1159,8 +1139,11 @@ fn resolve_operating_cost(
         profile.institutions.police_presence,
     )?);
     let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let heat = resolve_investigation_heat_surcharge(state, location);
-    let support_surcharge = Money::from_cents(supporting_business_count as i64 * 7_500);
+    let heat = resolve_investigation_heat_surcharge(state, enterprise, location, economics)?;
+    let support_surcharge = economics
+        .support_surcharge_per_business()
+        .checked_mul(i64::try_from(supporting_business_count).expect("usize must fit i64"))
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     base.checked_add(heat)
         .and_then(|total| total.checked_add(support_surcharge))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
@@ -1168,8 +1151,10 @@ fn resolve_operating_cost(
 
 fn resolve_investigation_heat_surcharge(
     state: &crate::core::state::AppState,
+    enterprise: EnterpriseId,
     location: EnterpriseLocation,
-) -> Money {
+    economics: &EnterpriseEconomicsDefinition,
+) -> Result<Money, EnterpriseError> {
     let neighborhood = match location {
         EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(business_id) => {
@@ -1185,11 +1170,11 @@ fn resolve_investigation_heat_surcharge(
     let Some(authority) =
         crate::legal::jurisdiction_system::resolve_case_intake_authority(state, neighborhood)
     else {
-        return Money::ZERO;
+        return Ok(Money::ZERO);
     };
-    // Only cases whose subjects or originating operation target this enterprise's neighborhood
-    // generate local street heat; an authority spanning several districts must not tax rackets
-    // in districts its cases never touched.
+    // Only operation-originated cases targeting this enterprise's neighborhood generate local
+    // street heat; an authority spanning several districts must not tax rackets in districts
+    // its cases never touched.
     let active = state
         .legal
         .investigations_for_owner(authority)
@@ -1203,13 +1188,14 @@ fn resolve_investigation_heat_surcharge(
         })
         .count();
     if active == 0 {
-        Money::ZERO
+        Ok(Money::ZERO)
     } else {
-        // $50 per active case in the district: street heat makes the racket more expensive
-        // to run (bribes, lookouts, missed nights). Linear surcharge doubles the original
-        // $25 to meaningfully erode daily net without instantly bankrupting a gambling
-        // enterprise; a 5-case heat costs $250/day, enough to flip marginal rackets.
-        Money::from_cents((active as i64) * 5_000)
+        // Street heat makes the racket more expensive to run (bribes, lookouts, missed nights);
+        // the authored per-case rate must erode daily net without instantly bankrupting it.
+        economics
+            .heat_surcharge_per_active_case()
+            .checked_mul(i64::try_from(active).expect("case count must fit i64"))
+            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
     }
 }
 
@@ -1507,12 +1493,6 @@ mod tests {
                 .checked_sub(plan.operating_cost())
                 .expect("net should be gross - cost")
         );
-        assert_eq!(
-            plan.policy_setting(),
-            Some(PolicySetting::CollectionForce(
-                crate::world::ForcePolicy::ThreatsOnly
-            ))
-        );
         assert!(plan.gross_revenue().cents() > 0);
         assert!(plan.operating_cost().cents() > 0);
 
@@ -1742,7 +1722,7 @@ mod tests {
         .commit(&mut fixture.state)
         .expect("manager arrest should commit");
 
-        assert!(due_active_enterprises(&fixture.state).is_empty());
+        assert!(find_due_enterprises(&fixture.state).is_empty());
         let detained_tick = run_tick(&registry, &mut fixture.state);
         assert!(detained_tick.enterprise_cycles.is_empty());
         assert_eq!(
@@ -2216,7 +2196,7 @@ mod tests {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));
-        assert!(due_active_enterprises(&fixture.state).is_empty());
+        assert!(find_due_enterprises(&fixture.state).is_empty());
 
         let resume = validate_resume_enterprise(&registry, &fixture.state, enterprise)
             .expect("suspended enterprise with valid authority should resume");

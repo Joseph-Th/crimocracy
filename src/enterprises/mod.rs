@@ -11,7 +11,6 @@ use crate::core::id::{
 use crate::core::time::SimTime;
 use crate::delegation::MandateAuthority;
 use crate::finance::Money;
-use crate::world::{PolicySetting, Rating};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -148,8 +147,6 @@ pub(super) struct EnterpriseCycleFinancials {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct EnterpriseCycleArtifacts {
     attention: AttentionClass,
-    manager_management: Option<Rating>,
-    policy_setting: Option<PolicySetting>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -198,14 +195,6 @@ impl EnterpriseCycleRecord {
 
     pub fn attention(&self) -> AttentionClass {
         self.artifacts.attention
-    }
-
-    pub fn manager_management(&self) -> Option<Rating> {
-        self.artifacts.manager_management
-    }
-
-    pub fn policy_setting(&self) -> Option<PolicySetting> {
-        self.artifacts.policy_setting
     }
 
     pub fn transaction(&self) -> Option<LedgerTransactionId> {

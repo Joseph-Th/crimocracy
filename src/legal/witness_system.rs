@@ -247,7 +247,7 @@ impl ValidatedWitnessStatement {
         state
             .ids
             .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
-        let (investigation_id, witness_id) = {
+        let (investigation_id, witness_id, cooperation) = {
             let case_witness = validate_witness_mutation_snapshot(
                 state,
                 self.draft.case_witness,
@@ -255,7 +255,11 @@ impl ValidatedWitnessStatement {
                 self.expected_investigation_version,
             )?;
             validate_statement_dependencies(state, case_witness, &self.draft)?;
-            (case_witness.investigation(), case_witness.witness())
+            (
+                case_witness.investigation(),
+                case_witness.witness(),
+                case_witness.cooperation(),
+            )
         };
 
         let statement = state.ids.next_witness_statement()?;
@@ -280,8 +284,8 @@ impl ValidatedWitnessStatement {
                 },
                 assessment: EvidenceAssessment {
                     kind: EvidenceKind::WitnessTestimony,
-                    strength: witness_strength(self.draft.confidence),
-                    reliability: witness_reliability(self.draft.confidence),
+                    strength: resolve_witness_strength(self.draft.confidence, cooperation),
+                    reliability: resolve_witness_reliability(self.draft.confidence, cooperation),
                     admissibility: Admissibility::Unknown,
                 },
                 discovered_at: recorded_at,
@@ -296,6 +300,7 @@ impl ValidatedWitnessStatement {
                 subject: self.draft.subject,
                 origin: self.draft.origin,
                 confidence: self.draft.confidence,
+                cooperation,
                 summary: self.draft.summary,
                 evidence,
                 recorded_at,
@@ -412,24 +417,63 @@ fn validate_current_witness_character(
     Ok(())
 }
 
-pub(crate) fn witness_strength(confidence: crate::world::Rating) -> EvidenceStrength {
+/// Confidence bands qualify raw witness certainty. Cooperation then discounts the
+/// assessment: uncooperative witnesses face pressure to minimize their own involvement,
+/// so a hostile account corroborates at best and a reluctant one cannot carry a case alone.
+const STRENGTH_BANDS: [EvidenceStrength; 4] = [
+    EvidenceStrength::Weak,
+    EvidenceStrength::Corroborating,
+    EvidenceStrength::Strong,
+    EvidenceStrength::Direct,
+];
+const RELIABILITY_BANDS: [EvidenceReliability; 4] = [
+    EvidenceReliability::Questionable,
+    EvidenceReliability::Mixed,
+    EvidenceReliability::Credible,
+    EvidenceReliability::HighlyReliable,
+];
+
+fn confidence_strength_band(confidence: crate::world::Rating) -> usize {
     match confidence.value() {
-        0..=34 => EvidenceStrength::Weak,
-        35..=59 => EvidenceStrength::Corroborating,
-        60..=84 => EvidenceStrength::Strong,
-        85..=100 => EvidenceStrength::Direct,
-        _ => unreachable!(),
+        0..=34 => 0,
+        35..=59 => 1,
+        60..=84 => 2,
+        85..=100 => 3,
+        _ => unreachable!("rating values are bounded by Rating::MAX"),
     }
 }
 
-pub(crate) fn witness_reliability(confidence: crate::world::Rating) -> EvidenceReliability {
+fn confidence_reliability_band(confidence: crate::world::Rating) -> usize {
     match confidence.value() {
-        0..=24 => EvidenceReliability::Questionable,
-        25..=49 => EvidenceReliability::Mixed,
-        50..=79 => EvidenceReliability::Credible,
-        80..=100 => EvidenceReliability::HighlyReliable,
-        _ => unreachable!(),
+        0..=24 => 0,
+        25..=49 => 1,
+        50..=79 => 2,
+        80..=100 => 3,
+        _ => unreachable!("rating values are bounded by Rating::MAX"),
     }
+}
+
+/// Hostile testimony loses two qualification bands, reluctant one; bands never fall below Weak.
+fn discount_band(band: usize, cooperation: WitnessCooperation) -> usize {
+    match cooperation {
+        WitnessCooperation::Cooperative => band,
+        WitnessCooperation::Reluctant => band.saturating_sub(1),
+        WitnessCooperation::Hostile => band.saturating_sub(2),
+    }
+}
+
+pub(crate) fn resolve_witness_strength(
+    confidence: crate::world::Rating,
+    cooperation: WitnessCooperation,
+) -> EvidenceStrength {
+    STRENGTH_BANDS[discount_band(confidence_strength_band(confidence), cooperation)]
+}
+
+pub(crate) fn resolve_witness_reliability(
+    confidence: crate::world::Rating,
+    cooperation: WitnessCooperation,
+) -> EvidenceReliability {
+    RELIABILITY_BANDS[discount_band(confidence_reliability_band(confidence), cooperation)]
 }
 
 #[cfg(test)]
@@ -922,7 +966,10 @@ mod tests {
             (85, EvidenceStrength::Direct),
             (100, EvidenceStrength::Direct),
         ] {
-            assert_eq!(witness_strength(rating(confidence)), strength);
+            assert_eq!(
+                resolve_witness_strength(rating(confidence), WitnessCooperation::Cooperative),
+                strength
+            );
         }
         for (confidence, reliability) in [
             (0, EvidenceReliability::Questionable),
@@ -934,7 +981,39 @@ mod tests {
             (80, EvidenceReliability::HighlyReliable),
             (100, EvidenceReliability::HighlyReliable),
         ] {
-            assert_eq!(witness_reliability(rating(confidence)), reliability);
+            assert_eq!(
+                resolve_witness_reliability(rating(confidence), WitnessCooperation::Cooperative),
+                reliability
+            );
+        }
+    }
+
+    #[test]
+    fn uncooperative_witnesses_cannot_produce_top_band_testimony() {
+        for confidence in 0..=100 {
+            let confidence = rating(confidence);
+            for (cooperation, strength_cap, reliability_cap) in [
+                (
+                    WitnessCooperation::Cooperative,
+                    EvidenceStrength::Direct,
+                    EvidenceReliability::HighlyReliable,
+                ),
+                (
+                    WitnessCooperation::Reluctant,
+                    EvidenceStrength::Strong,
+                    EvidenceReliability::Credible,
+                ),
+                (
+                    WitnessCooperation::Hostile,
+                    EvidenceStrength::Corroborating,
+                    EvidenceReliability::Mixed,
+                ),
+            ] {
+                let strength = resolve_witness_strength(confidence, cooperation);
+                assert!(strength <= strength_cap);
+                let reliability = resolve_witness_reliability(confidence, cooperation);
+                assert!(reliability <= reliability_cap);
+            }
         }
     }
 }

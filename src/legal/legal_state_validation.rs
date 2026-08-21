@@ -22,20 +22,8 @@ impl LegalState {
                 || !self
                     .indexes
                     .prosecutions
-                    .cases_by_defendant
-                    .get(&case.defendant())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .prosecutions
                     .cases_by_source_investigation
                     .get(&case.source_investigation())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .prosecutions
-                    .cases_by_office
-                    .get(&case.prosecutor_office())
                     .is_some_and(|ids| ids.contains(&id))
                 || !self
                     .indexes
@@ -259,12 +247,6 @@ impl LegalState {
                     .by_investigation
                     .get(&arrest.investigation())
                     .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .arrests
-                    .by_authority
-                    .get(&arrest.authority())
-                    .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
             }
@@ -295,16 +277,6 @@ impl LegalState {
                     .arrests
                     .get(id)
                     .is_some_and(|record| record.investigation() == *investigation)
-            }) {
-                return false;
-            }
-        }
-        for (authority, ids) in &self.indexes.arrests.by_authority {
-            if ids.iter().any(|id| {
-                !self
-                    .arrests
-                    .get(id)
-                    .is_some_and(|record| record.authority() == *authority)
             }) {
                 return false;
             }
@@ -504,12 +476,6 @@ impl LegalState {
                 .by_character
                 .get(&informant.character())
                 .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .informants
-                    .by_handler
-                    .get(&informant.handler())
-                    .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
             }
@@ -538,17 +504,6 @@ impl LegalState {
                     .informants
                     .get(id)
                     .is_some_and(|record| record.character() == *character)
-                {
-                    return false;
-                }
-            }
-        }
-        for (handler, ids) in &self.indexes.informants.by_handler {
-            for id in ids {
-                if !self
-                    .informants
-                    .get(id)
-                    .is_some_and(|record| record.handler() == *handler)
                 {
                     return false;
                 }
@@ -646,12 +601,6 @@ impl LegalState {
                 || !self
                     .indexes
                     .witnesses
-                    .case_witnesses_by_character
-                    .get(&witness.witness())
-                    .is_some_and(|ids| ids.contains(&witness.id()))
-                || !self
-                    .indexes
-                    .witnesses
                     .case_witnesses_by_investigation
                     .get(&witness.investigation())
                     .is_some_and(|ids| ids.contains(&witness.id()))
@@ -675,17 +624,6 @@ impl LegalState {
                 .is_some_and(|record| (record.investigation(), record.witness()) == *key)
             {
                 return false;
-            }
-        }
-        for (character, ids) in &self.indexes.witnesses.case_witnesses_by_character {
-            for id in ids {
-                if !self
-                    .case_witnesses
-                    .get(id)
-                    .is_some_and(|record| record.witness() == *character)
-                {
-                    return false;
-                }
             }
         }
         for (investigation, ids) in &self.indexes.witnesses.case_witnesses_by_investigation {
@@ -1135,14 +1073,6 @@ impl LegalState {
                     .is_some_and(|ids| ids.contains(&arrest.id())),
                 "Index Completeness: investigation arrest index is missing an arrest"
             );
-            debug_assert!(
-                self.indexes
-                    .arrests
-                    .by_authority
-                    .get(&arrest.authority())
-                    .is_some_and(|ids| ids.contains(&arrest.id())),
-                "Index Completeness: authority arrest index is missing an arrest"
-            );
             let active = self
                 .indexes
                 .arrests
@@ -1234,14 +1164,6 @@ impl LegalState {
             debug_assert!(
                 self.indexes
                     .witnesses
-                    .case_witnesses_by_character
-                    .get(&witness.witness())
-                    .is_some_and(|ids| ids.contains(&witness.id())),
-                "Index Completeness: character witness index is missing case witness"
-            );
-            debug_assert!(
-                self.indexes
-                    .witnesses
                     .case_witnesses_by_investigation
                     .get(&witness.investigation())
                     .is_some_and(|ids| ids.contains(&witness.id())),
@@ -1275,14 +1197,6 @@ impl LegalState {
                     .get(&informant.character())
                     .is_some_and(|ids| ids.contains(&informant.id())),
                 "Index Completeness: character informant index is missing a relationship"
-            );
-            debug_assert!(
-                self.indexes
-                    .informants
-                    .by_handler
-                    .get(&informant.handler())
-                    .is_some_and(|ids| ids.contains(&informant.id())),
-                "Index Completeness: handler informant index is missing a relationship"
             );
             let active = self
                 .indexes

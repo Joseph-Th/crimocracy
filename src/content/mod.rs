@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 18;
+pub const CURRENT_CONTENT_REVISION: u32 = 19;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -409,6 +409,8 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 wealth_revenue_per_point: Money::from_cents(60),
                 management_revenue_per_point: Money::from_cents(45),
                 police_cost_per_point: Money::from_cents(35),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 600,
             },
@@ -428,6 +430,8 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 wealth_revenue_per_point: Money::from_cents(100),
                 management_revenue_per_point: Money::from_cents(55),
                 police_cost_per_point: Money::from_cents(45),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
             },
@@ -451,6 +455,8 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 wealth_revenue_per_point: Money::from_cents(25),
                 management_revenue_per_point: Money::from_cents(45),
                 police_cost_per_point: Money::from_cents(40),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
                 gross_variance_basis_points: 1_800,
                 notable_variance_basis_points: 1_200,
             },

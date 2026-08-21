@@ -13,7 +13,7 @@ use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::{
     validate_contact_information_derivation, IntelligenceError, ValidatedInformation,
 };
-use crate::intelligence::{InformationSourceKind, KnowledgeHolder};
+use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
 use crate::social::{RelationshipDimensions, RelationshipRecord};
 use crate::world::{Lifecycle, OrganizationKind};
 use thiserror::Error;
@@ -99,6 +99,14 @@ pub enum ContactError {
     InformationUnavailable {
         information: InformationId,
         contact: CharacterId,
+    },
+    #[error(
+        "information {information} topic {topic:?} is outside the domain of {kind:?} contacts"
+    )]
+    InformationOutsideContactDomain {
+        information: InformationId,
+        topic: crate::intelligence::InformationTopic,
+        kind: ContactKind,
     },
     #[error("information {information} was already disclosed through contact {contact}")]
     DuplicateDisclosure {
@@ -361,7 +369,7 @@ pub fn validate_contact_disclosure(
         source,
         record.contact(),
         record.sponsor(),
-        information_source_kind(record.kind()),
+        resolve_information_source_kind(record.kind()),
     )?;
     Ok(ValidatedContactDisclosure {
         contact,
@@ -372,7 +380,7 @@ pub fn validate_contact_disclosure(
     })
 }
 
-pub const fn information_source_kind(kind: ContactKind) -> InformationSourceKind {
+pub const fn resolve_information_source_kind(kind: ContactKind) -> InformationSourceKind {
     match kind {
         ContactKind::Police => InformationSourceKind::PoliceContact,
         ContactKind::Legal => InformationSourceKind::Lawyer,
@@ -492,7 +500,39 @@ fn validate_disclosure_source(
             contact: contact.contact(),
         });
     }
+    // A contact can only vouch for knowledge inside their institutional domain; this stops a
+    // channel from laundering unrelated personal knowledge under institutional provenance.
+    if !disclosable_topics(contact.kind()).contains(&information.topic()) {
+        return Err(ContactError::InformationOutsideContactDomain {
+            information: source,
+            topic: information.topic(),
+            kind: contact.kind(),
+        });
+    }
     Ok(())
+}
+
+/// Topics each contact channel credibly knows through its institution.
+fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
+    match kind {
+        // Law enforcement gathers exactly the security and patrol picture it enforces.
+        ContactKind::Police => &[
+            InformationTopic::General,
+            InformationTopic::PoliceActivity,
+            InformationTopic::LegalActivity,
+            InformationTopic::TargetSecurity,
+            InformationTopic::Schedule,
+            InformationTopic::Route,
+        ],
+        ContactKind::Legal => &[InformationTopic::General, InformationTopic::LegalActivity],
+        ContactKind::Political => &[InformationTopic::General, InformationTopic::MarketAccess],
+        ContactKind::Press => &[InformationTopic::General],
+        ContactKind::Labor | ContactKind::Professional => &[
+            InformationTopic::General,
+            InformationTopic::FinancialPerformance,
+            InformationTopic::Personnel,
+        ],
+    }
 }
 
 fn ensure_no_active_duplicate(
@@ -729,12 +769,20 @@ mod tests {
         fixture: &mut ContactFixture,
         holder: KnowledgeHolder,
     ) -> InformationId {
+        record_source_information_with_topic(fixture, holder, InformationTopic::PoliceActivity)
+    }
+
+    fn record_source_information_with_topic(
+        fixture: &mut ContactFixture,
+        holder: KnowledgeHolder,
+        topic: InformationTopic,
+    ) -> InformationId {
         validate_record_information(
             &fixture.state,
             InformationDraft {
                 holder,
                 source_kind: InformationSourceKind::DirectObservation,
-                topic: InformationTopic::PoliceActivity,
+                topic,
                 source_entity: None,
                 subject: EntityRef::Character(fixture.handler),
                 observed_at: fixture.state.now(),
@@ -990,8 +1038,11 @@ mod tests {
         let mut fixture = make_fixture(OrganizationKind::Press);
         let contact = establish(&mut fixture);
         let source_character = fixture.source;
-        let source =
-            record_source_information(&mut fixture, KnowledgeHolder::Character(source_character));
+        let source = record_source_information_with_topic(
+            &mut fixture,
+            KnowledgeHolder::Character(source_character),
+            InformationTopic::General,
+        );
         let stale = validate_contact_disclosure(&fixture.state, contact, source)
             .expect("contact disclosure should initially validate");
         validate_terminate_contact(&fixture.state, contact)
@@ -1021,9 +1072,10 @@ mod tests {
         let mut duplicate_fixture = make_fixture(OrganizationKind::Press);
         let duplicate_contact = establish(&mut duplicate_fixture);
         let duplicate_source_character = duplicate_fixture.source;
-        let duplicate_source = record_source_information(
+        let duplicate_source = record_source_information_with_topic(
             &mut duplicate_fixture,
             KnowledgeHolder::Character(duplicate_source_character),
+            InformationTopic::General,
         );
         validate_contact_disclosure(
             &duplicate_fixture.state,
@@ -1049,6 +1101,35 @@ mod tests {
         );
         validate_invariants(&fixture.state);
         validate_invariants(&duplicate_fixture.state);
+    }
+
+    #[test]
+    fn press_contact_cannot_launder_operational_knowledge_outside_its_domain() {
+        let mut fixture = make_fixture(OrganizationKind::Press);
+        let contact = establish(&mut fixture);
+        let source_character = fixture.source;
+        let source =
+            record_source_information(&mut fixture, KnowledgeHolder::Character(source_character));
+        let error = validate_contact_disclosure(&fixture.state, contact, source)
+            .err()
+            .expect("press contacts must not disclose police-activity knowledge");
+        assert_eq!(
+            error,
+            ContactError::InformationOutsideContactDomain {
+                information: source,
+                topic: InformationTopic::PoliceActivity,
+                kind: ContactKind::Press,
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .contacts()
+                .disclosures_for_contact(contact)
+                .count(),
+            0
+        );
+        validate_invariants(&fixture.state);
     }
 
     #[test]
@@ -1087,9 +1168,19 @@ mod tests {
                 contact_kind
             );
             let source_character = fixture.source;
-            let source = record_source_information(
+            let topic = match contact_kind {
+                ContactKind::Legal => InformationTopic::LegalActivity,
+                ContactKind::Political => InformationTopic::MarketAccess,
+                ContactKind::Labor | ContactKind::Professional => {
+                    InformationTopic::FinancialPerformance
+                }
+                ContactKind::Police => InformationTopic::PoliceActivity,
+                ContactKind::Press => InformationTopic::General,
+            };
+            let source = record_source_information_with_topic(
                 &mut fixture,
                 KnowledgeHolder::Character(source_character),
+                topic,
             );
             let disclosure = validate_contact_disclosure(&fixture.state, contact, source)
                 .expect("institutional disclosure should validate")
