@@ -17,15 +17,12 @@ use crate::core::time::SimDuration;
 use crate::enterprises::EnterpriseKind;
 use crate::legal::InvestigationWorkKind;
 use crate::operations::OperationKind;
-use crate::world::{BusinessKind, CapabilityKind, DriveKind, PolicyKind, PolicySetting, TraitKind};
+use crate::world::{BusinessKind, PolicyKind, PolicySetting};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub struct Registry {
     content_revision: u32,
-    capabilities: BTreeMap<CapabilityKind, CapabilityDefinition>,
-    traits: BTreeMap<TraitKind, TraitDefinition>,
-    drives: BTreeMap<DriveKind, DriveDefinition>,
     recruitment: RecruitmentDefinition,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
@@ -58,21 +55,6 @@ impl Registry {
     }
     pub fn legal(&self) -> LegalConfigDefinition {
         self.legal
-    }
-    pub fn get_capability(&self, kind: CapabilityKind) -> &CapabilityDefinition {
-        self.capabilities
-            .get(&kind)
-            .unwrap_or_else(|| panic!("missing capability definition: {kind:?}"))
-    }
-    pub fn get_trait(&self, kind: TraitKind) -> &TraitDefinition {
-        self.traits
-            .get(&kind)
-            .unwrap_or_else(|| panic!("missing trait definition: {kind:?}"))
-    }
-    pub fn get_drive(&self, kind: DriveKind) -> &DriveDefinition {
-        self.drives
-            .get(&kind)
-            .unwrap_or_else(|| panic!("missing drive definition: {kind:?}"))
     }
     pub fn get_policy(&self, kind: PolicyKind) -> &PolicyDefinition {
         self.policies
@@ -121,7 +103,7 @@ mod tests {
     use crate::finance::Money;
     use crate::operations::{OperationApproach, RoleKind, ALL_OPERATION_KINDS};
     use crate::recruitment::RecruitmentApproach;
-    use crate::world::BusinessFunction;
+    use crate::world::{BusinessFunction, CapabilityKind, DriveKind, TraitKind};
     use std::collections::BTreeSet;
 
     fn burglary_operation_parts() -> (

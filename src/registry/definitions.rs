@@ -203,33 +203,6 @@ impl InvestigationWorkDefinition {
     }
 }
 #[derive(Clone, Debug)]
-pub struct CapabilityDefinition {
-    pub(super) kind: CapabilityKind,
-}
-impl CapabilityDefinition {
-    pub fn kind(&self) -> CapabilityKind {
-        self.kind
-    }
-}
-#[derive(Clone, Debug)]
-pub struct TraitDefinition {
-    pub(super) kind: TraitKind,
-}
-impl TraitDefinition {
-    pub fn kind(&self) -> TraitKind {
-        self.kind
-    }
-}
-#[derive(Clone, Debug)]
-pub struct DriveDefinition {
-    pub(super) kind: DriveKind,
-}
-impl DriveDefinition {
-    pub fn kind(&self) -> DriveKind {
-        self.kind
-    }
-}
-#[derive(Clone, Debug)]
 pub struct PolicyDefinition {
     pub(super) kind: PolicyKind,
     pub(super) default: PolicySetting,

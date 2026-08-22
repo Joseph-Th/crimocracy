@@ -1248,10 +1248,6 @@ fn canonical_world_dependencies_block_poaching_a_manager_with_direct_reports() {
 #[test]
 fn save_round_trip_preserves_recruitment_history_and_drive_authorship() {
     let registry = build_registry();
-    assert_eq!(
-        registry.get_drive(DriveKind::Safety).kind(),
-        DriveKind::Safety
-    );
     let mut fixture = fixture();
     let attempt = validate_recruitment_attempt(
         &fixture.registry,

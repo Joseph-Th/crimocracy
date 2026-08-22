@@ -582,13 +582,7 @@ fn abort_token_rejects_time_staleness_without_partial_mutation() {
     assert_eq!(record.status(), OperationStatus::InProgress);
     assert!(record.abort_record().is_none());
     assert_eq!(state.reports().reports_for(organization).count(), 0);
-    assert_eq!(
-        state
-            .history()
-            .events_for(EntityRef::Operation(operation))
-            .count(),
-        0
-    );
+    assert_eq!(state.history().events().count(), 0);
     validate_state(&state).expect("stale abort rejection must leave valid state");
     validate_invariants(&state);
 }
@@ -701,7 +695,7 @@ fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
 }
 
 #[test]
-fn in_progress_operation_cannot_resolve_at_or_after_completion_deadline() {
+fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let mut draft = make_test_draft(organization, leader, target);
     draft
@@ -744,6 +738,53 @@ fn in_progress_operation_cannot_resolve_at_or_after_completion_deadline() {
         .summary()
         .contains("before execution could complete"));
     validate_state(&state).expect("deadline abort should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn deadline_constrained_operation_resolves_on_its_clamped_deadline_minute() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(organization, leader, target);
+    draft
+        .constraints
+        .push(crate::operations::OperationConstraint::CompleteBefore(
+            SimTime::from_minutes(10),
+        ));
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("deadline-constrained operation should validate")
+        .commit(&mut state)
+        .expect("deadline-constrained operation should commit");
+
+    // One canonical minute per tick: the clamped window must resolve exactly on the deadline.
+    let mut resolved = None;
+    for _ in 0..24 {
+        let tick = crate::core::simulation::run_tick(&registry, &mut state);
+        if tick.resolved_operations.contains(&operation) {
+            resolved = Some(tick);
+            break;
+        }
+    }
+    let tick = resolved.expect("a deadline-constrained operation must resolve on its window");
+    assert_eq!(tick.now, SimTime::from_minutes(10));
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("resolved operation should persist");
+    assert_eq!(record.status(), OperationStatus::Completed);
+    // The compressed execution window is visible in the organization's after-action knowledge.
+    assert!(state
+        .intelligence()
+        .information_for_holder_by_topic(
+            KnowledgeHolder::Organization(organization),
+            InformationTopic::OperationalOutcome,
+        )
+        .any(|information| {
+            information.subject() == EntityRef::Operation(operation)
+                && information
+                    .summary()
+                    .contains("completion deadline compressed the execution window")
+        }));
+    validate_state(&state).expect("deadline resolution should remain structurally valid");
     validate_invariants(&state);
 }
 

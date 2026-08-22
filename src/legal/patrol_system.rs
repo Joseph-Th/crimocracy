@@ -346,6 +346,11 @@ pub(crate) fn resolve_patrol_presence_snapshot(
 ) -> PatrolPresenceSnapshot {
     let minute = u16::try_from(at.as_minutes() % u64::from(MINUTES_PER_DAY))
         .expect("minute-of-day remainder must fit u16");
+    // An explicit patrol schedule is authoritative: once an authority models deployments in a
+    // neighborhood, its windows define street presence there and a coverage gap means no one is
+    // on beat (presence zero). The neighborhood's ambient `police_presence` profile is only the
+    // estimate for districts with no modeled schedule at all — consumers fall back to it when
+    // this snapshot reports None. Crews exploit exactly this by scheduling work inside gaps.
     let mut deployment_versions = BTreeMap::new();
     let mut presence: Option<Rating> = None;
     for deployment in state
@@ -453,6 +458,9 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
     };
     let minute = u16::try_from(at.as_minutes() % u64::from(MINUTES_PER_DAY))
         .expect("minute-of-day remainder must fit u16");
+    // Same authoritative-schedule contract as `resolve_patrol_presence_snapshot`: an off-window
+    // minute inside a modeled deployment is a real coverage gap (zero presence, slowest allowed
+    // response), not a reason to fall back to the ambient estimate.
     let presence = deployment
         .windows()
         .iter()

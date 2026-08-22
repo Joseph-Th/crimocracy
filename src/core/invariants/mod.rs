@@ -983,7 +983,6 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("enterprises", state.enterprises.has_consistent_indexes()),
         ("legal", state.legal.has_consistent_indexes()),
         ("reports", state.reports.has_consistent_indexes()),
-        ("history", state.history.has_consistent_indexes()),
     ];
     for (subsystem, is_consistent) in checks {
         if !is_consistent {
@@ -1099,7 +1098,6 @@ pub fn validate_invariants(state: &AppState) {
     state.enterprises.debug_validate_indexes();
     state.legal.debug_validate_indexes();
     state.reports.debug_validate_indexes();
-    state.history.debug_validate_indexes();
 
     // The release-safe structural validators are the single source of truth for record,
     // lifecycle, provenance, and index coherence. Keep them authoritative here instead of

@@ -171,6 +171,12 @@ pub(crate) fn apply_due_police_response_arrivals(
             } else {
                 None
             };
+            // Every participant present when the response arrives holds first-hand exposure
+            // knowledge (`DirectAccess`): rivals later leverage exactly this to poach them,
+            // and informant disclosures carry it onward. A pre-entry abort additionally
+            // records debrief-derived organizational PoliceActivity knowledge through the
+            // abort path — different holder, reliability, and consumer, so both records are
+            // intentional and must stay.
             let participant_pressure = if matches!(
                 operation.status(),
                 OperationStatus::InProgress | OperationStatus::AwaitingDecision

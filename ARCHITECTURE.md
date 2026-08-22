@@ -50,7 +50,7 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` |
 
-Adapters, the harness at [`examples/gameplay_harness.rs`](examples/gameplay_harness.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
+Adapters, the harness at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
 
 ## Canonical operations
 

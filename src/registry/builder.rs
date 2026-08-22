@@ -186,9 +186,9 @@ pub(crate) enum RegistryBuildError {
 
 #[derive(Default)]
 pub(crate) struct RegistryBuilder {
-    capabilities: BTreeMap<CapabilityKind, CapabilityDefinition>,
-    traits: BTreeMap<TraitKind, TraitDefinition>,
-    drives: BTreeMap<DriveKind, DriveDefinition>,
+    capabilities: BTreeSet<CapabilityKind>,
+    traits: BTreeSet<TraitKind>,
+    drives: BTreeSet<DriveKind>,
     recruitment: Option<RecruitmentDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
@@ -207,11 +207,7 @@ impl RegistryBuilder {
         &mut self,
         kind: CapabilityKind,
     ) -> Result<(), RegistryBuildError> {
-        if self
-            .capabilities
-            .insert(kind, CapabilityDefinition { kind })
-            .is_some()
-        {
+        if !self.capabilities.insert(kind) {
             return Err(RegistryBuildError::DuplicateCapability(kind));
         }
         Ok(())
@@ -433,7 +429,7 @@ impl RegistryBuilder {
         Ok(())
     }
     pub(crate) fn register_drive(&mut self, kind: DriveKind) -> Result<(), RegistryBuildError> {
-        if self.drives.insert(kind, DriveDefinition { kind }).is_some() {
+        if !self.drives.insert(kind) {
             return Err(RegistryBuildError::DuplicateDrive(kind));
         }
         Ok(())
@@ -478,7 +474,7 @@ impl RegistryBuilder {
         Ok(())
     }
     pub(crate) fn register_trait(&mut self, kind: TraitKind) -> Result<(), RegistryBuildError> {
-        if self.traits.insert(kind, TraitDefinition { kind }).is_some() {
+        if !self.traits.insert(kind) {
             return Err(RegistryBuildError::DuplicateTrait(kind));
         }
         Ok(())
@@ -750,17 +746,17 @@ impl RegistryBuilder {
     }
     pub(crate) fn build(self, content_revision: u32) -> Result<Registry, RegistryBuildError> {
         for kind in ALL_CAPABILITY_KINDS {
-            if !self.capabilities.contains_key(&kind) {
+            if !self.capabilities.contains(&kind) {
                 return Err(RegistryBuildError::MissingCapability(kind));
             }
         }
         for kind in ALL_TRAIT_KINDS {
-            if !self.traits.contains_key(&kind) {
+            if !self.traits.contains(&kind) {
                 return Err(RegistryBuildError::MissingTrait(kind));
             }
         }
         for kind in ALL_DRIVE_KINDS {
-            if !self.drives.contains_key(&kind) {
+            if !self.drives.contains(&kind) {
                 return Err(RegistryBuildError::MissingDrive(kind));
             }
         }
@@ -798,9 +794,6 @@ impl RegistryBuilder {
         let legal = self.legal.ok_or(RegistryBuildError::MissingLegalConfig)?;
         Ok(Registry {
             content_revision,
-            capabilities: self.capabilities,
-            traits: self.traits,
-            drives: self.drives,
             recruitment,
             policies: self.policies,
             operations: self.operations,

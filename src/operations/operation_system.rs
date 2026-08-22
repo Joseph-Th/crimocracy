@@ -959,6 +959,9 @@ pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
     state.operations.due_authorized_at_or_before(state.now())
 }
 
+/// True once the operation's earliest completion deadline minute has arrived or passed. Begin
+/// gating and deadline-abort validation use this: an operation cannot start at its deadline,
+/// and a deadline reached without resolution justifies the `DeadlineMissed` abort artifacts.
 pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: OperationId) -> bool {
     state
         .operations
@@ -967,6 +970,11 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
         .is_some_and(|deadline| state.now() >= deadline)
 }
 
+/// Operations whose completion deadline has fully passed without resolution. Begin clamps
+/// `resolution_due_at` to a binding deadline, so an in-progress operation is due to resolve on
+/// the deadline minute itself; the strict comparison lets that same-minute resolution win over
+/// the abort scan. Only work that failed to resolve by its deadline — reachable when a decision
+/// request pauses the operation across the deadline — is reported here for a hard abort.
 pub(crate) fn due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
     let mut due = state
         .operations
@@ -977,7 +985,7 @@ pub(crate) fn due_operations_with_missed_deadlines(state: &AppState) -> Vec<Oper
                 .operations_with_status(OperationStatus::AwaitingDecision),
         )
         .filter(|operation| {
-            earliest_operation_deadline(operation).is_some_and(|deadline| state.now() >= deadline)
+            earliest_operation_deadline(operation).is_some_and(|deadline| state.now() > deadline)
         })
         .map(|operation| operation.id())
         .collect::<Vec<_>>();
@@ -1105,6 +1113,9 @@ pub(crate) fn validate_begin_operation(
         }
     }
     let duration = registry.get_operation(record.kind()).execution().duration();
+    // A binding deadline compresses the modeled window: the operation resolves on the deadline
+    // minute under time pressure (`resolve_time_pressure`), and only a deadline that passes
+    // without resolution — a decision-paused operation — is hard-aborted afterwards.
     let mut resolution_due_at = state.now() + duration;
     for constraint in record.constraints() {
         let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;

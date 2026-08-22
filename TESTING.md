@@ -73,7 +73,7 @@ When optimized compilation could change behavior, run `cargo test-release` (docu
 
 ## Gameplay-harness evidence
 
-[`examples/gameplay_harness.rs`](examples/gameplay_harness.rs) evaluates bounded deterministic policy treatments through production paths.
+[`examples/gameplay_harness/main.rs`](examples/gameplay_harness/main.rs) evaluates bounded deterministic policy treatments through production paths.
 
 | Mode | Evidence |
 | --- | --- |

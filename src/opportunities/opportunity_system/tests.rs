@@ -221,19 +221,9 @@ fn discovery_requires_organization_knowledge_and_creates_a_provenance_report() {
         fixture
             .state
             .opportunities()
-            .opportunities_for_entity(EntityRef::Business(fixture.business))
-            .map(OpportunityRecord::id)
-            .collect::<Vec<_>>(),
-        vec![opportunity]
-    );
-    assert_eq!(
-        fixture
-            .state
-            .opportunities()
-            .opportunities_from_information(fixture.source)
-            .map(OpportunityRecord::id)
-            .collect::<Vec<_>>(),
-        vec![opportunity]
+            .get_opportunity(opportunity)
+            .map(OpportunityRecord::context),
+        Some(record.context())
     );
     assert_eq!(
         fixture
@@ -738,14 +728,6 @@ fn discovery_rejects_personal_and_foreign_knowledge_without_partial_mutation() {
             }
         );
     }
-    assert_eq!(
-        fixture
-            .state
-            .opportunities()
-            .opportunities_for_organization(fixture.organization)
-            .count(),
-        0
-    );
     assert_eq!(
         fixture
             .state

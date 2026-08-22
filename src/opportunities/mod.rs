@@ -173,9 +173,6 @@ impl OperationOpportunityKey {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OpportunityState {
     records: BTreeMap<OpportunityId, OpportunityRecord>,
-    by_organization: BTreeMap<OrganizationId, BTreeSet<OpportunityId>>,
-    by_entity: BTreeMap<EntityRef, BTreeSet<OpportunityId>>,
-    by_information: BTreeMap<InformationId, BTreeSet<OpportunityId>>,
     by_report: BTreeMap<ReportId, OpportunityId>,
     open_by_context: BTreeMap<OperationOpportunityKey, OpportunityId>,
     open_by_expiry: BTreeMap<SimTime, BTreeSet<OpportunityId>>,
@@ -191,43 +188,10 @@ impl OpportunityState {
         self.records.get(&id)
     }
 
-    pub fn opportunities_for_organization(
-        &self,
-        organization: OrganizationId,
-    ) -> impl Iterator<Item = &OpportunityRecord> {
-        self.by_organization
-            .get(&organization)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
-    pub fn opportunities_from_information(
-        &self,
-        information: InformationId,
-    ) -> impl Iterator<Item = &OpportunityRecord> {
-        self.by_information
-            .get(&information)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
     pub fn opportunity_for_report(&self, report: ReportId) -> Option<&OpportunityRecord> {
         self.by_report
             .get(&report)
             .and_then(|id| self.records.get(id))
-    }
-
-    pub fn opportunities_for_entity(
-        &self,
-        entity: EntityRef,
-    ) -> impl Iterator<Item = &OpportunityRecord> {
-        self.by_entity
-            .get(&entity)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
     }
 
     pub fn opportunity_for_operation(&self, operation: OperationId) -> Option<&OpportunityRecord> {
@@ -269,19 +233,6 @@ impl OpportunityState {
         debug_assert!(!self.records.contains_key(&id));
         debug_assert!(!self.open_by_context.contains_key(&key));
 
-        self.by_organization
-            .entry(record.organization())
-            .or_default()
-            .insert(id);
-        for entity in record.context().operation().targets() {
-            self.by_entity.entry(*entity).or_default().insert(id);
-        }
-        for information in record.source_information() {
-            self.by_information
-                .entry(*information)
-                .or_default()
-                .insert(id);
-        }
         let previous_report = self.by_report.insert(record.report(), id);
         debug_assert!(
             previous_report.is_none(),
@@ -354,28 +305,7 @@ impl OpportunityState {
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         for record in self.records.values() {
             let id = record.id();
-            if !self
-                .by_organization
-                .get(&record.organization())
-                .is_some_and(|ids| ids.contains(&id))
-            {
-                return false;
-            }
-            if record.context().operation().targets().iter().any(|entity| {
-                !self
-                    .by_entity
-                    .get(entity)
-                    .is_some_and(|ids| ids.contains(&id))
-            }) {
-                return false;
-            }
-            if record.source_information().iter().any(|information| {
-                !self
-                    .by_information
-                    .get(information)
-                    .is_some_and(|ids| ids.contains(&id))
-            }) || self.by_report.get(&record.report()) != Some(&id)
-            {
+            if self.by_report.get(&record.report()) != Some(&id) {
                 return false;
             }
             if let Some(report) = record.resolution().and_then(OpportunityResolution::report) {
@@ -428,24 +358,6 @@ impl OpportunityState {
                 }
             }
         }
-        for (organization, ids) in &self.by_organization {
-            if ids.iter().any(|id| {
-                self.records
-                    .get(id)
-                    .is_none_or(|record| record.organization() != *organization)
-            }) {
-                return false;
-            }
-        }
-        for (information, ids) in &self.by_information {
-            if ids.iter().any(|id| {
-                self.records
-                    .get(id)
-                    .is_none_or(|record| !record.source_information().contains(information))
-            }) {
-                return false;
-            }
-        }
         for (report, id) in &self.by_report {
             let Some(record) = self.records.get(id) else {
                 return false;
@@ -461,15 +373,6 @@ impl OpportunityState {
                 | Some(OpportunityResolution::Converted { .. }) => false,
             };
             if !is_discovery_report && !is_resolution_report {
-                return false;
-            }
-        }
-        for (entity, ids) in &self.by_entity {
-            if ids.iter().any(|id| {
-                self.records
-                    .get(id)
-                    .is_none_or(|record| !record.context().operation().targets().contains(entity))
-            }) {
                 return false;
             }
         }

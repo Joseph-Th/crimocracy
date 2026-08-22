@@ -168,7 +168,6 @@ struct ContactIndexes {
     active_by_sponsor_contact: BTreeMap<(OrganizationId, CharacterId), ContactId>,
     active_by_handler: BTreeMap<CharacterId, BTreeSet<ContactId>>,
     active_by_contact: BTreeMap<CharacterId, BTreeSet<ContactId>>,
-    disclosures_by_contact: BTreeMap<ContactId, BTreeSet<ContactDisclosureId>>,
     disclosure_by_source: BTreeMap<(ContactId, InformationId), ContactDisclosureId>,
     disclosure_by_information: BTreeMap<InformationId, ContactDisclosureId>,
 }
@@ -203,18 +202,6 @@ impl ContactState {
             .into_iter()
             .flatten()
             .filter_map(|id| self.contacts.get(id))
-    }
-
-    pub fn disclosures_for_contact(
-        &self,
-        contact: ContactId,
-    ) -> impl Iterator<Item = &ContactDisclosureRecord> {
-        self.indexes
-            .disclosures_by_contact
-            .get(&contact)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.disclosures.get(id))
     }
 
     pub fn disclosure_for_information(
@@ -322,11 +309,6 @@ impl ContactState {
 
     pub(crate) fn insert_disclosure(&mut self, record: ContactDisclosureRecord) {
         let id = record.id();
-        self.indexes
-            .disclosures_by_contact
-            .entry(record.contact())
-            .or_default()
-            .insert(id);
         let previous_source = self
             .indexes
             .disclosure_by_source
@@ -393,11 +375,6 @@ impl ContactState {
         }
         for disclosure in self.disclosures.values() {
             if !self.contacts.contains_key(&disclosure.contact())
-                || !self
-                    .indexes
-                    .disclosures_by_contact
-                    .get(&disclosure.contact())
-                    .is_some_and(|ids| ids.contains(&disclosure.id()))
                 || self
                     .indexes
                     .disclosure_by_source
@@ -454,16 +431,6 @@ impl ContactState {
                 .get(disclosure)
                 .is_some_and(|record| record.disclosed_information() == *information)
             {
-                return false;
-            }
-        }
-        for (contact, ids) in &self.indexes.disclosures_by_contact {
-            if ids.iter().any(|id| {
-                !self
-                    .disclosures
-                    .get(id)
-                    .is_some_and(|record| record.contact() == *contact)
-            }) {
                 return false;
             }
         }
