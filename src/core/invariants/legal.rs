@@ -876,11 +876,33 @@ pub(super) fn validate_legal_reports_and_history(
                             && is_reviewable_evidence_kind(evidence.kind())
                     })
             }
+            (
+                InvestigationWorkKind::WitnessInterview,
+                InvestigationWorkFocus::Witness(case_witness),
+            ) => {
+                work.source_evidence().is_empty()
+                    && state
+                        .legal
+                        .get_case_witness(case_witness)
+                        .is_some_and(|witness| {
+                            witness.investigation() == work.investigation()
+                                && witness.registered_at() <= work.scheduled_at()
+                        })
+            }
             (InvestigationWorkKind::PatternAnalysis, InvestigationWorkFocus::Evidence(_))
             | (
                 InvestigationWorkKind::EvidenceReview,
                 InvestigationWorkFocus::EntityConnection { from: _, to: _ },
-            ) => false,
+            )
+            | (InvestigationWorkKind::PatternAnalysis, InvestigationWorkFocus::Witness(_))
+            | (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Witness(_))
+            | (
+                InvestigationWorkKind::WitnessInterview,
+                InvestigationWorkFocus::EntityConnection { .. },
+            )
+            | (InvestigationWorkKind::WitnessInterview, InvestigationWorkFocus::Evidence(_)) => {
+                false
+            }
         };
         if !focus_is_valid
             || work.scheduled_at() > state.now()
@@ -923,13 +945,6 @@ pub(super) fn validate_legal_reports_and_history(
                 }
                 match resolution.outcome() {
                     InvestigationWorkOutcome::Connected => {
-                        if work.kind() != InvestigationWorkKind::PatternAnalysis
-                            || resolution.superseded_by().is_some()
-                        {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
-                        }
                         let derived_id = resolution.derived_evidence().ok_or(
                             StateValidationError::InvalidInvestigationWork { work: work.id() },
                         )?;
@@ -938,24 +953,86 @@ pub(super) fn validate_legal_reports_and_history(
                                 work: work.id(),
                             });
                         }
-                        let derived = state.legal.get_evidence(derived_id).ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        if derived.investigation() != work.investigation()
-                            || derived.custodian() != investigation.owner()
-                            || derived.kind() != EvidenceKind::PatternLink
-                            || derived.origin() != Some(work.focus().from())
-                            || derived.subject() != work.focus().to()
-                            || derived.discovered_at() != resolution.resolved_at()
-                            || derived.derived_from() != work.source_evidence()
-                            || work
-                                .source_evidence()
-                                .iter()
-                                .any(|source| *source >= derived_id)
-                        {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
+                        match work.kind() {
+                            InvestigationWorkKind::PatternAnalysis => {
+                                if resolution.superseded_by().is_some() {
+                                    return Err(StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    });
+                                }
+                                let derived = state.legal.get_evidence(derived_id).ok_or(
+                                    StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    },
+                                )?;
+                                if derived.investigation() != work.investigation()
+                                    || derived.custodian() != investigation.owner()
+                                    || derived.kind() != EvidenceKind::PatternLink
+                                    || derived.origin() != Some(work.focus().from())
+                                    || derived.subject() != work.focus().to()
+                                    || derived.discovered_at() != resolution.resolved_at()
+                                    || derived.derived_from() != work.source_evidence()
+                                    || work
+                                        .source_evidence()
+                                        .iter()
+                                        .any(|source| *source >= derived_id)
+                                {
+                                    return Err(StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    });
+                                }
+                            }
+                            InvestigationWorkKind::WitnessInterview => {
+                                if resolution.superseded_by().is_some()
+                                    || !work.source_evidence().is_empty()
+                                {
+                                    return Err(StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    });
+                                }
+                                let Some(case_witness) = work.focus().witness_id() else {
+                                    return Err(StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    });
+                                };
+                                let derived = state.legal.get_evidence(derived_id).ok_or(
+                                    StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    },
+                                )?;
+                                // The interview's derived evidence is the recorded
+                                // testimony; the named statement must exist on the case
+                                // witness and point back at the same evidence.
+                                let statement_ok = state
+                                    .legal
+                                    .get_case_witness(case_witness)
+                                    .and_then(|witness| {
+                                        witness
+                                            .statements()
+                                            .iter()
+                                            .filter_map(|id| state.legal.get_witness_statement(*id))
+                                            .find(|statement| statement.evidence() == derived_id)
+                                    })
+                                    .is_some_and(|statement| {
+                                        statement.case_witness() == case_witness
+                                            && statement.recorded_at() == resolution.resolved_at()
+                                    });
+                                if derived.investigation() != work.investigation()
+                                    || derived.custodian() != investigation.owner()
+                                    || derived.kind() != EvidenceKind::WitnessTestimony
+                                    || derived.discovered_at() != resolution.resolved_at()
+                                    || !statement_ok
+                                {
+                                    return Err(StateValidationError::InvalidInvestigationWork {
+                                        work: work.id(),
+                                    });
+                                }
+                            }
+                            InvestigationWorkKind::EvidenceReview => {
+                                return Err(StateValidationError::InvalidInvestigationWork {
+                                    work: work.id(),
+                                });
+                            }
                         }
                     }
                     InvestigationWorkOutcome::Developed => {
@@ -1044,7 +1121,16 @@ pub(super) fn validate_legal_reports_and_history(
                             | (
                                 InvestigationWorkKind::EvidenceReview,
                                 InvestigationWorkFocus::EntityConnection { from: _, to: _ },
-                            ) => false,
+                            )
+                            | (
+                                InvestigationWorkKind::PatternAnalysis,
+                                InvestigationWorkFocus::Witness(_),
+                            )
+                            | (
+                                InvestigationWorkKind::EvidenceReview,
+                                InvestigationWorkFocus::Witness(_),
+                            )
+                            | (InvestigationWorkKind::WitnessInterview, _) => false,
                         };
                         if superseding.investigation() != work.investigation()
                             || superseding.discovered_at() > resolution.resolved_at()

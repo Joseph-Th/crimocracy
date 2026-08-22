@@ -115,6 +115,8 @@ pub enum OperationError {
     InvalidPropertyTarget(EntityRef),
     #[error("extraction target character {0} is not currently detained")]
     TargetNotDetained(crate::core::id::CharacterId),
+    #[error("character {0} is not a named witness on any active case")]
+    TargetNotCaseWitness(crate::core::id::CharacterId),
     #[error("objective {objective:?} cannot target administrative entity {target:?}")]
     InvalidObjectiveTarget {
         objective: OperationObjectiveKind,
@@ -279,7 +281,12 @@ impl<'registry> ValidatedOperation<'registry> {
         // organization between validation and commit, must stale the authorization. Topic and
         // objective-shape relevance are invariant here because intelligence topics are immutable
         // and the authored operation definition is static.
-        validate_operation_objective(state, self.draft.kind, &self.draft.objective)?;
+        validate_operation_objective(
+            state,
+            self.draft.kind,
+            self.draft.responsible_organization,
+            &self.draft.objective,
+        )?;
         for information in &self.draft.intelligence {
             let record = state
                 .intelligence
@@ -391,7 +398,12 @@ pub fn validate_authorize_operation<'registry>(
             unreachable!("authorization validates target existence through the operation objective")
         }
     })?;
-    validate_operation_objective(state, draft.kind, &draft.objective)?;
+    validate_operation_objective(
+        state,
+        draft.kind,
+        draft.responsible_organization,
+        &draft.objective,
+    )?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -725,11 +737,38 @@ pub(crate) fn is_valid_operation_objective(
 // authorized.
 fn validate_active_field_objective_targets(
     state: &AppState,
+    responsible_organization: OrganizationId,
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     match objective {
-        OperationObjective::ObtainCash { target } | OperationObjective::Frighten { target } => {
+        OperationObjective::ObtainCash { target } => {
             validate_active_field_objective_target(state, *target)
+        }
+        // Witness pressure is only meaningful against a character who is actually a named
+        // witness on an active case run by another authority; anything else would resolve
+        // with nothing to coerce.
+        OperationObjective::Frighten { target } => {
+            validate_active_field_objective_target(state, *target)?;
+            let EntityRef::Character(character) = *target else {
+                return Err(OperationError::InvalidObjectiveTarget {
+                    objective: OperationObjectiveKind::Frighten,
+                    target: *target,
+                });
+            };
+            let is_case_witness = state.legal.case_witnesses().any(|witness| {
+                witness.witness() == character
+                    && state
+                        .legal
+                        .get_investigation(witness.investigation())
+                        .is_some_and(|investigation| {
+                            investigation.status() == crate::legal::InvestigationStatus::Active
+                                && investigation.owner() != responsible_organization
+                        })
+            });
+            if !is_case_witness {
+                return Err(OperationError::TargetNotCaseWitness(character));
+            }
+            Ok(())
         }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::GatherInformation { .. } => Ok(()),
@@ -818,6 +857,7 @@ fn validate_active_field_objective_target(
 fn validate_operation_objective(
     state: &AppState,
     kind: OperationKind,
+    responsible_organization: OrganizationId,
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     if let OperationObjective::AcquireProperty { target } = objective {
@@ -881,7 +921,7 @@ fn validate_operation_objective(
             objective: objective.kind(),
         });
     }
-    validate_active_field_objective_targets(state, objective)?;
+    validate_active_field_objective_targets(state, responsible_organization, objective)?;
     Ok(())
 }
 

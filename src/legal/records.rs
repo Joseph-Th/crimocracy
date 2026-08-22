@@ -459,17 +459,20 @@ pub(super) struct ArrestIndexes {
 pub enum InvestigationWorkKind {
     PatternAnalysis,
     EvidenceReview,
+    WitnessInterview,
 }
 
-pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 2] = [
+pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 3] = [
     InvestigationWorkKind::PatternAnalysis,
     InvestigationWorkKind::EvidenceReview,
+    InvestigationWorkKind::WitnessInterview,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InvestigationWorkFocus {
     EntityConnection { from: EntityRef, to: EntityRef },
     Evidence(EvidenceId),
+    Witness(CaseWitnessId),
 }
 
 impl InvestigationWorkFocus {
@@ -485,10 +488,17 @@ impl InvestigationWorkFocus {
         Self::Evidence(evidence)
     }
 
+    pub fn witness(case_witness: CaseWitnessId) -> Self {
+        Self::Witness(case_witness)
+    }
+
     pub fn from(self) -> EntityRef {
         match self {
             Self::EntityConnection { from, .. } => from,
             Self::Evidence(evidence) => EntityRef::Evidence(evidence),
+            // Connection endpoints are meaningless for an interview focus; every caller
+            // guards on work kind before touching them.
+            Self::Witness(_) => unreachable!("witness focus has no connection endpoints"),
         }
     }
 
@@ -496,13 +506,21 @@ impl InvestigationWorkFocus {
         match self {
             Self::EntityConnection { to, .. } => to,
             Self::Evidence(evidence) => EntityRef::Evidence(evidence),
+            Self::Witness(_) => unreachable!("witness focus has no connection endpoints"),
         }
     }
 
     pub fn evidence_id(self) -> Option<EvidenceId> {
         match self {
             Self::Evidence(evidence) => Some(evidence),
-            Self::EntityConnection { .. } => None,
+            Self::EntityConnection { .. } | Self::Witness(_) => None,
+        }
+    }
+
+    pub fn witness_id(self) -> Option<CaseWitnessId> {
+        match self {
+            Self::Witness(case_witness) => Some(case_witness),
+            Self::EntityConnection { .. } | Self::Evidence(_) => None,
         }
     }
 }
@@ -1487,6 +1505,15 @@ pub struct IncidentIntakeDraft {
     /// authority and later surveillance read only this set to decide what is visible about the
     /// case, never the hidden evidence or investigation internals.
     pub notified_organizations: BTreeSet<OrganizationId>,
+    /// A named witness registered with the case at intake (for example an identifiable
+    /// business owner who saw the incident). Anonymous testimony remains ordinary evidence.
+    pub witness: Option<IncidentWitnessDraft>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IncidentWitnessDraft {
+    pub character: CharacterId,
+    pub cooperation: WitnessCooperation,
 }
 
 pub struct EvidenceDraft {

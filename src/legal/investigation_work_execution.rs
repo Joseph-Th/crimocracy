@@ -1,6 +1,7 @@
 //! Scheduled detective pattern analysis; this sibling system derives new case evidence only from evidence already owned by the investigation.
 
 use crate::core::entity::EntityRef;
+use crate::core::id::CaseWitnessId;
 use crate::core::id::{
     ArrestId, CharacterId, EvidenceId, IdExhaustionError, InvestigationId, InvestigationWorkId,
 };
@@ -13,7 +14,7 @@ use crate::legal::{
     InvestigationWorkDraft, InvestigationWorkFactors, InvestigationWorkFocus,
     InvestigationWorkIdentity, InvestigationWorkKind, InvestigationWorkOutcome,
     InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkRuntime,
-    InvestigationWorkStatus,
+    InvestigationWorkStatus, WitnessCooperation, WitnessStatementDraft,
 };
 use crate::registry::{InvestigationWorkDefinition, Registry};
 use crate::world::{CapabilityKind, Lifecycle, Rating};
@@ -100,6 +101,11 @@ pub enum InvestigationWorkError {
     VarianceOutOfRange { variance: i8, limit: u8 },
     #[error("investigation work source evidence {0} no longer belongs to the case")]
     InvalidSourceEvidence(EvidenceId),
+    #[error("witness interview for work {work} could not record a statement: {error}")]
+    InterviewStatementFailed {
+        work: InvestigationWorkId,
+        error: String,
+    },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
@@ -217,7 +223,28 @@ fn resolve_work_sources(
             resolve_pattern_sources(state, draft)
         }
         InvestigationWorkKind::EvidenceReview => resolve_review_source(state, draft),
+        InvestigationWorkKind::WitnessInterview => resolve_interview_focus(state, draft),
     }
+}
+
+/// An interview's source is a registered case witness, not an evidence record; its support
+/// comes from the witness's cooperation at resolution time.
+fn resolve_interview_focus(
+    state: &AppState,
+    draft: InvestigationWorkDraft,
+) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
+    let case_witness = draft
+        .focus
+        .witness_id()
+        .ok_or(InvestigationWorkError::InvalidFocus)?;
+    let witness = state
+        .legal
+        .get_case_witness(case_witness)
+        .ok_or(InvestigationWorkError::InvalidFocus)?;
+    if witness.investigation() != draft.investigation {
+        return Err(InvestigationWorkError::InvalidFocus);
+    }
+    Ok(BTreeSet::new())
 }
 
 fn resolve_review_source(
@@ -422,6 +449,7 @@ pub fn decide_investigation_work_resolution(
         match work.kind() {
             InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
             InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
+            InvestigationWorkKind::WitnessInterview => InvestigationWorkOutcome::Connected,
         }
     } else {
         InvestigationWorkOutcome::Inconclusive
@@ -531,6 +559,23 @@ pub(crate) fn resolve_source_support(
     state: &AppState,
     work: &InvestigationWorkRecord,
 ) -> Result<Rating, InvestigationWorkError> {
+    // Interview support is the witness's current cooperation, not evidence quality.
+    if work.kind() == InvestigationWorkKind::WitnessInterview {
+        let case_witness = work
+            .focus()
+            .witness_id()
+            .ok_or(InvestigationWorkError::InvalidFocus)?;
+        let witness = state
+            .legal
+            .get_case_witness(case_witness)
+            .ok_or(InvestigationWorkError::InvalidFocus)?;
+        let score = match witness.cooperation() {
+            WitnessCooperation::Hostile => 20_u8,
+            WitnessCooperation::Reluctant => 50,
+            WitnessCooperation::Cooperative => 85,
+        };
+        return Rating::try_new(score).map_err(|_| InvestigationWorkError::InvalidFocus);
+    }
     let mut total = 0_u32;
     let mut count = 0_u32;
     for evidence_id in work.source_evidence() {
@@ -598,6 +643,11 @@ pub(crate) fn find_superseding_evidence(
                     && evidence.kind() == EvidenceKind::ForensicAnalysis
             })
             .map(|evidence| evidence.id());
+    }
+    if work.kind() == InvestigationWorkKind::WitnessInterview {
+        // Testimony cannot be superseded by later forensics; only the witness's own
+        // cooperation changes what their account is worth.
+        return None;
     }
     let from = work.focus().from();
     let to = work.focus().to();
@@ -680,6 +730,7 @@ pub(crate) fn source_evidence_forms_simple_path(
 
 pub struct ValidatedInvestigationWorkResolution {
     plan: InvestigationWorkResolutionPlan,
+    interview_statement: Option<crate::legal::witness_system::ValidatedWitnessStatement>,
 }
 
 struct DerivedEvidenceDraft {
@@ -730,25 +781,35 @@ impl ValidatedInvestigationWorkResolution {
                     .legal
                     .get_investigation_work(self.plan.work)
                     .expect("validated investigation work must exist");
-                debug_assert_eq!(work.kind(), InvestigationWorkKind::PatternAnalysis);
-                let strength = derive_pattern_strength(self.plan.factors.source_support());
-                let reliability = minimum_source_reliability(state, work)?;
-                let admissibility = derive_pattern_admissibility(state, work);
-                Some(DerivedEvidenceDraft {
-                    investigation: work.investigation(),
-                    custodian: state
-                        .legal
-                        .get_investigation(work.investigation())
-                        .expect("validated investigation must exist")
-                        .owner(),
-                    subject: work.focus().to(),
-                    origin: Some(work.focus().from()),
-                    kind: EvidenceKind::PatternLink,
-                    strength,
-                    reliability,
-                    admissibility,
-                    derived_from: work.source_evidence().clone(),
-                })
+                match work.kind() {
+                    InvestigationWorkKind::PatternAnalysis => {
+                        let strength = derive_pattern_strength(self.plan.factors.source_support());
+                        let reliability = minimum_source_reliability(state, work)?;
+                        let admissibility = derive_pattern_admissibility(state, work);
+                        Some(DerivedEvidenceDraft {
+                            investigation: work.investigation(),
+                            custodian: state
+                                .legal
+                                .get_investigation(work.investigation())
+                                .expect("validated investigation must exist")
+                                .owner(),
+                            subject: work.focus().to(),
+                            origin: Some(work.focus().from()),
+                            kind: EvidenceKind::PatternLink,
+                            strength,
+                            reliability,
+                            admissibility,
+                            derived_from: work.source_evidence().clone(),
+                        })
+                    }
+                    // A connected interview is committed through the canonical witness-
+                    // statement path below; it produces testimony evidence plus the named
+                    // statement record rather than a derived evidence draft.
+                    InvestigationWorkKind::WitnessInterview => None,
+                    InvestigationWorkKind::EvidenceReview => {
+                        unreachable!("evidence review cannot resolve into a connected outcome")
+                    }
+                }
             }
             InvestigationWorkOutcome::Developed => {
                 let work = state
@@ -781,6 +842,17 @@ impl ValidatedInvestigationWorkResolution {
                 })
             }
             InvestigationWorkOutcome::Inconclusive | InvestigationWorkOutcome::Superseded => None,
+        };
+        // Successful witness interviews record the testimony through the canonical
+        // witness-statement path validated during plan validation.
+        let interview_statement_outcome = match self.interview_statement {
+            Some(statement) => Some(statement.commit(state).map_err(|error| {
+                InvestigationWorkError::InterviewStatementFailed {
+                    work: self.plan.work,
+                    error: error.to_string(),
+                }
+            })?),
+            None => None,
         };
         let derived_evidence = if let Some(draft) = derived_evidence_draft {
             let id = state.ids.next_evidence()?;
@@ -819,7 +891,10 @@ impl ValidatedInvestigationWorkResolution {
                 factors: self.plan.factors,
                 margin: self.plan.margin,
                 superseded_by: self.plan.superseded_by,
-                derived_evidence,
+                // For interviews this is the testimony evidence produced by the recorded
+                // statement; for other kinds it is the work's own derived evidence.
+                derived_evidence: derived_evidence
+                    .or(interview_statement_outcome.map(|outcome| outcome.evidence)),
             },
         );
         Ok(self.plan.work)
@@ -836,6 +911,131 @@ pub(crate) fn resolve_improved_evidence_reliability(
             EvidenceReliability::HighlyReliable
         }
     }
+}
+
+/// Builds the canonical statement an interview records. The testimony targets the strongest
+/// available character subject already in the case graph (minimum ID for determinism), or
+/// the case's origin operation when no person has been tied to the case yet. Confidence is
+/// a deterministic function of the interview margin.
+fn resolve_interview_statement_draft(
+    state: &AppState,
+    work: &InvestigationWorkRecord,
+    case_witness: CaseWitnessId,
+    margin: i16,
+) -> Result<WitnessStatementDraft, InvestigationWorkError> {
+    use crate::core::id::OperationId;
+
+    let investigation = state
+        .legal
+        .get_investigation(work.investigation())
+        .expect("validated interview investigation must exist");
+    let subject = investigation
+        .evidence()
+        .iter()
+        .filter_map(|id| state.legal.get_evidence(*id))
+        .map(|evidence| evidence.subject())
+        .filter(|subject| matches!(subject, EntityRef::Character(_)))
+        .min()
+        .or_else(|| {
+            investigation
+                .origin_operation()
+                .map(|operation: OperationId| EntityRef::Operation(operation))
+                .or_else(|| investigation.subjects().iter().next().copied())
+        })
+        .ok_or(InvestigationWorkError::InvalidFocus)?;
+    let confidence = if margin >= 20 {
+        Rating::try_new(85).expect("interview confidence must be valid")
+    } else if margin >= 10 {
+        Rating::try_new(65).expect("interview confidence must be valid")
+    } else {
+        Rating::try_new(40).expect("interview confidence must be valid")
+    };
+    Ok(WitnessStatementDraft {
+        case_witness,
+        subject,
+        origin: None,
+        confidence,
+        summary: format!(
+            "Statement recorded from witness interview on work {} regarding {subject:?}.",
+            work.id()
+        ),
+    })
+}
+
+/// Schedules witness interviews for staffed active cases whose registered witnesses have not
+/// given a statement yet. Witnesses typically enter a case after the initial evidence review
+/// is already scheduled, so this runs every tick over the (small) set of active cases.
+pub fn schedule_due_witness_interviews(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
+    let mut scheduled = Vec::new();
+    let candidates: Vec<InvestigationId> = state
+        .legal
+        .investigations()
+        .filter(|investigation| investigation.status() == InvestigationStatus::Active)
+        .map(|investigation| investigation.id())
+        .collect();
+    for investigation_id in candidates {
+        let investigation = state
+            .legal
+            .get_investigation(investigation_id)
+            .expect("indexed active investigation must exist");
+        // Deterministic investigator choice: the lead when present, otherwise the lowest
+        // assigned ID. Cases without investigators wait until staffing assigns one.
+        let Some(investigator) = investigation.lead_investigator().or_else(|| {
+            investigation
+                .assigned_investigators()
+                .iter()
+                .copied()
+                .next()
+        }) else {
+            continue;
+        };
+        let witnesses: Vec<_> = state
+            .legal
+            .case_witnesses_for_investigation(investigation_id)
+            .filter(|witness| witness.statements().is_empty())
+            .map(|witness| witness.id())
+            .collect();
+        for case_witness in witnesses {
+            let already_scheduled_or_done = state
+                .legal
+                .work_for_investigation(investigation_id)
+                .any(|work| {
+                    work.kind() == InvestigationWorkKind::WitnessInterview
+                        && work.focus().witness_id() == Some(case_witness)
+                });
+            if already_scheduled_or_done {
+                continue;
+            }
+            let focus = InvestigationWorkFocus::witness(case_witness);
+            if state
+                .legal
+                .scheduled_work_for_focus(
+                    investigation_id,
+                    InvestigationWorkKind::WitnessInterview,
+                    focus,
+                )
+                .is_some()
+            {
+                continue;
+            }
+            let work = validate_schedule_investigation_work(
+                registry,
+                state,
+                InvestigationWorkDraft {
+                    investigation: investigation_id,
+                    investigator,
+                    kind: InvestigationWorkKind::WitnessInterview,
+                    focus,
+                },
+            )?
+            .commit(state)?;
+            scheduled.push(work);
+        }
+    }
+    Ok(scheduled)
 }
 
 pub(crate) fn apply_initial_evidence_reviews(
@@ -931,6 +1131,7 @@ pub fn validate_investigation_work_resolution_plan(
         match work.kind() {
             InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
             InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
+            InvestigationWorkKind::WitnessInterview => InvestigationWorkOutcome::Connected,
         }
     } else {
         InvestigationWorkOutcome::Inconclusive
@@ -947,7 +1148,32 @@ pub fn validate_investigation_work_resolution_plan(
             found: work.version(),
         });
     }
-    Ok(ValidatedInvestigationWorkResolution { plan })
+    // A connected interview will record a statement at commit; validate it now so commit
+    // only re-checks staleness.
+    let interview_statement = if plan.outcome == InvestigationWorkOutcome::Connected
+        && work.kind() == InvestigationWorkKind::WitnessInterview
+    {
+        let case_witness = work
+            .focus()
+            .witness_id()
+            .expect("interview focus must reference a case witness");
+        Some(
+            crate::legal::witness_system::validate_record_witness_statement(
+                state,
+                resolve_interview_statement_draft(state, work, case_witness, plan.margin)?,
+            )
+            .map_err(|error| InvestigationWorkError::InterviewStatementFailed {
+                work: plan.work,
+                error: error.to_string(),
+            })?,
+        )
+    } else {
+        None
+    };
+    Ok(ValidatedInvestigationWorkResolution {
+        plan,
+        interview_statement,
+    })
 }
 
 fn validate_resolution_snapshot(

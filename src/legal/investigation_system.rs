@@ -8,9 +8,9 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::legal::{
-    EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity, EvidenceRecord,
-    IncidentIntakeDraft, InvestigationDraft, InvestigationRecord, InvestigationStatus,
-    InvestigatorRole,
+    CaseWitnessRecord, EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity,
+    EvidenceRecord, IncidentIntakeDraft, InvestigationDraft, InvestigationRecord,
+    InvestigationStatus, InvestigatorRole,
 };
 use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
 use std::cmp::Reverse;
@@ -116,6 +116,8 @@ pub enum InvestigationError {
         investigation: InvestigationId,
         arrest: ArrestId,
     },
+    #[error("character {character} is a subject of this case and cannot be its named witness")]
+    WitnessIsCaseSubject { character: CharacterId },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
@@ -809,6 +811,7 @@ fn validate_evidence_draft(
 pub struct IncidentIntakeOutcome {
     pub investigation: InvestigationId,
     pub evidence: Vec<EvidenceId>,
+    pub case_witness: Option<crate::core::id::CaseWitnessId>,
 }
 
 pub struct ValidatedIncidentIntake {
@@ -820,11 +823,16 @@ impl ValidatedIncidentIntake {
         u32::try_from(self.draft.evidence.len()).expect("incident evidence count must fit u32")
     }
 
+    pub(crate) fn has_witness(&self) -> bool {
+        self.draft.witness.is_some()
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<IncidentIntakeOutcome, InvestigationError> {
         validate_incident_intake_dependencies(state, &self.draft)?;
         state.ids.reserve_many(&[
             (IdKind::Investigation, 1),
             (IdKind::Evidence, self.evidence_count()),
+            (IdKind::CaseWitness, u32::from(self.draft.witness.is_some())),
         ])?;
         let investigation = state.ids.next_investigation()?;
         state.legal.insert_investigation(InvestigationRecord {
@@ -834,7 +842,7 @@ impl ValidatedIncidentIntake {
             status: InvestigationStatus::Active,
             lead_investigator: None,
             assigned_investigators: Default::default(),
-            subjects: self.draft.subjects,
+            subjects: self.draft.subjects.clone(),
             evidence: Default::default(),
             opened_at: state.now(),
             origin_operation: self.draft.origin_operation,
@@ -842,6 +850,21 @@ impl ValidatedIncidentIntake {
             last_activity_at: state.now(),
             version: 1,
         });
+        let case_witness = if let Some(witness) = self.draft.witness {
+            let id = state.ids.next_case_witness()?;
+            state.legal.insert_case_witness(CaseWitnessRecord {
+                id,
+                investigation,
+                witness: witness.character,
+                cooperation: witness.cooperation,
+                registered_at: state.now(),
+                statements: Default::default(),
+                version: 1,
+            });
+            Some(id)
+        } else {
+            None
+        };
         let mut evidence_ids = Vec::with_capacity(self.draft.evidence.len());
         for evidence in self.draft.evidence {
             let id = state.ids.next_evidence()?;
@@ -873,6 +896,7 @@ impl ValidatedIncidentIntake {
         Ok(IncidentIntakeOutcome {
             investigation,
             evidence: evidence_ids,
+            case_witness,
         })
     }
 }
@@ -912,6 +936,25 @@ fn validate_incident_intake_dependencies(
             return Err(InvestigationError::MissingEntity(EntityRef::Organization(
                 *organization,
             )));
+        }
+    }
+    if let Some(witness) = &draft.witness {
+        let record = state.world.get_character(witness.character).ok_or(
+            InvestigationError::MissingEntity(EntityRef::Character(witness.character)),
+        )?;
+        if record.lifecycle() != Lifecycle::Active {
+            return Err(InvestigationError::MissingEntity(EntityRef::Character(
+                witness.character,
+            )));
+        }
+        // A case's subject cannot also be its named witness.
+        if draft
+            .subjects
+            .contains(&EntityRef::Character(witness.character))
+        {
+            return Err(InvestigationError::WitnessIsCaseSubject {
+                character: witness.character,
+            });
         }
     }
     for evidence in &draft.evidence {
@@ -1025,6 +1068,7 @@ mod tests {
                 }],
                 origin_operation: None,
                 notified_organizations: BTreeSet::new(),
+                witness: None,
             },
         ) {
             Ok(_) => panic!("incident intake must reject informant statements"),
@@ -1980,6 +2024,7 @@ mod tests {
                 }],
                 origin_operation: Some(origin),
                 notified_organizations: BTreeSet::from([criminal]),
+                witness: None,
             },
         )
         .expect("incident intake should validate")
@@ -2021,6 +2066,7 @@ mod tests {
                 }],
                 origin_operation: Some(origin),
                 notified_organizations: BTreeSet::from([criminal]),
+                witness: None,
             },
         )
         .expect("identified incident intake should validate")

@@ -269,6 +269,22 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
             },
         )
         .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
+    // Interview support is the witness's cooperation; a hostile witness can deny the
+    // detective a usable statement entirely.
+    builder
+        .register_investigation_work(
+            InvestigationWorkKind::WitnessInterview,
+            "Witness interview",
+            InvestigationWorkDefinitionSpec {
+                duration: SimDuration::from_minutes(120),
+                base_difficulty: 30,
+                additional_source_difficulty: 0,
+                source_support_weight: 45,
+                variance_limit: 10,
+                connected_margin: 0,
+            },
+        )
+        .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
 }
 
 fn register_businesses(builder: &mut RegistryBuilder) {

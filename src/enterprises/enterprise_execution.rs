@@ -1681,6 +1681,7 @@ mod tests {
                     }],
                     origin_operation: Some(origin),
                     notified_organizations: BTreeSet::from([fixture.organization]),
+                    witness: None,
                 },
             )
             .expect("incident intake should validate")

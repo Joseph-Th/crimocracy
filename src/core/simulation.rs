@@ -49,6 +49,7 @@ pub struct TickOutcome {
     pub resolved_operations: Vec<OperationId>,
     pub staffed_investigations: Vec<(InvestigationId, CharacterId)>,
     pub scheduled_investigation_work: Vec<InvestigationWorkId>,
+    pub scheduled_witness_interviews: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
@@ -140,6 +141,14 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let scheduled_investigation_work =
         apply_initial_evidence_reviews(registry, state, &staffed_investigations)
             .expect("newly staffed investigations should schedule valid initial evidence work");
+    // Witness interviews are scheduled after evidence reviews so a witness registered by an
+    // operation resolving earlier in this same minute is interviewable as soon as its case
+    // has an investigator.
+    let witness_interviews =
+        crate::legal::investigation_work_execution::schedule_due_witness_interviews(
+            registry, state,
+        )
+        .expect("valid state should schedule due witness interviews");
     // Detective work resolves after operation consequences so legal state created by an operation
     // is visible to later institutional work in the same minute without bypassing evidence ownership.
     let due_investigation_work = due_scheduled_investigation_work(state);
@@ -237,6 +246,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         resolved_operations,
         staffed_investigations,
         scheduled_investigation_work,
+        scheduled_witness_interviews: witness_interviews,
         resolved_investigation_work,
         business_cycles,
         enterprise_cycles,

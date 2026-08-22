@@ -29,7 +29,7 @@ use crate::legal::patrol_system::{
 };
 use crate::legal::{
     Admissibility, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
-    IncidentIntakeDraft,
+    IncidentIntakeDraft, IncidentWitnessDraft, WitnessCooperation,
 };
 use crate::operations::surveillance_integration::{
     decide_surveillance_intelligence, surveillance_after_action_clause,
@@ -125,6 +125,8 @@ pub(crate) enum OperationResolutionError {
     Report(#[from] ReportError),
     #[error(transparent)]
     Surveillance(#[from] SurveillanceError),
+    #[error(transparent)]
+    Witness(#[from] crate::legal::witness_system::WitnessError),
     #[error(transparent)]
     BusinessEconomy(#[from] BusinessEconomyError),
     #[error(transparent)]
@@ -409,6 +411,7 @@ pub(crate) struct ValidatedOperationResolution {
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
     detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
+    witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,9 +442,10 @@ impl ValidatedOperationResolution {
             (IdKind::HistoryEvent, 1),
             (IdKind::Report, 1),
         ];
-        if self.incident.is_some() {
+        if let Some(incident) = self.incident.as_ref() {
             budget.push((IdKind::Investigation, 1));
             budget.push((IdKind::Evidence, incident_evidence_count));
+            budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
         }
         state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan)?;
@@ -526,6 +530,11 @@ impl ValidatedOperationResolution {
                 .commit(state)
                 .expect("validated detainee release must commit atomically");
         }
+        for intimidation in self.witness_intimidation {
+            intimidation
+                .commit(state)
+                .expect("validated witness intimidation must commit atomically");
+        }
         Ok(self.plan.snapshot.operation)
     }
 }
@@ -593,6 +602,7 @@ pub(crate) fn validate_operation_resolution_plan(
         state,
         record,
         &plan.outcome.exposure,
+        plan.outcome.factors.target_police_presence(),
         plan.snapshot.resolved_at,
     )?;
     let legal_activity_summary = if incident.is_some() {
@@ -670,6 +680,48 @@ pub(crate) fn validate_operation_resolution_plan(
             }],
         },
     )?;
+    // Witness pressure degrades the target's cooperation on every active case where they
+    // are the named witness; each degradation is validated here so commit re-checks only
+    // staleness.
+    let mut witness_intimidation = Vec::new();
+    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
+        if let (
+            crate::operations::OperationKind::WitnessPressure,
+            crate::operations::OperationObjective::Frighten {
+                target: EntityRef::Character(character),
+            },
+        ) = (record.kind(), record.objective())
+        {
+            let targets: Vec<_> = state
+                .legal
+                .case_witnesses()
+                .filter(|witness| witness.witness() == *character)
+                .filter(|witness| {
+                    state
+                        .legal
+                        .get_investigation(witness.investigation())
+                        .is_some_and(|investigation| {
+                            investigation.status() == crate::legal::InvestigationStatus::Active
+                        })
+                })
+                .map(|witness| (witness.id(), witness.cooperation()))
+                .collect();
+            for (case_witness, cooperation) in targets {
+                let degraded = match cooperation {
+                    WitnessCooperation::Cooperative => WitnessCooperation::Reluctant,
+                    WitnessCooperation::Reluctant => WitnessCooperation::Hostile,
+                    WitnessCooperation::Hostile => continue,
+                };
+                witness_intimidation.push(
+                    crate::legal::witness_system::validate_set_witness_cooperation(
+                        state,
+                        case_witness,
+                        degraded,
+                    )?,
+                );
+            }
+        }
+    }
     Ok(ValidatedOperationResolution {
         plan,
         incident,
@@ -680,6 +732,7 @@ pub(crate) fn validate_operation_resolution_plan(
         history,
         report,
         detainee_release,
+        witness_intimidation,
     })
 }
 
@@ -700,11 +753,64 @@ pub(crate) fn build_legal_activity_summary(
     )
 }
 
+fn resolve_incident_witness(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    exposure: &OperationExposurePlan,
+    target_police_presence: Option<Rating>,
+) -> Option<IncidentWitnessDraft> {
+    use crate::world::Lifecycle;
+
+    if !matches!(
+        exposure.level,
+        OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
+    ) {
+        return None;
+    }
+    // Only business targets have an identifiable on-scene witness today: the owner.
+    let target = match operation.objective() {
+        OperationObjective::AcquireProperty { target }
+        | OperationObjective::ObtainCash { target } => Some(*target),
+        OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::FreeDetainee { .. } => None,
+    }?;
+    let EntityRef::Business(business) = target else {
+        return None;
+    };
+    let record = state.world.get_business(business)?;
+    let crate::world::BusinessOwner::Character(character) = record.owner() else {
+        return None;
+    };
+    let witness = state.world.get_character(character)?;
+    if witness.lifecycle() != Lifecycle::Active {
+        return None;
+    }
+    // The identified participant cannot witness their own crime, and an organization's own
+    // member is not treated as the case's named witness against it.
+    if Some(character) == exposure.identified_character
+        || witness.organization() == Some(operation.responsible_organization())
+    {
+        return None;
+    }
+    // Patrol presence shapes whether a witness is willing to stand behind an account (§31).
+    let cooperation = match target_police_presence.map(Rating::value) {
+        Some(presence) if presence >= 60 => WitnessCooperation::Cooperative,
+        Some(presence) if presence >= 30 => WitnessCooperation::Reluctant,
+        _ => WitnessCooperation::Hostile,
+    };
+    Some(IncidentWitnessDraft {
+        character,
+        cooperation,
+    })
+}
+
 fn validate_exposure_incident(
     registry: &Registry,
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     exposure: &OperationExposurePlan,
+    target_police_presence: Option<Rating>,
     discovered_at: SimTime,
 ) -> Result<
     (
@@ -758,6 +864,10 @@ fn validate_exposure_incident(
         .get_operation(operation.kind())
         .execution()
         .exposure_evidence_kind();
+    // A witnessed or identifying exposure leaves a named witness when the target is a
+    // character-owned business: the owner saw it happen. Members of the responsible
+    // organization and the identified participant never count as the case's witness.
+    let witness = resolve_incident_witness(state, operation, exposure, target_police_presence);
     let incident = validate_incident_intake(
         state,
         IncidentIntakeDraft {
@@ -775,6 +885,7 @@ fn validate_exposure_incident(
             }],
             origin_operation: Some(operation.id()),
             notified_organizations: BTreeSet::from([operation.responsible_organization()]),
+            witness,
         },
     )?;
     Ok((
@@ -1895,7 +2006,14 @@ mod tests {
 
     /// Compact cash-capable target for operation fixtures: a retail business in its own
     /// mid-rated neighborhood, owned independently so no ownership side effects interfere.
-    fn make_fixture_business(registry: &Registry, state: &mut AppState, name: &str) -> BusinessId {
+    /// Compact cash-capable target for operation fixtures. When `owner` is set the business
+    /// belongs to that character so its owner can surface as an incident witness.
+    fn make_fixture_business_with_owner(
+        registry: &Registry,
+        state: &mut AppState,
+        name: &str,
+        owner: BusinessOwner,
+    ) -> BusinessId {
         let neighborhood = insert_neighborhood(
             state,
             NeighborhoodDraft {
@@ -1930,10 +2048,14 @@ mod tests {
                 kind: BusinessKind::Retail,
                 functions: BTreeSet::from([BusinessFunction::CashIntensive]),
                 neighborhood,
-                owner: BusinessOwner::Independent,
+                owner,
             },
         )
         .expect("fixture business should validate")
+    }
+
+    fn make_fixture_business(registry: &Registry, state: &mut AppState, name: &str) -> BusinessId {
+        make_fixture_business_with_owner(registry, state, name, BusinessOwner::Independent)
     }
 
     fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId) {
@@ -3278,6 +3400,232 @@ mod tests {
         );
         assert!(released.released_at().is_some());
         validate_state(&state).expect("post-extraction state should remain valid");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testimony() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x0B1E_1933);
+        let crew = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Witness Pipeline Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("crew should validate");
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Witness Pipeline Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police should validate");
+        let owner = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Shopkeeper Witness".to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("owner witness should validate");
+        let business = make_fixture_business_with_owner(
+            &registry,
+            &mut state,
+            "Witnessed Emporium",
+            BusinessOwner::Character(owner),
+        );
+        // Give the precinct jurisdiction over the target's ward so exposure opens a case.
+        let neighborhood = state
+            .world()
+            .get_business(business)
+            .expect("fixture business should exist")
+            .neighborhood();
+        validate_set_jurisdiction(
+            &state,
+            JurisdictionDraft {
+                organization: police,
+                neighborhoods: BTreeSet::from([neighborhood]),
+                case_intake_priority: Rating::try_new(80)
+                    .expect("fixture case priority should validate"),
+            },
+        )
+        .expect("precinct jurisdiction should validate")
+        .commit(&mut state)
+        .expect("precinct jurisdiction should commit");
+        // The precinct needs a capable detective so the case can be staffed and interviews
+        // can be conducted.
+        let _detective = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Pipeline Detective".to_owned(),
+                organization: Some(police),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Investigation,
+                    Rating::try_new(99).expect("fixture rating should be valid"),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("detective should validate");
+        let leader = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Pipeline Crew Leader".to_owned(),
+                organization: Some(crew),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([
+                    (
+                        CapabilityKind::Management,
+                        Rating::try_new(99).expect("fixture rating should be valid"),
+                    ),
+                    (
+                        CapabilityKind::Intimidation,
+                        Rating::try_new(99).expect("fixture rating should be valid"),
+                    ),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("leader should validate");
+
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Loud protection shakedown".to_owned(),
+                kind: OperationKind::Intimidation,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(business),
+                },
+                approach: OperationApproach::Intimidating,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::from_minutes(1),
+            },
+        )
+        .expect("intimidation operation should validate")
+        .commit(&mut state)
+        .expect("intimidation operation should commit");
+        loop {
+            let outcome = run_tick(&registry, &mut state);
+            if !outcome.resolved_operations.is_empty() {
+                break;
+            }
+        }
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should persist");
+        assert_eq!(record.status(), OperationStatus::Completed);
+        let exposure = record
+            .resolution()
+            .expect("resolution should persist")
+            .exposure();
+        assert!(
+            exposure.level() as i32 >= 2,
+            "an intimidating shakedown at a quiet ward must at least be witnessed"
+        );
+
+        // The character-owned business's owner is the case's named witness.
+        let investigation = exposure
+            .investigation()
+            .expect("a witnessed incident must open an investigation when jurisdiction exists");
+        let witnesses: Vec<_> = state
+            .legal()
+            .case_witnesses_for_investigation(investigation)
+            .map(|witness| witness.witness())
+            .collect();
+        assert_eq!(witnesses, vec![owner]);
+
+        // Once staffing assigns the detective, the tick schedules an interview whose success
+        // records real testimony evidence through the witness-statement path.
+        loop {
+            let outcome = run_tick(&registry, &mut state);
+            let has_statement = state
+                .legal()
+                .case_witness_for(investigation, owner)
+                .is_some_and(|witness| !witness.statements().is_empty());
+            if has_statement {
+                break;
+            }
+            assert!(
+                outcome.now.as_minutes() < 20_000,
+                "the interview pipeline should produce a statement well before this bound"
+            );
+        }
+        let case_witness = state
+            .legal()
+            .case_witness_for(investigation, owner)
+            .expect("witness record should persist");
+        assert_eq!(
+            case_witness.cooperation(),
+            crate::legal::WitnessCooperation::Reluctant,
+            "a presence-30 ward leaves the witness reluctant"
+        );
+        assert_eq!(case_witness.statements().len(), 1);
+
+        // Witness pressure against that same witness is now authorizable, and its success
+        // degrades cooperation one step on the active case.
+        let _pressure = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Quiet the shopkeeper".to_owned(),
+                kind: OperationKind::WitnessPressure,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::Frighten {
+                    target: EntityRef::Character(owner),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::from_minutes(1),
+            },
+        )
+        .expect("pressure against a named witness should validate")
+        .commit(&mut state)
+        .expect("pressure operation should commit");
+        loop {
+            let outcome = run_tick(&registry, &mut state);
+            if !outcome.resolved_operations.is_empty() {
+                break;
+            }
+        }
+        let pressured = state
+            .legal()
+            .case_witness_for(investigation, owner)
+            .expect("witness record should persist");
+        assert_ne!(
+            pressured.cooperation(),
+            crate::legal::WitnessCooperation::Reluctant,
+            "successful witness pressure must move cooperation off its prior step"
+        );
+        validate_state(&state).expect("witness pipeline state should remain valid");
         validate_invariants(&state);
     }
 
