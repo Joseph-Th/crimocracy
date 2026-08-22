@@ -154,6 +154,29 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .expect("front must exist")
             .name(),
     );
+    let (contact_name, handler_name) = {
+        let record = scenario
+            .state
+            .contacts()
+            .get_contact(scenario.police_contact)
+            .expect("police contact must persist");
+        (
+            scenario
+                .state
+                .world()
+                .get_character(record.contact())
+                .expect("contact character must exist")
+                .name()
+                .to_owned(),
+            scenario
+                .state
+                .world()
+                .get_character(record.handler())
+                .expect("handler character must exist")
+                .name()
+                .to_owned(),
+        )
+    };
     let detective = scenario
         .state
         .world()
@@ -166,6 +189,9 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .capability(CapabilityKind::Investigation)
             .expect("detective must have investigation capability")
             .value(),
+    );
+    println!(
+        "[STATE] {handler_name} keeps a standing Police-channel contact with {contact_name} inside Central Precinct; a quiet word costs no street exposure."
     );
     let replacement = scenario
         .state
@@ -557,12 +583,18 @@ pub fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
                     .state
                     .operations()
                     .get_operation(*operation)
-                    .map(|record| format!("operation: {}", record.title()));
+                    .map(|record| record.title().to_owned());
             }
             None
         });
+        // After-action and abort summaries already lead with the operation title, so the
+        // entity-derived context would only echo it; keep it for entries that do not.
+        let context = context.filter(|title| {
+            !entry.summary.starts_with(title.as_str())
+                && !entry.summary.starts_with(format!("{title}: ").as_str())
+        });
         if let Some(context) = context {
-            println!("  - [{marker}] [{context}] {}", entry.summary);
+            println!("  - [{marker}] [operation: {context}] {}", entry.summary);
         } else {
             println!("  - [{marker}] {}", entry.summary);
         }
@@ -657,7 +689,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
         optional_cents(metrics.matched_enterprise_net_cents),
     );
     println!(
-        "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}",
+        "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}, self-heat case opened {} read {:?}",
         metrics.second_opportunity_discovered,
         metrics.second_opportunity_expired,
         metrics.replacement_recruited,
@@ -668,6 +700,8 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.second_act_recon_information,
         optional_cents(metrics.second_act_property_acquired_value_cents),
         optional_cents(metrics.second_act_property_realized_cash_cents),
+        metrics.self_heat_case_opened,
+        metrics.self_heat_case_active,
     );
     if metrics.expansion_established {
         println!(
@@ -798,6 +832,11 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "an organization that re-invests in planning can recover value on a reopened window",
     );
     print_loop_checkpoint(
+        "own heat",
+        recon.self_heat_case_opened && recon.self_heat_case_active == Some(true),
+        "casing carries risk both ways: after the organization's own surveillance draws a case, it reads that case through its standing police contact — no extra street exposure, provenance-bearing disclosure",
+    );
+    print_loop_checkpoint(
         "discipline cost",
         press.second_opportunity_expired && press.second_burglary.is_none(),
         "choosing to stand down has a real price: the second score lapses while the hot case stays protected",
@@ -884,12 +923,13 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         terminal_label(rush),
     );
     println!(
-        "  - Information risk: RECON's own casing can be made — surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}.",
+        "  - Information risk: RECON's own casing can be made — surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}; the branch then reads that self-inflicted case through its police contact rather than more street work (own-heat read: {:?}).",
         if recon.session_case_staffed && !recon.investigation_created {
             "; this fixture's recon run drew exactly that kind of case from its own surveillance"
         } else {
             ", which this fixture's skilled scout in a quiet district avoided"
         },
+        recon.self_heat_case_active,
     );
     println!(
         "  - Exception leverage: PRESS chose Continue at {} surfaced decision(s); RUSH chose Abort through its standing contingency, producing {} versus {}.",

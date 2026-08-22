@@ -46,6 +46,13 @@ impl SurveillanceIntelligencePlan {
     pub(crate) fn observation_count(&self) -> usize {
         self.observations.len()
     }
+
+    /// Compact phrases naming what each observation covers, in stable observation order.
+    pub(crate) fn observation_findings(&self) -> impl Iterator<Item = &str> {
+        self.observations
+            .iter()
+            .map(|observation| observation.finding.as_str())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +71,10 @@ struct SurveillanceObservation {
     reliability: Reliability,
     specificity: Specificity,
     summary: String,
+    /// Compact player-facing phrase naming what this observation covers, quoted by the
+    /// operation's after-action clause so the report says what was learned without forcing a
+    /// drill-down into each information record.
+    finding: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,21 +261,33 @@ pub(crate) fn surveillance_after_action_clause(
     outcome: OperationObjectiveOutcome,
 ) -> Option<String> {
     let plan = plan?;
-    Some(match outcome {
+    let findings = plan.observation_findings().collect::<Vec<_>>().join("; ");
+    let clause = match outcome {
         OperationObjectiveOutcome::Achieved => format!(
-            "Surveillance produced {} usable target observation{}.",
+            "Surveillance produced {} usable target observation{}{}.",
             plan.observation_count(),
-            if plan.observation_count() == 1 { "" } else { "s" }
+            if plan.observation_count() == 1 { "" } else { "s" },
+            if findings.is_empty() {
+                String::new()
+            } else {
+                format!(": {findings}")
+            }
         ),
         OperationObjectiveOutcome::Partial => format!(
-            "Surveillance produced {} limited target observation{}; important details remain unresolved.",
+            "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
             plan.observation_count(),
-            if plan.observation_count() == 1 { "" } else { "s" }
+            if plan.observation_count() == 1 { "" } else { "s" },
+            if findings.is_empty() {
+                String::new()
+            } else {
+                format!(" Covered: {findings}.")
+            }
         ),
         OperationObjectiveOutcome::Failed => {
             "Surveillance produced no target observation reliable enough for planning.".to_owned()
         }
-    })
+    };
+    Some(clause)
 }
 
 pub(crate) fn is_valid_persisted_surveillance_information(
@@ -605,6 +628,7 @@ fn build_observations(
             reliability,
             specificity,
             summary: patrol_summary(name, patrol, outcome, observed_at),
+            finding: format!("police activity around {name}"),
         }],
         SurveillanceTargetSnapshot::Business {
             id,
@@ -621,6 +645,7 @@ fn build_observations(
                 reliability,
                 specificity,
                 summary: patrol_summary(neighborhood_name, patrol, outcome, observed_at),
+                finding: format!("police activity around {neighborhood_name}"),
             }];
             if outcome == OperationObjectiveOutcome::Achieved {
                 observations.push(SurveillanceObservation {
@@ -629,6 +654,7 @@ fn build_observations(
                     reliability,
                     specificity,
                     summary: business_access_summary(name, functions),
+                    finding: format!("access intelligence at {name}"),
                 });
             }
             observations
@@ -645,6 +671,7 @@ fn build_observations(
             reliability,
             specificity,
             summary: character_summary(name, organization.as_ref(), supervisor.as_ref()),
+            finding: format!("the movements of {name}"),
         }],
         SurveillanceTargetSnapshot::Organization {
             id,
@@ -663,6 +690,7 @@ fn build_observations(
                     sightline.active_case_against_surveiller,
                     outcome,
                 ),
+                finding: format!("case activity at {name}"),
             }],
             None => vec![SurveillanceObservation {
                 topic: InformationTopic::Personnel,
@@ -670,6 +698,7 @@ fn build_observations(
                 reliability,
                 specificity,
                 summary: organization_summary(name, active_members, outcome),
+                finding: format!("personnel around {name}"),
             }],
         },
         SurveillanceTargetSnapshot::Investigation {
@@ -693,6 +722,7 @@ fn build_observations(
                 assigned_investigators.len(),
                 outcome,
             ),
+            finding: format!("the status of {title}"),
         }],
         SurveillanceTargetSnapshot::Enterprise {
             id,
@@ -709,6 +739,7 @@ fn build_observations(
             reliability,
             specificity,
             summary: enterprise_summary(organization_name, manager_name, location_name, *status),
+            finding: format!("activity at {location_name}"),
         }],
         SurveillanceTargetSnapshot::Operation {
             id,
@@ -725,6 +756,7 @@ fn build_observations(
                 organization_name,
                 operation_status_label(*status)
             ),
+            finding: format!("activity linked to {organization_name}"),
         }],
     }
 }

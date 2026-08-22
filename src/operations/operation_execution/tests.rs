@@ -531,12 +531,22 @@ fn after_action_summary_contextualizes_adverse_variance() {
         variance: -1,
     };
 
+    // On an achieved job the variance is already visible in the outcome; reciting luck
+    // commentary would be noise in the executive brief.
     let achieved = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
         factors,
         OperationExposureLevel::None,
     );
-    assert!(achieved.contains("but the crew overcame them"));
+    assert!(!achieved.contains("unplanned circumstances"));
+    assert!(!achieved.contains("crew overcame them"));
+
+    let partial = build_after_action_summary(
+        OperationObjectiveOutcome::Partial,
+        factors,
+        OperationExposureLevel::None,
+    );
+    assert!(partial.contains("reduced the result"));
 
     let failed = build_after_action_summary(
         OperationObjectiveOutcome::Failed,

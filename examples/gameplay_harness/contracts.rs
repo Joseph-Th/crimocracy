@@ -161,6 +161,8 @@ pub fn validate_defector_trail_evidence(metrics: &RunMetrics) -> Result<(), Harn
 /// every branch discovers the reopened second score at the same minute, then either rebuilds and
 /// recovers value from it (RUSH via executive recruitment + morning-lull hit, RECON via fresh
 /// recon + patrol-safe window) or deliberately lets it lapse as the price of standing down (PRESS).
+/// A RECON branch whose own casing drew a police case must also read that case's activity through
+/// its standing police contact before the window closes.
 pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     let strategy = metrics
         .strategy
@@ -193,10 +195,15 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
                 && metrics.second_act_recon_information > 0
                 && metrics.second_burglary_terminal_minute.is_some()
+                // Self-inflicted heat closes its loop: a case drawn by the branch's own
+                // surveillance must be read through a player-visible channel (the standing
+                // police contact), and a session whose casing drew no case must not fabricate
+                // a read.
+                && metrics.self_heat_case_active.is_some() == metrics.self_heat_case_opened
             {
                 None
             } else {
-                Some("the RECON second act must discover the reopened score, re-run surveillance on the alternate target, and complete the burglary inside a fresh patrol-safe window")
+                Some("the RECON second act must discover the reopened score, re-run surveillance on the alternate target, complete the burglary inside a fresh patrol-safe window, and read any surveillance-drawn case through its police contact")
             }
         }
         Strategy::Press => {

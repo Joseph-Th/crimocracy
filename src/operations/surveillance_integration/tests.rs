@@ -310,9 +310,9 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
         .intelligence()
         .get_information(resolution.after_action_information())
         .expect("after-action information should persist");
-    assert!(after_action
-        .summary()
-        .contains("Surveillance produced 2 usable target observations."));
+    assert!(after_action.summary().contains(
+        "Surveillance produced 2 usable target observations: police activity around Northside Market; access intelligence at Market Social Club."
+    ));
 
     let envelope = build_save(&fixture.registry, &fixture.state)
         .expect("surveillance discoveries should save");

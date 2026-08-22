@@ -471,6 +471,9 @@ pub struct Scenario<'registry> {
     /// relationship to the boss, recruitable only through canonical executive recruitment.
     pub danny_ferro: CharacterId,
     pub detective: CharacterId,
+    /// The organization's standing Police-channel institutional contact: the boss's personal
+    /// line to the precinct's lead detective, established through the canonical contact path.
+    pub police_contact: crimocracy::core::id::ContactId,
     pub opportunity_information: InformationId,
     pub alternate_opportunity_information: InformationId,
     pub enterprise: EnterpriseId,
@@ -516,6 +519,12 @@ pub struct RunMetrics {
     /// case, so branch-heating contracts must use this session-wide signal rather than the
     /// burglary's own resolution record.
     pub session_case_staffed: bool,
+    /// Whether the branch's own act-2 surveillance drew a police case: self-inflicted heat the
+    /// organization only knows about through its surfaced after-action report.
+    pub self_heat_case_opened: bool,
+    /// What the organization's player-visible channel read about that self-inflicted case
+    /// before the window closed: Some(true) still active, Some(false) shelved, None no read.
+    pub self_heat_case_active: Option<bool>,
     pub evidence_count: usize,
     pub investigation_work_scheduled: u32,
     pub investigation_work_resolved: u32,

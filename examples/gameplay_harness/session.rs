@@ -1,5 +1,6 @@
 //! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
 
+use crimocracy::contacts::contact_system::validate_contact_disclosure;
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{OperationId, OrganizationId};
 use crimocracy::core::simulation::run_tick;
@@ -772,6 +773,12 @@ pub fn run_second_act(
                 .resolution()
                 .expect("completed second-score surveillance must have a resolution");
             metrics.second_act_recon_information = resolution.discovered_information().len();
+            // Casing carries risk both ways: if the surveillance itself drew a police case, the
+            // organization knows it only through the surfaced after-action report. RECON's
+            // answer is quieter than PRESS's precinct watch: ask the institutional contact it
+            // keeps inside the precinct instead of putting more eyes on the street.
+            let self_heat_investigation = resolution.exposure().investigation();
+            metrics.self_heat_case_opened = self_heat_investigation.is_some();
             let mut burglary_intelligence =
                 BTreeSet::from([scenario.alternate_opportunity_information]);
             let mut learned_patrol_summary = None;
@@ -850,6 +857,93 @@ pub fn run_second_act(
             run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
             record_second_act_burglary_terminal(scenario, burglary, metrics);
             liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
+            // Close the self-inflicted-heat loop through the contact channel: the after-action
+            // on the casing reported an opened case, so leadership asks its precinct channel
+            // what detectives are doing rather than surveilling the precinct again. The
+            // fixture authors the detective's own knowledge from world truth; the acting
+            // decision, disclosure, and everything the organization learns flow through the
+            // canonical contact and information paths.
+            if let Some(investigation) = self_heat_investigation {
+                let neighborhood_name = scenario
+                    .state
+                    .world()
+                    .get_neighborhood(scenario.neighborhood)
+                    .expect("neighborhood must persist")
+                    .name()
+                    .to_owned();
+                let police_name = scenario
+                    .state
+                    .world()
+                    .get_organization(scenario.police)
+                    .expect("police organization must persist")
+                    .name()
+                    .to_owned();
+                let boss_name = scenario
+                    .state
+                    .world()
+                    .get_character(scenario.boss)
+                    .expect("boss must persist")
+                    .name()
+                    .to_owned();
+                let detective_name = scenario
+                    .state
+                    .world()
+                    .get_character(scenario.detective)
+                    .expect("detective must persist")
+                    .name()
+                    .to_owned();
+                if narrative {
+                    println!(
+                        "[DECIDE]  The after-action on our own casing says it drew attention: {police_name} opened a case out of that surveillance. Before anything else touches {neighborhood_name}, leadership uses the channel it keeps inside the precinct."
+                    );
+                    println!(
+                        "[CONTACT] {boss_name} quietly asks {detective_name} what {police_name} is doing about it."
+                    );
+                }
+                // The detective's own knowledge is fixture-authored from world truth; the
+                // disclosure derives the organization's copy through the canonical path.
+                let contact_knowledge = author_detective_case_knowledge(scenario, investigation)?;
+                let disclosure = validate_contact_disclosure(
+                    &scenario.state,
+                    scenario.police_contact,
+                    contact_knowledge,
+                )?
+                .commit(&mut scenario.state)?;
+                let disclosed = scenario
+                    .state
+                    .contacts()
+                    .get_disclosure(disclosure)
+                    .expect("committed contact disclosure must be queryable")
+                    .disclosed_information();
+                let record = scenario
+                    .state
+                    .intelligence()
+                    .get_information(disclosed)
+                    .expect("disclosed contact information must persist");
+                // The acting policy reads only the surfaced summary, exactly like the
+                // authority-sightline parse used by the precinct-watch channel.
+                metrics.self_heat_case_active =
+                    observe_authority_case_sightline_summary(record.summary());
+                if narrative {
+                    println!(
+                        "[LEARN]   {:?} / {:?}: {}",
+                        record.reliability(),
+                        record.specificity(),
+                        record.summary()
+                    );
+                    match metrics.self_heat_case_active {
+                        Some(true) => println!(
+                            "[VERIFY]  The channel confirms detectives are still developing the case our casing opened; {neighborhood_name} stays quiet past this window."
+                        ),
+                        Some(false) => println!(
+                            "[VERIFY]  The channel says {police_name} has already shelved the case our casing opened."
+                        ),
+                        None => println!(
+                            "[VERIFY]  The channel gave no dependable read on the case our casing opened."
+                        ),
+                    }
+                }
+            }
         }
         Strategy::Press => {
             // PRESS already discovered the second score during the cold-case wait and deliberately

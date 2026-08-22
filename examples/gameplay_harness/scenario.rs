@@ -1,5 +1,6 @@
 //! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
 
+use crimocracy::contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft};
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, CharacterId, InformationId, OperationId, OpportunityId};
 use crimocracy::core::state::AppState;
@@ -349,6 +350,25 @@ pub fn build_scenario(
     )?
     .commit(&mut state);
 
+    // The boss keeps an old friendship with the precinct's lead detective: the organization's
+    // standing Police-channel institutional contact. It is world state every branch can use;
+    // only the arcs that have a reason to ask actually do.
+    validate_set_relationship(
+        &state,
+        boss,
+        detective,
+        RelationshipDimensions {
+            trust: level(45),
+            respect: level(35),
+            fear: level(0),
+            affection: level(25),
+            dependence: level(5),
+            resentment: level(0),
+            debt: level(10),
+        },
+    )?
+    .commit(&mut state);
+
     validate_assign_mandate(
         &state,
         MandateDraft {
@@ -576,6 +596,15 @@ pub fn build_scenario(
         },
     )?
     .commit(&mut state)?;
+    let police_contact = validate_establish_contact(
+        &state,
+        InstitutionalContactDraft {
+            sponsor: player,
+            handler: boss,
+            contact: detective,
+        },
+    )?
+    .commit(&mut state)?;
     let enterprise = validate_establish_enterprise(
         registry,
         &state,
@@ -648,6 +677,7 @@ pub fn build_scenario(
         scout,
         danny_ferro,
         detective,
+        police_contact,
         opportunity_information,
         alternate_opportunity_information,
         enterprise,
@@ -719,14 +749,68 @@ pub fn observe_authority_case_sightline(
             if record.topic() != InformationTopic::LegalActivity {
                 return None;
             }
-            if record.summary().contains("actively developing the case") {
-                Some(true)
-            } else if record.summary().contains("shelved") {
-                Some(false)
-            } else {
-                None
-            }
+            observe_authority_case_sightline_summary(record.summary())
         })
+}
+
+/// Parses a player-visible case-activity summary into the sightline read: Some(true) means the
+/// authority is still visibly developing the known case, Some(false) that it appears shelved.
+/// Both counterintelligence channels (precinct surveillance and contact disclosure) phrase
+/// their summaries with these exact markers so the acting policy never needs hidden state.
+pub fn observe_authority_case_sightline_summary(summary: &str) -> Option<bool> {
+    if summary.contains("actively developing") {
+        Some(true)
+    } else if summary.contains("shelved") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Fixture-authored contact knowledge: what the precinct's lead detective personally knows
+/// about a case's activity. Like every authored source (Lena Orr's street rumor, the delivery
+/// clerk's observation), this is synthetic setup committed through the canonical information
+/// path — here conditioned on world truth so the channel never becomes an oracle that reports
+/// what the plot needs rather than what the institution knows. Everything downstream — the
+/// decision to ask, the disclosure derivation, what the organization learns — is production.
+pub fn author_detective_case_knowledge(
+    scenario: &mut Scenario,
+    investigation: crimocracy::core::id::InvestigationId,
+) -> Result<crimocracy::core::id::InformationId, Box<dyn Error>> {
+    let police_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.police)
+        .expect("police organization must persist")
+        .name()
+        .to_owned();
+    let case_still_active = scenario
+        .state
+        .legal()
+        .get_investigation(investigation)
+        .is_some_and(|record| record.status() == crimocracy::legal::InvestigationStatus::Active);
+    let summary = if case_still_active {
+        format!("{police_name} detectives are still actively developing the case opened by the second-score surveillance.")
+    } else {
+        format!(
+            "{police_name} has already shelved the case opened by the second-score surveillance."
+        )
+    };
+    Ok(validate_record_information(
+        &scenario.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(scenario.detective),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: Some(EntityRef::Organization(scenario.police)),
+            subject: EntityRef::Organization(scenario.police),
+            observed_at: scenario.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Specific,
+            summary,
+        },
+    )?
+    .commit(&mut scenario.state)?)
 }
 
 pub fn authorize_burglary(

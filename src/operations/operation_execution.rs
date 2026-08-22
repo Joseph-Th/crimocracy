@@ -336,7 +336,14 @@ pub(crate) fn decide_operation_resolution(
         resolve_property_proceeds(registry, state, record, objective_outcome)?;
     let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
     let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
-    let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
+    // Every after-action summary leads with the operation title so executive-brief entries stay
+    // identifiable when several operations resolve into the same brief window.
+    let mut summary = format!("{}: ", record.title());
+    summary.push_str(&build_after_action_summary(
+        objective_outcome,
+        factors,
+        exposure.level(),
+    ));
     if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&unliquidated_property_clause(
@@ -1831,10 +1838,11 @@ pub(crate) fn liquidated_property_clause(
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
 /// outcome and the factors that actually moved it. Neutral lines (normal execution window, no
-/// exposure, neutral variance, negligible police presence) and strong-but-expected crew quality
-/// on a clean job are omitted rather than recited, so attention goes to what deviates from a
-/// routine job: weak capability bands, non-achieved outcomes that deserve explanation, adverse
-/// pressure, and thin planning intelligence.
+/// exposure, negligible police presence) and strong-but-expected crew quality on a clean job are
+/// omitted rather than recited, so attention goes to what deviates from a routine job: weak
+/// capability bands, non-achieved outcomes that deserve explanation, adverse pressure, and thin
+/// planning intelligence. Luck commentary is kept only when it explains a degraded result; on an
+/// achieved job the variance already shows in the outcome, so reciting it would be noise.
 fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
@@ -1922,20 +1930,20 @@ fn build_after_action_summary(
     if factors.time_pressure() > 0 {
         parts.push("The completion deadline compressed the execution window.".to_owned());
     }
-    match factors.variance() {
-        value if value < 0 => parts.push(match outcome {
-            OperationObjectiveOutcome::Achieved => {
-                "Unplanned circumstances were adverse, but the crew overcame them.".to_owned()
-            }
-            OperationObjectiveOutcome::Partial => {
-                "Adverse unplanned circumstances reduced the result.".to_owned()
-            }
-            OperationObjectiveOutcome::Failed => {
-                "Adverse unplanned circumstances contributed to the failure.".to_owned()
-            }
-        }),
-        0 => {}
-        _ => parts.push("Favorable unplanned circumstances improved the result.".to_owned()),
+    if outcome != OperationObjectiveOutcome::Achieved {
+        match factors.variance() {
+            value if value < 0 => parts.push(match outcome {
+                OperationObjectiveOutcome::Partial => {
+                    "Adverse unplanned circumstances reduced the result.".to_owned()
+                }
+                OperationObjectiveOutcome::Failed => {
+                    "Adverse unplanned circumstances contributed to the failure.".to_owned()
+                }
+                OperationObjectiveOutcome::Achieved => unreachable!("excluded above"),
+            }),
+            0 => {}
+            _ => parts.push("Favorable unplanned circumstances improved the result.".to_owned()),
+        }
     }
     match exposure {
         OperationExposureLevel::None => {}
