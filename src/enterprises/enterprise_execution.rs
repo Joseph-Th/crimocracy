@@ -229,6 +229,9 @@ struct EnterpriseCycleEconomics {
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+    /// Street-heat portion of `operating_cost`. Nonzero heat makes the cycle notable so the
+    /// organization hears why its racket got more expensive while police work stays heavy.
+    investigation_heat: Money,
     attention: AttentionClass,
 }
 
@@ -260,6 +263,9 @@ impl EnterpriseCyclePlan {
     }
     pub fn variance_basis_points(&self) -> i16 {
         self.economics.variance_basis_points
+    }
+    pub fn investigation_heat(&self) -> Money {
+        self.economics.investigation_heat
     }
     pub fn attention(&self) -> AttentionClass {
         self.economics.attention
@@ -325,7 +331,7 @@ pub fn decide_enterprise_cycle(
         resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
     let gross_revenue =
         apply_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
-    let operating_cost = resolve_operating_cost(
+    let cost = resolve_operating_cost(
         state,
         enterprise,
         economics,
@@ -333,6 +339,7 @@ pub fn decide_enterprise_cycle(
         record.location(),
         record.supporting_businesses().len(),
     )?;
+    let operating_cost = cost.total;
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
@@ -341,9 +348,11 @@ pub fn decide_enterprise_cycle(
     if let Some(policy_kind) = definition.policy() {
         resolve_policy_for_manager(state, record.manager(), policy_kind)?;
     }
-    let attention = if i32::from(variance_basis_points).unsigned_abs()
-        >= u32::from(economics.notable_variance_basis_points())
-    {
+    let variance_notable = i32::from(variance_basis_points).unsigned_abs()
+        >= u32::from(economics.notable_variance_basis_points());
+    // A hot district taxes the racket even on a normal-variance night; the manager reports that
+    // cost pressure rather than letting the racket quietly underperform its expectations.
+    let attention = if variance_notable || cost.investigation_heat > Money::ZERO {
         AttentionClass::Notable
     } else {
         AttentionClass::Routine
@@ -378,6 +387,7 @@ pub fn decide_enterprise_cycle(
             operating_cost,
             net_cash,
             variance_basis_points,
+            investigation_heat: cost.investigation_heat,
             attention,
         },
         accounts: EnterpriseCycleAccounts {
@@ -480,6 +490,7 @@ impl ValidatedEnterpriseCycle {
                     operating_cost: self.plan.economics.operating_cost,
                     net_cash: self.plan.economics.net_cash,
                     variance_basis_points: self.plan.economics.variance_basis_points,
+                    investigation_heat: self.plan.economics.investigation_heat,
                 },
                 artifacts: super::EnterpriseCycleArtifacts {
                     attention: self.plan.economics.attention,
@@ -588,13 +599,7 @@ pub fn validate_enterprise_cycle_plan(
                 observed_at: plan.snapshot.occurred_at,
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
-                summary: format!(
-                    "Enterprise cycle reported gross {} cents, operating cost {} cents, net cash {} cents, with variance {} basis points.",
-                    plan.economics.gross_revenue.cents(),
-                    plan.economics.operating_cost.cents(),
-                    plan.economics.net_cash.cents(),
-                    plan.economics.variance_basis_points,
-                ),
+                summary: build_cycle_report_summary(state, record, &plan.economics),
             },
         )?),
         AttentionClass::Routine => None,
@@ -1125,6 +1130,13 @@ fn resolve_gross_before_variance(
     Ok(gross)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OperatingCostBreakdown {
+    total: Money,
+    /// Portion of `total` caused by active investigations in the enterprise's district.
+    investigation_heat: Money,
+}
+
 fn resolve_operating_cost(
     state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
@@ -1132,7 +1144,7 @@ fn resolve_operating_cost(
     profile: NeighborhoodProfile,
     location: EnterpriseLocation,
     supporting_business_count: usize,
-) -> Result<Money, EnterpriseError> {
+) -> Result<OperatingCostBreakdown, EnterpriseError> {
     let base = economics.base_operating_cost().checked_add(weighted_rating(
         enterprise,
         economics.police_cost_per_point(),
@@ -1144,9 +1156,61 @@ fn resolve_operating_cost(
         .support_surcharge_per_business()
         .checked_mul(i64::try_from(supporting_business_count).expect("usize must fit i64"))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    base.checked_add(heat)
-        .and_then(|total| total.checked_add(support_surcharge))
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
+    let total = base
+        .checked_add(heat)
+        .and_then(|sum| sum.checked_add(support_surcharge))
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    Ok(OperatingCostBreakdown {
+        total,
+        investigation_heat: heat,
+    })
+}
+
+/// The manager's cycle report to leadership. Heat-bearing cycles must say *why* cost rose —
+/// the crew pays the street premium while police work stays heavy in their district — so the
+/// player can connect their own exposed operations to the racket's shrinking margin without
+/// any hidden case detail leaking into organization knowledge.
+fn build_cycle_report_summary(
+    state: &crate::core::state::AppState,
+    record: &crate::enterprises::EnterpriseRecord,
+    economics: &EnterpriseCycleEconomics,
+) -> String {
+    let base = format!(
+        "Enterprise cycle reported gross {} cents, operating cost {} cents",
+        economics.gross_revenue.cents(),
+        economics.operating_cost.cents(),
+    );
+    let heat = if economics.investigation_heat > Money::ZERO {
+        format!(
+            ", including a {}-cent street surcharge while police work stays heavy in {}",
+            economics.investigation_heat.cents(),
+            resolve_enterprise_district_name(state, record),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{base}{heat}, net cash {} cents, with variance {} basis points.",
+        economics.net_cash.cents(),
+        economics.variance_basis_points,
+    )
+}
+
+fn resolve_enterprise_district_name(
+    state: &crate::core::state::AppState,
+    record: &crate::enterprises::EnterpriseRecord,
+) -> String {
+    let neighborhood = match record.location() {
+        EnterpriseLocation::Neighborhood(id) => Some(id),
+        EnterpriseLocation::Business(business_id) => state
+            .world
+            .get_business(business_id)
+            .map(|business| business.neighborhood()),
+    };
+    neighborhood
+        .and_then(|id| state.world.get_neighborhood(id))
+        .map(|profile| profile.name().to_owned())
+        .unwrap_or_else(|| "the district".to_owned())
 }
 
 fn resolve_investigation_heat_surcharge(
@@ -1623,42 +1687,70 @@ mod tests {
             .commit(&mut fixture.state)
             .expect("incident intake should commit");
         };
-        let due_operating_cost = |fixture: &mut EnterpriseFixture| {
+        let due_cycle = |fixture: &mut EnterpriseFixture| {
             fixture
                 .state
                 .advance_clock(SimDuration::from_minutes(1_440));
             let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
                 .expect("due enterprise cycle should resolve");
-            let cost = plan.operating_cost();
+            let (cost, heat, attention) = (
+                plan.operating_cost(),
+                plan.investigation_heat(),
+                plan.attention(),
+            );
             validate_enterprise_cycle_plan(&fixture.state, plan)
                 .expect("cycle plan should validate")
                 .commit(&mut fixture.state)
                 .expect("cycle settlement should commit");
-            cost
+            (cost, heat, attention)
         };
 
-        let baseline = due_operating_cost(&mut fixture);
+        let (baseline_cost, baseline_heat, baseline_attention) = due_cycle(&mut fixture);
+        assert_eq!(baseline_heat, Money::ZERO);
+        assert_eq!(baseline_attention, AttentionClass::Routine);
         // A case targeting another district of the same authority must not tax this racket.
         open_heat_case(
             &mut fixture,
             "Dock ward inquiry",
             EntityRef::Neighborhood(other_neighborhood),
         );
-        let cross_district = due_operating_cost(&mut fixture);
-        assert_eq!(cross_district, baseline);
-        // A case targeting the enterprise's own district raises the daily cost by $50.
+        let (cross_district_cost, cross_district_heat, _) = due_cycle(&mut fixture);
+        assert_eq!(cross_district_cost, baseline_cost);
+        assert_eq!(cross_district_heat, Money::ZERO);
+        // A case targeting the enterprise's own district raises the daily cost by $50, becomes
+        // notable, and records a player-visible report explaining the street surcharge.
         open_heat_case(
             &mut fixture,
             "Market ward inquiry",
             EntityRef::Neighborhood(local_neighborhood),
         );
-        let local = due_operating_cost(&mut fixture);
+        let (local_cost, local_heat, local_attention) = due_cycle(&mut fixture);
         assert_eq!(
-            local,
-            cross_district
+            local_cost,
+            cross_district_cost
                 .checked_add(Money::from_cents(5_000))
                 .expect("heat surcharge arithmetic should not overflow")
         );
+        assert_eq!(local_heat, Money::from_cents(5_000));
+        assert_eq!(local_attention, AttentionClass::Notable);
+        let hot_cycle = fixture
+            .state
+            .enterprises()
+            .cycles_for(enterprise)
+            .max_by_key(|cycle| cycle.occurred_at())
+            .expect("hot cycle should persist");
+        let hot_information = fixture
+            .state
+            .intelligence()
+            .get_information(
+                hot_cycle
+                    .information()
+                    .expect("hot cycle must carry its report"),
+            )
+            .expect("cycle report information must persist");
+        assert!(hot_information
+            .summary()
+            .contains("5000-cent street surcharge while police work stays heavy"));
         validate_state(&fixture.state).expect("district heat state should validate");
         validate_invariants(&fixture.state);
     }

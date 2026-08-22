@@ -19,12 +19,12 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Intelligence | Provenance-bearing information, typed topics, holder indexes, transfers, lineage | `src/intelligence/` via `intelligence_system` |
 | Reports and history | Player-facing reports, executive briefs, financial reports, entity-linked campaign events | `src/reports/` and `src/history/` |
 | Finance | Typed accounts and balanced multi-account ledger | `src/finance/` via `finance_system` |
-| Operations | Semantic plans, objectives, approaches, roles, participant reservations, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, venue-sensitive property disposition | `src/operations/` via `operation_system` and `operation_execution` |
+| Operations | Semantic plans, objectives, approaches, roles, participant reservations, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, recent-take depletion on repeated targets, venue-sensitive property disposition | `src/operations/` via `operation_system` and `operation_execution` |
 | Opportunities | Information-backed discovery and open/dismissed/expired/converted lifecycle | `src/opportunities/` via `opportunity_system` |
 | Decisions | Durable typed requests, recipient/context indexes, versioned resolution, attention classes | `src/decisions/` via `decision_system` |
 | Delegation | Organization-owned mandates, responsibility scopes, policy overrides, budget authority, revision, revocation, dependency checks | `src/delegation/` via `delegation_system` |
 | Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment | `src/recruitment/` via `recruitment_system` |
-| Enterprises | Routine criminal enterprises, authored economics, manager authority, district-heat surcharge from active investigations, scheduled cycles, balanced settlement, financial reporting | `src/enterprises/` via `enterprise_execution` and reporting modules |
+| Enterprises | Routine criminal enterprises, authored economics, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement, financial reporting | `src/enterprises/` via `enterprise_execution` and reporting modules |
 | Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting | `src/economy/` via `business_economy_system` and reporting modules |
 | Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing, detective work, cold cases, arrests/custody, representation, prosecution referral, witnesses, informants | `src/legal/` via named legal system modules |
 | Institutional contacts | Person-mediated Police, Legal, Political, Press, Labor, and Professional channels with provenance-preserving disclosure | `src/contacts/` via `contact_system` |
@@ -57,6 +57,6 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 The current authored content revision is 19.
 
-The current in-memory state schema version is 44.
+The current in-memory state schema version is 45.
 
 The compiled operation vocabulary contains only constraints and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.

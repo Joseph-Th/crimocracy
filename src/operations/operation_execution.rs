@@ -197,7 +197,7 @@ struct OperationResolutionOutcomePlan {
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
-    property_proceeds: Option<OperationPropertyProceedsRecord>,
+    property_proceeds_plan: PropertyProceedsPlan,
     surveillance: Option<SurveillanceIntelligencePlan>,
 }
 
@@ -312,15 +312,19 @@ pub(crate) fn decide_operation_resolution(
         &police_snapshot,
         police_response_arrived,
     );
-    let property_proceeds =
+    let property_proceeds_plan =
         calculate_property_proceeds(registry, state, record, objective_outcome)?;
     let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
     let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
-    if let Some(proceeds) = property_proceeds {
+    if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&unliquidated_property_clause(
             proceeds.estimated_value().cents(),
         ));
+        if property_proceeds_plan.depleted_by_recent_take {
+            summary.push(' ');
+            summary.push_str(DEPLETED_TAKE_CLAUSE);
+        }
     }
     if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
     {
@@ -357,7 +361,7 @@ pub(crate) fn decide_operation_resolution(
             execution_margin,
             factors,
             exposure,
-            property_proceeds,
+            property_proceeds_plan,
             surveillance,
         },
         narrative: OperationResolutionNarrative {
@@ -476,7 +480,7 @@ impl ValidatedOperationResolution {
                 execution_margin: self.plan.outcome.execution_margin,
                 factors: self.plan.outcome.factors,
                 exposure,
-                property_proceeds: self.plan.outcome.property_proceeds,
+                property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
                 discovered_information,
                 legal_activity_information,
                 after_action_information,
@@ -500,7 +504,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .expect("validated resolution operation must exist");
     let expected_property_proceeds =
         calculate_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
-    if plan.outcome.property_proceeds != expected_property_proceeds {
+    if plan.outcome.property_proceeds_plan != expected_property_proceeds {
         return Err(OperationResolutionError::StalePropertyProceedsContext {
             operation: plan.snapshot.operation,
         });
@@ -1313,27 +1317,49 @@ pub(crate) fn resolve_objective_outcome(
     }
 }
 
+/// A successful take from the same business inside this window finds only partially replaced
+/// stock, so repeat scores on one target decay instead of yielding an identical haul forever.
+const RECENT_HIT_WINDOW_MINUTES: i64 = 3 * 24 * 60;
+/// Each recent prior successful take leaves this share of the remaining loot value.
+const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PropertyProceedsPlan {
+    pub(crate) proceeds: Option<OperationPropertyProceedsRecord>,
+    /// True when a recent successful take on the same target reduced this haul.
+    pub(crate) depleted_by_recent_take: bool,
+}
+
 pub(crate) fn calculate_property_proceeds(
     registry: &Registry,
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     outcome: OperationObjectiveOutcome,
-) -> Result<Option<OperationPropertyProceedsRecord>, OperationResolutionError> {
+) -> Result<PropertyProceedsPlan, OperationResolutionError> {
     let Some(definition) = registry
         .get_operation(operation.kind())
         .execution()
         .property_proceeds()
     else {
-        return Ok(None);
+        return Ok(PropertyProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
     };
     let OperationObjective::AcquireProperty {
         target: EntityRef::Business(business),
     } = operation.objective()
     else {
-        return Ok(None);
+        return Ok(PropertyProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
     };
     if outcome == OperationObjectiveOutcome::Failed {
-        return Ok(None);
+        return Ok(PropertyProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
     }
 
     let gross = resolve_business_gross_potential(registry, state, *business)?;
@@ -1343,7 +1369,7 @@ pub(crate) fn calculate_property_proceeds(
             operation: operation.id(),
         })?
         / 10_000_i128;
-    let value = match outcome {
+    let mut value = match outcome {
         OperationObjectiveOutcome::Achieved => full_value,
         OperationObjectiveOutcome::Partial => {
             full_value
@@ -1357,17 +1383,85 @@ pub(crate) fn calculate_property_proceeds(
             unreachable!("failed property operations return early")
         }
     };
+    // Stock taken by a recent score has not been fully replaced; each prior hit inside the
+    // recency window multiplies the remaining take down so farming one target decays. Depletion
+    // is evaluated at the take's own resolution instant — a committed operation must keep
+    // validating against exactly the take history it saw when it resolved.
+    let reference_at = operation
+        .resolution()
+        .map(|resolution| resolution.resolved_at())
+        .unwrap_or_else(|| state.now());
+    let recent_hits = count_recent_successful_takes(
+        state,
+        *business,
+        reference_at,
+        RECENT_HIT_WINDOW_MINUTES,
+        Some(operation.id()),
+    );
+    for _ in 0..recent_hits {
+        value = value.checked_mul(RECENT_HIT_VALUE_BASIS_POINTS).ok_or(
+            OperationResolutionError::PropertyProceedsOverflow {
+                operation: operation.id(),
+            },
+        )? / 10_000_i128;
+    }
     let cents =
         i64::try_from(value).map_err(|_| OperationResolutionError::PropertyProceedsOverflow {
             operation: operation.id(),
         })?;
     if cents <= 0 {
-        return Ok(None);
+        return Ok(PropertyProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: recent_hits > 0,
+        });
     }
-    Ok(Some(OperationPropertyProceedsRecord::new(
-        EntityRef::Business(*business),
-        crate::finance::Money::from_cents(cents),
-    )))
+    Ok(PropertyProceedsPlan {
+        proceeds: Some(OperationPropertyProceedsRecord::new(
+            EntityRef::Business(*business),
+            crate::finance::Money::from_cents(cents),
+        )),
+        depleted_by_recent_take: recent_hits > 0,
+    })
+}
+
+/// Counts completed, property-bearing successes against `business` whose resolution happened
+/// within `window_minutes` before `at`. Ordered scans over authoritative records keep this
+/// deterministic; no separate depletion index is maintained.
+fn count_recent_successful_takes(
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+    at: SimTime,
+    window_minutes: i64,
+    exclude: Option<crate::core::id::OperationId>,
+) -> u32 {
+    let at_minutes = i64::try_from(at.as_minutes()).unwrap_or(i64::MAX);
+    state
+        .operations
+        .operations_with_status(OperationStatus::Completed)
+        .filter(|record| Some(record.id()) != exclude)
+        .filter(|record| {
+            matches!(
+                record.objective(),
+                OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(target),
+                } if *target == business
+            )
+        })
+        .filter_map(|record| record.resolution())
+        .filter(|resolution| {
+            matches!(
+                resolution.objective_outcome(),
+                OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
+            )
+        })
+        .filter(|resolution| {
+            let resolved_minutes = i64::try_from(resolution.resolved_at().as_minutes())
+                .expect("simulation minute counts must fit i64");
+            resolved_minutes <= at_minutes && at_minutes - resolved_minutes < window_minutes
+        })
+        .count()
+        .try_into()
+        .expect("operation counts must fit u32")
 }
 
 /// The canonical after-action phrasing for a yet-unliquidated operation property hold. The
@@ -1378,6 +1472,11 @@ pub(crate) fn unliquidated_property_clause(est_value_cents: i64) -> String {
         "The crew secured property with an estimated held value of {est_value_cents} cents; it remains unliquidated."
     )
 }
+
+/// After-action phrasing when the same target was successfully hit recently: the haul came in
+/// light because the target had not fully replaced what an earlier score already took.
+const DEPLETED_TAKE_CLAUSE: &str =
+    "The take came in lighter than usual; this target has not fully replaced stock from a recent score.";
 
 /// The after-action phrasing used when held property has since been liquidated through a resale
 /// venue. Must stay coherent with `unliquidated_property_clause` for the brief's in-place refresh.
@@ -1391,99 +1490,108 @@ pub(crate) fn liquidated_property_clause(
     )
 }
 
+/// Composes the after-action narrative from the resolution factors. The report leads with the
+/// outcome and the factors that actually moved it: neutral lines (normal execution window, no
+/// exposure, neutral variance or approach, negligible police presence, zero-coverage planning
+/// intelligence) are omitted rather than recited, so attention goes to what deviates from a
+/// routine job.
 fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
 ) -> String {
-    let leadership = factors
-        .leader_capability()
-        .map(|rating| {
-            format!(
-                "Leadership coordination was {}.",
-                band_label(rating.qualitative_band())
-            )
-        })
-        .unwrap_or_else(|| {
-            "Leadership had no demonstrated capability for the execution.".to_owned()
-        });
-    let police = match factors.target_police_presence() {
-        Some(rating) if rating.value() >= 65 => {
-            "High local police presence materially increased execution pressure."
-        }
-        Some(rating) if rating.value() >= 35 => {
-            "Local police presence added meaningful execution pressure."
-        }
-        Some(_) => "Local police presence created limited execution pressure.",
-        None => "No location-based police pressure could be established from the operation target.",
-    };
-    let response = if factors.police_response_arrived() {
-        "Law-enforcement response reached the target before the operation ended."
+    let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
+    parts.push(format!(
+        "Assigned-role competence was {}.",
+        band_label(factors.role_capability_average().qualitative_band())
+    ));
+    if let Some(rating) = factors.leader_capability() {
+        parts.push(format!(
+            "Leadership coordination was {}.",
+            band_label(rating.qualitative_band())
+        ));
     } else {
-        "No law-enforcement response reached the target before the operation ended."
-    };
-    let covered = factors.intelligence_topics_covered();
-    let relevant = factors.intelligence_topics_relevant();
-    let coverage = if covered == 0 {
-        format!("Planning intelligence covered 0 of {relevant} relevant areas")
-    } else if covered == relevant {
-        format!("Planning intelligence covered all {relevant} relevant areas")
-    } else {
-        format!("Planning intelligence covered {covered} of {relevant} relevant areas")
-    };
-    let intelligence = match factors.intelligence_adjustment() {
+        parts.push("Leadership had no demonstrated capability for the execution.".to_owned());
+    }
+    // Police pressure is reported when it materially shaped the job or when the organization
+    // could not establish it at all; light presence was not worth the crew's attention.
+    match (
+        factors.target_police_presence(),
+        factors.police_response_arrived(),
+    ) {
+        (presence, true) => {
+            if presence.is_some_and(|rating| rating.value() >= 65) {
+                parts.push(
+                    "High local police presence materially increased execution pressure."
+                        .to_owned(),
+                );
+            }
+            parts.push(
+                "Law-enforcement response reached the target before the operation ended."
+                    .to_owned(),
+            );
+        }
+        (Some(rating), false) if rating.value() >= 65 => parts
+            .push("High local police presence materially increased execution pressure.".to_owned()),
+        (None, false) => parts.push(
+            "No location-based police pressure could be established from the operation target."
+                .to_owned(),
+        ),
+        (Some(_), false) => {}
+    }
+    if factors.intelligence_topics_covered() > 0 {
+        let covered = factors.intelligence_topics_covered();
+        let relevant = factors.intelligence_topics_relevant();
+        let coverage = if covered == relevant {
+            format!("Planning intelligence covered all {relevant} relevant areas")
+        } else {
+            format!("Planning intelligence covered {covered} of {relevant} relevant areas")
+        };
+        parts.push(format!(
+            "{coverage}; the available reports reduced execution uncertainty."
+        ));
+    }
+    match factors.approach_adjustment() {
         value if value < 0 => {
-            format!("{coverage}; the available reports reduced execution uncertainty.")
+            parts.push("The selected approach reduced execution difficulty.".to_owned())
         }
-        0 => format!("{coverage} and provided no material execution advantage."),
-        _ => unreachable!("operation intelligence never increases authored difficulty"),
-    };
-    let approach = match factors.approach_adjustment() {
-        value if value < 0 => "The selected approach reduced execution difficulty.",
-        0 => "The selected approach was neutral to execution difficulty.",
-        _ => "The selected approach increased execution difficulty.",
-    };
-    let deadline = if factors.time_pressure() == 0 {
-        "The plan had its normal execution window."
-    } else {
-        "The completion deadline compressed the execution window."
-    };
-    let circumstances = match (outcome, factors.variance()) {
-        (OperationObjectiveOutcome::Achieved, value) if value < 0 => {
-            "Unplanned circumstances were adverse, but the crew overcame them."
+        value if value > 0 => {
+            parts.push("The selected approach increased execution difficulty.".to_owned())
         }
-        (OperationObjectiveOutcome::Partial, value) if value < 0 => {
-            "Adverse unplanned circumstances reduced the result."
+        _ => {}
+    }
+    if factors.time_pressure() > 0 {
+        parts.push("The completion deadline compressed the execution window.".to_owned());
+    }
+    match factors.variance() {
+        value if value < 0 => parts.push(match outcome {
+            OperationObjectiveOutcome::Achieved => {
+                "Unplanned circumstances were adverse, but the crew overcame them.".to_owned()
+            }
+            OperationObjectiveOutcome::Partial => {
+                "Adverse unplanned circumstances reduced the result.".to_owned()
+            }
+            OperationObjectiveOutcome::Failed => {
+                "Adverse unplanned circumstances contributed to the failure.".to_owned()
+            }
+        }),
+        0 => {}
+        _ => parts.push("Favorable unplanned circumstances improved the result.".to_owned()),
+    }
+    match exposure {
+        OperationExposureLevel::None => {}
+        OperationExposureLevel::Trace => {
+            parts.push("The crew observed limited trace exposure.".to_owned())
         }
-        (OperationObjectiveOutcome::Failed, value) if value < 0 => {
-            "Adverse unplanned circumstances contributed to the failure."
-        }
-        (_, 0) => "Unplanned circumstances were neutral.",
-        (_, _) => "Favorable unplanned circumstances improved the result.",
-    };
-    let exposure = match exposure {
-        OperationExposureLevel::None => "No material operational exposure was observed.",
-        OperationExposureLevel::Trace => "The crew observed limited trace exposure.",
-        OperationExposureLevel::Witnessed => {
+        OperationExposureLevel::Witnessed => parts.push(
             "The operation appears to have been witnessed or otherwise clearly observed."
-        }
-        OperationExposureLevel::Identifying => {
-            "The crew believes at least one participant may have been identifiable."
-        }
-    };
-    format!(
-        "Objective {}. Assigned-role competence was {}. {} {} {} {} {} {} {} {}",
-        outcome_label(outcome),
-        band_label(factors.role_capability_average().qualitative_band()),
-        leadership,
-        intelligence,
-        police,
-        response,
-        approach,
-        deadline,
-        circumstances,
-        exposure,
-    )
+                .to_owned(),
+        ),
+        OperationExposureLevel::Identifying => parts.push(
+            "The crew believes at least one participant may have been identifiable.".to_owned(),
+        ),
+    }
+    parts.join(" ")
 }
 
 fn outcome_label(outcome: OperationObjectiveOutcome) -> &'static str {
@@ -2018,6 +2126,71 @@ mod tests {
             OperationExposureLevel::None,
         );
         assert!(failed.contains("contributed to the failure"));
+    }
+
+    #[test]
+    fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
+        let neutral = OperationResolutionFactors {
+            role_capability_average: Rating::try_new(80).expect("fixture rating should be valid"),
+            leader_capability: Some(Rating::try_new(80).expect("fixture rating should be valid")),
+            intelligence_quality: Rating::try_new(0).expect("fixture rating should be valid"),
+            intelligence_adjustment: 0,
+            intelligence_topics_covered: 0,
+            intelligence_topics_relevant: 4,
+            target_police_presence: None,
+            police_response_arrived: false,
+            approach_adjustment: 0,
+            time_pressure: 0,
+            variance: 0,
+        };
+
+        // A routine clean job reports the outcome and crew quality without reciting every
+        // neutral factor as a sentence.
+        let routine = build_after_action_summary(
+            OperationObjectiveOutcome::Achieved,
+            neutral,
+            OperationExposureLevel::None,
+        );
+        assert!(routine.starts_with("Objective achieved."));
+        assert!(!routine.contains("normal execution window"));
+        assert!(!routine.contains("no material execution advantage"));
+        assert!(!routine.contains("neutral to execution difficulty"));
+        assert!(!routine.contains("Unplanned circumstances were neutral"));
+        assert!(!routine.contains("No material operational exposure"));
+        assert!(!routine.contains("limited execution pressure"));
+        assert!(routine.contains("No location-based police pressure could be established"));
+
+        // Deviations stay: covered intelligence, compressed deadlines, adverse circumstances,
+        // and real exposure each earn their sentence.
+        let informed = OperationResolutionFactors {
+            intelligence_topics_covered: 2,
+            ..neutral
+        };
+        let planned = build_after_action_summary(
+            OperationObjectiveOutcome::Achieved,
+            informed,
+            OperationExposureLevel::None,
+        );
+        assert!(planned.contains("Planning intelligence covered 2 of 4 relevant areas"));
+        assert!(planned.contains("reduced execution uncertainty"));
+
+        let pressured = OperationResolutionFactors {
+            time_pressure: 3,
+            ..neutral
+        };
+        let rushed = build_after_action_summary(
+            OperationObjectiveOutcome::Achieved,
+            pressured,
+            OperationExposureLevel::None,
+        );
+        assert!(rushed.contains("compressed the execution window"));
+
+        let witnessed = build_after_action_summary(
+            OperationObjectiveOutcome::Partial,
+            neutral,
+            OperationExposureLevel::Witnessed,
+        );
+        assert!(witnessed.contains("witnessed or otherwise clearly observed"));
     }
 
     #[test]
@@ -3518,7 +3691,8 @@ mod tests {
         );
         let achieved_proceeds = achieved_plan
             .outcome
-            .property_proceeds
+            .property_proceeds_plan
+            .proceeds
             .expect("achieved property acquisition should create held proceeds");
         assert_eq!(achieved_proceeds.estimated_value().cents(), 56_400);
         assert!(achieved_plan
@@ -3679,7 +3853,8 @@ mod tests {
         assert_eq!(
             partial_plan
                 .outcome
-                .property_proceeds
+                .property_proceeds_plan
+                .proceeds
                 .expect("partial property acquisition should create reduced held proceeds")
                 .estimated_value()
                 .cents(),
@@ -3695,6 +3870,179 @@ mod tests {
             .expect("partial property proceeds should remain registry-valid");
         validate_invariants(&achieved_state);
         validate_invariants(&partial_state);
+    }
+
+    #[test]
+    fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
+        let (registry, mut state, _police, _neighborhood, first) =
+            make_exposed_business_operation_fixture(false);
+        let organization = state
+            .operations()
+            .get_operation(first)
+            .expect("first operation should persist")
+            .responsible_organization();
+        let (business, leader, specialist) = {
+            let record = state
+                .operations()
+                .get_operation(first)
+                .expect("first operation should persist");
+            let OperationObjective::AcquireProperty {
+                target: EntityRef::Business(business),
+            } = record.objective()
+            else {
+                panic!("fixture operation must target business property");
+            };
+            let specialist = *record
+                .roles()
+                .get(&RoleKind::EntrySpecialist)
+                .expect("fixture entry specialist should persist");
+            (*business, record.leader(), specialist)
+        };
+
+        let authorize_follow_up =
+            |registry: &Registry, state: &mut AppState, title: &str| -> OperationId {
+                validate_authorize_operation(
+                    registry,
+                    state,
+                    OperationDraft {
+                        title: title.to_owned(),
+                        kind: OperationKind::Burglary,
+                        responsible_organization: organization,
+                        leader,
+                        objective: OperationObjective::AcquireProperty {
+                            target: EntityRef::Business(business),
+                        },
+                        approach: OperationApproach::Covert,
+                        roles: BTreeMap::from([
+                            (RoleKind::Coordinator, leader),
+                            (RoleKind::EntrySpecialist, specialist),
+                        ]),
+                        intelligence: BTreeSet::new(),
+                        constraints: Vec::new(),
+                        contingencies: Vec::new(),
+                        scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+                    },
+                )
+                .expect("follow-up burglary should validate")
+                .commit(state)
+                .expect("follow-up burglary should commit")
+            };
+
+        let resolve_achieved = |registry: &Registry,
+                                state: &mut AppState,
+                                operation: OperationId|
+         -> OperationResolutionPlan {
+            run_tick(registry, state);
+            state.advance_clock(SimDuration::from_minutes(45));
+            let plan = decide_operation_resolution(
+                registry,
+                state,
+                operation,
+                OperationResolutionRandomness::new(12, 0),
+            )
+            .expect("favorable property operation should resolve");
+            assert_eq!(
+                plan.outcome.objective_outcome,
+                OperationObjectiveOutcome::Achieved
+            );
+            validate_operation_resolution_plan(registry, state, plan.clone())
+                .expect("resolution should validate")
+                .commit(state)
+                .expect("resolution should commit");
+            plan
+        };
+
+        // The first take yields full value with no depletion note.
+        run_tick(&registry, &mut state);
+        assert_eq!(
+            state.operations().get_operation(first).map(|r| r.status()),
+            Some(OperationStatus::InProgress)
+        );
+        state.advance_clock(SimDuration::from_minutes(45));
+        let first_plan = decide_operation_resolution(
+            &registry,
+            &state,
+            first,
+            OperationResolutionRandomness::new(12, 0),
+        )
+        .expect("first take should resolve");
+        assert_eq!(
+            first_plan.outcome.objective_outcome,
+            OperationObjectiveOutcome::Achieved
+        );
+        assert_eq!(
+            first_plan
+                .outcome
+                .property_proceeds_plan
+                .proceeds
+                .as_ref()
+                .expect("first take should create proceeds")
+                .estimated_value()
+                .cents(),
+            56_400
+        );
+        assert!(
+            !first_plan
+                .outcome
+                .property_proceeds_plan
+                .depleted_by_recent_take
+        );
+        assert!(!first_plan.narrative.summary.contains("lighter than usual"));
+        validate_operation_resolution_plan(&registry, &state, first_plan)
+            .expect("first take should validate")
+            .commit(&mut state)
+            .expect("first take should commit");
+
+        // An immediate second score on the same target finds partially replaced stock.
+        let second = authorize_follow_up(&registry, &mut state, "Repeat burglary");
+        let second_plan = resolve_achieved(&registry, &mut state, second);
+        assert_eq!(
+            second_plan
+                .outcome
+                .property_proceeds_plan
+                .proceeds
+                .as_ref()
+                .expect("second take should create reduced proceeds")
+                .estimated_value()
+                .cents(),
+            28_200
+        );
+        assert!(
+            second_plan
+                .outcome
+                .property_proceeds_plan
+                .depleted_by_recent_take
+        );
+        assert!(second_plan.narrative.summary.contains("lighter than usual"));
+
+        // After the recency window passes the target stocks back up to full value.
+        state.advance_clock(SimDuration::from_minutes(
+            u32::try_from(RECENT_HIT_WINDOW_MINUTES)
+                .expect("recency window must fit simulation minutes"),
+        ));
+        let third = authorize_follow_up(&registry, &mut state, "Recovered burglary");
+        let third_plan = resolve_achieved(&registry, &mut state, third);
+        assert_eq!(
+            third_plan
+                .outcome
+                .property_proceeds_plan
+                .proceeds
+                .as_ref()
+                .expect("recovered take should create full proceeds")
+                .estimated_value()
+                .cents(),
+            56_400
+        );
+        assert!(
+            !third_plan
+                .outcome
+                .property_proceeds_plan
+                .depleted_by_recent_take
+        );
+
+        validate_state_against_registry(&registry, &state)
+            .expect("depleted-take history should remain registry-valid");
+        validate_invariants(&state);
     }
 
     #[test]

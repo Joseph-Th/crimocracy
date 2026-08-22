@@ -948,6 +948,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
     run_organizational_capacity_probe(&registry, seed)?;
 
+    println!("\n--- REPEAT-TAKE PROBE ---");
+    run_repeat_take_probe(&registry, seed)?;
+
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;
 
@@ -1363,6 +1366,158 @@ fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
 fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
     validate_state(state)?;
     validate_state_against_registry(registry, state)?;
+    Ok(())
+}
+
+/// Proves that repeated scores on one target decay through the canonical property-proceeds
+/// path. The organization learns the district's patrol rhythm through surveillance, takes the
+/// same business twice, and observes that the immediate re-score recovers only part of the
+/// first haul while a take after a rest period returns to full value. All observations are
+/// player-visible: held-property records and after-action outcomes.
+fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let target = scenario.target;
+    let opportunity_information = scenario.opportunity_information;
+
+    let recon = authorize_surveillance(&mut scenario)?;
+    let mut metrics = RunMetrics {
+        strategy: Some(Strategy::Recon),
+        variation: Some(scenario.variation),
+        ..RunMetrics::default()
+    };
+    run_until_operation_terminal(&mut scenario, recon, false, &mut metrics)?;
+    let resolution = scenario
+        .state
+        .operations()
+        .get_operation(recon)
+        .expect("probe surveillance must persist")
+        .resolution()
+        .expect("completed probe surveillance must have a resolution");
+    let mut intelligence = BTreeSet::from([opportunity_information]);
+    let mut learned_patrol_summary = None;
+    for information in resolution.discovered_information() {
+        let record = scenario
+            .state
+            .intelligence()
+            .get_information(*information)
+            .expect("surveillance information must persist");
+        if record.topic() == InformationTopic::PoliceActivity {
+            learned_patrol_summary = Some(record.summary().to_owned());
+        }
+        intelligence.insert(*information);
+    }
+    let patrol_summary = learned_patrol_summary
+        .as_deref()
+        .ok_or("repeat-take probe surveillance produced no patrol-pattern observation")?;
+    let duration = registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .duration();
+
+    fn run_take(
+        scenario: &mut Scenario,
+        metrics: &mut RunMetrics,
+        patrol_summary: &str,
+        duration: SimDuration,
+        target: BusinessId,
+        intelligence: &BTreeSet<InformationId>,
+        title: &'static str,
+    ) -> Result<i64, Box<dyn Error>> {
+        let scheduled_for = choose_safe_start_from_patrol_report(
+            scenario.state.now(),
+            patrol_summary,
+            duration,
+            SimDuration::from_minutes(60),
+            SimTime::from_minutes(scenario.state.now().as_minutes() + 2_880),
+        )?;
+        let burglary = authorize_burglary(
+            scenario,
+            Strategy::Recon,
+            target,
+            title,
+            scheduled_for,
+            intelligence.clone(),
+            scenario.burglar,
+        )?;
+        run_until_operation_terminal(scenario, burglary, false, metrics)?;
+        let record = scenario
+            .state
+            .operations()
+            .get_operation(burglary)
+            .expect("probe burglary must persist");
+        let resolution = record
+            .resolution()
+            .expect("terminal probe burglary must have a resolution");
+        if resolution.objective_outcome() != OperationObjectiveOutcome::Achieved {
+            return Err(format!(
+                "repeat-take probe score '{title}' did not achieve: {}",
+                terminal_label(metrics)
+            )
+            .into());
+        }
+        let proceeds = resolution
+            .property_proceeds()
+            .expect("achieved probe score must create held property");
+        Ok(proceeds.estimated_value().cents())
+    }
+
+    let first_take = run_take(
+        &mut scenario,
+        &mut metrics,
+        patrol_summary,
+        duration,
+        target,
+        &intelligence,
+        "repeat-take probe first score",
+    )?;
+    let second_take = run_take(
+        &mut scenario,
+        &mut metrics,
+        patrol_summary,
+        duration,
+        target,
+        &intelligence,
+        "repeat-take probe immediate re-score",
+    )?;
+    if second_take != first_take / 2 || second_take >= first_take {
+        return Err(format!(
+            "immediate re-score expected exactly half of the first take, observed {first_take}c then {second_take}c"
+        )
+        .into());
+    }
+    println!(
+        "[REPEAT TAKE] The first score on {} held {} cents; an immediate re-score recovered only {second_take} cents — the target had not replaced its stock.",
+        scenario
+            .state
+            .world()
+            .get_business(target)
+            .expect("probe target must persist")
+            .name(),
+        first_take,
+    );
+
+    // Let the recency window pass so the target restocks, then confirm full value returns.
+    let rest_until = scenario.state.now() + SimDuration::from_minutes(3 * 1_440);
+    run_until(&mut scenario, rest_until, false, &mut metrics)?;
+    let third_take = run_take(
+        &mut scenario,
+        &mut metrics,
+        patrol_summary,
+        duration,
+        target,
+        &intelligence,
+        "repeat-take probe rested re-score",
+    )?;
+    if third_take != first_take {
+        return Err(format!(
+            "rested re-score expected the original {first_take}c take back, observed {third_take}c"
+        )
+        .into());
+    }
+    println!(
+        "[REPEAT TAKE] After letting the target rest, the next score held {third_take} cents again. Repeat takes decay and recover through production rules."
+    );
+    validate_harness_state(registry, &scenario.state)?;
     Ok(())
 }
 
@@ -4341,6 +4496,28 @@ fn observe_tick(
                 outcome.enterprise_cycles.len(),
             );
         }
+        // A notable cycle carries its manager's report as organization-held information; the
+        // narrative surfaces it so heat-driven cost pressure is legible when it happens.
+        for cycle_id in &outcome.enterprise_cycles {
+            let cycle = scenario
+                .state
+                .enterprises()
+                .get_cycle(*cycle_id)
+                .expect("settled enterprise cycle must persist");
+            if cycle.attention() != AttentionClass::Notable {
+                continue;
+            }
+            let summary = cycle
+                .information()
+                .and_then(|information| scenario.state.intelligence().get_information(information))
+                .map(|record| record.summary().to_owned())
+                .unwrap_or_else(|| "cycle report missing".to_owned());
+            println!(
+                "[ENTERPRISE] {}: {}",
+                stamp(outcome.now.as_minutes()),
+                summary,
+            );
+        }
         if let Some(report) = outcome.executive_brief {
             let report = scenario
                 .state
@@ -4972,28 +5149,43 @@ fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
 
 /// Condensed report rendering for routine briefs: header plus only the entries that need a
 /// leader's attention. Full after-action text stays on the [AFTER-ACTION]/[ABORT REPORT] beats so
-/// the interesting consequence text is not drowned in repeated boilerplate.
+/// the interesting consequence text is not drowned in repeated boilerplate. A day with nothing
+/// above routine attention is summarized in its header instead of printing an empty entry list.
 fn print_report_condensed(label: &str, report: &ReportRecord) {
     let entries = report.entries();
+    let attention_worthy: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.attention,
+                AttentionClass::Notable | AttentionClass::Exception | AttentionClass::Crisis
+            )
+        })
+        .collect();
+    if attention_worthy.is_empty() {
+        println!(
+            "[{label}] minute {}: {} (quiet; all {} entr{} routine)",
+            report.generated_at().as_minutes(),
+            report.title(),
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" },
+        );
+        return;
+    }
     println!(
         "[{label}] minute {}: {} ({} entries)",
         report.generated_at().as_minutes(),
         report.title(),
         entries.len()
     );
-    for entry in entries {
+    for entry in attention_worthy {
         let marker = match entry.attention {
             AttentionClass::Routine => "routine",
             AttentionClass::Notable => "notable",
             AttentionClass::Exception => "EXCEPTION",
             AttentionClass::Crisis => "CRISIS",
         };
-        if matches!(
-            entry.attention,
-            AttentionClass::Notable | AttentionClass::Exception | AttentionClass::Crisis
-        ) {
-            println!("  - [{marker}] {}", entry.summary);
-        }
+        println!("  - [{marker}] {}", entry.summary);
     }
 }
 
@@ -5146,10 +5338,30 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         defector_trail_shown,
         "after a departure, the organization can confirm where the defector landed through its own canonical surveillance channel instead of the report leaking the rival",
     );
-    let legitimate_isolated = rush.legitimate_net_cents == press.legitimate_net_cents
-        && press.legitimate_net_cents == recon.legitimate_net_cents;
-    let enterprise_heat_shown = press.enterprise_net_cents.unwrap_or(0)
-        < recon.enterprise_net_cents.unwrap_or(0)
+    // Window honesty: compare branches at their shared campaign-day boundary when both captured
+    // it, because the PRESS narrative arc deliberately runs longer than RUSH/RECON and raw
+    // cumulative totals over different observation lengths are not comparable.
+    let same_window = rush.matched_legitimate_net_cents.is_some()
+        && press.matched_legitimate_net_cents.is_some()
+        && recon.matched_legitimate_net_cents.is_some();
+    let legitimate_isolated = if same_window {
+        rush.matched_legitimate_net_cents == press.matched_legitimate_net_cents
+            && press.matched_legitimate_net_cents == recon.matched_legitimate_net_cents
+    } else {
+        rush.legitimate_net_cents == press.legitimate_net_cents
+            && press.legitimate_net_cents == recon.legitimate_net_cents
+    };
+    let (press_enterprise_window, recon_enterprise_window) = match (
+        press.matched_enterprise_net_cents,
+        recon.matched_enterprise_net_cents,
+    ) {
+        (Some(press_matched), Some(recon_matched)) => (press_matched, recon_matched),
+        _ => (
+            press.enterprise_net_cents.unwrap_or(0),
+            recon.enterprise_net_cents.unwrap_or(0),
+        ),
+    };
+    let enterprise_heat_shown = press_enterprise_window < recon_enterprise_window
         && press.investigation_created
         && !recon.investigation_created;
     print_loop_checkpoint(
@@ -5194,13 +5406,13 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; enterprise heat cut gambling net to {} vs RECON {} while hot, then recovered after the shelf; RECON realized {} of resale cash via a low-police venue.",
+        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; over the same campaign-day window enterprise heat cut gambling net to {} versus RECON's {}, then recovered after the shelf; RECON realized {} of resale cash via a low-police venue.",
         press.evidence_count,
         press.player_legal_activity_information,
         press.counterintelligence_scheduled_at.unwrap_or_default(),
         press.case_cold_minute.unwrap_or_default(),
-        optional_dollars(press.enterprise_net_cents),
-        optional_dollars(recon.enterprise_net_cents),
+        optional_dollars(Some(press_enterprise_window)),
+        optional_dollars(Some(recon_enterprise_window)),
         optional_dollars(recon.property_realized_cash_cents),
     );
     println!(
@@ -5210,7 +5422,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's heat surcharge and reduces resale value in heavily patrolled districts. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
+        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs (reported by the manager in-cycle) and reduces resale value in heavily patrolled districts. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."

@@ -142,6 +142,9 @@ pub(super) struct EnterpriseCycleFinancials {
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+    /// Street-heat portion of `operating_cost` at settlement. Persisted because notability
+    /// depends on it and the active-investigation state that produced it changes over time.
+    investigation_heat: Money,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,6 +194,10 @@ impl EnterpriseCycleRecord {
 
     pub fn variance_basis_points(&self) -> i16 {
         self.financials.variance_basis_points
+    }
+
+    pub fn investigation_heat(&self) -> Money {
+        self.financials.investigation_heat
     }
 
     pub fn attention(&self) -> AttentionClass {

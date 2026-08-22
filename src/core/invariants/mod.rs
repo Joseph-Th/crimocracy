@@ -664,7 +664,7 @@ pub fn validate_state_against_registry(
                 || factors.police_response_arrived() != expected_police_response_arrived
                 || resolution.execution_margin() != expected_margin
                 || resolution.objective_outcome() != expected_outcome
-                || resolution.property_proceeds() != expected_property_proceeds
+                || resolution.property_proceeds() != expected_property_proceeds.proceeds
             {
                 return Err(StateValidationError::InvalidOperationDefinition {
                     operation: operation.id(),
@@ -931,7 +931,20 @@ pub fn validate_state_against_registry(
             .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
         let economics = registry.get_enterprise(enterprise.kind()).economics();
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
+        // Notability must agree with the production rule in `enterprise_execution`: a notable
+        // variance or persisted street heat from active investigations at settlement makes the
+        // manager's cycle report player-visible. Heat is read from the committed cycle rather
+        // than recomputed, because the investigations that produced it may since have closed;
+        // it must still be a whole number of the authored per-case surcharge.
+        let per_case = economics.heat_surcharge_per_active_case().cents();
+        if cycle.investigation_heat().cents() < 0
+            || (per_case == 0 && cycle.investigation_heat().cents() != 0)
+            || (per_case > 0 && cycle.investigation_heat().cents() % per_case != 0)
+        {
+            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+        }
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
+            || cycle.investigation_heat() > crate::finance::Money::ZERO
         {
             AttentionClass::Notable
         } else {
