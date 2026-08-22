@@ -1074,6 +1074,10 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
     Ok(())
 }
 
+/// Full structural validation across every subsystem. This is a debug-boundary tool: the
+/// whole body compiles out of release builds, where save/load and observation boundaries own
+/// validation (see STATUS.md). Release builds pay none of this per tick.
+#[cfg(debug_assertions)]
 pub fn validate_invariants(state: &AppState) {
     debug_assert_eq!(
         state.state_schema_version(),
@@ -1103,9 +1107,6 @@ pub fn validate_invariants(state: &AppState) {
     // the release-safe checks (for example, the supervision-cycle walk must detect
     // multi-character cycles rather than only self-reference).
     if let Err(error) = validate_state(state) {
-        debug_assert!(
-            false,
-            "State Runtime Validity: release-safe structural validation failed: {error:?}"
-        );
+        panic!("State Runtime Validity: release-safe structural validation failed: {error:?}");
     }
 }

@@ -293,24 +293,12 @@ impl LegalState {
     fn has_consistent_police_response_indexes(&self) -> bool {
         for response in self.police_responses.values() {
             let id = response.id();
-            if !self
+            if self
                 .indexes
                 .police_responses
-                .by_authority
-                .get(&response.authority())
-                .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .police_responses
-                    .by_neighborhood
-                    .get(&response.neighborhood())
-                    .is_some_and(|ids| ids.contains(&id))
-                || self
-                    .indexes
-                    .police_responses
-                    .by_source_operation
-                    .get(&response.source_operation())
-                    != Some(&id)
+                .by_source_operation
+                .get(&response.source_operation())
+                != Some(&id)
             {
                 return false;
             }
@@ -321,26 +309,6 @@ impl LegalState {
                 .get(&response.arrival_due_at())
                 .is_some_and(|ids| ids.contains(&id));
             if due_indexed != (response.status() == PoliceResponseStatus::Dispatched) {
-                return false;
-            }
-        }
-        for (authority, ids) in &self.indexes.police_responses.by_authority {
-            if ids.iter().any(|id| {
-                !self
-                    .police_responses
-                    .get(id)
-                    .is_some_and(|record| record.authority() == *authority)
-            }) {
-                return false;
-            }
-        }
-        for (neighborhood, ids) in &self.indexes.police_responses.by_neighborhood {
-            if ids.iter().any(|id| {
-                !self
-                    .police_responses
-                    .get(id)
-                    .is_some_and(|record| record.neighborhood() == *neighborhood)
-            }) {
                 return false;
             }
         }
@@ -692,15 +660,6 @@ impl LegalState {
             {
                 return false;
             }
-            if !self
-                .indexes
-                .evidence
-                .evidence_by_subject
-                .get(&evidence.subject())
-                .is_some_and(|ids| ids.contains(&evidence.id()))
-            {
-                return false;
-            }
             if let Some(origin) = evidence.origin() {
                 if !self
                     .indexes
@@ -744,12 +703,12 @@ impl LegalState {
                 }
             }
         }
-        for (subject, ids) in &self.indexes.evidence.evidence_by_subject {
+        for (origin, ids) in &self.indexes.evidence.evidence_by_origin {
             for id in ids {
                 if !self
                     .evidence
                     .get(id)
-                    .is_some_and(|record| record.subject() == *subject)
+                    .is_some_and(|record| record.origin() == Some(*origin))
                 {
                     return false;
                 }
@@ -908,21 +867,6 @@ impl LegalState {
         }
         for deployment in self.patrol_deployments.values() {
             let id = deployment.id();
-            if !self
-                .indexes
-                .patrols
-                .by_organization
-                .get(&deployment.organization())
-                .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .patrols
-                    .by_neighborhood
-                    .get(&deployment.neighborhood())
-                    .is_some_and(|ids| ids.contains(&id))
-            {
-                return false;
-            }
             let active_pair = self
                 .indexes
                 .patrols
@@ -948,28 +892,6 @@ impl LegalState {
                 PatrolDeploymentStatus::Active
                 | PatrolDeploymentStatus::Suspended
                 | PatrolDeploymentStatus::Retired => {}
-            }
-        }
-        for (organization, ids) in &self.indexes.patrols.by_organization {
-            for id in ids {
-                if !self
-                    .patrol_deployments
-                    .get(id)
-                    .is_some_and(|record| record.organization() == *organization)
-                {
-                    return false;
-                }
-            }
-        }
-        for (neighborhood, ids) in &self.indexes.patrols.by_neighborhood {
-            for id in ids {
-                if !self
-                    .patrol_deployments
-                    .get(id)
-                    .is_some_and(|record| record.neighborhood() == *neighborhood)
-                {
-                    return false;
-                }
             }
         }
         for (key, id) in &self.indexes.patrols.active_by_organization_neighborhood {
@@ -1084,14 +1006,6 @@ impl LegalState {
             }
         }
         for evidence in self.evidence.values() {
-            debug_assert!(
-                self.indexes
-                    .evidence
-                    .evidence_by_subject
-                    .get(&evidence.subject())
-                    .is_some_and(|ids| ids.contains(&evidence.id())),
-                "Index Completeness: evidence subject index is missing evidence"
-            );
             if let Some(origin) = evidence.origin() {
                 debug_assert!(
                     self.indexes
@@ -1240,22 +1154,6 @@ impl LegalState {
             }
         }
         for deployment in self.patrol_deployments.values() {
-            debug_assert!(
-                self.indexes
-                    .patrols
-                    .by_organization
-                    .get(&deployment.organization())
-                    .is_some_and(|ids| ids.contains(&deployment.id())),
-                "Index Completeness: patrol organization index is missing deployment"
-            );
-            debug_assert!(
-                self.indexes
-                    .patrols
-                    .by_neighborhood
-                    .get(&deployment.neighborhood())
-                    .is_some_and(|ids| ids.contains(&deployment.id())),
-                "Index Completeness: patrol neighborhood index is missing deployment"
-            );
             let active = self
                 .indexes
                 .patrols

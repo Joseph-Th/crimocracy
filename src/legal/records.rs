@@ -1378,7 +1378,6 @@ pub(super) struct InvestigationIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct EvidenceIndexes {
-    pub(super) evidence_by_subject: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
     pub(super) evidence_by_origin: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
     pub(super) evidence_by_source: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
     pub(super) evidence_by_kind: BTreeMap<EvidenceKind, BTreeSet<EvidenceId>>,
@@ -1426,8 +1425,6 @@ pub(super) struct JurisdictionIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct PatrolIndexes {
-    pub(super) by_organization: BTreeMap<OrganizationId, BTreeSet<PatrolDeploymentId>>,
-    pub(super) by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,
     pub(super) active_by_organization_neighborhood:
         BTreeMap<(OrganizationId, NeighborhoodId), PatrolDeploymentId>,
     pub(super) active_by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,
@@ -1435,8 +1432,6 @@ pub(super) struct PatrolIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct PoliceResponseIndexes {
-    pub(super) by_authority: BTreeMap<OrganizationId, BTreeSet<PoliceResponseId>>,
-    pub(super) by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PoliceResponseId>>,
     pub(super) by_source_operation: BTreeMap<OperationId, PoliceResponseId>,
     pub(super) dispatched_by_arrival_due: BTreeMap<SimTime, BTreeSet<PoliceResponseId>>,
 }

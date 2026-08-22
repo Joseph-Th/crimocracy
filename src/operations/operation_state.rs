@@ -14,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct OperationState {
     records: BTreeMap<OperationId, OperationRecord>,
     by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
+    /// Non-terminal operations per organization. Participant double-booking checks scan
+    /// this instead of the organization's full operation history, which grows forever.
+    active_by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
     by_status: BTreeMap<OperationStatus, BTreeSet<OperationId>>,
     by_discovered_information: BTreeMap<InformationId, OperationId>,
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
@@ -34,6 +37,20 @@ impl OperationState {
         id: OrganizationId,
     ) -> impl Iterator<Item = &OperationRecord> {
         self.by_organization
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|operation_id| self.records.get(operation_id))
+    }
+
+    /// Non-terminal operations of an organization, in id order. This is the scan surface for
+    /// participant availability: terminal operations release their participants and never
+    /// block new bookings.
+    pub(crate) fn active_operations_for_organization(
+        &self,
+        id: OrganizationId,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.active_by_organization
             .get(&id)
             .into_iter()
             .flatten()
@@ -86,6 +103,10 @@ impl OperationState {
             "new operations must enter state as authorized"
         );
         self.by_organization
+            .entry(record.responsible_organization())
+            .or_default()
+            .insert(id);
+        self.active_by_organization
             .entry(record.responsible_organization())
             .or_default()
             .insert(id);
@@ -373,16 +394,28 @@ impl OperationState {
     }
 
     fn change_status(&mut self, id: OperationId, next: OperationStatus) {
-        let previous = self
-            .records
-            .get(&id)
-            .expect("validated operation disappeared before status commit")
-            .status();
+        let (previous, organization) = {
+            let record = self
+                .records
+                .get(&id)
+                .expect("validated operation disappeared before status commit");
+            (record.status(), record.responsible_organization())
+        };
         if let Some(ids) = self.by_status.get_mut(&previous) {
             ids.remove(&id);
             if ids.is_empty() {
                 self.by_status.remove(&previous);
             }
+        }
+        let active_entry = self.active_by_organization.entry(organization).or_default();
+        if matches!(next, OperationStatus::Completed | OperationStatus::Aborted) {
+            active_entry.remove(&id);
+        } else {
+            // Active-to-active transitions keep their membership; insertion is idempotent.
+            active_entry.insert(id);
+        }
+        if active_entry.is_empty() {
+            self.active_by_organization.remove(&organization);
         }
         let record = self
             .records
@@ -423,6 +456,18 @@ impl OperationState {
                 .by_status
                 .get(&record.status())
                 .is_some_and(|ids| ids.contains(&record.id()))
+            {
+                return false;
+            }
+            let active_indexed = self
+                .active_by_organization
+                .get(&record.responsible_organization())
+                .is_some_and(|ids| ids.contains(&record.id()));
+            if active_indexed
+                != !matches!(
+                    record.status(),
+                    OperationStatus::Completed | OperationStatus::Aborted
+                )
             {
                 return false;
             }
@@ -480,6 +525,19 @@ impl OperationState {
                 }
             }
         }
+        for (organization, ids) in &self.active_by_organization {
+            for id in ids {
+                if !self.records.get(id).is_some_and(|record| {
+                    record.responsible_organization() == *organization
+                        && !matches!(
+                            record.status(),
+                            OperationStatus::Completed | OperationStatus::Aborted
+                        )
+                }) {
+                    return false;
+                }
+            }
+        }
         for (time, ids) in &self.authorized_by_start {
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
@@ -514,6 +572,16 @@ impl OperationState {
                     .get(&record.responsible_organization())
                     .is_some_and(|ids| ids.contains(&record.id())),
                 "Index Completeness: operation organization index is missing an operation"
+            );
+            debug_assert_eq!(
+                self.active_by_organization
+                    .get(&record.responsible_organization())
+                    .is_some_and(|ids| ids.contains(&record.id())),
+                !matches!(
+                    record.status(),
+                    OperationStatus::Completed | OperationStatus::Aborted
+                ),
+                "Derived Data Consistency: operation active index disagrees with lifecycle"
             );
             debug_assert!(
                 self.by_status

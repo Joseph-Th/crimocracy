@@ -271,21 +271,6 @@ impl LegalState {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
-    /// Test-only observation surface: production code reads active deployments through
-    /// `active_patrol_deployments_for_neighborhood`.
-    #[cfg(test)]
-    pub fn patrol_deployments_for_neighborhood(
-        &self,
-        neighborhood: NeighborhoodId,
-    ) -> impl Iterator<Item = &PatrolDeploymentRecord> {
-        self.indexes
-            .patrols
-            .by_neighborhood
-            .get(&neighborhood)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.patrol_deployments.get(id))
-    }
     pub fn active_patrol_deployments_for_neighborhood(
         &self,
         neighborhood: NeighborhoodId,
@@ -764,12 +749,6 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        self.indexes
-            .evidence
-            .evidence_by_subject
-            .entry(record.subject())
-            .or_default()
-            .insert(record.id());
         if let Some(origin) = record.origin() {
             self.indexes
                 .evidence
@@ -1215,18 +1194,6 @@ impl LegalState {
             PatrolDeploymentStatus::Active,
             "Lifecycle Validity: new patrol deployments must be active"
         );
-        self.indexes
-            .patrols
-            .by_organization
-            .entry(organization)
-            .or_default()
-            .insert(id);
-        self.indexes
-            .patrols
-            .by_neighborhood
-            .entry(neighborhood)
-            .or_default()
-            .insert(id);
         let previous_active = self
             .indexes
             .patrols
@@ -1346,18 +1313,6 @@ impl LegalState {
     }
     pub(crate) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
         let id = record.id();
-        self.indexes
-            .police_responses
-            .by_authority
-            .entry(record.authority())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .police_responses
-            .by_neighborhood
-            .entry(record.neighborhood())
-            .or_default()
-            .insert(id);
         let previous_operation = self
             .indexes
             .police_responses

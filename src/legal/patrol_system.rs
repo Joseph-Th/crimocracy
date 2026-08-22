@@ -756,7 +756,8 @@ mod tests {
         assert_eq!(
             state
                 .legal()
-                .patrol_deployments_for_neighborhood(neighborhood)
+                .patrol_deployments()
+                .filter(|deployment| deployment.neighborhood() == neighborhood)
                 .count(),
             0
         );

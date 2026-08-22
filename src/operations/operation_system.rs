@@ -536,7 +536,7 @@ fn find_busy_participant(
     participants.iter().find_map(|participant| {
         state
             .operations
-            .operations_for_organization(organization)
+            .active_operations_for_organization(organization)
             .find(|operation| {
                 operation_uses_character(operation, *participant)
                     && operation_window_overlaps(
@@ -595,7 +595,7 @@ pub(crate) fn validate_operation_resume_participants(
     for participant in record.participants() {
         let conflict = state
             .operations
-            .operations_for_organization(record.responsible_organization())
+            .active_operations_for_organization(record.responsible_organization())
             .find(|other| {
                 other.id() != operation_id
                     && operation_uses_character(other, participant)
