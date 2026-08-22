@@ -425,7 +425,6 @@ mod tests {
         )
         .expect("organization fixture should validate");
         let character = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Information Courier".to_owned(),

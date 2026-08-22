@@ -62,7 +62,6 @@ fn make_fixture(
     )
     .expect("criminal fixture should validate");
     let investigator = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Detective Harlan".to_owned(),
@@ -79,7 +78,6 @@ fn make_fixture(
     )
     .expect("investigator fixture should validate");
     let second_investigator = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Detective Vera".to_owned(),
@@ -97,7 +95,6 @@ fn make_fixture(
     .expect("second investigator fixture should validate");
     let mut insert_subject = |name: &str| {
         insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: name.to_owned(),
@@ -311,6 +308,58 @@ fn pattern_analysis_resolves_to_derived_evidence_with_provenance() {
     validate_state(&fixture.state).expect("completed pattern analysis state should be valid");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("completed pattern analysis should match authored definitions");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn fully_inadmissible_sources_derive_inadmissible_pattern_links() {
+    let registry = build_registry();
+    // Strong, credible sources keep the analysis conclusive while their shared inadmissibility
+    // must carry into the derived evidence instead of being laundered into "disputed".
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Inadmissible,
+    );
+    let work =
+        validate_schedule_investigation_work(&registry, &fixture.state, work_draft(&fixture))
+            .expect("pattern analysis should validate")
+            .commit(&mut fixture.state)
+            .expect("pattern analysis should schedule");
+
+    loop {
+        let outcome = run_tick(&registry, &mut fixture.state);
+        if outcome.resolved_investigation_work.contains(&work) {
+            break;
+        }
+        assert!(
+            outcome.resolved_investigation_work.is_empty(),
+            "no other work should exist in this fixture"
+        );
+    }
+
+    let record = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("completed work should exist");
+    let resolution = record.resolution().expect("completed work must resolve");
+    assert_eq!(resolution.outcome(), InvestigationWorkOutcome::Connected);
+    let derived_id = resolution
+        .derived_evidence()
+        .expect("connected pattern analysis must create evidence");
+    let derived = fixture
+        .state
+        .legal()
+        .get_evidence(derived_id)
+        .expect("derived evidence should exist");
+    assert_eq!(
+        derived.admissibility(),
+        Admissibility::Inadmissible,
+        "evidence derived solely from inadmissible sources cannot pass as disputed"
+    );
+    validate_state(&fixture.state).expect("inadmissible derivation state should be valid");
     validate_invariants(&fixture.state);
 }
 

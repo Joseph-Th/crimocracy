@@ -10,7 +10,6 @@ use crate::delegation::{
     ResolvedMandateAuthority, ResponsibilityScope,
 };
 use crate::finance::FinancialOwner;
-use crate::registry::Registry;
 use crate::world::{Lifecycle, PolicyKind, PolicySetting};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -146,12 +145,10 @@ impl ValidatedMandateAssignment {
 }
 
 pub fn validate_assign_mandate(
-    registry: &Registry,
     state: &AppState,
     draft: MandateDraft,
 ) -> Result<ValidatedMandateAssignment, DelegationError> {
     validate_mandate_content(
-        registry,
         state,
         draft.organization,
         &draft.scopes,
@@ -211,52 +208,11 @@ impl ValidatedMandateRevision {
             self.expected_manager_version,
         )?;
         validate_enterprise_scope_dependencies(state, self.mandate, &self.draft.scopes)?;
-        // Revalidate budget and scope liveness that could have changed between validation and commit.
-        for scope in &self.draft.scopes {
-            match scope {
-                ResponsibilityScope::Neighborhood(id) => {
-                    let rec = state
-                        .world
-                        .get_neighborhood(*id)
-                        .ok_or(DelegationError::MissingNeighborhood(*id))?;
-                    if rec.lifecycle() != Lifecycle::Active {
-                        return Err(DelegationError::InactiveNeighborhood(*id));
-                    }
-                }
-                ResponsibilityScope::Business(id) => {
-                    let rec = state
-                        .world
-                        .get_business(*id)
-                        .ok_or(DelegationError::MissingBusiness(*id))?;
-                    if rec.lifecycle() != Lifecycle::Active {
-                        return Err(DelegationError::InactiveBusiness(*id));
-                    }
-                }
-                ResponsibilityScope::Function(_) => {}
-            }
-        }
-        for (kind, setting) in &self.draft.standing_orders {
-            if setting.kind() != *kind {
-                return Err(DelegationError::PolicyKindMismatch {
-                    expected: *kind,
-                    actual: setting.kind(),
-                });
-            }
-        }
-        if let Some(budget) = self.draft.budget {
-            if budget.limit.cents() < 0 {
-                return Err(DelegationError::NegativeBudgetLimit);
-            }
-            let account = state.finance.get_account(budget.funding_account).ok_or(
-                DelegationError::MissingBudgetAccount(budget.funding_account),
-            )?;
-            if account.owner() != FinancialOwner::Organization(self.organization) {
-                return Err(DelegationError::BudgetAccountOwnerMismatch {
-                    account: budget.funding_account,
-                    organization: self.organization,
-                });
-            }
-        }
+        // Revalidate budget and scope liveness that could have changed between validation
+        // and commit, sharing the exact validation-phase rules.
+        validate_scope_liveness(state, &self.draft.scopes)?;
+        validate_standing_orders(&self.draft.standing_orders)?;
+        validate_budget_authority(state, self.organization, self.draft.budget)?;
         let MandateRevisionDraft {
             scopes,
             standing_orders,
@@ -270,7 +226,6 @@ impl ValidatedMandateRevision {
 }
 
 pub fn validate_revise_mandate(
-    registry: &Registry,
     state: &AppState,
     mandate: MandateId,
     draft: MandateRevisionDraft,
@@ -283,7 +238,6 @@ pub fn validate_revise_mandate(
         return Err(DelegationError::InactiveMandate(mandate));
     }
     validate_mandate_content(
-        registry,
         state,
         record.organization(),
         &draft.scopes,
@@ -571,17 +525,10 @@ fn validate_manager_snapshot(
     Ok(())
 }
 
-fn validate_mandate_content(
-    registry: &Registry,
+fn validate_scope_liveness(
     state: &AppState,
-    organization: OrganizationId,
     scopes: &BTreeSet<ResponsibilityScope>,
-    standing_orders: &BTreeMap<PolicyKind, PolicySetting>,
-    budget: Option<BudgetAuthority>,
 ) -> Result<(), DelegationError> {
-    if scopes.is_empty() {
-        return Err(DelegationError::NoScopes);
-    }
     for scope in scopes {
         match scope {
             ResponsibilityScope::Neighborhood(id) => {
@@ -605,10 +552,13 @@ fn validate_mandate_content(
             ResponsibilityScope::Function(_) => {}
         }
     }
+    Ok(())
+}
+
+fn validate_standing_orders(
+    standing_orders: &BTreeMap<PolicyKind, PolicySetting>,
+) -> Result<(), DelegationError> {
     for (kind, setting) in standing_orders {
-        // Registry lookups cannot miss for the closed policy vocabulary; the kind/setting
-        // agreement below is what this validator actually checks.
-        let _ = registry.get_policy(*kind);
         if setting.kind() != *kind {
             return Err(DelegationError::PolicyKindMismatch {
                 expected: *kind,
@@ -616,6 +566,14 @@ fn validate_mandate_content(
             });
         }
     }
+    Ok(())
+}
+
+fn validate_budget_authority(
+    state: &AppState,
+    organization: OrganizationId,
+    budget: Option<BudgetAuthority>,
+) -> Result<(), DelegationError> {
     if let Some(budget) = budget {
         if budget.limit.cents() < 0 {
             return Err(DelegationError::NegativeBudgetLimit);
@@ -633,6 +591,21 @@ fn validate_mandate_content(
     Ok(())
 }
 
+fn validate_mandate_content(
+    state: &AppState,
+    organization: OrganizationId,
+    scopes: &BTreeSet<ResponsibilityScope>,
+    standing_orders: &BTreeMap<PolicyKind, PolicySetting>,
+    budget: Option<BudgetAuthority>,
+) -> Result<(), DelegationError> {
+    if scopes.is_empty() {
+        return Err(DelegationError::NoScopes);
+    }
+    validate_scope_liveness(state, scopes)?;
+    validate_standing_orders(standing_orders)?;
+    validate_budget_authority(state, organization, budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,7 +615,7 @@ mod tests {
     use crate::world::world_system::{insert_character, insert_organization};
     use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 
-    fn make_authority_fixture() -> (Registry, AppState, MandateAuthority) {
+    fn make_authority_fixture() -> (crate::Registry, AppState, MandateAuthority) {
         let registry = build_registry();
         let mut state = AppState::new(67);
         let organization = insert_organization(
@@ -655,7 +628,6 @@ mod tests {
         )
         .expect("organization fixture should validate");
         let manager = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Authority Manager".to_owned(),
@@ -669,7 +641,6 @@ mod tests {
         )
         .expect("manager fixture should validate");
         let mandate = validate_assign_mandate(
-            &registry,
             &state,
             MandateDraft {
                 organization,
@@ -717,14 +688,13 @@ mod tests {
 
     #[test]
     fn authority_rejects_wrong_manager_and_scope() {
-        let (registry, mut state, authority) = make_authority_fixture();
+        let (_, mut state, authority) = make_authority_fixture();
         let organization = state
             .delegation()
             .get_mandate(authority.mandate)
             .expect("mandate should exist")
             .organization();
         let other_manager = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Other Authority Manager".to_owned(),
@@ -769,11 +739,10 @@ mod tests {
 
     #[test]
     fn authority_snapshot_rejects_later_mandate_revision() {
-        let (registry, mut state, authority) = make_authority_fixture();
+        let (_, mut state, authority) = make_authority_fixture();
         let snapshot = resolve_mandate_authority(&state, authority)
             .expect("valid authority should resolve before revision");
         validate_revise_mandate(
-            &registry,
             &state,
             authority.mandate,
             MandateRevisionDraft {

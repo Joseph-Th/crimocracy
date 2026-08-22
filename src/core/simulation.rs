@@ -32,7 +32,7 @@ use crate::operations::operation_system::{
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
 use crate::opportunities::opportunity_system::apply_opportunity_expiry;
-use crate::recruitment::recruitment_system::resolve_due_autonomous_recruitment;
+use crate::recruitment::recruitment_system::apply_due_autonomous_recruitment;
 use crate::registry::Registry;
 use crate::reports::executive_brief::{
     decide_executive_brief, is_executive_brief_due, validate_executive_brief_plan,
@@ -246,7 +246,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated enterprise cycle must commit atomically");
         enterprise_cycles.push(cycle);
     }
-    let recruitment_attempts = resolve_due_autonomous_recruitment(registry, state)
+    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve due autonomous recruitment");
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the

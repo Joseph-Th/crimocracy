@@ -784,6 +784,33 @@ pub fn apply_automatic_legal_support(
     use crate::finance::{AccountKind, FinancialOwner};
     use crate::world::{Lifecycle, OrganizationKind as OrgKind, PolicyKind, PolicySetting};
 
+    // Automatic support concludes when the matter it covers does: a representation held for
+    // a detainee who has left custody ends with `MatterConcluded`, freeing the Legal contact
+    // for the next matter instead of locking it for the rest of the campaign.
+    let concluded: Vec<LegalRepresentationId> = state
+        .legal
+        .legal_representations()
+        .filter(|record| {
+            record.status() == LegalRepresentationStatus::Active
+                && state
+                    .legal
+                    .get_arrest(record.arrest())
+                    .is_none_or(|arrest| arrest.status() != ArrestStatus::Detained)
+        })
+        .map(|record| record.id())
+        .collect();
+    for representation in concluded {
+        // An autonomous stage must not abort the tick on one drifted record; the same
+        // canonical end path a player command would use stays in charge of each ending.
+        if let Ok(token) = validate_end_legal_representation(
+            state,
+            representation,
+            LegalRepresentationEndReason::MatterConcluded,
+        ) {
+            token.commit(state).ok();
+        }
+    }
+
     let candidates: Vec<crate::core::id::ArrestId> = state
         .legal
         .arrests()
@@ -825,47 +852,42 @@ pub fn apply_automatic_legal_support(
         else {
             continue;
         };
-        // First active Legal-channel contact of the sponsor, by contact id order.
-        let Some(contact) = state
+        // First active Legal-channel contact of the sponsor, by contact id order, with its
+        // institution captured in the same pass.
+        let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
+        let Some((contact, institution)) = state
             .contacts
             .contacts_for_sponsor(sponsor)
             .find(|contact| {
                 contact.status() == crate::contacts::ContactStatus::Active
                     && contact.kind() == crate::contacts::ContactKind::Legal
             })
-            .map(|contact| contact.id())
+            .map(|contact| (contact.id(), contact.institution()))
         else {
             continue;
         };
 
         // The payer must be a sponsor-owned cash account that can cover the flat retainer;
         // the provider account is the counsel institution's operating account.
-        let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
-        let institution = state
-            .contacts
-            .get_contact(contact)
-            .map(|contact| contact.institution());
-        let Some(institution) = institution else {
-            continue;
-        };
-        let payer_account = state.finance.accounts().find(|account| {
-            account.owner() == FinancialOwner::Organization(sponsor)
-                && matches!(
+        let payer_account = state
+            .finance
+            .accounts_for(FinancialOwner::Organization(sponsor))
+            .find(|account| {
+                matches!(
                     account.kind(),
                     AccountKind::StreetCash
                         | AccountKind::ConcealedCash
                         | AccountKind::AccountedFunds
                         | AccountKind::LegitimateOperating
-                )
-                && account.balance() >= fee
-        });
+                ) && account.balance() >= fee
+            });
         let Some(payer_account) = payer_account else {
             continue;
         };
-        let provider_account = state.finance.accounts().find(|account| {
-            account.owner() == FinancialOwner::Organization(institution)
-                && account.kind() == AccountKind::LegitimateOperating
-        });
+        let provider_account = state
+            .finance
+            .accounts_for(FinancialOwner::Organization(institution))
+            .find(|account| account.kind() == AccountKind::LegitimateOperating);
         let Some(provider_account) = provider_account else {
             continue;
         };

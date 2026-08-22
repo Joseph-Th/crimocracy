@@ -91,7 +91,6 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
     )
     .expect("neighborhood fixture should validate");
     let manager = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Enterprise Manager".to_owned(),
@@ -105,7 +104,6 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
     )
     .expect("manager fixture should validate");
     let mandate = validate_assign_mandate(
-        &registry,
         &state,
         MandateDraft {
             organization,
@@ -1097,7 +1095,6 @@ fn active_enterprise_blocks_authority_removal_until_suspended() {
 
     let replacement_scope = ResponsibilityScope::Function(ResponsibilityFunction::Finance);
     let revision_error = validate_revise_mandate(
-        &registry,
         &fixture.state,
         mandate,
         MandateRevisionDraft {

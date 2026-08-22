@@ -212,7 +212,7 @@ pub fn decide_business_cycle(
     }
     let due_at = economy
         .next_cycle_at()
-        .ok_or(BusinessEconomyError::EconomyNotActive(business))?;
+        .expect("active business economy must carry a scheduled next cycle");
     if state.now() < due_at {
         return Err(BusinessEconomyError::CycleNotDue { business, due_at });
     }
@@ -453,7 +453,7 @@ pub fn validate_business_cycle_plan(
     };
     let information = match (
         plan.economics.attention,
-        accounting_holder(plan.snapshot.owner),
+        resolve_accounting_holder(plan.snapshot.owner),
     ) {
         (AttentionClass::Notable, Some(holder)) => Some(validate_record_information(
             state,
@@ -683,7 +683,7 @@ fn validate_accounts(
     Ok(())
 }
 
-fn accounting_holder(owner: BusinessOwner) -> Option<KnowledgeHolder> {
+fn resolve_accounting_holder(owner: BusinessOwner) -> Option<KnowledgeHolder> {
     match owner {
         BusinessOwner::Independent => None,
         BusinessOwner::Organization(id) => Some(KnowledgeHolder::Organization(id)),

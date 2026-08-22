@@ -169,7 +169,12 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                         .is_some_and(|valid_until| at >= valid_until)
                     || operation.responsible_organization() != opportunity.organization()
                     || operation.kind() != context.operation_kind()
-                    || operation_targets != *context.targets()
+                // A converted operation acts against one of the discovered targets; its
+                // objective carries exactly one referenced entity (see conversion matching).
+                    || operation_targets.len() != 1
+                    || !operation_targets
+                        .iter()
+                        .all(|target| context.targets().contains(target))
                     || state
                         .opportunities
                         .opportunity_for_operation(operation.id())

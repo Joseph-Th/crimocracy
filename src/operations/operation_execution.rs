@@ -412,6 +412,7 @@ pub(crate) struct ValidatedOperationResolution {
     report: ValidatedReport,
     detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
     witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
+    participant_information: Vec<ValidatedInformation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -546,38 +547,9 @@ impl ValidatedOperationResolution {
         }
         // Personal after-action knowledge for each participant: the crew knows what went
         // down even though the organization's own record is the org-held after-action.
-        let operation_id = self.plan.snapshot.operation;
-        let leader = state
-            .operations()
-            .get_operation(operation_id)
-            .map(|record| {
-                (
-                    record.participants(),
-                    record.leader(),
-                    record.title().to_owned(),
-                )
-            })
-            .expect("completed operation must persist");
-        let (participants, op_leader, title) = leader;
-        for participant in participants {
-            let _personal_knowledge = validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Character(participant),
-                    source_kind: InformationSourceKind::AfterAction,
-                    topic: crate::intelligence::InformationTopic::OperationalOutcome,
-                    source_entity: Some(EntityRef::Character(op_leader)),
-                    subject: EntityRef::Operation(operation_id),
-                    observed_at: self.plan.snapshot.resolved_at,
-                    reliability: Reliability::DirectAccess,
-                    specificity: Specificity::Precise,
-                    summary: format!(
-                        "You took part in {title}, which ended with objective {}.",
-                        outcome_label(self.plan.outcome.objective_outcome)
-                    ),
-                },
-            )?
-            .commit(state)?;
+        // Every draft was validated before the first mutation above.
+        for information in self.participant_information {
+            information.commit(state)?;
         }
         Ok(self.plan.snapshot.operation)
     }
@@ -769,6 +741,33 @@ pub(crate) fn validate_operation_resolution_plan(
             }
         }
     }
+    // Personal after-action knowledge for each participant: the crew knows what went down
+    // even though the organization's own record is the org-held after-action. Validating
+    // here keeps commit free of fallible content checks after terminal mutation.
+    let participant_information = record
+        .participants()
+        .into_iter()
+        .map(|participant| {
+            validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Character(participant),
+                    source_kind: InformationSourceKind::AfterAction,
+                    topic: crate::intelligence::InformationTopic::OperationalOutcome,
+                    source_entity: Some(EntityRef::Character(record.leader())),
+                    subject: EntityRef::Operation(record.id()),
+                    observed_at: plan.snapshot.resolved_at,
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: format!(
+                        "You took part in {}, which ended with objective {}.",
+                        record.title(),
+                        outcome_label(plan.outcome.objective_outcome)
+                    ),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ValidatedOperationResolution {
         plan,
         incident,
@@ -780,6 +779,7 @@ pub(crate) fn validate_operation_resolution_plan(
         report,
         detainee_release,
         witness_intimidation,
+        participant_information,
     })
 }
 
@@ -1591,52 +1591,16 @@ pub(crate) fn resolve_property_proceeds(
     }
 
     let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let full_value = i128::from(gross.cents())
-        .checked_mul(i128::from(definition.business_gross_basis_points()))
-        .ok_or(OperationResolutionError::PropertyProceedsOverflow {
-            operation: operation.id(),
-        })?
-        / 10_000_i128;
-    let mut value = match outcome {
-        OperationObjectiveOutcome::Achieved => full_value,
-        OperationObjectiveOutcome::Partial => {
-            full_value
-                .checked_mul(i128::from(definition.partial_recovery_basis_points()))
-                .ok_or(OperationResolutionError::PropertyProceedsOverflow {
-                    operation: operation.id(),
-                })?
-                / 10_000_i128
-        }
-        OperationObjectiveOutcome::Failed => {
-            unreachable!("failed property operations return early")
-        }
-    };
-    // Stock taken by a recent score has not been fully replaced; each prior hit inside the
-    // recency window multiplies the remaining take down so farming one target decays. Depletion
-    // is evaluated at the take's own resolution instant — a committed operation must keep
-    // validating against exactly the take history it saw when it resolved.
-    let reference_at = operation
-        .resolution()
-        .map(|resolution| resolution.resolved_at())
-        .unwrap_or_else(|| state.now());
-    let recent_hits = count_recent_successful_takes(
-        state,
-        *business,
-        reference_at,
-        RECENT_HIT_WINDOW_MINUTES,
-        Some(operation.id()),
-    );
-    for _ in 0..recent_hits {
-        value = value.checked_mul(RECENT_HIT_VALUE_BASIS_POINTS).ok_or(
-            OperationResolutionError::PropertyProceedsOverflow {
-                operation: operation.id(),
-            },
-        )? / 10_000_i128;
-    }
-    let cents =
-        i64::try_from(value).map_err(|_| OperationResolutionError::PropertyProceedsOverflow {
-            operation: operation.id(),
-        })?;
+    let recent_hits = recent_take_hits(state, operation, *business);
+    let cents = resolve_take_cents(
+        operation.id(),
+        gross.cents(),
+        definition.business_gross_basis_points(),
+        definition.partial_recovery_basis_points(),
+        outcome,
+        recent_hits,
+        |operation| OperationResolutionError::PropertyProceedsOverflow { operation },
+    )?;
     if cents <= 0 {
         return Ok(PropertyProceedsPlan {
             proceeds: None,
@@ -1650,6 +1614,65 @@ pub(crate) fn resolve_property_proceeds(
         )),
         depleted_by_recent_take: recent_hits > 0,
     })
+}
+
+/// Recent successful takes against the same target at this operation's own resolution instant —
+/// a committed operation must keep validating against exactly the take history it saw when it
+/// resolved.
+fn recent_take_hits(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    business: crate::core::id::BusinessId,
+) -> u32 {
+    let reference_at = operation
+        .resolution()
+        .map(|resolution| resolution.resolved_at())
+        .unwrap_or_else(|| state.now());
+    count_recent_successful_takes(
+        state,
+        business,
+        reference_at,
+        RECENT_HIT_WINDOW_MINUTES,
+        Some(operation.id()),
+    )
+}
+
+/// Shared take economics: authored basis points of the target's gross potential, scaled down on a
+/// partial outcome and again by each recent successful hit against the same target.
+fn resolve_take_cents(
+    operation: crate::core::id::OperationId,
+    gross_cents: i64,
+    full_basis_points: u32,
+    partial_basis_points: u16,
+    outcome: OperationObjectiveOutcome,
+    recent_hits: u32,
+    overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
+) -> Result<i64, OperationResolutionError> {
+    let full_value = i128::from(gross_cents)
+        .checked_mul(i128::from(full_basis_points))
+        .ok_or(overflow(operation))?
+        / 10_000_i128;
+    let mut value = match outcome {
+        OperationObjectiveOutcome::Achieved => full_value,
+        OperationObjectiveOutcome::Partial => {
+            full_value
+                .checked_mul(i128::from(partial_basis_points))
+                .ok_or(overflow(operation))?
+                / 10_000_i128
+        }
+        OperationObjectiveOutcome::Failed => {
+            unreachable!("failed takes return early")
+        }
+    };
+    // Each prior hit inside the recency window multiplies the remaining take down so farming
+    // one target decays.
+    for _ in 0..recent_hits {
+        value = value
+            .checked_mul(RECENT_HIT_VALUE_BASIS_POINTS)
+            .ok_or(overflow(operation))?
+            / 10_000_i128;
+    }
+    i64::try_from(value).map_err(|_| overflow(operation))
 }
 
 /// Counts completed, property-bearing successes against `business` whose resolution happened
@@ -1743,48 +1766,16 @@ pub(crate) fn resolve_cash_proceeds(
     }
 
     let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let full_value = i128::from(gross.cents())
-        .checked_mul(i128::from(definition.business_take_basis_points()))
-        .ok_or(OperationResolutionError::CashProceedsOverflow {
-            operation: operation.id(),
-        })?
-        / 10_000_i128;
-    let mut value = match outcome {
-        OperationObjectiveOutcome::Achieved => full_value,
-        OperationObjectiveOutcome::Partial => {
-            full_value
-                .checked_mul(i128::from(definition.partial_take_basis_points()))
-                .ok_or(OperationResolutionError::CashProceedsOverflow {
-                    operation: operation.id(),
-                })?
-                / 10_000_i128
-        }
-        OperationObjectiveOutcome::Failed => {
-            unreachable!("failed cash operations return early")
-        }
-    };
-    let reference_at = operation
-        .resolution()
-        .map(|resolution| resolution.resolved_at())
-        .unwrap_or_else(|| state.now());
-    let recent_hits = count_recent_successful_takes(
-        state,
-        *business,
-        reference_at,
-        RECENT_HIT_WINDOW_MINUTES,
-        Some(operation.id()),
-    );
-    for _ in 0..recent_hits {
-        value = value.checked_mul(RECENT_HIT_VALUE_BASIS_POINTS).ok_or(
-            OperationResolutionError::CashProceedsOverflow {
-                operation: operation.id(),
-            },
-        )? / 10_000_i128;
-    }
-    let cents =
-        i64::try_from(value).map_err(|_| OperationResolutionError::CashProceedsOverflow {
-            operation: operation.id(),
-        })?;
+    let recent_hits = recent_take_hits(state, operation, *business);
+    let cents = resolve_take_cents(
+        operation.id(),
+        gross.cents(),
+        definition.business_take_basis_points(),
+        definition.partial_take_basis_points(),
+        outcome,
+        recent_hits,
+        |operation| OperationResolutionError::CashProceedsOverflow { operation },
+    )?;
     if cents <= 0 {
         return Ok(CashProceedsPlan {
             proceeds: None,

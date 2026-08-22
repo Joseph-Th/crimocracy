@@ -705,7 +705,6 @@ mod tests {
         )
         .expect("institution should validate");
         let handler = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Contact Handler".to_owned(),
@@ -719,7 +718,6 @@ mod tests {
         )
         .expect("handler should validate");
         let source = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Institutional Source".to_owned(),

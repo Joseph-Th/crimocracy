@@ -42,7 +42,6 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
     )
     .expect("organization fixture should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Leader".to_owned(),
@@ -176,7 +175,6 @@ fn operation_rejects_foreign_crew_members_before_authorization() {
     )
     .expect("foreign organization fixture should validate");
     let foreign_member = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Foreign Member".to_owned(),

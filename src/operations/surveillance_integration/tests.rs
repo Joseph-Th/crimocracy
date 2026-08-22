@@ -148,7 +148,6 @@ fn fixture(observer_skill: u8, with_patrol: bool) -> Fixture {
     )
     .expect("business should validate");
     let observer = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Mara Vale".to_owned(),
@@ -167,7 +166,6 @@ fn fixture(observer_skill: u8, with_patrol: bool) -> Fixture {
     )
     .expect("observer should validate");
     let entry_specialist = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Nora Quill".to_owned(),
@@ -386,7 +384,6 @@ fn partial_and_failed_surveillance_degrade_or_withhold_target_knowledge() {
     )
     .expect("rival should validate");
     let target = insert_character(
-        &rival_registry,
         &mut partial.state,
         CharacterDraft {
             name: "Nico Hart".to_owned(),
@@ -422,7 +419,6 @@ fn partial_and_failed_surveillance_degrade_or_withhold_target_knowledge() {
 
     let mut failed = fixture(0, false);
     let failed_target = insert_character(
-        &failed.registry,
         &mut failed.state,
         CharacterDraft {
             name: "Unresolved Target".to_owned(),
@@ -475,7 +471,6 @@ fn surveillance_resolution_rejects_target_change_after_planning() {
     )
     .expect("rival should validate");
     let target = insert_character(
-        &fixture.registry,
         &mut fixture.state,
         CharacterDraft {
             name: "Changing Subject".to_owned(),
@@ -530,7 +525,6 @@ fn surveillance_resolution_rejects_target_change_after_planning() {
 fn investigation_surveillance_reports_visible_case_activity_without_evidence_graph_leakage() {
     let mut fixture = fixture(100, false);
     let suspect = insert_character(
-        &fixture.registry,
         &mut fixture.state,
         CharacterDraft {
             name: "Hidden Case Subject".to_owned(),

@@ -347,9 +347,17 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                     || !history
                         .entities()
                         .contains(&EntityRef::Character(attempt.candidate()))
-                    || !history
-                        .entities()
-                        .contains(&EntityRef::Character(attempt.recruiter()))
+                    // A defection event omits the recruiter: their membership would resolve
+                    // straight back to the hidden destination organization. A fresh join
+                    // names both recruiter and destination.
+                    || (attempt.previous_organization().is_none()
+                        && !history
+                            .entities()
+                            .contains(&EntityRef::Character(attempt.recruiter())))
+                    || (attempt.previous_organization().is_some()
+                        && history
+                            .entities()
+                            .contains(&EntityRef::Character(attempt.recruiter())))
                     || history
                         .entities()
                         .contains(&EntityRef::Organization(attempt.target_organization()))

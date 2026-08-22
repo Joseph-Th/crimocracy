@@ -28,14 +28,12 @@ fn rating(value: u8) -> Rating {
 }
 
 fn insert_test_investigator(
-    registry: &crate::Registry,
     state: &mut AppState,
     organization: OrganizationId,
     name: &str,
     skill: u8,
 ) -> CharacterId {
     insert_character(
-        registry,
         state,
         CharacterDraft {
             name: name.to_owned(),
@@ -133,8 +131,8 @@ fn autonomous_staffing_assigns_best_available_detective_and_respects_active_case
         },
     )
     .expect("criminal fixture should validate");
-    let junior = insert_test_investigator(&registry, &mut state, police, "Junior", 70);
-    let senior = insert_test_investigator(&registry, &mut state, police, "Senior", 92);
+    let junior = insert_test_investigator(&mut state, police, "Junior", 70);
+    let senior = insert_test_investigator(&mut state, police, "Senior", 92);
     let first = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -216,8 +214,8 @@ fn investigation_suspend_resume_is_versioned_persistent_and_disables_active_muta
         },
     )
     .expect("criminal fixture should validate");
-    let detective = insert_test_investigator(&registry, &mut state, police, "Harlan", 82);
-    let second_detective = insert_test_investigator(&registry, &mut state, police, "Meyer", 74);
+    let detective = insert_test_investigator(&mut state, police, "Harlan", 82);
+    let second_detective = insert_test_investigator(&mut state, police, "Meyer", 74);
     let investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -361,9 +359,8 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
         },
     )
     .expect("criminal fixture should validate");
-    let detective = insert_test_investigator(&registry, &mut state, police, "Doyle", 90);
+    let detective = insert_test_investigator(&mut state, police, "Doyle", 90);
     let first = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "First Subject".to_owned(),
@@ -377,7 +374,6 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
     )
     .expect("first subject should validate");
     let middle = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Middle Subject".to_owned(),
@@ -391,7 +387,6 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
     )
     .expect("middle subject should validate");
     let target = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Target Subject".to_owned(),
@@ -553,7 +548,7 @@ fn suspended_case_resume_revalidates_retained_staffing_after_detective_transfer(
         },
     )
     .expect("criminal fixture should validate");
-    let detective = insert_test_investigator(&registry, &mut state, police, "Reed", 80);
+    let detective = insert_test_investigator(&mut state, police, "Reed", 80);
     let investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -638,8 +633,8 @@ fn investigator_staffing_is_versioned_indexed_and_blocks_foreign_reassignment() 
         },
     )
     .expect("criminal fixture should validate");
-    let first = insert_test_investigator(&registry, &mut state, police, "Harlan", 82);
-    let second = insert_test_investigator(&registry, &mut state, police, "Meyer", 74);
+    let first = insert_test_investigator(&mut state, police, "Harlan", 82);
+    let second = insert_test_investigator(&mut state, police, "Meyer", 74);
     let investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -759,7 +754,7 @@ fn investigator_assignment_token_rejects_case_changes_after_validation() {
         },
     )
     .expect("criminal fixture should validate");
-    let detective = insert_test_investigator(&registry, &mut state, police, "Doyle", 79);
+    let detective = insert_test_investigator(&mut state, police, "Doyle", 79);
     let investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -848,7 +843,6 @@ fn case_graph_indexes_track_shared_subjects_and_evidence_kinds() {
     )
     .expect("criminal fixture should validate");
     let character = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Case Graph Associate".to_owned(),
@@ -980,7 +974,6 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
     )
     .expect("criminal fixture should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Cold Case Leader".to_owned(),
@@ -1158,7 +1151,6 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
     )
     .expect("criminal fixture should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Cleared Case Leader".to_owned(),
@@ -1175,7 +1167,6 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
     )
     .expect("leader fixture should validate");
     let lieutenant = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Cleared Case Lieutenant".to_owned(),
@@ -1292,7 +1283,6 @@ fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
     )
     .expect("police fixture should validate");
     let suspect = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Ray Cusack".to_owned(),

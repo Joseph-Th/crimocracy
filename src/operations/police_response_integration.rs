@@ -24,6 +24,7 @@ use crate::legal::police_response_system::{
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::operation_system::validate_police_arrival_abort_operation;
 use crate::operations::{OperationContingency, OperationStatus};
+use crate::registry::OperationExecutionDefinition;
 use crate::registry::Registry;
 use thiserror::Error;
 
@@ -67,6 +68,21 @@ impl OperationPoliceResponseStartPlan {
     }
 }
 
+/// Deterministic arrival delay for a dispatched response: authored base delay reduced by
+/// patrol presence (basis points of the authored reduction window) and clamped to the
+/// authored minimum. Shared with the invariant validator so timing math cannot drift.
+pub(crate) fn resolve_police_arrival_delay(
+    execution: &OperationExecutionDefinition,
+    response_presence: u8,
+) -> u32 {
+    let reduction = u32::from(response_presence)
+        .saturating_mul(u32::from(execution.patrol_response_reduction_minutes()))
+        / 100;
+    let base = execution.base_police_response_delay().as_minutes();
+    let minimum = execution.minimum_police_response_delay().as_minutes();
+    base.saturating_sub(reduction).max(minimum)
+}
+
 pub(crate) fn decide_operation_police_response_start(
     registry: &Registry,
     state: &AppState,
@@ -101,12 +117,7 @@ pub(crate) fn decide_operation_police_response_start(
     };
     let patrol =
         resolve_authority_patrol_presence_snapshot(state, authority, neighborhood, state.now());
-    let reduction = u32::from(patrol.presence.value())
-        .saturating_mul(u32::from(execution.patrol_response_reduction_minutes()))
-        / 100;
-    let base = execution.base_police_response_delay().as_minutes();
-    let minimum = execution.minimum_police_response_delay().as_minutes();
-    let delay = base.saturating_sub(reduction).max(minimum);
+    let delay = resolve_police_arrival_delay(execution, patrol.presence.value());
     let arrival_due_at = state.now() + SimDuration::from_minutes(delay);
     let dispatch = validate_dispatch_police_response(
         state,

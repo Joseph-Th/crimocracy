@@ -280,7 +280,7 @@ fn validate_discovery_state(
             });
         }
     }
-    if let Some(existing) = state.opportunities.open_matching_operation(
+    if let Some(existing) = state.opportunities.find_open_operation(
         draft.organization,
         draft.operation_kind,
         &draft.targets,
@@ -448,12 +448,20 @@ fn validate_conversion_match(
     }
     // Property-capable kinds can only authorize AcquireProperty objectives (enforced at
     // authorization), so a kind-matched conversion always carries the right objective.
+    // An operation objective carries exactly one referenced entity, while a discovery may cover
+    // several related targets. Conversion is coherent when the operation acts against one of the
+    // opportunity's discovered targets; exact set equality would strand multi-target discoveries
+    // in a permanent Open state.
     let operation_targets: BTreeSet<_> = operation
         .objective()
         .referenced_entities()
         .into_iter()
         .collect();
-    if operation_targets != *context.targets() {
+    if operation_targets.len() != 1
+        || !operation_targets
+            .iter()
+            .all(|target| context.targets().contains(target))
+    {
         return Err(OpportunityError::OperationTargetsMismatch {
             operation: operation.id(),
         });

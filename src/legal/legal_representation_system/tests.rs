@@ -98,7 +98,6 @@ fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
     )
     .expect("counsel institution should validate");
     let handler = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Legal Liaison".to_owned(),
@@ -112,7 +111,6 @@ fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
     )
     .expect("contact handler should validate");
     let defendant = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Arrested Associate".to_owned(),
@@ -126,7 +124,6 @@ fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
     )
     .expect("defendant should validate");
     let counsel = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Eleanor Vale".to_owned(),
@@ -588,6 +585,38 @@ fn active_representation_survives_defendant_departure_after_release() {
 }
 
 #[test]
+fn automatic_policy_concludes_representation_after_release_and_frees_the_contact() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 7_500, None);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("defendant detention should release")
+        .commit(&mut fixture.state)
+        .expect("defendant release should commit");
+
+    // The next automatic-support stage concludes the now-moot matter through the canonical
+    // end path so the Legal contact becomes available again instead of staying locked.
+    let ended = apply_automatic_legal_support(&mut fixture.state)
+        .expect("automatic legal support should resolve");
+    assert!(ended.is_empty(), "retention must not rerun after release");
+    let record = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("representation should persist after conclusion");
+    assert_eq!(record.status(), LegalRepresentationStatus::Ended);
+    assert_eq!(
+        record.end_reason(),
+        Some(LegalRepresentationEndReason::MatterConcluded)
+    );
+    validate_terminate_contact(&fixture.state, fixture.contact)
+        .expect("concluded representation should free its contact")
+        .commit(&mut fixture.state)
+        .expect("contact termination should commit");
+    validate_state(&fixture.state).expect("concluded representation state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn stale_retainer_after_contact_termination_is_atomic() {
     let mut fixture = fixture();
     let validated = validate_retain_legal_representation(
@@ -638,7 +667,6 @@ fn stale_retainer_after_contact_termination_is_atomic() {
 fn delegated_legal_budget_authority_is_persisted_and_enforced() {
     let mut fixture = fixture();
     let mandate = validate_assign_mandate(
-        &fixture.registry,
         &fixture.state,
         MandateDraft {
             organization: fixture.sponsor,

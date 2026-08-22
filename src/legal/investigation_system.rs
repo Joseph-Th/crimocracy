@@ -902,15 +902,18 @@ impl ValidatedIncidentIntake {
         });
         let case_witness = if let Some(witness) = self.draft.witness {
             let id = state.ids.next_case_witness()?;
-            state.legal.insert_case_witness(CaseWitnessRecord {
-                id,
-                investigation,
-                witness: witness.character,
-                cooperation: witness.cooperation,
-                registered_at: state.now(),
-                statements: Default::default(),
-                version: 1,
-            });
+            state.legal.insert_case_witness(
+                CaseWitnessRecord {
+                    id,
+                    investigation,
+                    witness: witness.character,
+                    cooperation: witness.cooperation,
+                    registered_at: state.now(),
+                    statements: Default::default(),
+                    version: 1,
+                },
+                state.now(),
+            );
             Some(id)
         } else {
             None

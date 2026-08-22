@@ -97,16 +97,6 @@ impl SocialState {
     ) -> Option<&RelationshipRecord> {
         self.relationships.get(&RelationshipKey { from, to })
     }
-    pub fn relationships_from(
-        &self,
-        from: CharacterId,
-    ) -> impl Iterator<Item = &RelationshipRecord> {
-        self.by_subject
-            .get(&from)
-            .into_iter()
-            .flatten()
-            .filter_map(move |to| self.get_relationship(from, *to))
-    }
     pub fn relationships_to(&self, to: CharacterId) -> impl Iterator<Item = &RelationshipRecord> {
         self.by_target
             .get(&to)
@@ -186,46 +176,11 @@ impl SocialState {
         }
         true
     }
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),
             "Derived Data Consistency: relationship indexes disagree with source records"
         );
-        for record in self.relationships.values() {
-            debug_assert!(
-                self.by_subject
-                    .get(&record.from())
-                    .is_some_and(|targets| targets.contains(&record.to())),
-                "Index Completeness: relationship subject index is missing an edge"
-            );
-            debug_assert!(
-                self.by_target
-                    .get(&record.to())
-                    .is_some_and(|sources| sources.contains(&record.from())),
-                "Index Completeness: relationship target index is missing an edge"
-            );
-        }
-        for (from, targets) in &self.by_subject {
-            for to in targets {
-                debug_assert!(
-                    self.relationships.contains_key(&RelationshipKey {
-                        from: *from,
-                        to: *to
-                    }),
-                    "Index Completeness: relationship index points to missing edge"
-                );
-            }
-        }
-        for (to, sources) in &self.by_target {
-            for from in sources {
-                debug_assert!(
-                    self.relationships.contains_key(&RelationshipKey {
-                        from: *from,
-                        to: *to
-                    }),
-                    "Index Completeness: relationship target index points to missing edge"
-                );
-            }
-        }
     }
 }

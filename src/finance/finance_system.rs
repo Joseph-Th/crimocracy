@@ -372,7 +372,6 @@ mod tests {
         )
         .expect("organization fixture should validate");
         let manager = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Budget Manager".to_owned(),
@@ -403,7 +402,6 @@ mod tests {
         )
         .expect("destination account should validate");
         let mandate = validate_assign_mandate(
-            &registry,
             &state,
             MandateDraft {
                 organization,
@@ -538,7 +536,6 @@ mod tests {
 
     #[test]
     fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked() {
-        let registry = build_registry();
         let (mut state, authorization, funding, destination) = make_test_budget();
         let mandate = authorization.mandate;
         let transaction = validate_record_transaction(
@@ -566,7 +563,6 @@ mod tests {
             .expect("mandate should exist")
             .organization();
         let supervisor = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Budget Supervisor".to_owned(),
@@ -886,7 +882,6 @@ mod tests {
 
     #[test]
     fn validated_budget_transaction_becomes_stale_after_mandate_revision() {
-        let registry = build_registry();
         let (mut state, authorization, funding, destination) = make_test_budget();
         let mandate = authorization.mandate;
         let transaction = validate_record_transaction(
@@ -922,7 +917,7 @@ mod tests {
                 period: current_budget.period,
             }),
         };
-        validate_revise_mandate(&registry, &state, mandate, revision)
+        validate_revise_mandate(&state, mandate, revision)
             .expect("mandate revision should validate")
             .commit(&mut state)
             .expect("mandate revision should commit");
@@ -1013,7 +1008,6 @@ mod tests {
 
     #[test]
     fn delegated_spend_rejects_manager_who_does_not_own_mandate() {
-        let registry = build_registry();
         let (mut state, authorization, funding, destination) = make_test_budget();
         let mandate = authorization.mandate;
         let organization = state
@@ -1022,7 +1016,6 @@ mod tests {
             .expect("mandate should exist")
             .organization();
         let other_manager = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Other Manager".to_owned(),

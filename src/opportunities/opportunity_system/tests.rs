@@ -84,7 +84,6 @@ fn make_fixture() -> OpportunityFixture {
     )
     .expect("business fixture should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Opportunity Crew Leader".to_owned(),
@@ -98,7 +97,6 @@ fn make_fixture() -> OpportunityFixture {
     )
     .expect("leader fixture should validate");
     let entry_specialist = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Opportunity Entry Specialist".to_owned(),
@@ -295,6 +293,61 @@ fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery
             .commit(&mut fixture.state)
             .expect("replacement opportunity should commit");
     assert_ne!(replacement, opportunity);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn multi_target_discovery_converts_against_one_of_its_targets() {
+    let mut fixture = make_fixture();
+    // A second covered target: the fixture leader's presence in the situation.
+    let owner_intel = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Character(fixture.leader),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "The property's watchman is a known fixture personality.".to_owned(),
+        },
+    )
+    .expect("second target information should validate")
+    .commit(&mut fixture.state)
+    .expect("second target information should commit");
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            targets: BTreeSet::from([
+                EntityRef::Business(fixture.business),
+                EntityRef::Character(fixture.leader),
+            ]),
+            source_information: BTreeSet::from([fixture.source, owner_intel]),
+            ..opportunity_draft(&fixture, SimTime::from_minutes(120))
+        },
+    )
+    .expect("multi-target opportunity should validate when every target is covered")
+    .commit(&mut fixture.state)
+    .expect("multi-target opportunity should commit");
+
+    // The operation acts against only one of the discovered targets.
+    let operation = authorize_matching_operation(&mut fixture);
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("operation targeting one discovered target should convert the opportunity")
+        .commit(&mut fixture.state)
+        .expect("validated conversion should commit");
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("converted opportunity should persist")
+            .status(),
+        OpportunityStatus::Converted
+    );
     validate_invariants(&fixture.state);
 }
 

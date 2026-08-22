@@ -479,6 +479,7 @@ impl ContactState {
         true
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),

@@ -238,7 +238,9 @@ fn disposition_report_is_redundant_in_window(
     report: &crate::reports::ReportRecord,
     previous_brief: Option<ReportId>,
 ) -> bool {
-    if report.kind() != ReportKind::Financial || report.title() != "Property disposition" {
+    // Structural identity only: a Financial-kind report that some operation's disposition
+    // points back to is a property-disposition report. Display titles are not identity.
+    if report.kind() != ReportKind::Financial {
         return false;
     }
     report.entries().iter().any(|entry| {
@@ -491,7 +493,6 @@ mod tests {
         designate_player_organization(&mut state, organization)
             .expect("player organization designation should validate");
         let recruiter = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Personnel Manager".to_owned(),
@@ -505,7 +506,6 @@ mod tests {
         )
         .expect("recruiter fixture should validate");
         let candidate = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Independent Candidate".to_owned(),
@@ -535,7 +535,6 @@ mod tests {
         .expect("recruitment relationship fixture should validate")
         .commit(&mut state);
         let mandate = validate_assign_mandate(
-            &registry,
             &state,
             MandateDraft {
                 organization,

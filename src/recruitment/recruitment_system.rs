@@ -279,7 +279,10 @@ pub fn find_recruitment_candidates(
     Ok(candidates)
 }
 
-pub(crate) fn resolve_due_autonomous_recruitment(
+/// Autonomous recruitment pass: applies due delegated recruitment attempts for every
+/// personnel-scoped mandate whose manager runs on delegated autonomy. Mutates state through
+/// canonical validated commits, hence `apply_` rather than a read-only `resolve_`.
+pub(crate) fn apply_due_autonomous_recruitment(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<RecruitmentAttemptId>, RecruitmentError> {
@@ -300,6 +303,9 @@ pub(crate) fn resolve_due_autonomous_recruitment(
         .map(|mandate| (mandate.id(), mandate.organization(), mandate.manager()))
         .collect();
     let mut attempts = Vec::new();
+    // Candidates recruited earlier in this same pass are off-limits to later mandates: without
+    // this guard one minute could bounce a character between organizations with zero dwell time.
+    let mut recruited_this_pass = std::collections::BTreeSet::new();
     for (mandate, organization, manager) in authorities {
         let Some(manager_record) = state.world().get_character(manager) else {
             continue;
@@ -327,6 +333,7 @@ pub(crate) fn resolve_due_autonomous_recruitment(
         let approach = autonomous_recruitment_approach(manager_record);
         let mut candidates =
             find_recruitment_candidates(registry, state, organization, manager).unwrap_or_default();
+        candidates.retain(|candidate| !recruited_this_pass.contains(candidate));
         if candidates.is_empty() {
             continue;
         }
@@ -355,7 +362,10 @@ pub(crate) fn resolve_due_autonomous_recruitment(
             },
         ) {
             Ok(validated) => match validated.commit(state) {
-                Ok(attempt) => attempt,
+                Ok(attempt) => {
+                    recruited_this_pass.insert(candidate);
+                    attempt
+                }
                 Err(_) => continue,
             },
             Err(_) => continue,
@@ -630,25 +640,20 @@ fn validate_recruitment_plan_with_authority(
             .world
             .get_organization(plan.draft.target_organization)
             .expect("validated target organization must exist");
-        // When the candidate is poached from another organization, campaign history must not leak
-        // the hidden recruiting organization: the defector's former organization is told only that
-        // the member left, and the player discovers the destination through surveillance, not a
-        // global history read. So a defection event omits the organization entity and its name.
+        // When the candidate is poached from another organization, campaign history must not
+        // leak the hidden recruiting organization: the defector's former organization is told
+        // only that the member left, and the player discovers the destination through
+        // surveillance, not a global history read. So a defection event omits the destination
+        // organization entity and its name — and also the recruiter, whose membership would
+        // resolve straight back to that organization.
         if plan.context.previous_organization.is_some() {
             Some(validate_record_event(
                 state,
                 HistoryEventDraft {
                     occurred_at: plan.context.occurred_at,
                     kind: HistoryEventKind::Recruitment,
-                    summary: format!(
-                        "{} joined after recruitment by {}.",
-                        candidate.name(),
-                        recruiter.name()
-                    ),
-                    entities: BTreeSet::from([
-                        EntityRef::Character(plan.draft.candidate),
-                        EntityRef::Character(plan.draft.recruiter),
-                    ]),
+                    summary: format!("{} left their former organization.", candidate.name()),
+                    entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
                 },
             )?)
         } else {

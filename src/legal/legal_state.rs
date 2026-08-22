@@ -15,7 +15,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::legal::records::{
-    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
+    Admissibility, ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
     InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
     InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
@@ -715,11 +715,12 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before evidence commit");
         // A named character becomes an identified suspect — unlocking arrest eligibility and
-        // cold-case exemption — only through evidence whose assessment is actionable. Weak
-        // material stays in the case graph without promoting anyone to suspect status.
-        if !matches!(record.subject(), EntityRef::Character(_))
-            || record.strength() != EvidenceStrength::Weak
-        {
+        // cold-case exemption — only through evidence whose assessment is actionable: not
+        // weak, and not inadmissible. Unusable material stays in the case graph without
+        // promoting anyone to suspect status.
+        let promotes_character = record.strength() != EvidenceStrength::Weak
+            && record.admissibility() != Admissibility::Inadmissible;
+        if !matches!(record.subject(), EntityRef::Character(_)) || promotes_character {
             investigation.subjects.insert(record.subject());
             self.indexes
                 .investigations
@@ -766,9 +767,12 @@ impl LegalState {
         // cold-case inactivity clock must reset to now.
         self.note_investigation_activity(investigation_id, activity_at);
     }
-    pub(crate) fn insert_case_witness(&mut self, record: CaseWitnessRecord) {
+    /// Registers a case witness and resets the case's cold-case inactivity clock: witness
+    /// registration is consequence-bearing (cooperation drives future interview support).
+    pub(crate) fn insert_case_witness(&mut self, record: CaseWitnessRecord, activity_at: SimTime) {
         let id = record.id();
-        let key = (record.investigation(), record.witness());
+        let investigation_id = record.investigation();
+        let key = (investigation_id, record.witness());
         let previous_key = self
             .indexes
             .witnesses
@@ -781,12 +785,12 @@ impl LegalState {
         self.indexes
             .witnesses
             .case_witnesses_by_investigation
-            .entry(record.investigation())
+            .entry(investigation_id)
             .or_default()
             .insert(id);
         let investigation = self
             .investigations
-            .get_mut(&record.investigation())
+            .get_mut(&investigation_id)
             .expect("validated investigation disappeared before witness registration");
         investigation.version = investigation
             .version
@@ -797,11 +801,15 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate case witness ID inserted"
         );
+        self.note_investigation_activity(investigation_id, activity_at);
     }
+    /// Updates witness cooperation and resets the case's cold-case inactivity clock:
+    /// cooperation directly drives future interview support scoring.
     pub(crate) fn set_witness_cooperation(
         &mut self,
         case_witness: CaseWitnessId,
         cooperation: WitnessCooperation,
+        activity_at: SimTime,
     ) {
         let investigation_id = {
             let record = self
@@ -823,6 +831,7 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        self.note_investigation_activity(investigation_id, activity_at);
     }
     pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
         let id = record.id();

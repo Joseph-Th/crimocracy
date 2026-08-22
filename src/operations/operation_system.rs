@@ -18,6 +18,7 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::operations::operation_state::{pause_duration_minutes, shift_past_pause};
 use crate::operations::police_response_integration::{
     decide_operation_police_response_start, OperationPoliceResponseStartPlan,
 };
@@ -588,16 +589,8 @@ pub(crate) fn validate_operation_resume_participants(
     let due_at = record
         .resolution_due_at()
         .expect("decision-blocked operation must retain its resolution due time");
-    let paused_minutes = resumed_at
-        .as_minutes()
-        .checked_sub(paused_at.as_minutes())
-        .expect("operation cannot resume before its decision pause began");
-    let shifted_due_at = SimTime::from_minutes(
-        due_at
-            .as_minutes()
-            .checked_add(paused_minutes)
-            .expect("operation resolution time overflowed u64 minutes"),
-    );
+    let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
+    let shifted_due_at = shift_past_pause(due_at, paused_minutes, "resolution time");
     let window_start = record.started_at().unwrap_or(record.scheduled_for());
     for participant in record.participants() {
         let conflict = state
@@ -641,14 +634,10 @@ fn projected_operation_window(
     let mut end = existing.resolution_due_at()?;
     if existing.status() == OperationStatus::AwaitingDecision {
         if let Some(paused_at) = existing.awaiting_decision_since() {
-            let paused_minutes = now
-                .as_minutes()
-                .checked_sub(paused_at.as_minutes())
-                .expect("current time cannot precede an operation's decision pause");
-            end = SimTime::from_minutes(
-                end.as_minutes()
-                    .checked_add(paused_minutes)
-                    .expect("projected operation resolution time overflowed u64 minutes"),
+            end = shift_past_pause(
+                end,
+                pause_duration_minutes(paused_at, now),
+                "projected resolution time",
             );
         }
     }
@@ -1295,15 +1284,10 @@ pub(crate) fn projected_resume_entry_at(
     if entry_at <= paused_at {
         return Some(entry_at);
     }
-    let paused_minutes = resumed_at
-        .as_minutes()
-        .checked_sub(paused_at.as_minutes())
-        .expect("operation cannot resume before its decision pause began");
-    Some(SimTime::from_minutes(
-        entry_at
-            .as_minutes()
-            .checked_add(paused_minutes)
-            .expect("operation entry time overflowed u64 minutes"),
+    Some(shift_past_pause(
+        entry_at,
+        pause_duration_minutes(paused_at, resumed_at),
+        "entry time",
     ))
 }
 

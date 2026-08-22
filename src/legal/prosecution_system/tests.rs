@@ -91,7 +91,6 @@ fn fixture() -> Fixture {
     )
     .expect("prosecutor office should validate");
     let defendant = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Case Defendant".to_owned(),
@@ -105,7 +104,6 @@ fn fixture() -> Fixture {
     )
     .expect("defendant fixture should validate");
     let lead = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Lead Prosecutor".to_owned(),
@@ -361,7 +359,6 @@ fn open_case_is_unique_per_office_but_other_prosecutor_office_may_receive_referr
     )
     .expect("second prosecutor office should validate");
     let second_lead = insert_character(
-        &fixture.registry,
         &mut fixture.state,
         CharacterDraft {
             name: "State Prosecutor Lead".to_owned(),
@@ -684,7 +681,6 @@ fn private_legal_services_and_generic_legal_authority_cannot_act_as_prosecutor_o
         )
         .expect("invalid prosecution fixture organization should still be creatable");
         let invalid_lead = insert_character(
-            &fixture.registry,
             &mut fixture.state,
             CharacterDraft {
                 name: "Invalid Prosecutor".to_owned(),

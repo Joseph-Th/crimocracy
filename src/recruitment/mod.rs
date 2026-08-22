@@ -28,6 +28,33 @@ pub const ALL_RECRUITMENT_APPROACHES: [RecruitmentApproach; 4] = [
     RecruitmentApproach::PersonalAppeal,
 ];
 
+#[cfg(test)]
+mod approach_list_tests {
+    use super::*;
+
+    #[test]
+    fn all_recruitment_approaches_cover_every_variant() {
+        // The wildcard-free match makes adding a variant a compile error here, forcing this
+        // canary and ALL_RECRUITMENT_APPROACHES to be revisited together.
+        let expected: [RecruitmentApproach; 4] = [
+            RecruitmentApproach::FinancialOpportunity,
+            RecruitmentApproach::Advancement,
+            RecruitmentApproach::Protection,
+            RecruitmentApproach::PersonalAppeal,
+        ];
+        for approach in ALL_RECRUITMENT_APPROACHES {
+            match approach {
+                RecruitmentApproach::FinancialOpportunity
+                | RecruitmentApproach::Advancement
+                | RecruitmentApproach::Protection
+                | RecruitmentApproach::PersonalAppeal => {}
+            }
+            assert!(expected.contains(&approach));
+        }
+        assert_eq!(ALL_RECRUITMENT_APPROACHES.as_slice(), expected);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecruitmentRelationshipSnapshot {
     from: CharacterId,
@@ -382,6 +409,7 @@ impl RecruitmentState {
         true
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),

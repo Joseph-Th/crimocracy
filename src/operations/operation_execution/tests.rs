@@ -156,7 +156,6 @@ fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId)
     .expect("operation organization fixture should validate");
     let target = make_fixture_business(&registry, &mut state, "Operation Test Target");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Operation Test Leader".to_owned(),
@@ -211,7 +210,6 @@ fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
     .expect("intelligence operation organization should validate");
     let target = make_fixture_business(&registry, &mut state, "Intelligence Test Target");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Prepared Crew Leader".to_owned(),
@@ -382,7 +380,6 @@ fn make_exposed_business_operation_fixture_with_contingencies(
     )
     .expect("exposure business should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Exposure Crew Leader".to_owned(),
@@ -405,7 +402,6 @@ fn make_exposed_business_operation_fixture_with_contingencies(
     )
     .expect("exposure leader should validate");
     let specialist = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Exposure Entry Specialist".to_owned(),
@@ -1361,7 +1357,6 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect("police should validate");
     let mut make_member = |name: &str, supervisor: Option<CharacterId>| {
         insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: name.to_owned(),
@@ -1562,7 +1557,6 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     )
     .expect("police should validate");
     let owner = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Shopkeeper Witness".to_owned(),
@@ -1602,7 +1596,6 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     // The precinct needs a capable detective so the case can be staffed and interviews
     // can be conducted.
     let _detective = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Pipeline Detective".to_owned(),
@@ -1619,7 +1612,6 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     )
     .expect("detective should validate");
     let leader = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Pipeline Crew Leader".to_owned(),

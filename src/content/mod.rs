@@ -28,6 +28,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const CURRENT_CONTENT_REVISION: u32 = 22;
 
+/// Authored floor for police response arrival delays; the patrol-reduction window is the
+/// remainder above this minimum so a full-presence response arrives at exactly the floor.
+const MINIMUM_POLICE_RESPONSE_DELAY_MINUTES: u32 = 3;
+
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
     for kind in ALL_CAPABILITY_KINDS {
@@ -650,9 +654,13 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         police_response: OperationPoliceResponseDefinition {
             dispatch_threshold,
             base_response_delay: SimDuration::from_minutes(base_response_minutes),
-            minimum_response_delay: SimDuration::from_minutes(3),
-            patrol_reduction_minutes: u16::try_from(base_response_minutes - 3)
-                .expect("authored police response delay range must fit u16"),
+            minimum_response_delay: SimDuration::from_minutes(
+                MINIMUM_POLICE_RESPONSE_DELAY_MINUTES,
+            ),
+            patrol_reduction_minutes: u16::try_from(
+                base_response_minutes - MINIMUM_POLICE_RESPONSE_DELAY_MINUTES,
+            )
+            .expect("authored police response delay range must fit u16"),
             entry_offset: entry_minutes.map(SimDuration::from_minutes),
             arrival_difficulty_penalty: response_difficulty,
             arrival_exposure_penalty: response_exposure,

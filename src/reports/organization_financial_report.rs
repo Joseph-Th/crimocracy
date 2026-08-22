@@ -256,12 +256,19 @@ fn collect_notable_business_cycles(
     period_end: SimTime,
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
-    for business in state.world.businesses().filter(|business| {
-        state
-            .economy()
-            .get_business_economy(business.id())
-            .is_some()
-    }) {
+    // Historical-ownership-indexed scan: every business the recipient ever owned can carry
+    // organization-owned cycles inside the window (including one transferred mid-period),
+    // so the world-wide business list is never walked here.
+    for business in state
+        .world
+        .businesses_ever_owned_by_organization(recipient)
+        .filter(|business| {
+            state
+                .economy()
+                .get_business_economy(business.id())
+                .is_some()
+        })
+    {
         for cycle in state.economy().cycles_for(business.id()).filter(|cycle| {
             cycle.occurred_at() >= period_start
                 && cycle.occurred_at() <= period_end

@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind,
-    OrganizationId,
+    BusinessId, CharacterId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
+    IdExhaustionError, IdKind, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -31,7 +31,8 @@ use crate::intelligence::{
 };
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
 use crate::world::{
-    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile, Rating,
+    BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile, PolicyKind,
+    Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -80,6 +81,12 @@ pub enum EnterpriseError {
     #[error("supporting business {business} changed after validation; expected version {expected}, found {found}")]
     StaleSupportingBusiness {
         business: BusinessId,
+        expected: u32,
+        found: u32,
+    },
+    #[error("enterprise manager {character} changed after validation; expected version {expected}, found {found}")]
+    StaleManager {
+        character: CharacterId,
         expected: u32,
         found: u32,
     },
@@ -221,6 +228,12 @@ struct EnterpriseCycleSnapshot {
     next_cycle_at: SimTime,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     host_business_version: Option<(BusinessId, u32)>,
+    /// Manager capability feeds gross revenue, so a manager mutation between decide and
+    /// commit would otherwise settle economics computed from a stale rating.
+    manager_version: (CharacterId, u32),
+    /// Authored policy axis for the enterprise kind, if any. Re-checked at validation and
+    /// commit because the resolved setting is delegation-owned and never persisted here.
+    policy_check: Option<PolicyKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,7 +294,7 @@ pub fn decide_enterprise_cycle(
     }
     let due_at = record
         .next_cycle_at()
-        .ok_or(EnterpriseError::EnterpriseNotActive(enterprise))?;
+        .expect("active enterprise must carry a scheduled next cycle");
     if state.now() < due_at {
         return Err(EnterpriseError::CycleNotDue { enterprise, due_at });
     }
@@ -320,6 +333,7 @@ pub fn decide_enterprise_cycle(
         .get_character(record.manager())
         .expect("resolved enterprise authority manager must exist");
     let manager_management = manager.capability(CapabilityKind::Management);
+    let manager_version = (record.manager(), manager.version());
     let economics = definition.economics();
     let gross_before_variance =
         resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
@@ -339,7 +353,8 @@ pub fn decide_enterprise_cycle(
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     // Validate that the manager still holds the authored policy authority for this enterprise
     // kind. The resolved setting is delegation-owned state and is never persisted on the cycle.
-    if let Some(policy_kind) = definition.policy() {
+    let policy_check = definition.policy();
+    if let Some(policy_kind) = policy_check {
         resolve_policy_for_manager(state, record.manager(), policy_kind)?;
     }
     let variance_notable = i32::from(variance_basis_points).unsigned_abs()
@@ -375,6 +390,8 @@ pub fn decide_enterprise_cycle(
             next_cycle_at: state.now() + economics.cycle(),
             supporting_business_versions,
             host_business_version,
+            manager_version,
+            policy_check,
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,
@@ -395,6 +412,30 @@ pub struct ValidatedEnterpriseCycle {
     plan: EnterpriseCyclePlan,
     ledger: Option<ValidatedLedgerTransaction>,
     information: Option<ValidatedInformation>,
+}
+
+/// Re-runs the decide-time manager checks that depend on mutable delegation-owned state.
+fn ensure_manager_authority_current(
+    state: &AppState,
+    snapshot: &EnterpriseCycleSnapshot,
+) -> Result<(), EnterpriseError> {
+    let (manager, expected_version) = snapshot.manager_version;
+    let record = state
+        .world
+        .get_character(manager)
+        .expect("current mandate authority implies the manager exists");
+    if record.version() != expected_version {
+        return Err(EnterpriseError::StaleManager {
+            character: manager,
+            expected: expected_version,
+            found: record.version(),
+        });
+    }
+    // A standing order revoked between plan and validation must not settle a cycle.
+    if let Some(policy_kind) = snapshot.policy_check {
+        resolve_policy_for_manager(state, manager, policy_kind)?;
+    }
+    Ok(())
 }
 
 impl ValidatedEnterpriseCycle {
@@ -433,6 +474,7 @@ impl ValidatedEnterpriseCycle {
             });
         }
         ensure_mandate_authority_current(state, self.plan.snapshot.authority)?;
+        ensure_manager_authority_current(state, &self.plan.snapshot)?;
         validate_supporting_business_versions(
             state,
             &self.plan.snapshot.supporting_business_versions,
@@ -463,6 +505,9 @@ impl ValidatedEnterpriseCycle {
             self.plan.accounts.settlement_account,
             Some(record.id()),
         )?;
+        // Settlement atomicity rests on the ID budget reserved above: every downstream commit
+        // (ledger, information, cycle) consumes pre-reserved IDs and cannot fail after the
+        // first one mutates state.
         let transaction = match self.ledger {
             Some(ledger) => Some(ledger.commit(state)?),
             None => None,
@@ -527,6 +572,7 @@ pub fn validate_enterprise_cycle_plan(
         });
     }
     ensure_mandate_authority_current(state, plan.snapshot.authority)?;
+    ensure_manager_authority_current(state, &plan.snapshot)?;
     validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;
     if let Some((business_id, expected)) = plan.snapshot.host_business_version {
         let business = state

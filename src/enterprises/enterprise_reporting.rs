@@ -294,7 +294,6 @@ mod tests {
         )
         .expect("neighborhood fixture should validate");
         let manager = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Historical Enterprise Manager".to_owned(),
@@ -309,7 +308,6 @@ mod tests {
         .expect("manager fixture should validate");
         let scope = ResponsibilityScope::Neighborhood(neighborhood);
         let mandate = validate_assign_mandate(
-            &registry,
             &state,
             MandateDraft {
                 organization,

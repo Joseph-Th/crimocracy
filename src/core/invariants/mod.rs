@@ -10,7 +10,9 @@ use crate::core::id::{
     OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
     RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
-use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
+use crate::core::state::AppState;
+#[cfg(debug_assertions)]
+use crate::core::state::CURRENT_STATE_SCHEMA_VERSION;
 use crate::decisions::DecisionResponse;
 use crate::enterprises::EnterpriseLocation;
 use crate::legal::investigation_work_execution::{
@@ -23,6 +25,7 @@ use crate::operations::operation_execution::{
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
     resolve_property_proceeds,
 };
+use crate::operations::police_response_integration::resolve_police_arrival_delay;
 use crate::operations::property_disposition::resolve_property_liquidation_value;
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::opportunities::OpportunityResolution;
@@ -587,15 +590,10 @@ pub fn validate_state_against_registry(
                     .legal
                     .get_police_response(response)
                     .is_some_and(|response| {
-                        let reduction =
-                            u32::from(response.response_presence().value()).saturating_mul(
-                                u32::from(execution.patrol_response_reduction_minutes()),
-                            ) / 100;
-                        let delay = execution
-                            .base_police_response_delay()
-                            .as_minutes()
-                            .saturating_sub(reduction)
-                            .max(execution.minimum_police_response_delay().as_minutes());
+                        let delay = resolve_police_arrival_delay(
+                            execution,
+                            response.response_presence().value(),
+                        );
                         response.alert_score() >= execution.police_dispatch_threshold()
                             && response.arrival_due_at()
                                 == response.dispatched_at()
@@ -1112,3 +1110,8 @@ pub fn validate_invariants(state: &AppState) {
         panic!("State Runtime Validity: release-safe structural validation failed: {error:?}");
     }
 }
+
+/// Release builds pay none of the debug-boundary validation per tick; save/load and
+/// observation boundaries own validation there via [`validate_state`].
+#[cfg(not(debug_assertions))]
+pub fn validate_invariants(_state: &AppState) {}

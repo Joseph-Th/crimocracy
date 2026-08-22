@@ -1,7 +1,7 @@
 //! Serializable application state; subsystem state is owned here and mutated through systems.
 
 use crate::contacts::ContactState;
-use crate::core::attention::AttentionSettings;
+use crate::core::attention::{AttentionClass, AttentionSettings};
 use crate::core::id::{IdCounters, OrganizationId};
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::DecisionState;
@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 49;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 50;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -172,6 +172,15 @@ impl AppState {
 
     pub fn attention_settings(&self) -> &AttentionSettings {
         &self.campaign.attention
+    }
+
+    /// Canonical mutation path for the persistent auto-pause preference.
+    pub fn set_auto_pause(&mut self, attention: AttentionClass, enabled: bool) {
+        if enabled {
+            self.campaign.attention.auto_pause.insert(attention);
+        } else {
+            self.campaign.attention.auto_pause.remove(&attention);
+        }
     }
 
     pub(crate) fn state_schema_version(&self) -> u16 {

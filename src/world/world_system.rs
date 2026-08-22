@@ -44,6 +44,10 @@ pub enum WorldError {
         owner: BusinessOwner,
     },
     #[error(
+        "character {character} already has this organization and supervisor; reassignment unchanged"
+    )]
+    CharacterReassignmentUnchanged { character: CharacterId },
+    #[error(
         "business {business} changed after validation; expected version {expected}, found {found}"
     )]
     StaleBusiness {
@@ -68,8 +72,8 @@ pub enum WorldError {
         supervisor: CharacterId,
         organization: Option<OrganizationId>,
     },
-    #[error("character {character} cannot have a supervisor without belonging to an organization")]
-    SupervisorWithoutOrganization { character: CharacterId },
+    #[error("cannot assign supervisor {supervisor} to a character without an organization")]
+    SupervisorWithoutOrganization { supervisor: CharacterId },
     #[error("character {character} cannot supervise itself")]
     SelfSupervision { character: CharacterId },
     #[error("reassignment would create a supervision cycle involving character {character}")]
@@ -199,7 +203,6 @@ pub fn insert_neighborhood(
 }
 
 pub fn insert_character(
-    registry: &Registry,
     state: &mut AppState,
     draft: CharacterDraft,
 ) -> Result<CharacterId, WorldError> {
@@ -207,15 +210,6 @@ pub fn insert_character(
         return Err(WorldError::EmptyName);
     }
     validate_membership(state, draft.organization, draft.supervisor)?;
-    for kind in draft.capabilities.keys() {
-        registry.get_capability(*kind);
-    }
-    for kind in &draft.traits {
-        registry.get_trait(*kind);
-    }
-    for kind in draft.drives.keys() {
-        registry.get_drive(*kind);
-    }
 
     let id = state.ids.next_character()?;
     state.world.insert_character(CharacterRecord {
@@ -287,6 +281,11 @@ pub fn validate_reassign_character(
         .world
         .get_character(character)
         .ok_or(WorldError::MissingCharacter(character))?;
+    if organization == record.organization() && supervisor == record.supervisor() {
+        // A no-op reassignment must not commit or bump the version: that would silently
+        // invalidate every outstanding validated token pinned to this character.
+        return Err(WorldError::CharacterReassignmentUnchanged { character });
+    }
     validate_reassignment_preconditions(state, character, organization, supervisor)?;
 
     Ok(ValidatedCharacterReassignment {
@@ -500,12 +499,10 @@ impl ValidatedBusinessOwnershipTransfer {
         }
         validate_business_owner(state, self.new_owner)?;
         validate_business_support_ownership_change(state, self.business, self.new_owner)?;
-        if self.new_owner == self.previous_owner {
-            return Err(WorldError::BusinessOwnershipUnchanged {
-                business: self.business,
-                owner: self.new_owner,
-            });
-        }
+        debug_assert_ne!(
+            self.new_owner, self.previous_owner,
+            "validation rejects unchanged ownership before a token exists"
+        );
         let resulting_business_version = self
             .expected_version
             .checked_add(1)
@@ -662,7 +659,7 @@ fn validate_membership(
     if let Some(supervisor_id) = supervisor {
         if organization.is_none() {
             return Err(WorldError::SupervisorWithoutOrganization {
-                character: supervisor_id,
+                supervisor: supervisor_id,
             });
         }
         let supervisor_record = state
@@ -705,14 +702,12 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     fn make_test_character(
-        registry: &Registry,
         state: &mut AppState,
         name: &str,
         organization: OrganizationId,
         supervisor: Option<CharacterId>,
     ) -> CharacterId {
         insert_character(
-            registry,
             state,
             CharacterDraft {
                 name: name.to_owned(),
@@ -795,13 +790,8 @@ mod tests {
             },
         )
         .expect("second owner should validate");
-        let individual_owner = make_test_character(
-            &registry,
-            &mut state,
-            "Individual Proprietor",
-            second_owner,
-            None,
-        );
+        let individual_owner =
+            make_test_character(&mut state, "Individual Proprietor", second_owner, None);
         let business = make_test_business(
             &registry,
             &mut state,
@@ -931,13 +921,6 @@ mod tests {
             1
         );
         assert_eq!(
-            state
-                .world()
-                .businesses_ever_owned_by_character(individual_owner)
-                .count(),
-            1
-        );
-        assert_eq!(
             state.world().business_ownership_history(business).count(),
             3
         );
@@ -1051,21 +1034,9 @@ mod tests {
             },
         )
         .expect("test organization should validate");
-        let boss = make_test_character(&registry, &mut state, "Boss", organization, None);
-        let lieutenant = make_test_character(
-            &registry,
-            &mut state,
-            "Lieutenant",
-            organization,
-            Some(boss),
-        );
-        let soldier = make_test_character(
-            &registry,
-            &mut state,
-            "Soldier",
-            organization,
-            Some(lieutenant),
-        );
+        let boss = make_test_character(&mut state, "Boss", organization, None);
+        let lieutenant = make_test_character(&mut state, "Lieutenant", organization, Some(boss));
+        let soldier = make_test_character(&mut state, "Soldier", organization, Some(lieutenant));
 
         let error = validate_reassign_character(&state, boss, Some(organization), Some(soldier))
             .expect_err("cycle must be rejected before mutation");
@@ -1095,21 +1066,9 @@ mod tests {
             },
         )
         .expect("test organization should validate");
-        let boss = make_test_character(&registry, &mut state, "Boss", organization, None);
-        let lieutenant = make_test_character(
-            &registry,
-            &mut state,
-            "Lieutenant",
-            organization,
-            Some(boss),
-        );
-        let soldier = make_test_character(
-            &registry,
-            &mut state,
-            "Soldier",
-            organization,
-            Some(lieutenant),
-        );
+        let boss = make_test_character(&mut state, "Boss", organization, None);
+        let lieutenant = make_test_character(&mut state, "Lieutenant", organization, Some(boss));
+        let soldier = make_test_character(&mut state, "Soldier", organization, Some(lieutenant));
 
         validate_reassign_character(&state, soldier, Some(organization), Some(boss))
             .expect("valid reassignment should produce a token")
@@ -1134,11 +1093,9 @@ mod tests {
             },
         )
         .expect("test organization should validate");
-        let supervisor =
-            make_test_character(&registry, &mut state, "Supervisor", organization, None);
+        let supervisor = make_test_character(&mut state, "Supervisor", organization, None);
 
         let error = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Unassigned".to_owned(),
@@ -1154,19 +1111,15 @@ mod tests {
 
         assert_eq!(
             error,
-            WorldError::SupervisorWithoutOrganization {
-                character: supervisor,
-            }
+            WorldError::SupervisorWithoutOrganization { supervisor }
         );
         validate_invariants(&state);
     }
 
     #[test]
     fn unassigned_character_cannot_have_unassigned_supervisor() {
-        let registry = build_registry();
         let mut state = AppState::new(13);
         let supervisor = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Unassigned Supervisor".to_owned(),
@@ -1181,7 +1134,6 @@ mod tests {
         .expect("unassigned supervisor fixture should validate");
 
         let error = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Unassigned".to_owned(),
@@ -1197,9 +1149,7 @@ mod tests {
 
         assert_eq!(
             error,
-            WorldError::SupervisorWithoutOrganization {
-                character: supervisor,
-            }
+            WorldError::SupervisorWithoutOrganization { supervisor }
         );
         assert_eq!(state.world.direct_reports(supervisor).count(), 0);
         validate_invariants(&state);
@@ -1218,11 +1168,10 @@ mod tests {
             },
         )
         .expect("test organization should validate");
-        let boss = make_test_character(&registry, &mut state, "Boss", organization, None);
-        let first = make_test_character(&registry, &mut state, "First", organization, Some(boss));
-        let second = make_test_character(&registry, &mut state, "Second", organization, Some(boss));
-        let member =
-            make_test_character(&registry, &mut state, "Member", organization, Some(first));
+        let boss = make_test_character(&mut state, "Boss", organization, None);
+        let first = make_test_character(&mut state, "First", organization, Some(boss));
+        let second = make_test_character(&mut state, "Second", organization, Some(boss));
+        let member = make_test_character(&mut state, "Member", organization, Some(first));
 
         let stale = validate_reassign_character(&state, member, Some(organization), Some(second))
             .expect("first reassignment should validate");
@@ -1255,6 +1204,45 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_reassignment_is_rejected_without_bumping_the_version() {
+        let registry = build_registry();
+        let mut state = AppState::new(29);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Test Organization".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("test organization should validate");
+        let boss = make_test_character(&mut state, "Boss", organization, None);
+        let member = make_test_character(&mut state, "Member", organization, Some(boss));
+        let version_before = state
+            .world()
+            .get_character(member)
+            .expect("member should exist")
+            .version();
+
+        let error = validate_reassign_character(&state, member, Some(organization), Some(boss))
+            .expect_err("no-op reassignment must be rejected");
+        assert_eq!(
+            error,
+            WorldError::CharacterReassignmentUnchanged { character: member }
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_character(member)
+                .expect("member should exist")
+                .version(),
+            version_before,
+            "rejected reassignment must not invalidate outstanding tokens"
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
     fn reassignment_token_revalidates_new_mandate_dependency_at_commit() {
         let registry = build_registry();
         let mut state = AppState::new(23);
@@ -1276,13 +1264,11 @@ mod tests {
             },
         )
         .expect("second organization should validate");
-        let manager =
-            make_test_character(&registry, &mut state, "Manager", first_organization, None);
+        let manager = make_test_character(&mut state, "Manager", first_organization, None);
         let reassignment =
             validate_reassign_character(&state, manager, Some(second_organization), None)
                 .expect("reassignment should initially validate");
         let mandate = validate_assign_mandate(
-            &registry,
             &state,
             MandateDraft {
                 organization: first_organization,
@@ -1341,14 +1327,9 @@ mod tests {
             },
         )
         .expect("second organization should validate");
-        let supervisor = make_test_character(
-            &registry,
-            &mut state,
-            "Future Supervisor",
-            first_organization,
-            None,
-        );
-        let member = make_test_character(&registry, &mut state, "Member", first_organization, None);
+        let supervisor =
+            make_test_character(&mut state, "Future Supervisor", first_organization, None);
+        let member = make_test_character(&mut state, "Member", first_organization, None);
         let member_reassignment =
             validate_reassign_character(&state, member, Some(first_organization), Some(supervisor))
                 .expect("member reassignment should initially validate");
@@ -1400,15 +1381,8 @@ mod tests {
             },
         )
         .expect("second organization should validate");
-        let supervisor = make_test_character(
-            &registry,
-            &mut state,
-            "Supervisor",
-            first_organization,
-            None,
-        );
+        let supervisor = make_test_character(&mut state, "Supervisor", first_organization, None);
         let direct_report = make_test_character(
-            &registry,
             &mut state,
             "Direct Report",
             first_organization,

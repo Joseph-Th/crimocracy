@@ -236,7 +236,7 @@ impl OpportunityState {
             .and_then(|id| self.records.get(id))
     }
 
-    pub fn open_matching_operation(
+    pub fn find_open_operation(
         &self,
         organization: OrganizationId,
         operation_kind: OperationKind,
@@ -503,6 +503,7 @@ impl OpportunityState {
         true
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),

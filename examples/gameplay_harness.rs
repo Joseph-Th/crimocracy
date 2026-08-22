@@ -1607,7 +1607,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
     )?;
 
     let handler = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Harbor Legal Liaison".to_owned(),
@@ -1620,7 +1619,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         },
     )?;
     let defendant = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Harbor Associate".to_owned(),
@@ -1633,7 +1631,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         },
     )?;
     let counsel = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Elena Vale".to_owned(),
@@ -1646,7 +1643,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         },
     )?;
     let prosecutor = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Ada Mercer".to_owned(),
@@ -2716,7 +2712,6 @@ fn build_scenario(
         },
     )?;
     let detective = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Harlan Pike".to_owned(),
@@ -2798,7 +2793,6 @@ fn build_scenario(
     .commit(&mut state)?;
 
     let boss = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Joseph Marrow".to_owned(),
@@ -2814,7 +2808,6 @@ fn build_scenario(
         },
     )?;
     let lieutenant = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Carlo Venn".to_owned(),
@@ -2833,7 +2826,6 @@ fn build_scenario(
         },
     )?;
     let burglar = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Frank Dello".to_owned(),
@@ -2849,7 +2841,6 @@ fn build_scenario(
         },
     )?;
     let scout = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Mara Vale".to_owned(),
@@ -2868,7 +2859,6 @@ fn build_scenario(
         },
     )?;
     let bartender = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Lena Orr".to_owned(),
@@ -2886,7 +2876,6 @@ fn build_scenario(
     // pre-existing personal relationship to the boss that makes the pitch deterministic without
     // any RNG or hidden-state reads.
     let danny_ferro = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Danny Ferro".to_owned(),
@@ -2902,7 +2891,6 @@ fn build_scenario(
         },
     )?;
     let rival_recruiter = insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Maria Rosetti".to_owned(),
@@ -2915,7 +2903,6 @@ fn build_scenario(
         },
     )?;
     insert_character(
-        registry,
         &mut state,
         CharacterDraft {
             name: "Victor D'Amato".to_owned(),
@@ -2980,7 +2967,6 @@ fn build_scenario(
     .commit(&mut state);
 
     validate_assign_mandate(
-        registry,
         &state,
         MandateDraft {
             organization: rival,
@@ -3193,7 +3179,6 @@ fn build_scenario(
         },
     )?;
     let mandate = validate_assign_mandate(
-        registry,
         &state,
         MandateDraft {
             organization: player,
@@ -3499,7 +3484,6 @@ fn establish_harbor_expansion(
         .to_owned();
 
     validate_revise_mandate(
-        scenario.registry,
         &scenario.state,
         scenario.lieutenant_mandate,
         MandateRevisionDraft {
@@ -4247,7 +4231,6 @@ fn run_organizational_capacity_probe(registry: &Registry, seed: u64) -> Result<(
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     );
     validate_revise_mandate(
-        registry,
         &scenario.state,
         player_mandate,
         MandateRevisionDraft {

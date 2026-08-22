@@ -64,7 +64,6 @@ fn relationship(
 }
 
 fn assign_personnel_mandate(
-    registry: &crate::registry::Registry,
     fixture: &mut Fixture,
     recruitment_policy: Option<ApprovalPolicy>,
 ) -> crate::core::id::MandateId {
@@ -77,7 +76,6 @@ fn assign_personnel_mandate(
         })
         .unwrap_or_default();
     validate_assign_mandate(
-        registry,
         &fixture.state,
         MandateDraft {
             organization: fixture.target,
@@ -124,7 +122,6 @@ fn fixture() -> Fixture {
     )
     .expect("target organization should validate");
     let incumbent = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Incumbent Lieutenant".to_owned(),
@@ -138,7 +135,6 @@ fn fixture() -> Fixture {
     )
     .expect("incumbent should validate");
     let recruiter = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Rival Recruiter".to_owned(),
@@ -152,7 +148,6 @@ fn fixture() -> Fixture {
     )
     .expect("recruiter should validate");
     let candidate = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Frightened Associate".to_owned(),
@@ -195,10 +190,8 @@ fn protection_draft(fixture: &Fixture) -> RecruitmentDraft {
 
 #[test]
 fn executive_channel_rejects_supervised_recruiters() {
-    let registry = build_registry();
     let mut fixture = fixture();
     let supervised = insert_character(
-        &registry,
         &mut fixture.state,
         CharacterDraft {
             name: "Supervised Soldier".to_owned(),
@@ -245,10 +238,8 @@ fn executive_channel_rejects_supervised_recruiters() {
 
 #[test]
 fn candidate_discovery_follows_incoming_relationships_not_global_roster() {
-    let registry = build_registry();
     let mut fixture = fixture();
     let unrelated = insert_character(
-        &registry,
         &mut fixture.state,
         CharacterDraft {
             name: "Unrelated Associate".to_owned(),
@@ -285,19 +276,18 @@ fn candidate_discovery_follows_incoming_relationships_not_global_roster() {
 fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     let registry = build_registry();
     let mut fixture = fixture();
-    let mandate =
-        assign_personnel_mandate(&registry, &mut fixture, Some(ApprovalPolicy::Delegated));
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
 
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
     assert!(
-        resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
             .expect("autonomous recruitment before cadence should be a no-op")
             .is_empty()
     );
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
-    let attempts = resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+    let attempts = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
         .expect("delegated broad recruiter should act at the authored cadence");
     assert_eq!(attempts.len(), 1);
     let attempt = fixture
@@ -319,7 +309,7 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
         } if found_mandate == mandate && manager == fixture.recruiter
     ));
     assert!(
-        resolve_due_autonomous_recruitment(&registry, &mut fixture.state)
+        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
             .expect("same-minute repeat should be blocked by recruitment history")
             .is_empty()
     );
@@ -329,9 +319,8 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
 
 #[test]
 fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
-    let registry = build_registry();
     let mut fixture = fixture();
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let error = match validate_delegated_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -361,9 +350,8 @@ fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
 
 #[test]
 fn approval_required_recruitment_executes_only_after_approval() {
-    let registry = build_registry();
     let mut fixture = fixture();
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let request = validate_request_recruitment_approval(
         &fixture.registry,
         &fixture.state,
@@ -476,9 +464,8 @@ fn approval_required_recruitment_executes_only_after_approval() {
 
 #[test]
 fn rejected_recruitment_approval_records_no_attempt() {
-    let registry = build_registry();
     let mut fixture = fixture();
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let request = validate_request_recruitment_approval(
         &fixture.registry,
         &fixture.state,
@@ -530,7 +517,7 @@ fn rejected_recruitment_approval_records_no_attempt() {
 fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
     let registry = build_registry();
     let mut fixture = fixture();
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let request = validate_request_recruitment_approval(
         &fixture.registry,
         &fixture.state,
@@ -590,7 +577,7 @@ fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
 fn save_round_trip_preserves_pending_recruitment_approval() {
     let registry = build_registry();
     let mut fixture = fixture();
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let request = validate_request_recruitment_approval(
         &fixture.registry,
         &fixture.state,
@@ -643,10 +630,8 @@ fn save_round_trip_preserves_pending_recruitment_approval() {
 
 #[test]
 fn delegated_recruitment_persists_exact_mandate_and_policy_authority() {
-    let registry = build_registry();
     let mut fixture = fixture();
-    let mandate =
-        assign_personnel_mandate(&registry, &mut fixture, Some(ApprovalPolicy::Delegated));
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
     let attempt = validate_delegated_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -689,7 +674,7 @@ fn delegated_recruitment_token_rejects_organization_policy_change_without_mutati
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
     .expect("delegated organization policy should validate");
-    let mandate = assign_personnel_mandate(&registry, &mut fixture, None);
+    let mandate = assign_personnel_mandate(&mut fixture, None);
     let token = validate_delegated_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -877,12 +862,13 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
     assert!(history
         .entities()
         .contains(&EntityRef::Character(fixture.candidate)));
-    assert!(history
-        .entities()
-        .contains(&EntityRef::Character(fixture.recruiter)));
     // This is a defection out of `fixture.source`, so campaign history must not leak the
     // hidden recruiting organization: the player finds the destination through surveillance,
-    // not a global history read.
+    // not a global history read. The recruiter is omitted too — their membership would
+    // resolve straight back to the destination organization.
+    assert!(!history
+        .entities()
+        .contains(&EntityRef::Character(fixture.recruiter)));
     assert!(!history
         .entities()
         .contains(&EntityRef::Organization(fixture.target)));
@@ -893,6 +879,13 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         .expect("target organization should persist")
         .name();
     assert!(!history.summary().contains(target_name));
+    let recruiter_name = fixture
+        .state
+        .world()
+        .get_character(fixture.recruiter)
+        .expect("recruiter should persist")
+        .name();
+    assert!(!history.summary().contains(recruiter_name));
     let departure_reports: Vec<_> = fixture
         .state
         .reports()
@@ -1146,10 +1139,8 @@ fn relationship_change_invalidates_validated_attempt_without_partial_mutation() 
 
 #[test]
 fn canonical_world_dependencies_block_poaching_a_manager_with_direct_reports() {
-    let registry = build_registry();
     let mut fixture = fixture();
     let subordinate = insert_character(
-        &registry,
         &mut fixture.state,
         CharacterDraft {
             name: "Dependent Soldier".to_owned(),

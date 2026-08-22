@@ -10,6 +10,25 @@ use crate::operations::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Minutes elapsed between a decision pause's start and its resumption instant. Shared by
+/// resume validation and commit so pause arithmetic cannot drift between the two phases.
+pub(crate) fn pause_duration_minutes(paused_at: SimTime, resumed_at: SimTime) -> u64 {
+    resumed_at
+        .as_minutes()
+        .checked_sub(paused_at.as_minutes())
+        .expect("operation cannot resume before its decision pause began")
+}
+
+/// Shifts a scheduled time forward across a decision pause; overflow breaks the simulation's
+/// minute-count invariant. `what` names the shifted field for the panic message.
+pub(crate) fn shift_past_pause(time: SimTime, paused_minutes: u64, what: &str) -> SimTime {
+    SimTime::from_minutes(
+        time.as_minutes()
+            .checked_add(paused_minutes)
+            .unwrap_or_else(|| panic!("operation {what} overflowed u64 minutes")),
+    )
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OperationState {
     records: BTreeMap<OperationId, OperationRecord>,
@@ -205,24 +224,11 @@ impl OperationState {
                     .expect("awaiting operation must retain its pause time"),
             )
         };
-        let paused_minutes = resumed_at
-            .as_minutes()
-            .checked_sub(paused_at.as_minutes())
-            .expect("operation cannot resume before its decision pause began");
-        let shifted_due_at = SimTime::from_minutes(
-            due_at
-                .as_minutes()
-                .checked_add(paused_minutes)
-                .expect("operation resolution time overflowed u64 minutes"),
-        );
+        let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
+        let shifted_due_at = shift_past_pause(due_at, paused_minutes, "resolution time");
         let shifted_entry_at = entry_at.map(|entry_at| {
             if entry_at > paused_at {
-                SimTime::from_minutes(
-                    entry_at
-                        .as_minutes()
-                        .checked_add(paused_minutes)
-                        .expect("operation entry time overflowed u64 minutes"),
-                )
+                shift_past_pause(entry_at, paused_minutes, "entry time")
             } else {
                 entry_at
             }
@@ -561,6 +567,7 @@ impl OperationState {
         true
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),

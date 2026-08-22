@@ -79,15 +79,18 @@ impl ValidatedCaseWitnessRegistration {
             self.expected_character_version,
         )?;
         let id = state.ids.next_case_witness()?;
-        state.legal.insert_case_witness(CaseWitnessRecord {
-            id,
-            investigation: self.draft.investigation,
-            witness: self.draft.witness,
-            cooperation: self.draft.cooperation,
-            registered_at: state.now(),
-            statements: Default::default(),
-            version: 1,
-        });
+        state.legal.insert_case_witness(
+            CaseWitnessRecord {
+                id,
+                investigation: self.draft.investigation,
+                witness: self.draft.witness,
+                cooperation: self.draft.cooperation,
+                registered_at: state.now(),
+                statements: Default::default(),
+                version: 1,
+            },
+            state.now(),
+        );
         Ok(id)
     }
 }
@@ -199,7 +202,7 @@ impl ValidatedWitnessCooperation {
         }
         state
             .legal
-            .set_witness_cooperation(self.case_witness, self.cooperation);
+            .set_witness_cooperation(self.case_witness, self.cooperation, state.now());
         Ok(())
     }
 }
@@ -530,7 +533,6 @@ mod tests {
         )
         .expect("criminal fixture should validate");
         let witness = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Daniel Mercer".to_owned(),
@@ -544,7 +546,6 @@ mod tests {
         )
         .expect("witness fixture should validate");
         let subject = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Frank Dello".to_owned(),
@@ -674,7 +675,6 @@ mod tests {
         );
 
         let second_witness = insert_character(
-            &registry,
             &mut restored,
             CharacterDraft {
                 name: "Nora Bell".to_owned(),

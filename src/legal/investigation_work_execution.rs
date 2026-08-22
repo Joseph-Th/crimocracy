@@ -757,12 +757,30 @@ pub(crate) fn resolve_pattern_admissibility(
     state: &AppState,
     work: &InvestigationWorkRecord,
 ) -> Admissibility {
-    if work.source_evidence().iter().all(|id| {
-        state
-            .legal
-            .get_evidence(*id)
-            .is_some_and(|evidence| evidence.admissibility() == Admissibility::Admissible)
-    }) {
+    let source_admissibilities: Vec<Option<Admissibility>> = work
+        .source_evidence()
+        .iter()
+        .map(|id| {
+            state
+                .legal
+                .get_evidence(*id)
+                .map(|evidence| evidence.admissibility())
+        })
+        .collect();
+    // Derived evidence whose entire provenance is inadmissible is itself inadmissible;
+    // calling it merely "disputed" would let it pass autonomous-arrest evidence gates.
+    if !source_admissibilities.is_empty()
+        && source_admissibilities
+            .iter()
+            .all(|admissibility| *admissibility == Some(Admissibility::Inadmissible))
+    {
+        return Admissibility::Inadmissible;
+    }
+    if !source_admissibilities.is_empty()
+        && source_admissibilities
+            .iter()
+            .all(|admissibility| *admissibility == Some(Admissibility::Admissible))
+    {
         Admissibility::Admissible
     } else {
         Admissibility::Disputed
@@ -981,15 +999,16 @@ pub fn apply_due_witness_interview_scheduling(
             .legal
             .get_investigation(investigation_id)
             .expect("indexed active investigation must exist");
-        // Deterministic investigator choice: the lead when present, otherwise the lowest
-        // assigned ID. Cases without investigators wait until staffing assigns one.
-        let Some(investigator) = investigation.lead_investigator().or_else(|| {
-            investigation
-                .assigned_investigators()
-                .iter()
-                .copied()
-                .next()
-        }) else {
+        // Deterministic investigator choice: the lead when present and available, otherwise
+        // the lowest assigned ID. Detained investigators are skipped so an autonomous pass
+        // never schedules work they could not perform; cases without an available
+        // investigator wait for a later minute or the staffing pass.
+        let investigator = investigation
+            .lead_investigator()
+            .into_iter()
+            .chain(investigation.assigned_investigators().iter().copied())
+            .find(|id| state.legal.active_arrest_for_character(*id).is_none());
+        let Some(investigator) = investigator else {
             continue;
         };
         let witnesses: Vec<_> = state
@@ -999,20 +1018,24 @@ pub fn apply_due_witness_interview_scheduling(
             .map(|witness| witness.id())
             .collect();
         for case_witness in witnesses {
-            // Any interview work in any status covers this witness: scheduled work will
-            // produce the statement, completed work already has.
-            let already_scheduled_or_done = state
+            let focus = InvestigationWorkFocus::witness(case_witness);
+            // A pending scheduled interview covers this witness; a completed interview always
+            // produced a statement, which the candidate filter above already excludes.
+            if state
                 .legal
-                .work_for_investigation(investigation_id)
-                .any(|work| {
-                    work.kind() == InvestigationWorkKind::WitnessInterview
-                        && work.focus().witness_id() == Some(case_witness)
-                });
-            if already_scheduled_or_done {
+                .scheduled_work_for_focus(
+                    investigation_id,
+                    InvestigationWorkKind::WitnessInterview,
+                    focus,
+                )
+                .is_some()
+            {
                 continue;
             }
-            let focus = InvestigationWorkFocus::witness(case_witness);
-            let work = validate_schedule_investigation_work(
+            // An autonomous pass must not abort the tick: a canonical rejection (for example
+            // an investigator detained between selection and validation) leaves this witness
+            // for a later minute, like the staffing pass's unstaffed cases.
+            let Ok(work) = validate_schedule_investigation_work(
                 registry,
                 state,
                 InvestigationWorkDraft {
@@ -1021,8 +1044,12 @@ pub fn apply_due_witness_interview_scheduling(
                     kind: InvestigationWorkKind::WitnessInterview,
                     focus,
                 },
-            )?
-            .commit(state)?;
+            ) else {
+                continue;
+            };
+            let Ok(work) = work.commit(state) else {
+                continue;
+            };
             scheduled.push(work);
         }
     }

@@ -154,7 +154,6 @@ fn make_test_scenario() -> TestScenario {
     .expect("precinct jurisdiction fixture should commit");
 
     let boss = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Joseph Marrow".to_owned(),
@@ -171,7 +170,6 @@ fn make_test_scenario() -> TestScenario {
     )
     .expect("boss fixture should validate");
     let lieutenant = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Carlo Venn".to_owned(),
@@ -188,7 +186,6 @@ fn make_test_scenario() -> TestScenario {
     )
     .expect("lieutenant fixture should validate");
     let associate = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Frank Dello".to_owned(),
@@ -205,7 +202,6 @@ fn make_test_scenario() -> TestScenario {
     )
     .expect("associate fixture should validate");
     let detective = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Detective Harlan".to_owned(),
@@ -219,7 +215,6 @@ fn make_test_scenario() -> TestScenario {
     )
     .expect("detective fixture should validate");
     let rival_recruiter = insert_character(
-        &registry,
         &mut state,
         CharacterDraft {
             name: "Maria Rosetti".to_owned(),
@@ -430,7 +425,6 @@ fn make_test_scenario() -> TestScenario {
     .expect("validated operation should remain current");
 
     let mandate = validate_assign_mandate(
-        &registry,
         &state,
         MandateDraft {
             organization: player,
@@ -694,7 +688,8 @@ fn test_mixed_scenario_soak_preserves_invariants() {
                     .expect("fixture should have a recruitable entry specialist");
                 let recruiter = state
                     .social()
-                    .relationships_from(candidate)
+                    .relationships()
+                    .filter(|relationship| relationship.from() == candidate)
                     .find_map(|relationship| {
                         let contact = state.world().get_character(relationship.to())?;
                         (contact.organization() != Some(player_organization))
@@ -1071,14 +1066,12 @@ fn mandate_policy_override_falls_back_to_organization_after_revocation() {
 
 #[test]
 fn stale_mandate_revision_cannot_overwrite_newer_revision() {
-    let registry = build_registry();
     let TestScenario {
         mut state,
         operation: _,
         mandate,
     } = make_test_scenario();
     let stale = validate_revise_mandate(
-        &registry,
         &state,
         mandate,
         MandateRevisionDraft {
@@ -1091,7 +1084,6 @@ fn stale_mandate_revision_cannot_overwrite_newer_revision() {
     )
     .expect("first revision should validate");
     let current = validate_revise_mandate(
-        &registry,
         &state,
         mandate,
         MandateRevisionDraft {
@@ -1269,6 +1261,11 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
     .commit(&mut state)
     .expect("pending-decision report should commit");
 
+    // Toggle two classes off their defaults before saving so the round trip proves
+    // changed preferences, not just restored defaults.
+    state.set_auto_pause(AttentionClass::Exception, false);
+    state.set_auto_pause(AttentionClass::Notable, true);
+
     let envelope = build_save(&registry, &state).expect("valid pending state should save");
     let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
     let decoded: SaveEnvelope =
@@ -1279,13 +1276,21 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
         restored
             .attention_settings()
             .is_auto_pause_enabled(AttentionClass::Exception),
-        default_auto_pause.is_auto_pause_enabled(AttentionClass::Exception)
+        false,
+        "toggled-off Exception auto-pause must survive save/load"
     );
     assert_eq!(
         restored
             .attention_settings()
             .is_auto_pause_enabled(AttentionClass::Notable),
-        default_auto_pause.is_auto_pause_enabled(AttentionClass::Notable)
+        true,
+        "toggled-on Notable auto-pause must survive save/load"
+    );
+    assert_ne!(
+        default_auto_pause.is_auto_pause_enabled(AttentionClass::Notable),
+        restored
+            .attention_settings()
+            .is_auto_pause_enabled(AttentionClass::Notable)
     );
     assert_eq!(
         restored

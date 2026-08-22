@@ -157,7 +157,6 @@ mod tests {
         )
         .expect("criminal fixture should validate");
         let first = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "First Associate".to_owned(),
@@ -171,7 +170,6 @@ mod tests {
         )
         .expect("first associate should validate");
         let target = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Target Associate".to_owned(),
@@ -185,7 +183,6 @@ mod tests {
         )
         .expect("target associate should validate");
         let alternate = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Alternate Associate".to_owned(),

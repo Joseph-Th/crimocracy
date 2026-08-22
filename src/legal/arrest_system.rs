@@ -512,7 +512,6 @@ mod tests {
         )
         .expect("police should validate");
         let suspect = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Case Subject".to_owned(),
@@ -827,7 +826,6 @@ mod tests {
             .and_then(|record| record.organization())
             .expect("suspect fixture should belong to the criminal organization");
         let direct_report = insert_character(
-            &fixture.registry,
             &mut fixture.state,
             CharacterDraft {
                 name: "Existing Direct Report".to_owned(),
@@ -841,7 +839,6 @@ mod tests {
         )
         .expect("preexisting reporting line should validate");
         let unassigned = insert_character(
-            &fixture.registry,
             &mut fixture.state,
             CharacterDraft {
                 name: "Unassigned Member".to_owned(),

@@ -430,7 +430,9 @@ pub(crate) const fn informant_reliability(reliability: Reliability) -> EvidenceR
 
 /// A detained member gets exactly one recruitment decision, one authored cadence after the
 /// arrest. No extra per-arrest state is needed: the decision instant is a pure function of
-/// `arrested_at`, and the single draw consumes the state-owned investigation stream.
+/// `arrested_at`, and the single draw consumes the state-owned investigation stream. The
+/// equality below relies on the canonical tick advancing exactly one simulated minute per
+/// call (`core::simulation::run_tick`); no adapter may fast-forward across minutes.
 pub(crate) const RECRUITMENT_DECISION_OFFSET_MINUTES: u64 = 1_440;
 /// Base flip chance in percent; fear of prison (the character's Safety drive) adds up to
 /// 50 points on top.
@@ -491,7 +493,8 @@ pub fn apply_detainee_informant_recruitment(
         let chance = BASE_FLIP_CHANCE_PERCENT + safety / 2;
         let roll = {
             let rng = state.investigation_rng_mut();
-            crate::core::simulation::draw_index(rng, 100).unwrap_or(usize::MAX)
+            crate::core::simulation::draw_index(rng, 100)
+                .expect("percentile draw over a nonempty 1..=100 range cannot fail")
         };
         if roll as u32 >= chance {
             continue;
@@ -631,7 +634,6 @@ mod tests {
         )
         .expect("criminal fixture should validate");
         let member = insert_character(
-            &registry,
             &mut state,
             CharacterDraft {
                 name: "Leo Trent".to_owned(),

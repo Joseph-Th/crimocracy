@@ -547,10 +547,10 @@ impl CharacterStore {
         let old_supervisor = record.membership.supervisor;
 
         if let Some(old) = old_organization {
-            Self::remove_index_entry(&mut self.by_organization, old, id);
+            prune_index_entry(&mut self.by_organization, old, id);
         }
         if let Some(old) = old_supervisor {
-            Self::remove_index_entry(&mut self.by_supervisor, old, id);
+            prune_index_entry(&mut self.by_supervisor, old, id);
         }
         record.membership.organization = organization;
         record.membership.supervisor = supervisor;
@@ -566,19 +566,6 @@ impl CharacterStore {
             self.by_supervisor.entry(new).or_default().insert(id);
         }
     }
-
-    fn remove_index_entry<K: Ord + Copy>(
-        index: &mut BTreeMap<K, BTreeSet<CharacterId>>,
-        key: K,
-        id: CharacterId,
-    ) {
-        if let Some(ids) = index.get_mut(&key) {
-            ids.remove(&id);
-            if ids.is_empty() {
-                index.remove(&key);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -588,7 +575,6 @@ struct BusinessStore {
     by_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
     by_character_owner: BTreeMap<CharacterId, BTreeSet<BusinessId>>,
     by_historical_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
-    by_historical_character_owner: BTreeMap<CharacterId, BTreeSet<BusinessId>>,
     ownership_changes: BTreeMap<BusinessOwnershipChangeId, BusinessOwnershipChangeRecord>,
     ownership_change_by_business_version: BTreeMap<(BusinessId, u32), BusinessOwnershipChangeId>,
 }
@@ -680,12 +666,9 @@ impl BusinessStore {
                     .or_default()
                     .insert(business);
             }
-            BusinessOwner::Character(character) => {
-                self.by_historical_character_owner
-                    .entry(character)
-                    .or_default()
-                    .insert(business);
-            }
+            // Historical character ownership stays derivable from `ownership_changes`;
+            // only the organization projection has a production reader (business reporting).
+            BusinessOwner::Character(_) => {}
         }
     }
 
@@ -693,24 +676,25 @@ impl BusinessStore {
         match owner {
             BusinessOwner::Independent => {}
             BusinessOwner::Organization(organization) => {
-                Self::remove_business_index(&mut self.by_organization_owner, organization, business)
+                prune_index_entry(&mut self.by_organization_owner, organization, business)
             }
             BusinessOwner::Character(character) => {
-                Self::remove_business_index(&mut self.by_character_owner, character, business)
+                prune_index_entry(&mut self.by_character_owner, character, business)
             }
         }
     }
+}
 
-    fn remove_business_index<K: Ord + Copy>(
-        index: &mut BTreeMap<K, BTreeSet<BusinessId>>,
-        key: K,
-        business: BusinessId,
-    ) {
-        if let Some(ids) = index.get_mut(&key) {
-            ids.remove(&business);
-            if ids.is_empty() {
-                index.remove(&key);
-            }
+/// Removes one entity from an owned-set index, dropping the key entirely when its set empties.
+fn prune_index_entry<K: Ord + Copy, V: Ord + Copy>(
+    index: &mut BTreeMap<K, BTreeSet<V>>,
+    key: K,
+    value: V,
+) {
+    if let Some(ids) = index.get_mut(&key) {
+        ids.remove(&value);
+        if ids.is_empty() {
+            index.remove(&key);
         }
     }
 }
@@ -783,18 +767,6 @@ impl WorldState {
     ) -> impl Iterator<Item = &BusinessRecord> {
         self.businesses
             .by_historical_organization_owner
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .filter_map(|business_id| self.businesses.records.get(business_id))
-    }
-
-    pub fn businesses_ever_owned_by_character(
-        &self,
-        id: CharacterId,
-    ) -> impl Iterator<Item = &BusinessRecord> {
-        self.businesses
-            .by_historical_character_owner
             .get(&id)
             .into_iter()
             .flatten()
@@ -1067,16 +1039,9 @@ impl WorldState {
                             return false;
                         }
                     }
-                    BusinessOwner::Character(character) => {
-                        if !self
-                            .businesses
-                            .by_historical_character_owner
-                            .get(&character)
-                            .is_some_and(|ids| ids.contains(&record.id()))
-                        {
-                            return false;
-                        }
-                    }
+                    // Historical character ownership is derivable from `ownership_changes`
+                    // and carries no maintained projection.
+                    BusinessOwner::Character(_) => {}
                 }
                 previous_owner = Some(change.new_owner());
                 previous_time = Some(change.changed_at());
@@ -1137,25 +1102,6 @@ impl WorldState {
                 }
             }
         }
-        for (character, ids) in &self.businesses.by_historical_character_owner {
-            for id in ids {
-                let Some(record) = self.businesses.records.get(id) else {
-                    return false;
-                };
-                let found = (1..=record.version()).any(|version| {
-                    self.businesses
-                        .ownership_change_by_business_version
-                        .get(&(*id, version))
-                        .and_then(|change_id| self.businesses.ownership_changes.get(change_id))
-                        .is_some_and(|change| {
-                            change.new_owner() == BusinessOwner::Character(*character)
-                        })
-                });
-                if !found {
-                    return false;
-                }
-            }
-        }
         for (key, id) in &self.businesses.ownership_change_by_business_version {
             if !self
                 .businesses
@@ -1182,6 +1128,7 @@ impl WorldState {
         true
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),
