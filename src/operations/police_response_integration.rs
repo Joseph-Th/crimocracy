@@ -224,23 +224,25 @@ fn validate_participant_police_pressure_information(
                 .get_character(participant)
                 .expect("validated operation participant must exist")
                 .name();
-            validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Character(participant),
-                    source_kind: InformationSourceKind::DirectObservation,
-                    topic: InformationTopic::PoliceActivity,
-                    source_entity: Some(EntityRef::Organization(authority)),
-                    subject: EntityRef::Character(participant),
-                    observed_at: state.now(),
-                    reliability: Reliability::DirectAccess,
-                    specificity: Specificity::Precise,
-                    summary: format!(
-                        "{participant_name} directly experienced {authority_name} responding during {}.",
-                        operation.title()
-                    ),
-                },
-            )
+                validate_record_information(
+                    state,
+                    InformationDraft {
+                        holder: KnowledgeHolder::Character(participant),
+                        source_kind: InformationSourceKind::DirectObservation,
+                        topic: InformationTopic::PoliceActivity,
+                        source_entity: Some(EntityRef::Organization(authority)),
+                        // The observation is personal exposure knowledge — exactly what a
+                        // rival's recruitment pitch or an informant disclosure leverages.
+                        subject: EntityRef::Character(participant),
+                        observed_at: state.now(),
+                        reliability: Reliability::DirectAccess,
+                        specificity: Specificity::Precise,
+                        summary: format!(
+                            "{participant_name} directly experienced {authority_name} responding during {}.",
+                            operation.title()
+                        ),
+                    },
+                )
         })
         .collect()
 }

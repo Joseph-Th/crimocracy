@@ -195,6 +195,10 @@ pub struct OperationAbortArtifacts {
     information: InformationId,
     report: ReportId,
     history_event: HistoryEventId,
+    /// District-scoped police-response knowledge the organization holds after a pre-entry
+    /// police-arrival abort: the crew was debriefed through production paths, so leadership
+    /// knows how the responding authority moved in that neighborhood.
+    police_activity_information: Option<InformationId>,
 }
 
 impl OperationAbortArtifacts {
@@ -208,6 +212,10 @@ impl OperationAbortArtifacts {
 
     pub fn history_event(self) -> HistoryEventId {
         self.history_event
+    }
+
+    pub fn police_activity_information(self) -> Option<InformationId> {
+        self.police_activity_information
     }
 }
 

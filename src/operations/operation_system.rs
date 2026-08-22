@@ -1142,6 +1142,7 @@ pub struct ValidatedOperationAbort {
     phase: OperationAbortPhase,
     cause: OperationAbortCause,
     information: Option<ValidatedInformation>,
+    police_activity_information: Option<ValidatedInformation>,
     report: Option<ValidatedReport>,
     history: Option<ValidatedHistoryEvent>,
 }
@@ -1150,6 +1151,9 @@ impl ValidatedOperationAbort {
     pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
         let mut budget = Vec::new();
         if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.police_activity_information.is_some() {
             budget.push((IdKind::Information, 1));
         }
         if self.history.is_some() {
@@ -1207,12 +1211,17 @@ impl ValidatedOperationAbort {
             (None, None, None) => None,
             (Some(information), Some(report), Some(history)) => {
                 let information = information.commit(state)?;
+                let police_activity_information = self
+                    .police_activity_information
+                    .map(|information| information.commit(state))
+                    .transpose()?;
                 let history_event = history.commit(state)?;
                 let report = report.commit(state)?;
                 Some(OperationAbortArtifacts {
                     information,
                     report,
                     history_event,
+                    police_activity_information,
                 })
             }
             (None, Some(_), _) | (None, _, Some(_)) | (Some(_), None, _) | (Some(_), _, None) => {
@@ -1356,9 +1365,9 @@ fn validate_operation_abort(
         }
     };
 
-    let (information, report, history) = match (phase, cause) {
+    let (information, police_activity_information, report, history) = match (phase, cause) {
         (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder) => {
-            (None, None, None)
+            (None, None, None, None)
         }
         (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed)
         | (OperationAbortPhase::InProgress, _)
@@ -1380,6 +1389,51 @@ fn validate_operation_abort(
                 },
             )
             .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+            // A police-arrival abort leaves the organization district-scoped enforcement
+            // knowledge: its own crew saw this authority respond here before entry. Holding
+            // it as PoliceActivity information is what lets later planning in the same
+            // neighborhood learn from the failed approach without fresh surveillance.
+            let police_activity_information = match cause {
+                OperationAbortCause::PoliceArrival(response_id) => {
+                    let response = state
+                        .legal
+                        .get_police_response(response_id)
+                        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
+                    Some(
+                        validate_record_information(
+                            state,
+                            InformationDraft {
+                                holder: KnowledgeHolder::Organization(
+                                    record.responsible_organization(),
+                                ),
+                                source_kind: InformationSourceKind::AfterAction,
+                                topic: InformationTopic::PoliceActivity,
+                                source_entity: Some(EntityRef::Organization(response.authority())),
+                                subject: EntityRef::Neighborhood(response.neighborhood()),
+                                observed_at: state.now(),
+                                reliability: Reliability::GenerallyReliable,
+                                specificity: Specificity::Specific,
+                                summary: format!(
+                                    "The crew of {} was debriefed after a {} response reached the target before entry; the organization expects active enforcement around {} at that hour.",
+                                    record.title(),
+                                    state
+                                        .world
+                                        .get_organization(response.authority())
+                                        .map_or("law-enforcement", |record| record.name()),
+                                    state
+                                        .world
+                                        .get_neighborhood(response.neighborhood())
+                                        .map_or("the district", |record| record.name()),
+                                ),
+                            },
+                        )
+                        .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?,
+                    )
+                }
+                OperationAbortCause::AuthorityOrder
+                | OperationAbortCause::Decision(_)
+                | OperationAbortCause::DeadlineMissed => None,
+            };
             let report = validate_record_report(
                 state,
                 ReportDraft {
@@ -1406,7 +1460,12 @@ fn validate_operation_abort(
                 },
             )
             .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
-            (Some(information), Some(report), Some(history))
+            (
+                Some(information),
+                police_activity_information,
+                Some(report),
+                Some(history),
+            )
         }
         (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_))
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_)) => {
@@ -1422,6 +1481,7 @@ fn validate_operation_abort(
         phase,
         cause,
         information,
+        police_activity_information,
         report,
         history,
     })

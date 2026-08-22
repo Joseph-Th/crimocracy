@@ -467,16 +467,21 @@ pub fn validate_business_cycle_plan(
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
                 summary: format!(
-                    "Business cycle reported gross {}, operating cost {}, net cash {}, with variance {} basis points.",
-                    crate::finance::helpers::format_money_cents(plan.economics.gross_revenue.cents()),
-                    crate::finance::helpers::format_money_cents(plan.economics.operating_cost.cents()),
+                    "Business cycle reported gross {}, operating cost {}, net cash {}, and {}.",
+                    crate::finance::helpers::format_money_cents(
+                        plan.economics.gross_revenue.cents()
+                    ),
+                    crate::finance::helpers::format_money_cents(
+                        plan.economics.operating_cost.cents()
+                    ),
                     crate::finance::helpers::format_money_cents(plan.economics.net_cash.cents()),
-                    plan.economics.variance_basis_points,
+                    crate::finance::helpers::describe_gross_variance(
+                        plan.economics.variance_basis_points
+                    ),
                 ),
             },
         )?),
-        (AttentionClass::Routine, _)
-        | (AttentionClass::Notable, None) => None,
+        (AttentionClass::Routine, _) | (AttentionClass::Notable, None) => None,
         (AttentionClass::Exception | AttentionClass::Crisis, _) => {
             unreachable!("business cycles only produce routine or notable attention")
         }

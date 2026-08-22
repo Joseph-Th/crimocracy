@@ -1212,6 +1212,50 @@ fn validate_operation_abort_artifacts(
         });
     }
 
+    // District-scoped enforcement knowledge exists exactly when the abort was caused by a
+    // pre-entry police arrival: that is the only abort path where the debriefed crew gives
+    // the organization first-hand knowledge of a response in the target's neighborhood.
+    let expected_police_activity = match abort.cause() {
+        OperationAbortCause::PoliceArrival(response) => state
+            .legal
+            .get_police_response(response)
+            .map(|response| (response.authority(), response.neighborhood())),
+        OperationAbortCause::AuthorityOrder
+        | OperationAbortCause::Decision(_)
+        | OperationAbortCause::DeadlineMissed => None,
+    };
+    match (
+        artifacts.police_activity_information(),
+        expected_police_activity,
+    ) {
+        (Some(information_id), Some((authority, neighborhood))) => {
+            let police = state.intelligence.get_information(information_id).ok_or(
+                StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                },
+            )?;
+            if police.holder()
+                != KnowledgeHolder::Organization(operation.responsible_organization())
+                || police.source_kind() != InformationSourceKind::AfterAction
+                || police.topic() != InformationTopic::PoliceActivity
+                || police.source_entity() != Some(EntityRef::Organization(authority))
+                || police.subject() != EntityRef::Neighborhood(neighborhood)
+                || police.observed_at() != abort.aborted_at()
+                || police.recorded_at() != abort.aborted_at()
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(StateValidationError::InvalidOperationAbort {
+                operation: operation.id(),
+            });
+        }
+    }
+
     let report = state.reports.get_report(artifacts.report()).ok_or(
         StateValidationError::InvalidOperationAbort {
             operation: operation.id(),

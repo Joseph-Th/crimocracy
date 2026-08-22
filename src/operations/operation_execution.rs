@@ -1839,27 +1839,47 @@ pub(crate) fn liquidated_property_clause(
 }
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
-/// outcome and the factors that actually moved it: neutral lines (normal execution window, no
-/// exposure, neutral variance or approach, negligible police presence, zero-coverage planning
-/// intelligence) are omitted rather than recited, so attention goes to what deviates from a
-/// routine job.
+/// outcome and the factors that actually moved it. Neutral lines (normal execution window, no
+/// exposure, neutral variance, negligible police presence) and strong-but-expected crew quality
+/// on a clean job are omitted rather than recited, so attention goes to what deviates from a
+/// routine job: weak capability bands, non-achieved outcomes that deserve explanation, adverse
+/// pressure, and thin planning intelligence.
 fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
 ) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
-    parts.push(format!(
-        "Assigned-role competence was {}.",
-        band_label(factors.role_capability_average().qualitative_band())
-    ));
-    if let Some(rating) = factors.leader_capability() {
+    // Crew quality is worth a sentence only when it explains the result: a weak band is a risk
+    // factor, and a partial or failed job should say what the crew brought to it.
+    if outcome != OperationObjectiveOutcome::Achieved
+        || matches!(
+            factors.role_capability_average().qualitative_band(),
+            QualitativeBand::Poor | QualitativeBand::Competent
+        )
+    {
         parts.push(format!(
-            "Leadership coordination was {}.",
-            band_label(rating.qualitative_band())
+            "Assigned-role competence was {}.",
+            band_label(factors.role_capability_average().qualitative_band())
         ));
-    } else {
-        parts.push("Leadership had no demonstrated capability for the execution.".to_owned());
+    }
+    match factors.leader_capability() {
+        Some(rating)
+            if outcome != OperationObjectiveOutcome::Achieved
+                || matches!(
+                    rating.qualitative_band(),
+                    QualitativeBand::Poor | QualitativeBand::Competent
+                ) =>
+        {
+            parts.push(format!(
+                "Leadership coordination was {}.",
+                band_label(rating.qualitative_band())
+            ));
+        }
+        Some(_) => {}
+        None => {
+            parts.push("Leadership had no demonstrated capability for the execution.".to_owned())
+        }
     }
     // Police pressure is reported when it materially shaped the job or when the organization
     // could not establish it at all; light presence was not worth the crew's attention.
@@ -1895,18 +1915,18 @@ fn build_after_action_summary(
         } else {
             format!("Planning intelligence covered {covered} of {relevant} relevant areas")
         };
-        parts.push(format!(
-            "{coverage}; the available reports reduced execution uncertainty."
-        ));
+        // Thin coverage is actionable uncertainty the boss should see, not reassurance.
+        let confidence = if covered * 2 >= relevant {
+            "; the available reports reduced execution uncertainty."
+        } else {
+            "; large gaps remained in the plan's information."
+        };
+        parts.push(format!("{coverage}{confidence}"));
     }
-    match factors.approach_adjustment() {
-        value if value < 0 => {
-            parts.push("The selected approach reduced execution difficulty.".to_owned())
-        }
-        value if value > 0 => {
-            parts.push("The selected approach increased execution difficulty.".to_owned())
-        }
-        _ => {}
+    // A chosen approach that reduced difficulty is the expected case, not news; only an
+    // approach that hurt execution earns a sentence.
+    if factors.approach_adjustment() > 0 {
+        parts.push("The selected approach increased execution difficulty.".to_owned());
     }
     if factors.time_pressure() > 0 {
         parts.push("The completion deadline compressed the execution window.".to_owned());

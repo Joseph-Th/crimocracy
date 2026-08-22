@@ -491,7 +491,7 @@ fn scheduled_operation_resolves_into_persisted_after_action_report_information_a
         InformationSourceKind::AfterAction
     );
     assert_eq!(information.subject(), EntityRef::Operation(operation));
-    assert!(information.summary().contains("Assigned-role competence"));
+    assert!(information.summary().contains("Objective"));
     let report = state
         .reports()
         .get_report(resolution.after_action_report())
@@ -566,14 +566,16 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         variance: 0,
     };
 
-    // A routine clean job reports the outcome and crew quality without reciting every
-    // neutral factor as a sentence.
+    // A routine clean job by a strong crew reports just the outcome and genuinely notable
+    // context; strong-but-expected crew quality is not recited as a sentence.
     let routine = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
         neutral,
         OperationExposureLevel::None,
     );
     assert!(routine.starts_with("Objective achieved."));
+    assert!(!routine.contains("Assigned-role competence"));
+    assert!(!routine.contains("Leadership coordination"));
     assert!(!routine.contains("normal execution window"));
     assert!(!routine.contains("no material execution advantage"));
     assert!(!routine.contains("neutral to execution difficulty"));
@@ -581,6 +583,18 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     assert!(!routine.contains("No material operational exposure"));
     assert!(!routine.contains("limited execution pressure"));
     assert!(routine.contains("No location-based police pressure could be established"));
+
+    // Weak crew quality on a clean job is a risk factor the boss should see.
+    let thin = OperationResolutionFactors {
+        role_capability_average: Rating::try_new(30).expect("fixture rating should be valid"),
+        ..neutral
+    };
+    let thin_crew = build_after_action_summary(
+        OperationObjectiveOutcome::Achieved,
+        thin,
+        OperationExposureLevel::None,
+    );
+    assert!(thin_crew.contains("Assigned-role competence was competent."));
 
     // Deviations stay: covered intelligence, compressed deadlines, adverse circumstances,
     // and real exposure each earn their sentence.
@@ -595,6 +609,20 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     );
     assert!(planned.contains("Planning intelligence covered 2 of 4 relevant areas"));
     assert!(planned.contains("reduced execution uncertainty"));
+
+    // Coverage below half the relevant areas reads as an honest planning gap instead of
+    // false reassurance.
+    let gapped = OperationResolutionFactors {
+        intelligence_topics_covered: 1,
+        ..neutral
+    };
+    let gapped_plan = build_after_action_summary(
+        OperationObjectiveOutcome::Achieved,
+        gapped,
+        OperationExposureLevel::None,
+    );
+    assert!(gapped_plan.contains("Planning intelligence covered 1 of 4 relevant areas"));
+    assert!(gapped_plan.contains("large gaps remained in the plan's information"));
 
     let pressured = OperationResolutionFactors {
         time_pressure: 3,

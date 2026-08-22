@@ -57,9 +57,23 @@ pub fn format_money_cents(cents: i64) -> String {
     format!("{sign}${grouped}.{fraction:02}")
 }
 
+/// Describes a gross-variance draw as leader-readable language instead of basis points.
+/// Cycle reports are how managers and accountants talk, so small draws read as "close to
+/// plan" and material ones as an approximate percentage over or under expectations.
+pub fn describe_gross_variance(basis_points: i16) -> String {
+    let magnitude = i32::from(basis_points).unsigned_abs();
+    if magnitude < 500 {
+        "gross came in close to plan".to_owned()
+    } else {
+        let percent = magnitude as f64 / 100.0;
+        let direction = if basis_points > 0 { "over" } else { "under" };
+        format!("gross ran about {percent:.1}% {direction} plan")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_money_cents;
+    use super::{describe_gross_variance, format_money_cents};
 
     #[test]
     fn money_format_groups_thousands_and_preserves_sign() {
@@ -69,5 +83,20 @@ mod tests {
         assert_eq!(format_money_cents(55320), "$553.20");
         assert_eq!(format_money_cents(1_234_567), "$12,345.67");
         assert_eq!(format_money_cents(-12_500), "-$125.00");
+    }
+
+    #[test]
+    fn variance_description_reads_like_a_manager_not_a_ledger() {
+        assert_eq!(describe_gross_variance(0), "gross came in close to plan");
+        assert_eq!(describe_gross_variance(-300), "gross came in close to plan");
+        assert_eq!(describe_gross_variance(499), "gross came in close to plan");
+        assert_eq!(
+            describe_gross_variance(1082),
+            "gross ran about 10.8% over plan"
+        );
+        assert_eq!(
+            describe_gross_variance(-1128),
+            "gross ran about 11.3% under plan"
+        );
     }
 }

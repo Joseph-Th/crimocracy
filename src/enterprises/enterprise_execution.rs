@@ -1187,9 +1187,9 @@ fn build_cycle_report_summary(
         String::new()
     };
     format!(
-        "{base}{heat}, net cash {}, with variance {} basis points.",
+        "{base}{heat}, net cash {}, and {}.",
         crate::finance::helpers::format_money_cents(economics.net_cash.cents()),
-        economics.variance_basis_points,
+        crate::finance::helpers::describe_gross_variance(economics.variance_basis_points),
     )
 }
 

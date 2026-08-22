@@ -632,6 +632,11 @@ struct RunMetrics {
     second_act_recon_information: usize,
     second_act_property_acquired_value_cents: Option<i64>,
     second_act_property_realized_cash_cents: Option<i64>,
+    /// Debrief knowledge after a standing abort: the district-scoped PoliceActivity record
+    /// the organization holds as an abort artifact, carried into second-score planning.
+    debrief_patrol_information: Vec<InformationId>,
+    /// Topics carried into the second-score plan, proving what act 2 actually knew.
+    second_act_planning_topics: BTreeSet<InformationTopic>,
     // District-diversification evidence: PRESS capitalizes a second-district enterprise out of
     // its idle street cash while the home district is legally hot, so the same heat that taxes
     // the canal racket never touches the harbor book.
@@ -1222,10 +1227,11 @@ fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
                 metrics.abort_cause,
                 Some(OperationAbortCause::PoliceArrival(_))
             ) && metrics.abort_phase == Some(OperationAbortPhase::InProgress)
+                && metrics.player_police_activity_information > 0
             {
                 None
             } else {
-                Some("pre-entry police arrival triggers the standing abort contingency")
+                Some("pre-entry police arrival triggers the standing abort contingency and the crew's direct observations are debriefed into organization knowledge")
             }
         }
         Strategy::Press => {
@@ -1344,10 +1350,16 @@ fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
                 && metrics.second_act_recon_information == 0
                 && metrics.second_burglary_terminal_minute.is_some()
                 && metrics.player_personnel_departures > 0
+                // The debriefed abort must actually inform the rebuild: the second-score plan
+                // carries the organization's debrief-derived police-response observation.
+                && metrics.player_police_activity_information > 0
+                && metrics
+                    .second_act_planning_topics
+                    .contains(&InformationTopic::PoliceActivity)
             {
                 None
             } else {
-                Some("the RUSH second act must discover the reopened score, rebuild the crew after at least one rival departure through the canonical executive path, and work the second score in the morning lull with the rebuilt crew and no fresh recon")
+                Some("the RUSH second act must discover the reopened score, debrief the aborted crew's police observations into organizational knowledge, rebuild through the canonical executive path, and work the second score in the morning lull with the rebuilt crew, no fresh recon, and the debriefed patrol information in the plan")
             }
         }
         Strategy::Recon => {
@@ -2305,6 +2317,40 @@ fn play_session(
                     .expect("neighborhood must persist")
                     .name()
             );
+        }
+    }
+
+    // A standing abort is not a wasted night: the abort artifacts carry the organization's
+    // own debrief-derived read on how the responding authority moved in this district. That
+    // record is what lets act 2 plan against the patrol rhythm without fresh surveillance or
+    // hidden-state reads.
+    if metrics.aborted {
+        if let Some(OperationAbortCause::PoliceArrival(_)) = metrics.abort_cause {
+            let debrief_information = burglary_record
+                .abort_record()
+                .and_then(|abort| abort.artifacts())
+                .and_then(|artifacts| artifacts.police_activity_information());
+            if let Some(information) = debrief_information {
+                metrics.player_police_activity_information =
+                    metrics.player_police_activity_information.saturating_add(1);
+                metrics.debrief_patrol_information.push(information);
+                if narrative {
+                    let record = scenario
+                        .state
+                        .intelligence()
+                        .get_information(information)
+                        .expect("debrief police-activity knowledge must persist");
+                    println!(
+                        "[DECIDE]  Debrief the crew before anyone plans around that response; what they saw becomes organizational knowledge."
+                    );
+                    println!(
+                        "[LEARN]   {:?} / {:?}: {}",
+                        record.reliability(),
+                        record.specificity(),
+                        record.summary()
+                    );
+                }
+            }
         }
     }
 
@@ -3636,14 +3682,28 @@ fn run_second_act(
                 "{} second-score burglary",
                 scenario.variation.alternate_target_name()
             );
+            // The rebuilt crew plans from the original street observation plus what the
+            // debrief taught the organization about the district's police response.
+            let mut intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
+            intelligence.extend(metrics.debrief_patrol_information.iter().copied());
+            metrics.second_act_planning_topics = intelligence
+                .iter()
+                .map(|information| {
+                    scenario
+                        .state
+                        .intelligence()
+                        .get_information(*information)
+                        .expect("second-score planning information must persist")
+                        .topic()
+                })
+                .collect();
             if narrative {
                 println!(
-                    "[DECIDE]  Rebuild is in hand. Work the second score on {} during the morning lull at {}, with the rebuilt crew and the original street observation only - no fresh recon.",
+                    "[DECIDE]  Rebuild is in hand. Work the second score on {} during the morning lull at {}, with the rebuilt crew, the original street observation, and the debriefed read on the district's response.",
                     scenario.variation.alternate_target_name(),
                     format_minute_of_day(scheduled_for.as_minutes()),
                 );
             }
-            let intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
             let burglary = authorize_burglary(
                 scenario,
                 Strategy::Rush,
@@ -3742,6 +3802,22 @@ fn run_second_act(
                 burglary_intelligence,
                 scenario.burglar,
             )?;
+            metrics.second_act_planning_topics = scenario
+                .state
+                .operations()
+                .get_operation(burglary)
+                .expect("second-score burglary must remain queryable")
+                .intelligence()
+                .iter()
+                .map(|information| {
+                    scenario
+                        .state
+                        .intelligence()
+                        .get_information(*information)
+                        .expect("second-score planning information must persist")
+                        .topic()
+                })
+                .collect();
             validate_convert_opportunity(&scenario.state, opportunity, burglary)?
                 .commit(&mut scenario.state)?;
             metrics.second_burglary = Some(burglary);
@@ -3860,7 +3936,8 @@ fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: &Run
             );
             if strategy == Strategy::Rush {
                 println!(
-                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the rebuilt crew worked the morning lull."
+                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the rebuilt crew worked the morning lull on {} planning item(s), including the debriefed police-response observation.",
+                    metrics.second_act_planning_topics.len()
                 );
             } else {
                 println!(
@@ -5251,6 +5328,9 @@ struct FinancialView {
     held_property_value_cents: i64,
     liquidated_property_operations: u32,
     liquidated_property_cash_cents: i64,
+    /// Organization-owned balances grouped by account kind, so the readout shows the cash
+    /// position a boss would actually govern, not only cycle flows.
+    cash_position: Vec<(AccountKind, i64)>,
 }
 
 #[derive(Clone)]
@@ -5370,6 +5450,22 @@ fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn 
             ))
         })
         .expect("scenario liquidated-property totals must fit numeric bounds");
+    let mut cash_kinds: BTreeMap<AccountKind, i64> = BTreeMap::new();
+    for account in scenario
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(scenario.player))
+    {
+        // Settlement and payable accounts are ledger counterparties, not governable cash;
+        // a boss reads their cash position from what they actually hold or are owed.
+        if !matches!(
+            account.kind(),
+            AccountKind::Settlement | AccountKind::Payable
+        ) {
+            *cash_kinds.entry(account.kind()).or_default() += account.balance().cents();
+        }
+    }
+    let cash_position: Vec<_> = cash_kinds.into_iter().collect();
     Ok(FinancialView {
         legitimate_cycle_count: business_summary.totals.cycle_count,
         legitimate_net_cents: business_summary.totals.net_cash.cents(),
@@ -5385,6 +5481,7 @@ fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn 
         held_property_value_cents: held_property_value.cents(),
         liquidated_property_operations,
         liquidated_property_cash_cents: liquidated_property_cash.cents(),
+        cash_position,
     })
 }
 
@@ -5428,6 +5525,32 @@ fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         view.liquidated_property_operations,
         format_cents(view.liquidated_property_cash_cents),
     );
+    if !view.cash_position.is_empty() {
+        let total: i64 = view.cash_position.iter().map(|(_, cents)| cents).sum();
+        let lines: Vec<_> = view
+            .cash_position
+            .iter()
+            .map(|(kind, cents)| format!("{} {}", account_kind_label(*kind), format_cents(*cents)))
+            .collect();
+        println!(
+            "  Cash position (total {}): {}.",
+            format_cents(total),
+            lines.join(", "),
+        );
+    }
+}
+
+/// Short leader-readable label for an organization account kind in the financial view.
+fn account_kind_label(kind: AccountKind) -> &'static str {
+    match kind {
+        AccountKind::StreetCash => "street cash",
+        AccountKind::ConcealedCash => "concealed cash",
+        AccountKind::AccountedFunds => "accounted funds",
+        AccountKind::LegitimateOperating => "legitimate operating",
+        AccountKind::Receivable => "receivable",
+        AccountKind::Payable => "payable",
+        AccountKind::Settlement => "settlement",
+    }
 }
 
 fn print_report(label: &str, report: &ReportRecord, scenario: &Scenario) {
@@ -5593,6 +5716,15 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
             && recon.burglary_information_quality.unwrap_or_default()
                 > rush.burglary_information_quality.unwrap_or_default(),
         "the player can make a better plan from organization-held intelligence",
+    );
+    print_loop_checkpoint(
+        "failure teaches",
+        rush.aborted
+            && rush.player_police_activity_information > 0
+            && rush
+                .second_act_planning_topics
+                .contains(&InformationTopic::PoliceActivity),
+        "a standing abort is debriefed into organizational patrol knowledge that plans the rebuilt crew's next job",
     );
     let response_choice_changed_consequence = rush.aborted
         && press.outcome.is_some()
