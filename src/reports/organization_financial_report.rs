@@ -82,24 +82,25 @@ pub fn validate_organization_financial_report(
         resolve_held_operation_property(state, recipient, period_end)?;
     let (property_disposition_count, realized_property_cash) =
         resolve_liquidated_operation_property(state, recipient, period_start, period_end)?;
+    let money = crate::finance::helpers::format_money_cents;
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Routine,
         summary: format!(
-            "Legitimate businesses: {} businesses, {} cycles, gross {} cents, operating cost {} cents, net {} cents. Illicit enterprises: {} enterprises, {} cycles, gross {} cents, operating cost {} cents, net {} cents. Held operation property at period end: {} operation(s), estimated value {} cents, unliquidated. Liquidated operation property during period: {} disposition(s), realized cash {} cents.",
+            "Legitimate businesses: {} businesses, {} cycles, gross {}, operating cost {}, net {}. Illicit enterprises: {} enterprises, {} cycles, gross {}, operating cost {}, net {}. Held operation property at period end: {} operation(s), estimated value {}, unliquidated. Liquidated operation property during period: {} disposition(s), realized cash {}.",
             business_summary.totals.business_count,
             business_summary.totals.cycle_count,
-            business_summary.totals.gross_revenue.cents(),
-            business_summary.totals.operating_cost.cents(),
-            business_summary.totals.net_cash.cents(),
+            money(business_summary.totals.gross_revenue.cents()),
+            money(business_summary.totals.operating_cost.cents()),
+            money(business_summary.totals.net_cash.cents()),
             enterprise_summary.totals.enterprise_count,
             enterprise_summary.totals.cycle_count,
-            enterprise_summary.totals.gross_revenue.cents(),
-            enterprise_summary.totals.operating_cost.cents(),
-            enterprise_summary.totals.net_cash.cents(),
+            money(enterprise_summary.totals.gross_revenue.cents()),
+            money(enterprise_summary.totals.operating_cost.cents()),
+            money(enterprise_summary.totals.net_cash.cents()),
             property_operation_count,
-            held_property_value.cents(),
+            money(held_property_value.cents()),
             property_disposition_count,
-            realized_property_cash.cents(),
+            money(realized_property_cash.cents()),
         ),
         sources: Vec::new(),
         entities: BTreeSet::new(),

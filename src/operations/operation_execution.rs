@@ -1802,14 +1802,18 @@ pub(crate) fn resolve_cash_proceeds(
 /// phrasing must be shared here rather than duplicated and allowed to drift.
 pub(crate) fn unliquidated_property_clause(est_value_cents: i64) -> String {
     format!(
-        "The crew secured property with an estimated held value of {est_value_cents} cents; it remains unliquidated."
+        "The crew secured property with an estimated held value of {}; it remains unliquidated.",
+        crate::finance::helpers::format_money_cents(est_value_cents)
     )
 }
 
 /// After-action phrasing for cash the crew is carrying home; it stays held until the
 /// canonical deposit command moves it into an organization account.
 pub(crate) fn undeposited_cash_clause(cents: i64) -> String {
-    format!("The crew took {cents} cents in cash; it remains undeposited.")
+    format!(
+        "The crew took {} in cash; it remains undeposited.",
+        crate::finance::helpers::format_money_cents(cents)
+    )
 }
 
 /// After-action phrasing when the same target was successfully hit recently: the haul came in
@@ -1825,7 +1829,9 @@ pub(crate) fn liquidated_property_clause(
     realized_cents: i64,
 ) -> String {
     format!(
-        "The crew secured property with an estimated held value of {est_value_cents} cents; it was later liquidated through {venue_name} for {realized_cents} cents."
+        "The crew secured property with an estimated held value of {}; it was later liquidated through {venue_name} for {}.",
+        crate::finance::helpers::format_money_cents(est_value_cents),
+        crate::finance::helpers::format_money_cents(realized_cents),
     )
 }
 
@@ -4647,7 +4653,7 @@ mod tests {
         assert!(achieved_plan
             .narrative
             .summary
-            .contains("estimated held value of 56400 cents"));
+            .contains("estimated held value of $564.00"));
         assert!(achieved_plan
             .narrative
             .summary
@@ -4684,13 +4690,11 @@ mod tests {
             .get_report(financial_report)
             .expect("organization financial report should persist");
         assert!(report.entries()[0].summary.contains(
-            "Held operation property at period end: 1 operation(s), estimated value 56400 cents"
+            "Held operation property at period end: 1 operation(s), estimated value $564.00"
         ));
         assert!(report.entries().iter().any(|entry| {
             entry.entities.contains(&EntityRef::Operation(operation))
-                && entry
-                    .summary
-                    .contains("estimated held value of 56400 cents")
+                && entry.summary.contains("estimated held value of $564.00")
         }));
 
         let (resale_venue, cash_account, settlement_account) = insert_property_disposition_fixture(
@@ -4760,17 +4764,17 @@ mod tests {
             .get_report(liquidated_report)
             .expect("liquidation financial report should persist");
         assert!(liquidated_report.entries()[0].summary.contains(
-            "Held operation property at period end: 0 operation(s), estimated value 0 cents"
+            "Held operation property at period end: 0 operation(s), estimated value $0.00"
         ));
-        assert!(liquidated_report.entries()[0]
-            .summary
-            .contains("Liquidated operation property during period: 1 disposition(s), realized cash 32148 cents"));
+        assert!(liquidated_report.entries()[0].summary.contains(
+            "Liquidated operation property during period: 1 disposition(s), realized cash $321.48"
+        ));
         assert!(liquidated_report.entries().iter().any(|entry| {
             entry.entities.contains(&EntityRef::Operation(operation))
                 && entry
                     .summary
                     .contains("liquidated through Fixture Pawn Exchange")
-                && entry.summary.contains("32148 cents")
+                && entry.summary.contains("$321.48")
         }));
         let restored = restore_save(
             &registry,
@@ -5064,7 +5068,7 @@ mod tests {
         assert_eq!(operation_entries.len(), 1);
         assert!(operation_entries[0]
             .summary
-            .contains("it was later liquidated through Fixture Pawn Exchange for 32148 cents"));
+            .contains("it was later liquidated through Fixture Pawn Exchange for $321.48"));
         assert!(!same_window_report
             .entries()
             .iter()
@@ -5124,7 +5128,7 @@ mod tests {
             entry.summary.starts_with("Property from ")
                 && entry
                     .summary
-                    .contains("liquidated through Fixture Pawn Exchange for 32148 cents")
+                    .contains("liquidated through Fixture Pawn Exchange for $321.48")
         }));
         assert!(!second_report
             .entries()

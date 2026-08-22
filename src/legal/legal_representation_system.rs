@@ -288,7 +288,7 @@ pub fn validate_retain_legal_representation(
         .expect("validated legal-services institution must exist");
 
     let summary = format!(
-        "{} retained {} of {} to represent {} for a fee of {} cents.",
+        "{} retained {} of {} to represent {} for a fee of {}.",
         state
             .world
             .get_organization(draft.sponsor)
@@ -297,7 +297,7 @@ pub fn validate_retain_legal_representation(
         counsel.name(),
         firm.name(),
         defendant.name(),
-        draft.fee.cents(),
+        crate::finance::helpers::format_money_cents(draft.fee.cents()),
     );
     let information = validate_record_information(
         state,

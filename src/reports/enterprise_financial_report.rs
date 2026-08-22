@@ -43,13 +43,13 @@ pub fn validate_enterprise_financial_report(
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Routine,
         summary: format!(
-            "Enterprise performance: {} enterprises completed {} cycles, including {} notable variances; gross revenue {} cents, operating cost {} cents, net cash {} cents.",
+            "Enterprise performance: {} enterprises completed {} cycles, including {} notable variances; gross revenue {}, operating cost {}, net cash {}.",
             summary.totals.enterprise_count,
             summary.totals.cycle_count,
             summary.totals.notable_cycle_count,
-            summary.totals.gross_revenue.cents(),
-            summary.totals.operating_cost.cents(),
-            summary.totals.net_cash.cents(),
+            crate::finance::helpers::format_money_cents(summary.totals.gross_revenue.cents()),
+            crate::finance::helpers::format_money_cents(summary.totals.operating_cost.cents()),
+            crate::finance::helpers::format_money_cents(summary.totals.net_cash.cents()),
         ),
         sources: Vec::new(),
         entities: BTreeSet::new(),

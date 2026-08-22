@@ -16,8 +16,8 @@ use crimocracy::build_registry;
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
-    BusinessId, CharacterId, EnterpriseId, InformationId, OperationId, OpportunityId,
-    OrganizationId,
+    BusinessId, CharacterId, EnterpriseId, FinancialAccountId, InformationId, MandateId,
+    NeighborhoodId, OperationId, OpportunityId, OrganizationId,
 };
 use crimocracy::core::invariants::{validate_state, validate_state_against_registry};
 use crimocracy::core::simulation::{run_tick, TickOutcome};
@@ -539,13 +539,13 @@ struct Scenario<'registry> {
     rival: OrganizationId,
     second_rival: OrganizationId,
     police: OrganizationId,
-    neighborhood: crimocracy::core::id::NeighborhoodId,
+    neighborhood: NeighborhoodId,
     target: BusinessId,
     alternate_target: BusinessId,
     front: BusinessId,
     resale_venue: BusinessId,
-    liquidation_cash: crimocracy::core::id::FinancialAccountId,
-    liquidation_settlement: crimocracy::core::id::FinancialAccountId,
+    liquidation_cash: FinancialAccountId,
+    liquidation_settlement: FinancialAccountId,
     boss: CharacterId,
     lieutenant: CharacterId,
     burglar: CharacterId,
@@ -557,6 +557,13 @@ struct Scenario<'registry> {
     opportunity_information: InformationId,
     alternate_opportunity_information: InformationId,
     enterprise: EnterpriseId,
+    /// Second-district expansion fixture: a quiet neighborhood the organization can diversify
+    /// into while its home district is legally hot. Unused by RUSH/RECON; PRESS capitalizes it.
+    expansion_neighborhood: NeighborhoodId,
+    expansion_front: BusinessId,
+    expansion_cash: FinancialAccountId,
+    expansion_settlement: FinancialAccountId,
+    lieutenant_mandate: MandateId,
     investigation: Option<crimocracy::core::id::InvestigationId>,
     variation: FixtureVariation,
     timeline: ScenarioTimeline,
@@ -625,6 +632,12 @@ struct RunMetrics {
     second_act_recon_information: usize,
     second_act_property_acquired_value_cents: Option<i64>,
     second_act_property_realized_cash_cents: Option<i64>,
+    // District-diversification evidence: PRESS capitalizes a second-district enterprise out of
+    // its idle street cash while the home district is legally hot, so the same heat that taxes
+    // the canal racket never touches the harbor book.
+    expansion_enterprise: Option<EnterpriseId>,
+    expansion_established: bool,
+    expansion_net_cents: Option<i64>,
 }
 
 #[derive(Default)]
@@ -764,8 +777,15 @@ impl Aggregate {
         } else {
             self.liquidation_minute_total as f64 / self.liquidation_samples as f64
         };
+        // Block layout instead of one wide line: outcomes and legal pressure on the first band,
+        // intelligence and economics on the second, so a strategy row stays scannable.
         println!(
-            "{label:<6}  samples {:>2}  fixtures {:?}  achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}  standing {:>5.1}%  police {:>5.1}%  cases {:>5.1}%  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%  case work {}/{}  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m  reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
+            "{label:<6} samples {:>2}  fixtures {:?}
+       outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}
+       pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  cases opened {:>5.1}%  case work {}/{}
+                 surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
+       economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
+       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -774,14 +794,15 @@ impl Aggregate {
             self.percent(self.aborted),
             self.unresolved,
             self.percent(self.standing_contingency_aborts),
-            self.percent(self.police_dispatched),
+            self.percent(self.police_arrived),
             self.percent(self.investigations),
+            self.investigation_work_scheduled,
+            self.investigation_work_resolved,
+            self.decisions,
             self.percent(self.legal_activity_information_sessions),
             self.percent(self.police_activity_information_sessions),
             self.percent(self.followup_case_active_sessions),
             self.percent(self.cold_case_confirmed_sessions),
-            self.investigation_work_scheduled,
-            self.investigation_work_resolved,
             avg_exposure,
             avg_intelligence,
             avg_terminal_minute,
@@ -927,6 +948,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_night_trap_evidence(&press)?;
     validate_night_trap_evidence(&recon)?;
     validate_press_consequence_arc(&press)?;
+    validate_press_expansion_evidence(&press)?;
     validate_defector_trail_evidence(&rush)?;
     validate_defector_trail_evidence(&press)?;
     validate_defector_trail_evidence(&recon)?;
@@ -939,7 +961,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     print_experience_readout(&rush, &press, &recon);
     validate_branch_financial_isolation(&rush, &press, &recon)?;
     println!(
-        "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by the district heat surcharge from an active investigation (PRESS penalized while hot)."
+        "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects: PRESS paid the Canal District heat surcharge while hot, and its post-window Harbor District expansion earned surcharge-free income outside Central Precinct's jurisdiction."
     );
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
@@ -1357,6 +1379,25 @@ fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContr
     })
 }
 
+/// Full-mode narrative PRESS sessions must convert the standing-down wait into governance:
+/// the branch revises its mandate, capitalizes a second-district float from idle street cash,
+/// and opens a diversified enterprise that the hot home-district case cannot tax. The harbor
+/// book must also have actually earned by session end, proving the expansion is live economy,
+/// not a paper establishment.
+fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if metrics.expansion_established && metrics.expansion_net_cents.is_some_and(|net| net > 0) {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "the standing-down wait must end in district diversification: a revised mandate, a capitalized second-district enterprise, and positive harbor earnings by session end",
+        })
+    }
+}
+
 fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
     validate_state(state)?;
     validate_state_against_registry(registry, state)?;
@@ -1480,14 +1521,15 @@ fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn E
         .into());
     }
     println!(
-        "[REPEAT TAKE] The first score on {} held {} cents; an immediate re-score recovered only {second_take} cents — the target had not replaced its stock.",
+        "[REPEAT TAKE] The first score on {} held {}; an immediate re-score recovered only {} - the target had not replaced its stock.",
         scenario
             .state
             .world()
             .get_business(target)
             .expect("probe target must persist")
             .name(),
-        first_take,
+        format_cents(first_take),
+        format_cents(second_take),
     );
 
     // Let the recency window pass so the target restocks, then confirm full value returns.
@@ -1509,7 +1551,8 @@ fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn E
         .into());
     }
     println!(
-        "[REPEAT TAKE] After letting the target rest, the next score held {third_take} cents again. Repeat takes decay and recover through production rules."
+        "[REPEAT TAKE] After letting the target rest, the next score held {} again. Repeat takes decay and recover through production rules.",
+        format_cents(third_take)
     );
     validate_harness_state(registry, &scenario.state)?;
     Ok(())
@@ -2440,6 +2483,19 @@ fn play_session(
                     );
                 }
             }
+            // Once the matched observation window has closed, standing down no longer means
+            // sitting on idle capital: the organization diversifies into the quiet harbor
+            // district, whose rackets pay no heat surcharge because Central Precinct's case
+            // never touched them. This is real agency during the wait, not a time skip.
+            let matched_boundary = SimTime::from_minutes(
+                metrics
+                    .matched_financial_boundary_minute
+                    .expect("narrative sessions always record their matched financial boundary"),
+            );
+            if scenario.state.now() < matched_boundary {
+                run_until(&mut scenario, matched_boundary, narrative, &mut metrics)?;
+            }
+            establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
             run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
             // The shelf estimate assumes only auto-scheduled work advances the case's
             // last-activity instant. If some later work or evidence event pushed that
@@ -2532,6 +2588,17 @@ fn play_session(
         let financials = resolve_financial_view(&scenario)?;
         metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
+        if let Some(expansion) = metrics.expansion_enterprise {
+            metrics.expansion_net_cents = Some(
+                scenario
+                    .state
+                    .enterprises()
+                    .cycles_for(expansion)
+                    .try_fold(Money::ZERO, |sum, cycle| sum.checked_add(cycle.net_cash()))
+                    .expect("expansion enterprise totals must fit money range")
+                    .cents(),
+            );
+        }
         if narrative {
             print_final_case_audit(&scenario, burglary);
             print_second_act_recap(&scenario, strategy, &metrics);
@@ -2947,6 +3014,87 @@ fn build_scenario(
         },
     )?;
 
+    // Second-district expansion fixture: a quiet harbor neighborhood outside Central Precinct's
+    // jurisdiction, with a player-owned social club able to host a second gambling enterprise.
+    // No jurisdiction is authored here on purpose: with no case-intake authority there is no
+    // district heat, which is exactly the diversification lesson the PRESS arc proves.
+    let expansion_neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Harbor District".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(jitter_rating_u8(52, jitter_rating)),
+                    commercial_activity: rating(jitter_rating_u8(58, jitter_rating)),
+                    illicit_demand: rating(jitter_rating_u8(66, jitter_rating)),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(jitter_rating_u8(28, jitter_rating)),
+                    political_influence: rating(55),
+                    social_cohesion: rating(70),
+                    visible_violence_tolerance: rating(30),
+                },
+            },
+        },
+    )?;
+    let expansion_front = insert_business(
+        registry,
+        &mut state,
+        BusinessDraft {
+            name: "Pier Nine Social Club".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood: expansion_neighborhood,
+            owner: BusinessOwner::Organization(player),
+        },
+    )?;
+    let expansion_business_operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(expansion_front),
+            kind: AccountKind::LegitimateOperating,
+            label: "Pier Nine legitimate operating".to_owned(),
+        },
+    )?;
+    let expansion_business_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(expansion_front),
+            kind: AccountKind::Settlement,
+            label: "Pier Nine legitimate settlement".to_owned(),
+        },
+    )?;
+    validate_establish_business_economy(
+        registry,
+        &state,
+        BusinessEconomyDraft {
+            business: expansion_front,
+            operating_account: expansion_business_operating,
+            settlement_account: expansion_business_settlement,
+        },
+    )?
+    .commit(&mut state)?;
+    let expansion_cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::StreetCash,
+            label: "Harbor District float".to_owned(),
+        },
+    )?;
+    let expansion_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+            label: "Harbor District gambling settlement".to_owned(),
+        },
+    )?;
+
     let business_operating = insert_account(
         &mut state,
         FinancialAccountDraft {
@@ -3102,6 +3250,11 @@ fn build_scenario(
         opportunity_information,
         alternate_opportunity_information,
         enterprise,
+        expansion_neighborhood,
+        expansion_front,
+        expansion_cash,
+        expansion_settlement,
+        lieutenant_mandate: mandate,
         investigation: None,
         variation,
         timeline,
@@ -3279,6 +3432,113 @@ fn discover_second_opportunity(
     Ok(opportunity)
 }
 
+/// The PRESS wait becomes governance instead of dead time: revise the lieutenant's mandate to
+/// cover both districts, move idle street cash into a harbor float through a canonical ledger
+/// transfer, and establish a second gambling enterprise delegated under the revised mandate.
+/// Every step is a production path a player would drive from the delegation and finance views;
+/// nothing here reads hidden case state, and the harbor district pays no heat surcharge because
+/// Central Precinct's active case never touched it.
+fn establish_harbor_expansion(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    const EXPANSION_FLOAT_CENTS: i64 = 40_000;
+    let canal_cash = scenario
+        .state
+        .enterprises()
+        .get_enterprise(scenario.enterprise)
+        .expect("canal enterprise must persist")
+        .cash_account();
+    let neighborhood_name = scenario
+        .state
+        .world()
+        .get_neighborhood(scenario.neighborhood)
+        .expect("canal neighborhood must persist")
+        .name()
+        .to_owned();
+    let lieutenant_name = scenario
+        .state
+        .world()
+        .get_character(scenario.lieutenant)
+        .expect("lieutenant must persist")
+        .name()
+        .to_owned();
+
+    validate_revise_mandate(
+        scenario.registry,
+        &scenario.state,
+        scenario.lieutenant_mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Neighborhood(scenario.neighborhood),
+                ResponsibilityScope::Neighborhood(scenario.expansion_neighborhood),
+                ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+                ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    validate_record_transaction(
+        &scenario.state,
+        LedgerTransactionDraft {
+            occurred_at: scenario.state.now(),
+            memo: "Capitalize the Harbor District book".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: canal_cash,
+                    amount: Money::from_cents(-EXPANSION_FLOAT_CENTS),
+                },
+                LedgerPosting {
+                    account: scenario.expansion_cash,
+                    amount: Money::from_cents(EXPANSION_FLOAT_CENTS),
+                },
+            ],
+            authorization: None,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let enterprise = validate_establish_enterprise(
+        scenario.registry,
+        &scenario.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization: scenario.player,
+            authority: MandateAuthority {
+                mandate: scenario.lieutenant_mandate,
+                manager: scenario.lieutenant,
+                scope: ResponsibilityScope::Neighborhood(scenario.expansion_neighborhood),
+            },
+            location: EnterpriseLocation::Business(scenario.expansion_front),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: scenario.expansion_cash,
+            settlement_account: scenario.expansion_settlement,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.expansion_enterprise = Some(enterprise);
+    metrics.expansion_established = true;
+    if narrative {
+        println!(
+            "[DECIDE]  Standing down does not mean standing still. Revise {lieutenant_name}'s mandate to cover both districts, capitalize a harbor float from idle gambling cash, and open a second book in Harbor District."
+        );
+        println!(
+            "[DELEGATE] {} now holds an expanded two-district mandate (v2); routine authority over the new enterprise is delegated.",
+            lieutenant_name
+        );
+        println!(
+            "[EXPAND]   Gambling enterprise established at Pier Nine Social Club (Harbor District) with a {} float.",
+            format_cents(EXPANSION_FLOAT_CENTS)
+        );
+        println!(
+            "[NARRATION] Harbor District sits outside Central Precinct's jurisdiction: the open case that taxes the {neighborhood_name} racket cannot reach this one."
+        );
+    }
+    Ok(())
+}
+
 /// The RUSH rebuild beat: after an autonomous rival departure removed the entry specialist, the
 /// player works the canonical executive recruitment path to court the independent candidate. The
 /// candidate relationship is authored so acceptance is deterministic and identical across seeds;
@@ -3391,7 +3651,7 @@ fn run_second_act(
             );
             if narrative {
                 println!(
-                    "[DECIDE]  Rebuild is in hand. Work the second score on {} during the morning lull at {}, with the rebuilt crew and the original street observation only — no fresh recon.",
+                    "[DECIDE]  Rebuild is in hand. Work the second score on {} during the morning lull at {}, with the rebuilt crew and the original street observation only - no fresh recon.",
                     scenario.variation.alternate_target_name(),
                     format_minute_of_day(scheduled_for.as_minutes()),
                 );
@@ -4990,18 +5250,66 @@ fn print_final_case_audit(scenario: &Scenario, burglary: OperationId) {
     );
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FinancialView {
     legitimate_cycle_count: u32,
     legitimate_net_cents: i64,
     enterprise_cycle_count: usize,
     enterprise_net_cents: i64,
-    street_cash_cents: i64,
+    /// Per-enterprise economics so the readout distinguishes the canal book from any
+    /// diversification the branch opened during its arc.
+    enterprise_lines: Vec<EnterpriseLine>,
     liquidation_cash_cents: i64,
     held_property_operations: u32,
     held_property_value_cents: i64,
     liquidated_property_operations: u32,
     liquidated_property_cash_cents: i64,
+}
+
+#[derive(Clone)]
+struct EnterpriseLine {
+    label: String,
+    cycle_count: usize,
+    net_cents: i64,
+    cash_cents: i64,
+}
+
+fn enterprise_label(scenario: &Scenario, enterprise: EnterpriseId) -> String {
+    let record = scenario
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("labeled enterprise must persist");
+    match record.location() {
+        EnterpriseLocation::Business(business) => scenario
+            .state
+            .world()
+            .get_business(business)
+            .map(|record| {
+                format!(
+                    "{} ({})",
+                    record.name(),
+                    host_district_label(scenario, business)
+                )
+            })
+            .unwrap_or_else(|| "enterprise".to_owned()),
+        EnterpriseLocation::Neighborhood(_) => "district enterprise".to_owned(),
+    }
+}
+
+fn host_district_label(scenario: &Scenario, business: BusinessId) -> String {
+    scenario
+        .state
+        .world()
+        .get_business(business)
+        .and_then(|record| {
+            scenario
+                .state
+                .world()
+                .get_neighborhood(record.neighborhood())
+        })
+        .map(|neighborhood| neighborhood.name().to_owned())
+        .unwrap_or_else(|| "unknown district".to_owned())
 }
 
 fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn Error>> {
@@ -5011,23 +5319,38 @@ fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn 
         SimTime::ZERO,
         scenario.state.now(),
     )?;
-    let enterprise = scenario
-        .state
-        .enterprises()
-        .get_enterprise(scenario.enterprise)
-        .expect("scenario enterprise must exist");
     let enterprise_net = scenario
         .state
         .enterprises()
         .cycles_for(scenario.enterprise)
         .try_fold(Money::ZERO, |sum, cycle| sum.checked_add(cycle.net_cash()))
         .expect("scenario enterprise totals must fit money range");
-    let street_cash = scenario
+    let mut enterprise_lines = Vec::new();
+    for record in scenario
         .state
-        .finance()
-        .get_account(enterprise.cash_account())
-        .expect("enterprise cash account must exist")
-        .balance();
+        .enterprises()
+        .enterprises_for_organization(scenario.player)
+    {
+        let id = record.id();
+        let net = scenario
+            .state
+            .enterprises()
+            .cycles_for(id)
+            .try_fold(Money::ZERO, |sum, cycle| sum.checked_add(cycle.net_cash()))
+            .expect("enterprise totals must fit money range");
+        enterprise_lines.push(EnterpriseLine {
+            label: enterprise_label(scenario, id),
+            cycle_count: scenario.state.enterprises().cycles_for(id).count(),
+            net_cents: net.cents(),
+            cash_cents: scenario
+                .state
+                .finance()
+                .get_account(record.cash_account())
+                .expect("enterprise cash account must exist")
+                .balance()
+                .cents(),
+        });
+    }
     let liquidation_cash = scenario
         .state
         .finance()
@@ -5069,7 +5392,7 @@ fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn 
             .cycles_for(scenario.enterprise)
             .count(),
         enterprise_net_cents: enterprise_net.cents(),
-        street_cash_cents: street_cash.cents(),
+        enterprise_lines,
         liquidation_cash_cents: liquidation_cash.cents(),
         held_property_operations,
         held_property_value_cents: held_property_value.cents(),
@@ -5088,12 +5411,22 @@ fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         view.legitimate_cycle_count,
         format_cents(view.legitimate_net_cents),
     );
-    println!(
-        "  Delegated gambling: {} cycle(s), net {}, street-cash balance {}.",
-        view.enterprise_cycle_count,
-        format_cents(view.enterprise_net_cents),
-        format_cents(view.street_cash_cents),
-    );
+    for line in &view.enterprise_lines {
+        println!(
+            "  Delegated gambling, {}: {} cycle(s), net {}, street float {}.",
+            line.label,
+            line.cycle_count,
+            format_cents(line.net_cents),
+            format_cents(line.cash_cents),
+        );
+    }
+    if view.enterprise_lines.is_empty() {
+        println!(
+            "  Delegated gambling: {} cycle(s), net {}.",
+            view.enterprise_cycle_count,
+            format_cents(view.enterprise_net_cents),
+        );
+    }
     println!(
         "  Resale liquidation cash balance: {}.",
         format_cents(view.liquidation_cash_cents),
@@ -5167,10 +5500,11 @@ fn print_report_condensed(label: &str, report: &ReportRecord) {
         return;
     }
     println!(
-        "[{label}] minute {}: {} ({} entries)",
+        "[{label}] minute {}: {} ({} entr{})",
         report.generated_at().as_minutes(),
         report.title(),
-        entries.len()
+        entries.len(),
+        if entries.len() == 1 { "y" } else { "ies" },
     );
     for entry in attention_worthy {
         let marker = match entry.attention {
@@ -5239,6 +5573,12 @@ fn print_metrics(metrics: &RunMetrics) {
         optional_cents(metrics.second_act_property_acquired_value_cents),
         optional_cents(metrics.second_act_property_realized_cash_cents),
     );
+    if metrics.expansion_established {
+        println!(
+            "        diversification: second-district enterprise established, net {}",
+            optional_cents(metrics.expansion_net_cents),
+        );
+    }
 }
 
 fn optional_cents(value: Option<i64>) -> String {
@@ -5323,6 +5663,11 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "discipline cost",
         press.second_opportunity_expired && press.second_burglary.is_none(),
         "choosing to stand down has a real price: the second score lapses while the hot case stays protected",
+    );
+    print_loop_checkpoint(
+        "diversify",
+        press.expansion_established && press.expansion_net_cents.is_some_and(|net| net > 0),
+        "idle capital during the wait becomes governance: a revised two-district mandate and a second-district enterprise the hot home case cannot tax",
     );
     let defector_trail_shown = rush.defector_trail_confirmed == Some(true)
         && press.defector_trail_confirmed == Some(true)
@@ -5414,6 +5759,11 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         recon.burglary_terminal_minute.unwrap_or_default(),
         rush.burglary_terminal_minute.unwrap_or_default(),
     );
+    println!(
+        "  - Diversification leverage: while the case stayed hot, PRESS converted idle street cash into a Harbor District book earning {} surcharge-free, versus the canal book's heat-taxed window net of {}.",
+        optional_dollars(press.expansion_net_cents),
+        optional_dollars(press.enterprise_net_cents),
+    );
     println!("Current experience gaps exposed by this fixture:");
     println!(
         "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs (reported by the manager in-cycle) and reduces resale value in heavily patrolled districts. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
@@ -5425,7 +5775,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
-        "  - The delegation pillar is now measurably hot: enterprise heat is visible, but the fixtures still never ask the player to re-scope a mandate, replace a delegated manager mid-crisis, or respond to manager drift beyond the capacity-probe revision."
+        "  - The delegation pillar now carries real weight in the narrative arc: PRESS re-scopes its lieutenant's mandate mid-crisis to open a second district. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."
     );
     println!(
         "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."

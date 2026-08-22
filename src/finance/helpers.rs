@@ -37,3 +37,37 @@ pub fn build_settlement_postings(
         },
     ])
 }
+
+/// Renders a cents amount as leader-readable dollars (`"$1,234.56"`, `"-$12.30"`).
+/// Player-facing reports quote people talking about money, so raw cent counts stay
+/// confined to diagnostics and ledger internals.
+pub fn format_money_cents(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    let whole = abs / 100;
+    let fraction = abs % 100;
+    let digits = whole.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len().div_ceil(3));
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{sign}${grouped}.{fraction:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_money_cents;
+
+    #[test]
+    fn money_format_groups_thousands_and_preserves_sign() {
+        assert_eq!(format_money_cents(0), "$0.00");
+        assert_eq!(format_money_cents(5), "$0.05");
+        assert_eq!(format_money_cents(75), "$0.75");
+        assert_eq!(format_money_cents(55320), "$553.20");
+        assert_eq!(format_money_cents(1_234_567), "$12,345.67");
+        assert_eq!(format_money_cents(-12_500), "-$125.00");
+    }
+}

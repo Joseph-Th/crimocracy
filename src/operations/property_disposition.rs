@@ -435,9 +435,9 @@ pub(crate) fn build_disposition_summary(
     realized_value: Money,
 ) -> String {
     format!(
-        "Property from {operation_title} was liquidated through {venue_name} for {} cents from an estimated held value of {} cents.",
-        realized_value.cents(),
-        estimated_value.cents()
+        "Property from {operation_title} was liquidated through {venue_name} for {} from an estimated held value of {}.",
+        crate::finance::helpers::format_money_cents(realized_value.cents()),
+        crate::finance::helpers::format_money_cents(estimated_value.cents())
     )
 }
 
@@ -627,7 +627,7 @@ fn validate_operation_cash_state(
 
 pub(crate) fn build_deposit_summary(operation_title: &str, amount: Money) -> String {
     format!(
-        "Cash from {operation_title} was deposited for {} cents.",
-        amount.cents()
+        "Cash from {operation_title} was deposited for {}.",
+        crate::finance::helpers::format_money_cents(amount.cents())
     )
 }

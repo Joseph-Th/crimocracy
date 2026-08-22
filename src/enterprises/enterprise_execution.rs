@@ -1176,22 +1176,22 @@ fn build_cycle_report_summary(
     economics: &EnterpriseCycleEconomics,
 ) -> String {
     let base = format!(
-        "Enterprise cycle reported gross {} cents, operating cost {} cents",
-        economics.gross_revenue.cents(),
-        economics.operating_cost.cents(),
+        "Enterprise cycle reported gross {}, operating cost {}",
+        crate::finance::helpers::format_money_cents(economics.gross_revenue.cents()),
+        crate::finance::helpers::format_money_cents(economics.operating_cost.cents()),
     );
     let heat = if economics.investigation_heat > Money::ZERO {
         format!(
-            ", including a {}-cent street surcharge while police work stays heavy in {}",
-            economics.investigation_heat.cents(),
+            ", including a {} street surcharge while police work stays heavy in {}",
+            crate::finance::helpers::format_money_cents(economics.investigation_heat.cents()),
             resolve_enterprise_district_name(state, record),
         )
     } else {
         String::new()
     };
     format!(
-        "{base}{heat}, net cash {} cents, with variance {} basis points.",
-        economics.net_cash.cents(),
+        "{base}{heat}, net cash {}, with variance {} basis points.",
+        crate::finance::helpers::format_money_cents(economics.net_cash.cents()),
         economics.variance_basis_points,
     )
 }
@@ -1751,7 +1751,7 @@ mod tests {
             .expect("cycle report information must persist");
         assert!(hot_information
             .summary()
-            .contains("5000-cent street surcharge while police work stays heavy"));
+            .contains("$50.00 street surcharge while police work stays heavy"));
         validate_state(&fixture.state).expect("district heat state should validate");
         validate_invariants(&fixture.state);
     }
