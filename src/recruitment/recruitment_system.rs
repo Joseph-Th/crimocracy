@@ -9,7 +9,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, validate_mandate_authority_snapshot,
+    ensure_mandate_authority_current, resolve_mandate_authority, resolve_policy_for_manager,
     DelegationError, PolicySource, ResolvedPolicy,
 };
 use crate::delegation::{
@@ -412,7 +412,7 @@ pub(crate) fn decide_recruitment_attempt(
         draft.candidate,
         state.now(),
     );
-    let factors = calculate_recruitment_factors_from_context(RecruitmentFactorContext {
+    let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
         definition: registry.recruitment(),
         candidate,
         recruiter,
@@ -423,7 +423,7 @@ pub(crate) fn decide_recruitment_attempt(
         had_previous_organization: candidate.organization().is_some(),
     })
     .expect("validated recruitment must retain a candidate-to-recruiter relationship snapshot");
-    let margin = calculate_recruitment_margin(registry.recruitment(), factors, draft.approach);
+    let margin = resolve_recruitment_margin(registry.recruitment(), factors, draft.approach);
     let outcome = classify_recruitment_outcome(margin);
     Ok(RecruitmentPlan {
         draft,
@@ -778,7 +778,7 @@ impl ValidatedRecruitmentAttempt {
         budget.push((IdKind::RecruitmentAttempt, 1));
         state.ids.reserve_many(&budget)?;
         if let Some(guard) = self.delegated_guard {
-            validate_mandate_authority_snapshot(state, guard.authority)?;
+            ensure_mandate_authority_current(state, guard.authority)?;
             let current_policy = resolve_policy_for_manager(
                 state,
                 guard.authority.authority().manager,
@@ -1030,7 +1030,7 @@ pub(crate) struct RecruitmentFactorContext<'a> {
     pub had_previous_organization: bool,
 }
 
-pub(crate) fn calculate_recruitment_factors_from_context(
+pub(crate) fn resolve_recruitment_factors_from_context(
     context: RecruitmentFactorContext<'_>,
 ) -> Option<RecruitmentFactors> {
     let RecruitmentFactorContext {
@@ -1159,7 +1159,7 @@ fn recruitment_trait_adjustment(
         .expect("validated authored recruitment trait adjustments must fit i16")
 }
 
-pub(crate) fn calculate_recruitment_margin(
+pub(crate) fn resolve_recruitment_margin(
     definition: &RecruitmentDefinition,
     factors: RecruitmentFactors,
     approach: RecruitmentApproach,
@@ -1294,7 +1294,7 @@ fn validate_plan_definition(
             candidate: plan.draft.candidate,
         });
     }
-    let factors = calculate_recruitment_factors_from_context(RecruitmentFactorContext {
+    let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
         definition,
         candidate,
         recruiter,
@@ -1307,7 +1307,7 @@ fn validate_plan_definition(
     .expect("validated recruitment plan must preserve its recruiter relationship");
     debug_assert_eq!(factors, plan.context.factors);
     debug_assert_eq!(
-        calculate_recruitment_margin(definition, factors, plan.draft.approach),
+        resolve_recruitment_margin(definition, factors, plan.draft.approach),
         plan.context.margin
     );
     debug_assert_eq!(
@@ -1863,7 +1863,7 @@ mod tests {
             fixture
                 .state
                 .recruitment()
-                .attempt_for_approval_decision(request.decision)
+                .get_attempt_for_approval_decision(request.decision)
                 .map(|record| record.id()),
             Some(attempt)
         );
@@ -1930,7 +1930,7 @@ mod tests {
         assert!(fixture
             .state
             .recruitment()
-            .attempt_for_approval_decision(request.decision)
+            .get_attempt_for_approval_decision(request.decision)
             .is_none());
         assert_eq!(
             fixture
@@ -1989,7 +1989,7 @@ mod tests {
         assert!(fixture
             .state
             .recruitment()
-            .attempt_for_approval_decision(request.decision)
+            .get_attempt_for_approval_decision(request.decision)
             .is_none());
 
         validate_resolve_decision(
@@ -2615,8 +2615,8 @@ mod tests {
     fn save_round_trip_preserves_recruitment_history_and_drive_authorship() {
         let registry = build_registry();
         assert_eq!(
-            registry.get_drive(DriveKind::Safety).display_name(),
-            "Safety"
+            registry.get_drive(DriveKind::Safety).kind(),
+            DriveKind::Safety
         );
         let mut fixture = fixture();
         let attempt = validate_recruitment_attempt(

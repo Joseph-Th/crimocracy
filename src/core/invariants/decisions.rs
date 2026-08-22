@@ -338,7 +338,7 @@ fn validate_recruitment_approval_decision(
 
     let linked_attempt = state
         .recruitment
-        .attempt_for_approval_decision(decision.id());
+        .get_attempt_for_approval_decision(decision.id());
     match decision.status() {
         DecisionStatus::Pending => {
             if state.decisions.pending_for_recruitment_approval(

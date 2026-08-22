@@ -4,7 +4,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{FinancialAccountId, IdExhaustionError, LedgerTransactionId, MandateId};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, validate_mandate_authority_snapshot, DelegationError,
+    ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::finance::{
@@ -120,7 +120,7 @@ impl ValidatedLedgerTransaction {
             }
         }
         if let Some(snapshot) = self.authority_snapshot {
-            validate_mandate_authority_snapshot(state, snapshot)?;
+            ensure_mandate_authority_current(state, snapshot)?;
         }
         if let Some(usage) = self.budget_usage {
             let summary = resolve_budget_usage(state, usage.mandate(), self.draft.occurred_at)?;

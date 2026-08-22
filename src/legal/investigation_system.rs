@@ -353,10 +353,10 @@ fn validate_investigation_transition_dependencies(
 /// evidence identified a concrete character is a real, actionable lead and is never auto-shelved.
 /// The owned authority keeps the sitting case history intact so a later operation exposure in the
 /// same jurisdiction can resume the same shelf rather than starting from silence.
-pub(crate) fn process_cold_case_decay(
+pub(crate) fn apply_cold_case_decay(
     state: &mut AppState,
     cold_case_window: SimDuration,
-) -> Result<Vec<InvestigationId>, InvestigationError> {
+) -> Result<ColdCaseDecayOutcome, InvestigationError> {
     let threshold_minutes = state
         .now()
         .as_minutes()
@@ -365,6 +365,7 @@ pub(crate) fn process_cold_case_decay(
         .legal
         .active_case_ids_with_last_activity_at_or_before(SimTime::from_minutes(threshold_minutes));
     let mut suspended = Vec::new();
+    let mut closed = Vec::new();
     for investigation in candidates {
         let record = state
             .legal
@@ -373,11 +374,47 @@ pub(crate) fn process_cold_case_decay(
         if record.origin_operation().is_none() {
             continue;
         }
-        let has_identified_subject = record
+        // An operation-originated case whose every identified subject is in custody is fully
+        // worked: the institutional trail ends, so the case closes rather than sitting active
+        // forever. Cases with subjects still at large keep their investigator attention.
+        let identified_subjects: Vec<CharacterId> = record
             .subjects()
             .iter()
-            .any(|subject| matches!(subject, EntityRef::Character(_)));
-        if has_identified_subject {
+            .filter_map(|subject| match subject {
+                EntityRef::Character(character) => Some(*character),
+                EntityRef::Organization(_)
+                | EntityRef::Neighborhood(_)
+                | EntityRef::Business(_)
+                | EntityRef::Operation(_)
+                | EntityRef::Investigation(_)
+                | EntityRef::Evidence(_)
+                | EntityRef::FinancialAccount(_)
+                | EntityRef::DecisionRequest(_)
+                | EntityRef::Mandate(_)
+                | EntityRef::Enterprise(_) => None,
+            })
+            .collect();
+        if !identified_subjects.is_empty()
+            && identified_subjects.iter().all(|character| {
+                state
+                    .legal
+                    .active_arrest_for_character(*character)
+                    .is_some()
+            })
+        {
+            if let Ok(transition) = validate_transition_investigation(
+                state,
+                investigation,
+                InvestigationTransition::Close,
+            ) {
+                transition
+                    .commit(state)
+                    .expect("validated cold-case closure must commit atomically");
+                closed.push(investigation);
+            }
+            continue;
+        }
+        if !identified_subjects.is_empty() {
             continue;
         }
         let transition = validate_transition_investigation(
@@ -391,7 +428,15 @@ pub(crate) fn process_cold_case_decay(
             .expect("validated cold-case suspension must commit atomically");
         suspended.push(investigation);
     }
-    Ok(suspended)
+    Ok(ColdCaseDecayOutcome { suspended, closed })
+}
+
+/// Cold-window decay results, split so observers can distinguish shelved cases from cases
+/// fully closed because every identified subject is already in custody.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColdCaseDecayOutcome {
+    pub suspended: Vec<InvestigationId>,
+    pub closed: Vec<InvestigationId>,
 }
 
 #[derive(Debug)]
@@ -2074,9 +2119,15 @@ mod tests {
         .expect("identified incident intake should commit")
         .investigation;
         state.advance_clock(SimDuration::from_minutes(121));
-        let suspended = process_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        let suspended = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
             .expect("cold-case decay should resolve");
-        assert_eq!(suspended, vec![case]);
+        assert_eq!(
+            suspended,
+            ColdCaseDecayOutcome {
+                suspended: vec![case],
+                closed: Vec::new()
+            }
+        );
         let record = state
             .legal()
             .get_investigation(case)

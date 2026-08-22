@@ -200,11 +200,10 @@ impl RegistryBuilder {
     pub(crate) fn register_capability(
         &mut self,
         kind: CapabilityKind,
-        display_name: &'static str,
     ) -> Result<(), RegistryBuildError> {
         if self
             .capabilities
-            .insert(kind, CapabilityDefinition { kind, display_name })
+            .insert(kind, CapabilityDefinition { kind })
             .is_some()
         {
             return Err(RegistryBuildError::DuplicateCapability(kind));
@@ -427,16 +426,8 @@ impl RegistryBuilder {
         });
         Ok(())
     }
-    pub(crate) fn register_drive(
-        &mut self,
-        kind: DriveKind,
-        display_name: &'static str,
-    ) -> Result<(), RegistryBuildError> {
-        if self
-            .drives
-            .insert(kind, DriveDefinition { kind, display_name })
-            .is_some()
-        {
+    pub(crate) fn register_drive(&mut self, kind: DriveKind) -> Result<(), RegistryBuildError> {
+        if self.drives.insert(kind, DriveDefinition { kind }).is_some() {
             return Err(RegistryBuildError::DuplicateDrive(kind));
         }
         Ok(())
@@ -444,7 +435,6 @@ impl RegistryBuilder {
     pub(crate) fn register_investigation_work(
         &mut self,
         kind: InvestigationWorkKind,
-        display_name: &'static str,
         spec: InvestigationWorkDefinitionSpec,
     ) -> Result<(), RegistryBuildError> {
         if spec.duration.as_minutes() == 0 {
@@ -467,7 +457,6 @@ impl RegistryBuilder {
                 kind,
                 InvestigationWorkDefinition {
                     kind,
-                    display_name,
                     duration: spec.duration,
                     base_difficulty: spec.base_difficulty,
                     additional_source_difficulty: spec.additional_source_difficulty,
@@ -482,16 +471,8 @@ impl RegistryBuilder {
         }
         Ok(())
     }
-    pub(crate) fn register_trait(
-        &mut self,
-        kind: TraitKind,
-        display_name: &'static str,
-    ) -> Result<(), RegistryBuildError> {
-        if self
-            .traits
-            .insert(kind, TraitDefinition { kind, display_name })
-            .is_some()
-        {
+    pub(crate) fn register_trait(&mut self, kind: TraitKind) -> Result<(), RegistryBuildError> {
+        if self.traits.insert(kind, TraitDefinition { kind }).is_some() {
             return Err(RegistryBuildError::DuplicateTrait(kind));
         }
         Ok(())
@@ -499,7 +480,6 @@ impl RegistryBuilder {
     pub(crate) fn register_policy(
         &mut self,
         kind: PolicyKind,
-        display_name: &'static str,
         default: PolicySetting,
     ) -> Result<(), RegistryBuildError> {
         if default.kind() != kind {
@@ -507,14 +487,7 @@ impl RegistryBuilder {
         }
         if self
             .policies
-            .insert(
-                kind,
-                PolicyDefinition {
-                    kind,
-                    display_name,
-                    default,
-                },
-            )
+            .insert(kind, PolicyDefinition { kind, default })
             .is_some()
         {
             return Err(RegistryBuildError::DuplicatePolicy(kind));
@@ -672,7 +645,6 @@ impl RegistryBuilder {
     pub(crate) fn register_enterprise(
         &mut self,
         kind: EnterpriseKind,
-        display_name: &'static str,
         economics: EnterpriseEconomicsDefinition,
         policy: Option<PolicyKind>,
         required_business_functions: BTreeSet<BusinessFunction>,
@@ -707,7 +679,6 @@ impl RegistryBuilder {
                 kind,
                 EnterpriseDefinition {
                     kind,
-                    display_name,
                     economics,
                     policy,
                     required_business_functions,
@@ -723,8 +694,6 @@ impl RegistryBuilder {
     pub(crate) fn register_business(
         &mut self,
         kind: BusinessKind,
-        display_name: &'static str,
-        typical_functions: BTreeSet<BusinessFunction>,
         economics: BusinessEconomicsDefinition,
     ) -> Result<(), RegistryBuildError> {
         if economics.cycle.as_minutes() == 0 {
@@ -748,15 +717,7 @@ impl RegistryBuilder {
         }
         if self
             .businesses
-            .insert(
-                kind,
-                BusinessDefinition {
-                    kind,
-                    display_name,
-                    typical_functions,
-                    economics,
-                },
-            )
+            .insert(kind, BusinessDefinition { kind, economics })
             .is_some()
         {
             return Err(RegistryBuildError::DuplicateBusiness(kind));

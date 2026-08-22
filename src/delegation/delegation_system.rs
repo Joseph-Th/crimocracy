@@ -412,7 +412,7 @@ pub fn resolve_mandate_authority(
     })
 }
 
-pub fn validate_mandate_authority_snapshot(
+pub fn ensure_mandate_authority_current(
     state: &AppState,
     snapshot: ResolvedMandateAuthority,
 ) -> Result<(), DelegationError> {
@@ -788,7 +788,7 @@ mod tests {
         .expect("mandate revision should commit");
 
         assert_eq!(
-            validate_mandate_authority_snapshot(&state, snapshot)
+            ensure_mandate_authority_current(&state, snapshot)
                 .expect_err("authority snapshot must become stale after mandate revision"),
             DelegationError::StaleMandate {
                 mandate: authority.mandate,

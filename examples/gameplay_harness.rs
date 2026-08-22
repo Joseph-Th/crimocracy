@@ -1033,24 +1033,18 @@ fn split_flag_value(arg: &str) -> Option<(&str, &str)> {
 
 fn parse_seed_value(raw: &str) -> Result<u64, HarnessCliError> {
     let value = raw.to_owned();
+    let invalid = || HarnessCliError::InvalidValue {
+        flag: "--seed",
+        value: value.clone(),
+    };
+    // Accepted forms are exactly `0x[hex]` or all-decimal digits; anything else is a typo
+    // and must be rejected rather than silently reinterpreted in another radix.
     if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).map_err(|_| HarnessCliError::InvalidValue {
-            flag: "--seed",
-            value,
-        })
+        u64::from_str_radix(hex, 16).map_err(|_| invalid())
     } else if raw.chars().all(|c| c.is_ascii_digit()) && !raw.is_empty() {
-        // Decimal fast-path for ergonomics; fall back to hex if it looks hex.
-        raw.parse::<u64>()
-            .map_err(|_| HarnessCliError::InvalidValue {
-                flag: "--seed",
-                value,
-            })
+        raw.parse::<u64>().map_err(|_| invalid())
     } else {
-        // Try hex without prefix for backwards compatibility.
-        u64::from_str_radix(raw, 16).map_err(|_| HarnessCliError::InvalidValue {
-            flag: "--seed",
-            value,
-        })
+        Err(invalid())
     }
 }
 

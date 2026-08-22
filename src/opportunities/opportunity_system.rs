@@ -574,7 +574,7 @@ fn validate_expiry_due(
     Ok(valid_until)
 }
 
-pub(crate) fn expire_due_opportunities(
+pub(crate) fn apply_opportunity_expiry(
     registry: &Registry,
     state: &mut AppState,
 ) -> Vec<OpportunityId> {

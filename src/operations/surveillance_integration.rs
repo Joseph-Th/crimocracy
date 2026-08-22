@@ -1022,7 +1022,7 @@ mod tests {
     use crate::core::simulation::run_tick;
     use crate::core::time::SimDuration;
     use crate::legal::investigation_system::{
-        process_cold_case_decay, validate_add_evidence, validate_incident_intake,
+        apply_cold_case_decay, validate_add_evidence, validate_incident_intake,
         validate_open_investigation,
     };
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
@@ -1033,7 +1033,7 @@ mod tests {
         JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
     };
     use crate::operations::operation_execution::{
-        calculate_intelligence_factors, decide_operation_resolution,
+        decide_operation_resolution, resolve_intelligence_factors,
         validate_operation_resolution_plan, OperationResolutionError,
         OperationResolutionRandomness,
     };
@@ -1378,7 +1378,7 @@ mod tests {
         let start = run_tick(&fixture.registry, &mut fixture.state);
         assert!(start.started_operations.contains(&burglary));
         let (quality, adjustment, covered, relevant) =
-            calculate_intelligence_factors(&fixture.registry, &fixture.state, burglary);
+            resolve_intelligence_factors(&fixture.registry, &fixture.state, burglary);
         assert!(quality.value() > 0);
         assert!(adjustment < 0);
         assert!(covered >= 2);
@@ -1684,9 +1684,10 @@ mod tests {
         // A passing of the authored cold window deterministically shelves the case, and a fresh
         // police-organization surveillance then reports the matter has gone quiet.
         fixture.state.advance_clock(SimDuration::from_minutes(121));
-        let suspended = process_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
+        let suspended = apply_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
             .expect("cold-case decay should resolve");
-        assert_eq!(suspended, vec![case]);
+        assert_eq!(suspended.suspended, vec![case]);
+        assert!(suspended.closed.is_empty());
         assert_eq!(
             fixture
                 .state

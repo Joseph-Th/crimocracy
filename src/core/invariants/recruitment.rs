@@ -10,8 +10,8 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::recruitment::recruitment_system::{
-    calculate_recruitment_factors_from_context, calculate_recruitment_margin,
-    classify_recruitment_outcome, select_perceived_legal_pressure_at, RecruitmentFactorContext,
+    classify_recruitment_outcome, resolve_recruitment_factors_from_context,
+    resolve_recruitment_margin, select_perceived_legal_pressure_at, RecruitmentFactorContext,
 };
 use crate::recruitment::{RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource};
 use crate::registry::Registry;
@@ -171,7 +171,7 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                     || approval_context.authority().policy_source() != policy_source
                     || state
                         .recruitment
-                        .attempt_for_approval_decision(decision)
+                        .get_attempt_for_approval_decision(decision)
                         .map(|record| record.id())
                         != Some(attempt.id())
                 {
@@ -426,21 +426,20 @@ pub(super) fn validate_recruitment_against_registry(
                 attempt.candidate(),
                 attempt.occurred_at(),
             );
-        let expected_factors =
-            calculate_recruitment_factors_from_context(RecruitmentFactorContext {
-                definition,
-                candidate,
-                recruiter,
-                approach: attempt.approach(),
-                recruiter_relationship: attempt.recruiter_relationship(),
-                incumbent_relationship: attempt.incumbent_relationship(),
-                perceived_legal_pressure: expected_legal_pressure,
-                had_previous_organization: attempt.previous_organization().is_some(),
-            });
+        let expected_factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
+            definition,
+            candidate,
+            recruiter,
+            approach: attempt.approach(),
+            recruiter_relationship: attempt.recruiter_relationship(),
+            incumbent_relationship: attempt.incumbent_relationship(),
+            perceived_legal_pressure: expected_legal_pressure,
+            had_previous_organization: attempt.previous_organization().is_some(),
+        });
         if expected_factors != Some(attempt.factors())
             || attempt.pressure_information() != expected_pressure_information
             || attempt.margin()
-                != calculate_recruitment_margin(definition, attempt.factors(), attempt.approach())
+                != resolve_recruitment_margin(definition, attempt.factors(), attempt.approach())
             || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {

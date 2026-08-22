@@ -9,7 +9,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, validate_mandate_authority_snapshot,
+    ensure_mandate_authority_current, resolve_mandate_authority, resolve_policy_for_manager,
     DelegationError,
 };
 use crate::delegation::{
@@ -145,7 +145,7 @@ pub struct ValidatedEnterpriseEstablishment {
 
 impl ValidatedEnterpriseEstablishment {
     pub fn commit(self, state: &mut AppState) -> Result<EnterpriseId, EnterpriseError> {
-        validate_mandate_authority_snapshot(state, self.authority)?;
+        ensure_mandate_authority_current(state, self.authority)?;
         validate_enterprise_environment(
             state,
             self.draft.organization,
@@ -438,7 +438,7 @@ impl ValidatedEnterpriseCycle {
                 found: state.now(),
             });
         }
-        validate_mandate_authority_snapshot(state, self.plan.snapshot.authority)?;
+        ensure_mandate_authority_current(state, self.plan.snapshot.authority)?;
         validate_supporting_business_versions(
             state,
             &self.plan.snapshot.supporting_business_versions,
@@ -532,7 +532,7 @@ pub fn validate_enterprise_cycle_plan(
             found: state.now(),
         });
     }
-    validate_mandate_authority_snapshot(state, plan.snapshot.authority)?;
+    ensure_mandate_authority_current(state, plan.snapshot.authority)?;
     validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;
     if let Some((business_id, expected)) = plan.snapshot.host_business_version {
         let business = state
@@ -644,7 +644,7 @@ impl ValidatedEnterpriseStatusChange {
             });
         }
         if let Some(authority) = self.authority {
-            validate_mandate_authority_snapshot(state, authority)?;
+            ensure_mandate_authority_current(state, authority)?;
             validate_enterprise_environment(
                 state,
                 record.organization(),

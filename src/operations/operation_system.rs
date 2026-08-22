@@ -1191,7 +1191,7 @@ impl ValidatedOperationAbort {
     }
 }
 
-pub fn validate_authority_abort_operation(
+pub(crate) fn validate_authority_abort_operation(
     state: &AppState,
     operation: OperationId,
 ) -> Result<ValidatedOperationAbort, OperationError> {
@@ -1946,7 +1946,7 @@ mod tests {
             .expect("operation should commit");
 
         let (quality, adjustment, covered, relevant) =
-            crate::operations::operation_execution::calculate_intelligence_factors(
+            crate::operations::operation_execution::resolve_intelligence_factors(
                 &registry, &state, operation,
             );
         assert_eq!(quality.value(), 0);

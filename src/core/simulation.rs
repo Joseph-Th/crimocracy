@@ -16,10 +16,10 @@ use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, find_due_enterprises, validate_enterprise_cycle_plan,
 };
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
-use crate::legal::investigation_system::process_cold_case_decay;
+use crate::legal::investigation_system::apply_cold_case_decay;
 use crate::legal::investigation_work_execution::{
     apply_initial_evidence_reviews, decide_investigation_work_resolution,
-    due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
+    find_due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
     InvestigationWorkRandomness,
 };
 use crate::operations::operation_execution::{
@@ -31,7 +31,7 @@ use crate::operations::operation_system::{
     has_missed_operation_deadline, validate_deadline_missed_operation, OperationTransition,
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
-use crate::opportunities::opportunity_system::expire_due_opportunities;
+use crate::opportunities::opportunity_system::apply_opportunity_expiry;
 use crate::recruitment::recruitment_system::resolve_due_autonomous_recruitment;
 use crate::registry::Registry;
 use crate::reports::executive_brief::{
@@ -60,6 +60,7 @@ pub struct TickOutcome {
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
+    pub cold_case_closures: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
 }
 
@@ -69,7 +70,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     state.advance_clock(SimDuration::ONE_MINUTE);
     // Opportunity expiry runs before other due work so its durable lifecycle report is available
     // to every same-minute consumer, including the executive brief synthesized at the end.
-    let expired_opportunities = expire_due_opportunities(registry, state);
+    let expired_opportunities = apply_opportunity_expiry(registry, state);
     let due_authorized = due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
     for operation in due_authorized {
@@ -155,7 +156,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         .expect("valid state should schedule due witness interviews");
     // Detective work resolves after operation consequences so legal state created by an operation
     // is visible to later institutional work in the same minute without bypassing evidence ownership.
-    let due_investigation_work = due_scheduled_investigation_work(state);
+    let due_investigation_work = find_due_scheduled_investigation_work(state);
     let mut resolved_investigation_work = Vec::with_capacity(due_investigation_work.len());
     for work in due_investigation_work {
         let kind = state
@@ -201,7 +202,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // final for the minute; an authored institutional-inactivity window then shelves operation-
     // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
     // decay does not perturb any domain RNG sequence.
-    let cold_case_suspensions = process_cold_case_decay(state, registry.legal().cold_case_window())
+    let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
         .expect("valid state should resolve cold-case decay");
     let due_businesses = find_due_businesses(state);
     let mut business_cycles = Vec::with_capacity(due_businesses.len());
@@ -279,7 +280,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         enterprise_cycles,
         recruitment_attempts,
         expired_opportunities,
-        cold_case_suspensions,
+        cold_case_suspensions: cold_case_decay.suspended,
+        cold_case_closures: cold_case_decay.closed,
         executive_brief,
     }
 }

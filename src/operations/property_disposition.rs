@@ -223,7 +223,7 @@ pub fn validate_dispose_property(
         draft.cash_account,
         draft.settlement_account,
     )?;
-    let realized_value = calculate_property_liquidation_value(
+    let realized_value = resolve_property_liquidation_value(
         registry,
         state,
         operation.kind(),
@@ -383,7 +383,7 @@ fn validate_accounts(
     Ok(())
 }
 
-pub(crate) fn calculate_property_liquidation_value(
+pub(crate) fn resolve_property_liquidation_value(
     registry: &Registry,
     state: &crate::core::state::AppState,
     kind: OperationKind,

@@ -21,7 +21,7 @@ use crate::legal::police_response_system::{
     validate_police_response_arrival, PoliceResponseDispatchDraft, PoliceResponseError,
     ValidatedPoliceResponseDispatch,
 };
-use crate::operations::operation_execution::calculate_operation_police_alert_context;
+use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::operation_system::validate_police_arrival_abort_operation;
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::registry::Registry;
@@ -80,7 +80,7 @@ pub(crate) fn decide_operation_police_response_start(
     let entry_at = execution
         .operation_entry_offset()
         .map(|offset| state.now() + offset);
-    let alert = calculate_operation_police_alert_context(registry, state, operation, state.now());
+    let alert = resolve_operation_police_alert_context(registry, state, operation, state.now());
     let Some(neighborhood) = alert.neighborhood() else {
         return Ok(OperationPoliceResponseStartPlan {
             entry_at,

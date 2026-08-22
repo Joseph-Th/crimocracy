@@ -638,13 +638,8 @@ fn validate_dependency_versions(
 }
 
 fn validate_time(state: &AppState, expected: SimTime) -> Result<(), LegalRepresentationError> {
-    if state.now() != expected {
-        return Err(LegalRepresentationError::StaleTime {
-            expected,
-            found: state.now(),
-        });
-    }
-    Ok(())
+    crate::core::time::ensure_time_current(state.now(), expected)
+        .map_err(|(expected, found)| LegalRepresentationError::StaleTime { expected, found })
 }
 
 pub struct ValidatedLegalRepresentationEnd {

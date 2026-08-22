@@ -1,4 +1,4 @@
-//! Persistent institutional contacts and provenance-bearing disclosures into organization knowledge.
+//! Persistent institutional contacts and provenance-bearing disclosures; sibling `contact_system` owns establishment, termination, and disclosure transactions.
 
 pub mod contact_system;
 

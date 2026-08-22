@@ -441,7 +441,7 @@ pub fn decide_investigation_work_resolution(
         .get_investigation(work.investigation())
         .expect("validated scheduled work must have an investigation");
     let (factors, margin) =
-        calculate_work_factors_and_margin(definition, state, work, randomness.variance())?;
+        resolve_work_factors_and_margin(definition, state, work, randomness.variance())?;
     let superseded_by = find_superseding_evidence(state, work);
     let outcome = if superseded_by.is_some() {
         InvestigationWorkOutcome::Superseded
@@ -505,7 +505,7 @@ fn validate_source_evidence(
     Ok(())
 }
 
-pub(crate) fn calculate_work_difficulty(
+pub(crate) fn resolve_work_difficulty(
     definition: &InvestigationWorkDefinition,
     source_evidence_count: u8,
 ) -> u8 {
@@ -520,7 +520,7 @@ pub(crate) fn calculate_work_difficulty(
     .expect("clamped investigation difficulty must fit u8")
 }
 
-pub(crate) fn calculate_work_factors_and_margin(
+pub(crate) fn resolve_work_factors_and_margin(
     definition: &InvestigationWorkDefinition,
     state: &AppState,
     work: &InvestigationWorkRecord,
@@ -537,7 +537,7 @@ pub(crate) fn calculate_work_factors_and_margin(
     let source_support = resolve_source_support(state, work)?;
     let source_evidence_count = u8::try_from(work.source_evidence().len())
         .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
-    let difficulty = calculate_work_difficulty(definition, source_evidence_count);
+    let difficulty = resolve_work_difficulty(definition, source_evidence_count);
     let support_adjustment =
         i16::from(source_support.value()) * i16::from(definition.source_support_weight()) / 100;
     let margin =
@@ -745,7 +745,7 @@ struct DerivedEvidenceDraft {
     derived_from: BTreeSet<EvidenceId>,
 }
 
-pub(crate) fn derive_pattern_strength(source_support: Rating) -> EvidenceStrength {
+pub(crate) fn resolve_pattern_strength(source_support: Rating) -> EvidenceStrength {
     if source_support.value() >= 75 {
         EvidenceStrength::Strong
     } else {
@@ -753,7 +753,7 @@ pub(crate) fn derive_pattern_strength(source_support: Rating) -> EvidenceStrengt
     }
 }
 
-pub(crate) fn derive_pattern_admissibility(
+pub(crate) fn resolve_pattern_admissibility(
     state: &AppState,
     work: &InvestigationWorkRecord,
 ) -> Admissibility {
@@ -783,9 +783,9 @@ impl ValidatedInvestigationWorkResolution {
                     .expect("validated investigation work must exist");
                 match work.kind() {
                     InvestigationWorkKind::PatternAnalysis => {
-                        let strength = derive_pattern_strength(self.plan.factors.source_support());
+                        let strength = resolve_pattern_strength(self.plan.factors.source_support());
                         let reliability = minimum_source_reliability(state, work)?;
-                        let admissibility = derive_pattern_admissibility(state, work);
+                        let admissibility = resolve_pattern_admissibility(state, work);
                         Some(DerivedEvidenceDraft {
                             investigation: work.investigation(),
                             custodian: state
@@ -1123,7 +1123,7 @@ pub fn validate_investigation_work_resolution_plan(
         .expect("validated work must exist");
     let definition = registry.get_investigation_work(work.kind());
     let (expected_factors, expected_margin) =
-        calculate_work_factors_and_margin(definition, state, work, plan.factors.variance())?;
+        resolve_work_factors_and_margin(definition, state, work, plan.factors.variance())?;
     let expected_superseded_by = find_superseding_evidence(state, work);
     let expected_outcome = if expected_superseded_by.is_some() {
         InvestigationWorkOutcome::Superseded
@@ -1219,7 +1219,7 @@ fn validate_resolution_snapshot(
     Ok(())
 }
 
-pub(crate) fn due_scheduled_investigation_work(state: &AppState) -> Vec<InvestigationWorkId> {
+pub(crate) fn find_due_scheduled_investigation_work(state: &AppState) -> Vec<InvestigationWorkId> {
     state.legal.due_investigation_work_at_or_before(state.now())
 }
 

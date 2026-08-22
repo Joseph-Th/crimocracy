@@ -46,3 +46,14 @@ impl SimDuration {
         self.0
     }
 }
+
+/// Freshness check for validate-then-commit tokens: `Err((expected, found))` when the
+/// simulation clock has moved past the instant the token was validated at. Callers map the
+/// pair into their own typed stale-time error.
+pub fn ensure_time_current(now: SimTime, expected: SimTime) -> Result<(), (SimTime, SimTime)> {
+    if now == expected {
+        Ok(())
+    } else {
+        Err((expected, now))
+    }
+}

@@ -13,11 +13,6 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug)]
-pub struct CapabilityDefinition {
-    pub(super) kind: CapabilityKind,
-    pub(super) display_name: &'static str,
-}
 #[derive(Clone, Copy, Debug)]
 pub struct RecruitmentRelationshipSupportDefinition {
     pub trust_weight: u8,
@@ -168,7 +163,6 @@ impl RecruitmentDefinition {
 #[derive(Clone, Debug)]
 pub struct InvestigationWorkDefinition {
     pub(super) kind: InvestigationWorkKind,
-    pub(super) display_name: &'static str,
     pub(crate) duration: SimDuration,
     pub(crate) base_difficulty: u8,
     pub(crate) additional_source_difficulty: u8,
@@ -189,9 +183,6 @@ impl InvestigationWorkDefinition {
     pub fn kind(&self) -> InvestigationWorkKind {
         self.kind
     }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
-    }
     pub fn duration(&self) -> SimDuration {
         self.duration
     }
@@ -211,52 +202,41 @@ impl InvestigationWorkDefinition {
         self.connected_margin
     }
 }
+#[derive(Clone, Debug)]
+pub struct CapabilityDefinition {
+    pub(super) kind: CapabilityKind,
+}
 impl CapabilityDefinition {
     pub fn kind(&self) -> CapabilityKind {
         self.kind
-    }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
     }
 }
 #[derive(Clone, Debug)]
 pub struct TraitDefinition {
     pub(super) kind: TraitKind,
-    pub(super) display_name: &'static str,
 }
 impl TraitDefinition {
     pub fn kind(&self) -> TraitKind {
         self.kind
     }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
-    }
 }
 #[derive(Clone, Debug)]
 pub struct DriveDefinition {
     pub(super) kind: DriveKind,
-    pub(super) display_name: &'static str,
 }
 impl DriveDefinition {
     pub fn kind(&self) -> DriveKind {
         self.kind
     }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
-    }
 }
 #[derive(Clone, Debug)]
 pub struct PolicyDefinition {
     pub(super) kind: PolicyKind,
-    pub(super) display_name: &'static str,
     pub(super) default: PolicySetting,
 }
 impl PolicyDefinition {
     pub fn kind(&self) -> PolicyKind {
         self.kind
-    }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
     }
     pub fn default(&self) -> PolicySetting {
         self.default
@@ -528,7 +508,6 @@ impl EnterpriseEconomicsDefinition {
 #[derive(Clone, Debug)]
 pub struct EnterpriseDefinition {
     pub(super) kind: EnterpriseKind,
-    pub(super) display_name: &'static str,
     pub(super) economics: EnterpriseEconomicsDefinition,
     pub(super) policy: Option<PolicyKind>,
     pub(super) required_business_functions: BTreeSet<BusinessFunction>,
@@ -537,9 +516,6 @@ pub struct EnterpriseDefinition {
 impl EnterpriseDefinition {
     pub fn kind(&self) -> EnterpriseKind {
         self.kind
-    }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
     }
     pub fn economics(&self) -> &EnterpriseEconomicsDefinition {
         &self.economics
@@ -594,19 +570,11 @@ impl BusinessEconomicsDefinition {
 #[derive(Clone, Debug)]
 pub struct BusinessDefinition {
     pub(super) kind: BusinessKind,
-    pub(super) display_name: &'static str,
-    pub(super) typical_functions: BTreeSet<BusinessFunction>,
     pub(super) economics: BusinessEconomicsDefinition,
 }
 impl BusinessDefinition {
     pub fn kind(&self) -> BusinessKind {
         self.kind
-    }
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
-    }
-    pub fn typical_functions(&self) -> &BTreeSet<BusinessFunction> {
-        &self.typical_functions
     }
     pub fn economics(&self) -> &BusinessEconomicsDefinition {
         &self.economics

@@ -10,11 +10,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+/// Records are removed from state by deletion, never flagged; the single variant replaces
+/// the former Active/Inactive/Removed trio whose non-active states were unreachable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Lifecycle {
     Active,
-    Inactive,
-    Removed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

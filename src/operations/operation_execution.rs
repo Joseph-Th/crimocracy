@@ -279,7 +279,7 @@ pub(crate) fn decide_operation_resolution(
         intelligence_adjustment,
         intelligence_topics_covered,
         intelligence_topics_relevant,
-    ) = calculate_intelligence_factors(registry, state, operation);
+    ) = resolve_intelligence_factors(registry, state, operation);
     let started_at = record
         .started_at()
         .expect("in-progress operation must have a start time");
@@ -321,9 +321,9 @@ pub(crate) fn decide_operation_resolution(
         time_pressure,
         variance: randomness.execution_variance(),
     };
-    let execution_margin = calculate_execution_margin(execution, factors);
+    let execution_margin = resolve_execution_margin(execution, factors);
     let objective_outcome = resolve_objective_outcome(execution, execution_margin);
-    let exposure = calculate_exposure_plan(
+    let exposure = resolve_exposure_plan(
         registry,
         state,
         operation,
@@ -333,7 +333,7 @@ pub(crate) fn decide_operation_resolution(
         police_response_arrived,
     );
     let property_proceeds_plan =
-        calculate_property_proceeds(registry, state, record, objective_outcome)?;
+        resolve_property_proceeds(registry, state, record, objective_outcome)?;
     let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
     let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
     let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
@@ -594,7 +594,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .get_operation(plan.snapshot.operation)
         .expect("validated resolution operation must exist");
     let expected_property_proceeds =
-        calculate_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
+        resolve_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
     if plan.outcome.property_proceeds_plan != expected_property_proceeds {
         return Err(OperationResolutionError::StalePropertyProceedsContext {
             operation: plan.snapshot.operation,
@@ -1196,7 +1196,7 @@ pub(crate) fn resolve_investigation_target_neighborhoods(
     resolve_target_neighborhoods(state, entities)
 }
 
-fn calculate_exposure_plan(
+fn resolve_exposure_plan(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
@@ -1228,7 +1228,7 @@ fn calculate_exposure_plan(
             .expect("bounded intelligence exposure mitigation must fit u8"),
         variance,
     };
-    let score = calculate_exposure_score(execution, factors);
+    let score = resolve_exposure_score(execution, factors);
     let level = resolve_exposure_level(execution, score);
     let identified_character = if level == OperationExposureLevel::Identifying {
         most_exposed_participant(state, record)
@@ -1244,7 +1244,7 @@ fn calculate_exposure_plan(
     }
 }
 
-pub(crate) fn calculate_exposure_score(
+pub(crate) fn resolve_exposure_score(
     execution: &OperationExecutionDefinition,
     factors: OperationExposureFactors,
 ) -> i16 {
@@ -1308,7 +1308,7 @@ fn resolve_stealth_average(
         .expect("stealth average must remain within rating bounds")
 }
 
-pub(crate) fn calculate_operation_police_alert_context(
+pub(crate) fn resolve_operation_police_alert_context(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
@@ -1322,8 +1322,7 @@ pub(crate) fn calculate_operation_police_alert_context(
     let police_snapshot =
         resolve_target_police_snapshot(state, record.objective().referenced_entities(), at);
     let stealth_average = resolve_stealth_average(state, record);
-    let (intelligence_quality, _, _, _) =
-        calculate_intelligence_factors(registry, state, operation);
+    let (intelligence_quality, _, _, _) = resolve_intelligence_factors(registry, state, operation);
     let intelligence_mitigation = u16::from(intelligence_quality.value())
         .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
         / 100;
@@ -1339,7 +1338,7 @@ pub(crate) fn calculate_operation_police_alert_context(
         variance: 0,
     };
     OperationPoliceAlertContext {
-        score: calculate_exposure_score(execution, factors),
+        score: resolve_exposure_score(execution, factors),
         neighborhood: police_snapshot.exposure_neighborhood,
     }
 }
@@ -1400,7 +1399,7 @@ fn weighted_ability(role_average: Rating, leader_capability: Option<Rating>) -> 
     (role * 3 + leadership) / 4
 }
 
-pub(crate) fn calculate_intelligence_factors(
+pub(crate) fn resolve_intelligence_factors(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
@@ -1503,7 +1502,7 @@ fn specificity_score(specificity: Specificity) -> u8 {
     }
 }
 
-pub(crate) fn calculate_execution_margin(
+pub(crate) fn resolve_execution_margin(
     execution: &OperationExecutionDefinition,
     factors: OperationResolutionFactors,
 ) -> i16 {
@@ -1556,7 +1555,7 @@ pub(crate) struct PropertyProceedsPlan {
     pub(crate) depleted_by_recent_take: bool,
 }
 
-pub(crate) fn calculate_property_proceeds(
+pub(crate) fn resolve_property_proceeds(
     registry: &Registry,
     state: &AppState,
     operation: &crate::operations::OperationRecord,

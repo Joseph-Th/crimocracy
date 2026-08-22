@@ -620,14 +620,8 @@ fn validate_character_version(
 }
 
 fn validate_time(state: &AppState, expected: SimTime) -> Result<(), ContactError> {
-    if state.now() == expected {
-        Ok(())
-    } else {
-        Err(ContactError::StaleTime {
-            expected,
-            found: state.now(),
-        })
-    }
+    crate::core::time::ensure_time_current(state.now(), expected)
+        .map_err(|(expected, found)| ContactError::StaleTime { expected, found })
 }
 
 fn has_relationship_basis(dimensions: RelationshipDimensions) -> bool {

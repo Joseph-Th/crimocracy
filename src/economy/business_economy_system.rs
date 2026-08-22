@@ -500,7 +500,6 @@ pub fn validate_business_cycle_plan(
 enum BusinessEconomyStatusChange {
     Suspend,
     Resume,
-    Close,
 }
 
 pub struct ValidatedBusinessEconomyStatusChange {
@@ -539,7 +538,6 @@ impl ValidatedBusinessEconomyStatusChange {
         let status = match self.change {
             BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
             BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
-            BusinessEconomyStatusChange::Close => BusinessOperatingStatus::Closed,
         };
         let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
         state
@@ -609,25 +607,6 @@ pub fn validate_resume_business_economy(
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Resume,
         cycle_duration: Some(cycle_duration),
-    })
-}
-
-pub fn validate_close_business_economy(
-    state: &AppState,
-    business: BusinessId,
-) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    let economy = state
-        .economy
-        .get_business_economy(business)
-        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
-    if economy.status() == BusinessOperatingStatus::Closed {
-        return Err(BusinessEconomyError::EconomyClosed(business));
-    }
-    Ok(ValidatedBusinessEconomyStatusChange {
-        business,
-        expected_version: economy.version(),
-        change: BusinessEconomyStatusChange::Close,
-        cycle_duration: None,
     })
 }
 

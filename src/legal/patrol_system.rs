@@ -477,14 +477,8 @@ pub(crate) fn is_canonical_patrol_schedule(windows: &[PatrolWindow]) -> bool {
 }
 
 fn validate_time(state: &AppState, expected: SimTime) -> Result<(), PatrolError> {
-    if state.now() == expected {
-        Ok(())
-    } else {
-        Err(PatrolError::StaleTime {
-            expected,
-            found: state.now(),
-        })
-    }
+    crate::core::time::ensure_time_current(state.now(), expected)
+        .map_err(|(expected, found)| PatrolError::StaleTime { expected, found })
 }
 
 fn validate_jurisdiction_version(

@@ -14,16 +14,16 @@ use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::decisions::DecisionResponse;
 use crate::enterprises::EnterpriseLocation;
 use crate::legal::investigation_work_execution::{
-    calculate_work_factors_and_margin, derive_pattern_admissibility, derive_pattern_strength,
     find_superseding_evidence, minimum_source_reliability, resolve_improved_evidence_reliability,
+    resolve_pattern_admissibility, resolve_pattern_strength, resolve_work_factors_and_margin,
 };
 use crate::legal::{EvidenceKind, InvestigationWorkKind, InvestigationWorkOutcome};
 use crate::operations::operation_execution::{
-    calculate_execution_margin, calculate_exposure_score, calculate_intelligence_factors,
-    calculate_property_proceeds, has_police_response_arrived_by, resolve_exposure_level,
-    resolve_objective_outcome,
+    has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
+    resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
+    resolve_property_proceeds,
 };
-use crate::operations::property_disposition::calculate_property_liquidation_value;
+use crate::operations::property_disposition::resolve_property_liquidation_value;
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::opportunities::OpportunityResolution;
 use crate::registry::Registry;
@@ -634,17 +634,17 @@ pub fn validate_state_against_registry(
         }
         if let Some(resolution) = operation.resolution() {
             let factors = resolution.factors();
-            let expected_margin = calculate_execution_margin(execution, factors);
+            let expected_margin = resolve_execution_margin(execution, factors);
             let expected_outcome = resolve_objective_outcome(execution, expected_margin);
             let (
                 expected_intelligence_quality,
                 expected_intelligence_adjustment,
                 expected_intelligence_topics_covered,
                 expected_intelligence_topics_relevant,
-            ) = calculate_intelligence_factors(registry, state, operation.id());
+            ) = resolve_intelligence_factors(registry, state, operation.id());
             let expected_police_response_arrived =
                 has_police_response_arrived_by(state, operation, resolution.resolved_at());
-            let expected_property_proceeds = calculate_property_proceeds(
+            let expected_property_proceeds = resolve_property_proceeds(
                 registry,
                 state,
                 operation,
@@ -680,7 +680,7 @@ pub fn validate_state_against_registry(
                         operation: operation.id(),
                     },
                 )?;
-                let expected_realized = calculate_property_liquidation_value(
+                let expected_realized = resolve_property_liquidation_value(
                     registry,
                     state,
                     operation.kind(),
@@ -706,7 +706,7 @@ pub fn validate_state_against_registry(
                 u16::from(factors.intelligence_quality().value())
                     .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
                     / 100;
-            let expected_exposure_score = calculate_exposure_score(execution, exposure_factors);
+            let expected_exposure_score = resolve_exposure_score(execution, exposure_factors);
             let expected_exposure_level =
                 resolve_exposure_level(execution, expected_exposure_score);
             if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
@@ -779,7 +779,7 @@ pub fn validate_state_against_registry(
         };
         let factors = resolution.factors();
         let (expected_factors, expected_margin) =
-            calculate_work_factors_and_margin(definition, state, work, factors.variance())
+            resolve_work_factors_and_margin(definition, state, work, factors.variance())
                 .map_err(|_| StateValidationError::InvalidInvestigationWork { work: work.id() })?;
         if factors != expected_factors
             || factors.variance().unsigned_abs() > definition.variance_limit()
@@ -807,9 +807,9 @@ pub fn validate_state_against_registry(
                     minimum_source_reliability(state, work).map_err(|_| {
                         StateValidationError::InvalidInvestigationWork { work: work.id() }
                     })?;
-                if evidence.strength() != derive_pattern_strength(factors.source_support())
+                if evidence.strength() != resolve_pattern_strength(factors.source_support())
                     || evidence.reliability() != expected_reliability
-                    || evidence.admissibility() != derive_pattern_admissibility(state, work)
+                    || evidence.admissibility() != resolve_pattern_admissibility(state, work)
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }

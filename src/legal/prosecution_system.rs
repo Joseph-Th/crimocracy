@@ -603,13 +603,8 @@ fn validate_opening_versions(
 }
 
 fn validate_time(state: &AppState, expected: SimTime) -> Result<(), ProsecutionError> {
-    if state.now() != expected {
-        return Err(ProsecutionError::StaleTime {
-            expected,
-            found: state.now(),
-        });
-    }
-    Ok(())
+    crate::core::time::ensure_time_current(state.now(), expected)
+        .map_err(|(expected, found)| ProsecutionError::StaleTime { expected, found })
 }
 
 pub struct ValidatedProsecutionCaseResolution {

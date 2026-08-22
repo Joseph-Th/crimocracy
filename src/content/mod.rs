@@ -32,17 +32,17 @@ pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
     for kind in ALL_CAPABILITY_KINDS {
         builder
-            .register_capability(kind, capability_name(kind))
+            .register_capability(kind)
             .unwrap_or_else(|error| panic!("invalid capability registry: {error}"));
     }
     for kind in ALL_TRAIT_KINDS {
         builder
-            .register_trait(kind, trait_name(kind))
+            .register_trait(kind)
             .unwrap_or_else(|error| panic!("invalid trait registry: {error}"));
     }
     for kind in ALL_DRIVE_KINDS {
         builder
-            .register_drive(kind, drive_name(kind))
+            .register_drive(kind)
             .unwrap_or_else(|error| panic!("invalid drive registry: {error}"));
     }
     register_recruitment(&mut builder);
@@ -243,7 +243,6 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
     builder
         .register_investigation_work(
             InvestigationWorkKind::PatternAnalysis,
-            "Pattern analysis",
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(360),
                 base_difficulty: 55,
@@ -257,7 +256,6 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
     builder
         .register_investigation_work(
             InvestigationWorkKind::EvidenceReview,
-            "Evidence review",
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(180),
                 base_difficulty: 45,
@@ -273,7 +271,6 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
     builder
         .register_investigation_work(
             InvestigationWorkKind::WitnessInterview,
-            "Witness interview",
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(120),
                 base_difficulty: 30,
@@ -290,12 +287,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
     let definitions = [
         (
             BusinessKind::Retail,
-            "Retail",
-            BTreeSet::from([
-                BusinessFunction::CashIntensive,
-                BusinessFunction::CustomerAccess,
-                BusinessFunction::MeetingSpace,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(12_000),
@@ -309,12 +300,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
         ),
         (
             BusinessKind::Hospitality,
-            "Hospitality",
-            BTreeSet::from([
-                BusinessFunction::CashIntensive,
-                BusinessFunction::CustomerAccess,
-                BusinessFunction::MeetingSpace,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(15_000),
@@ -328,12 +313,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
         ),
         (
             BusinessKind::Automotive,
-            "Automotive",
-            BTreeSet::from([
-                BusinessFunction::VehicleFleet,
-                BusinessFunction::Warehousing,
-                BusinessFunction::MeetingSpace,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(14_000),
@@ -347,13 +326,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
         ),
         (
             BusinessKind::Transportation,
-            "Transportation",
-            BTreeSet::from([
-                BusinessFunction::VehicleFleet,
-                BusinessFunction::Warehousing,
-                BusinessFunction::UnionAccess,
-                BusinessFunction::DistributionInfrastructure,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(18_000),
@@ -367,11 +339,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
         ),
         (
             BusinessKind::Warehouse,
-            "Warehouse",
-            BTreeSet::from([
-                BusinessFunction::Warehousing,
-                BusinessFunction::DistributionInfrastructure,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(9_000),
@@ -385,12 +352,6 @@ fn register_businesses(builder: &mut RegistryBuilder) {
         ),
         (
             BusinessKind::ProfessionalServices,
-            "Professional services",
-            BTreeSet::from([
-                BusinessFunction::ProfessionalRecords,
-                BusinessFunction::CustomerAccess,
-                BusinessFunction::MeetingSpace,
-            ]),
             BusinessEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(16_000),
@@ -403,9 +364,9 @@ fn register_businesses(builder: &mut RegistryBuilder) {
             },
         ),
     ];
-    for (kind, name, functions, economics) in definitions {
+    for (kind, economics) in definitions {
         builder
-            .register_business(kind, name, functions, economics)
+            .register_business(kind, economics)
             .unwrap_or_else(|error| panic!("invalid business registry: {error}"));
     }
 }
@@ -414,7 +375,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
     let definitions = [
         (
             EnterpriseKind::Protection,
-            "Protection",
             EnterpriseEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(4_000),
@@ -438,7 +398,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
         ),
         (
             EnterpriseKind::Gambling,
-            "Gambling",
             EnterpriseEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(8_000),
@@ -463,7 +422,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
         ),
         (
             EnterpriseKind::AlcoholDistribution,
-            "Alcohol distribution",
             EnterpriseEconomicsDefinition {
                 cycle: SimDuration::from_minutes(1_440),
                 base_gross: Money::from_cents(16_000),
@@ -488,13 +446,12 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
             ]),
         ),
     ];
-    for (kind, name, economics, policy, required_business_functions, required_network_functions) in
+    for (kind, economics, policy, required_business_functions, required_network_functions) in
         definitions
     {
         builder
             .register_enterprise(
                 kind,
-                name,
                 economics,
                 policy,
                 required_business_functions,
@@ -508,68 +465,20 @@ fn register_policies(builder: &mut RegistryBuilder) {
     let definitions = [
         (
             PolicyKind::IndependentRecruitment,
-            "Independent recruitment",
             PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
         ),
         (
             PolicyKind::AssociateLegalSupport,
-            "Associate legal support",
             PolicySetting::AssociateLegalSupport(LegalSupportPolicy::CaseByCase),
         ),
     ];
-    for (kind, name, default) in definitions {
+    for (kind, default) in definitions {
         builder
-            .register_policy(kind, name, default)
+            .register_policy(kind, default)
             .unwrap_or_else(|error| panic!("invalid policy registry: {error}"));
     }
 }
 
-fn capability_name(kind: CapabilityKind) -> &'static str {
-    match kind {
-        CapabilityKind::Violence => "Violence",
-        CapabilityKind::Intimidation => "Intimidation",
-        CapabilityKind::Stealth => "Stealth",
-        CapabilityKind::Burglary => "Burglary",
-        CapabilityKind::Driving => "Driving",
-        CapabilityKind::Surveillance => "Surveillance",
-        CapabilityKind::Investigation => "Investigation",
-        CapabilityKind::Accounting => "Accounting",
-        CapabilityKind::Negotiation => "Negotiation",
-        CapabilityKind::Management => "Management",
-        CapabilityKind::PoliticalInfluence => "Political influence",
-        CapabilityKind::LegalKnowledge => "Legal knowledge",
-        CapabilityKind::SocialAccess => "Social access",
-    }
-}
-fn trait_name(kind: TraitKind) -> &'static str {
-    match kind {
-        TraitKind::Cautious => "Cautious",
-        TraitKind::Impulsive => "Impulsive",
-        TraitKind::Greedy => "Greedy",
-        TraitKind::Proud => "Proud",
-        TraitKind::Patient => "Patient",
-        TraitKind::Cruel => "Cruel",
-        TraitKind::Charismatic => "Charismatic",
-        TraitKind::Vindictive => "Vindictive",
-        TraitKind::Secretive => "Secretive",
-        TraitKind::Ambitious => "Ambitious",
-        TraitKind::LoyalToFamily => "Loyal to family",
-        TraitKind::EasilyFrightened => "Easily frightened",
-    }
-}
-fn drive_name(kind: DriveKind) -> &'static str {
-    match kind {
-        DriveKind::Money => "Money",
-        DriveKind::Status => "Status",
-        DriveKind::Safety => "Safety",
-        DriveKind::Respect => "Respect",
-        DriveKind::Revenge => "Revenge",
-        DriveKind::FamilySecurity => "Family security",
-        DriveKind::PoliticalAdvancement => "Political advancement",
-        DriveKind::Independence => "Independence",
-        DriveKind::IdeologicalCause => "Ideological cause",
-    }
-}
 fn operation_name(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::Burglary => "Burglary",

@@ -142,6 +142,7 @@ Single vocabulary across subsystems:
 | keyed lookup | `get_*` |
 | conditional scan | `find_*` |
 | final derivation | `resolve_*` |
+| state-owned randomness draw | `draw_*` |
 | plain accessor | noun form, e.g. `status()` |
 | construction | `new()` |
 | aggregate assembly | `build_*` |

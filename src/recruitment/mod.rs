@@ -294,7 +294,7 @@ impl RecruitmentState {
             .and_then(|id| self.records.get(id))
     }
 
-    pub fn attempt_for_approval_decision(
+    pub fn get_attempt_for_approval_decision(
         &self,
         decision: DecisionRequestId,
     ) -> Option<&RecruitmentAttemptRecord> {
