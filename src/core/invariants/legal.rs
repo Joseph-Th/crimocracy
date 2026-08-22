@@ -1,4 +1,4 @@
-//! Release-safe structural validation for the legal, reports, and history subsystems.
+//! Release-safe structural validation for the legal subsystems plus persisted reports and history.
 
 use crate::contacts::ContactStatus;
 use crate::core::attention::AttentionClass;
@@ -492,9 +492,7 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
     Ok(())
 }
 
-pub(super) fn validate_legal_reports_and_history(
-    state: &AppState,
-) -> Result<(), StateValidationError> {
+pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateValidationError> {
     for jurisdiction in state.legal.jurisdictions() {
         let organization = state
             .world

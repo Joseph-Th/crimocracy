@@ -317,7 +317,7 @@ mod world;
 
 use self::business::{validate_business_economies, validate_enterprises};
 use self::decisions::{validate_decisions, validate_delegation};
-use self::legal::validate_legal_reports_and_history;
+use self::legal::validate_legal_subsystems;
 use self::operations::validate_operations;
 use self::opportunities::validate_opportunities;
 use self::recruitment::{validate_recruitment, validate_recruitment_against_registry};
@@ -336,7 +336,7 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_delegation(state)?;
     validate_business_economies(state)?;
     validate_enterprises(state)?;
-    validate_legal_reports_and_history(state)?;
+    validate_legal_subsystems(state)?;
     Ok(())
 }
 

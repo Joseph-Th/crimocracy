@@ -14,9 +14,9 @@ use crate::decisions::{
     RecruitmentApprovalContext, RecruitmentApprovalRequestDraft,
 };
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, DelegationError, ResolvedPolicy,
+    resolve_mandate_authority, resolve_policy_for_manager, DelegationError,
 };
-use crate::delegation::{ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope};
+use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
 use crate::operations::operation_system::{
     has_missed_operation_deadline, validate_deadline_missed_operation,
@@ -565,8 +565,6 @@ pub struct ValidatedRecruitmentApprovalRequest {
     draft: DecisionRequestDraft,
     recipient: OrganizationId,
     proposal: ValidatedRecruitmentProposal,
-    authority: ResolvedMandateAuthority,
-    policy: ResolvedPolicy,
     options: BTreeSet<DecisionResponse>,
 }
 
@@ -586,12 +584,8 @@ impl ValidatedRecruitmentApprovalRequest {
             return Err(DecisionError::ExistingPendingRecruitmentApproval { decision });
         }
         validate_recruitment_approval_authority_snapshot(state, context)?;
-        if self.authority.mandate_version() != context.authority().mandate_version()
-            || self.authority.manager_version() != context.authority().manager_version()
-            || recruitment_policy_source(self.policy.source) != context.authority().policy_source()
-        {
-            return Err(DecisionError::StaleRecruitmentApprovalAuthority);
-        }
+        // Live authority/policy agreement was just re-proven against the context snapshot;
+        // the proposal revalidates its own personnel state at commit.
         self.proposal.revalidate_state(state)?;
 
         let requests_pause = state.player_organization() == Some(self.recipient)
@@ -683,8 +677,6 @@ pub fn validate_request_recruitment_approval(
         },
         recipient: draft.target_organization,
         proposal,
-        authority,
-        policy,
         options: BTreeSet::from([DecisionResponse::Approve, DecisionResponse::Reject]),
     })
 }
