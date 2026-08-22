@@ -156,13 +156,6 @@ mod tests {
                 .leader_capability(),
             CapabilityKind::Surveillance
         );
-        assert_eq!(
-            registry
-                .get_operation(OperationKind::Bribery)
-                .execution()
-                .leader_capability(),
-            CapabilityKind::Negotiation
-        );
     }
 
     fn recruitment_spec() -> RecruitmentDefinitionSpec {

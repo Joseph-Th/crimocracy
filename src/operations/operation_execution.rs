@@ -67,6 +67,23 @@ pub(crate) enum OperationResolutionError {
     PropertyProceedsOverflow { operation: OperationId },
     #[error("operation {operation} property-proceeds context changed after resolution planning")]
     StalePropertyProceedsContext { operation: OperationId },
+    #[error("operation {operation} cash-proceeds arithmetic overflowed")]
+    CashProceedsOverflow { operation: OperationId },
+    #[error("operation {operation} cash-proceeds context changed after resolution planning")]
+    StaleCashProceedsContext { operation: OperationId },
+    #[error(
+        "extraction operation {operation} targets character {character}, who is not in custody"
+    )]
+    MissingDetaineeArrest {
+        operation: OperationId,
+        character: CharacterId,
+    },
+    #[error("extraction operation {operation} cannot release character {character}: {error}")]
+    DetaineeRelease {
+        operation: OperationId,
+        character: CharacterId,
+        error: String,
+    },
     #[error("operation {operation} changed after resolution planning; expected version {expected}, found {found}")]
     StaleOperation {
         operation: OperationId,
@@ -198,6 +215,7 @@ struct OperationResolutionOutcomePlan {
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
     property_proceeds_plan: PropertyProceedsPlan,
+    cash_proceeds_plan: CashProceedsPlan,
     surveillance: Option<SurveillanceIntelligencePlan>,
 }
 
@@ -314,6 +332,7 @@ pub(crate) fn decide_operation_resolution(
     );
     let property_proceeds_plan =
         calculate_property_proceeds(registry, state, record, objective_outcome)?;
+    let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
     let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
     let mut summary = build_after_action_summary(objective_outcome, factors, exposure.level());
     if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
@@ -322,6 +341,14 @@ pub(crate) fn decide_operation_resolution(
             proceeds.estimated_value().cents(),
         ));
         if property_proceeds_plan.depleted_by_recent_take {
+            summary.push(' ');
+            summary.push_str(DEPLETED_TAKE_CLAUSE);
+        }
+    }
+    if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
+        summary.push(' ');
+        summary.push_str(&undeposited_cash_clause(proceeds.amount().cents()));
+        if cash_proceeds_plan.depleted_by_recent_take {
             summary.push(' ');
             summary.push_str(DEPLETED_TAKE_CLAUSE);
         }
@@ -362,6 +389,7 @@ pub(crate) fn decide_operation_resolution(
             factors,
             exposure,
             property_proceeds_plan,
+            cash_proceeds_plan,
             surveillance,
         },
         narrative: OperationResolutionNarrative {
@@ -380,6 +408,7 @@ pub(crate) struct ValidatedOperationResolution {
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
+    detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -481,6 +510,7 @@ impl ValidatedOperationResolution {
                 factors: self.plan.outcome.factors,
                 exposure,
                 property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
+                cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
                 discovered_information,
                 legal_activity_information,
                 after_action_information,
@@ -488,6 +518,14 @@ impl ValidatedOperationResolution {
                 history_event,
             },
         );
+        // Extraction releases run last so custody ownership changes only after the operation
+        // itself has reached its terminal record; the validated release was checked against
+        // the arrest version seen during plan validation.
+        if let Some(release) = self.detainee_release {
+            release
+                .commit(state)
+                .expect("validated detainee release must commit atomically");
+        }
         Ok(self.plan.snapshot.operation)
     }
 }
@@ -509,6 +547,38 @@ pub(crate) fn validate_operation_resolution_plan(
             operation: plan.snapshot.operation,
         });
     }
+    let expected_cash_proceeds =
+        resolve_cash_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
+    if plan.outcome.cash_proceeds_plan != expected_cash_proceeds {
+        return Err(OperationResolutionError::StaleCashProceedsContext {
+            operation: plan.snapshot.operation,
+        });
+    }
+    // Extraction success frees the target through the canonical arrest-release path; the
+    // release is validated here so commit re-checks only staleness.
+    let detainee_release = match (record.objective(), plan.outcome.objective_outcome) {
+        (
+            crate::operations::OperationObjective::FreeDetainee { target },
+            OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial,
+        ) => {
+            let arrest = state.legal.active_arrest_for_character(*target).ok_or(
+                OperationResolutionError::MissingDetaineeArrest {
+                    operation: plan.snapshot.operation,
+                    character: *target,
+                },
+            )?;
+            Some(
+                crate::legal::arrest_system::validate_release_arrest(state, arrest.id()).map_err(
+                    |error| OperationResolutionError::DetaineeRelease {
+                        operation: plan.snapshot.operation,
+                        character: *target,
+                        error: error.to_string(),
+                    },
+                )?,
+            )
+        }
+        _ => None,
+    };
     let surveillance_information = match &plan.outcome.surveillance {
         Some(surveillance) => validate_surveillance_information(
             state,
@@ -609,6 +679,7 @@ pub(crate) fn validate_operation_resolution_plan(
         information,
         history,
         report,
+        detainee_release,
     })
 }
 
@@ -1439,14 +1510,7 @@ fn count_recent_successful_takes(
         .operations
         .operations_with_status(OperationStatus::Completed)
         .filter(|record| Some(record.id()) != exclude)
-        .filter(|record| {
-            matches!(
-                record.objective(),
-                OperationObjective::AcquireProperty {
-                    target: EntityRef::Business(target),
-                } if *target == business
-            )
-        })
+        .filter(|record| targets_business(record.objective(), business))
         .filter_map(|record| record.resolution())
         .filter(|resolution| {
             matches!(
@@ -1464,6 +1528,121 @@ fn count_recent_successful_takes(
         .expect("operation counts must fit u32")
 }
 
+/// Whether the objective takes value out of `business`, whether property or cash. Both take
+/// kinds share the recency-depletion window: stock and ready cash alike need time to replace.
+fn targets_business(
+    objective: &crate::operations::OperationObjective,
+    business: crate::core::id::BusinessId,
+) -> bool {
+    let target = match objective {
+        OperationObjective::AcquireProperty { target }
+        | OperationObjective::ObtainCash { target } => target,
+        OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::FreeDetainee { .. } => return false,
+    };
+    matches!(target, EntityRef::Business(id) if *id == business)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CashProceedsPlan {
+    proceeds: Option<crate::operations::OperationCashProceedsRecord>,
+    depleted_by_recent_take: bool,
+}
+
+/// Derives the cash a successful take carries home. Mirrors the property-proceeds economics:
+/// authored basis points of the target business's gross potential, scaled down on a partial
+/// outcome and by each recent successful hit against the same target.
+pub(crate) fn resolve_cash_proceeds(
+    registry: &Registry,
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    outcome: OperationObjectiveOutcome,
+) -> Result<CashProceedsPlan, OperationResolutionError> {
+    let Some(definition) = registry
+        .get_operation(operation.kind())
+        .execution()
+        .cash_proceeds()
+    else {
+        return Ok(CashProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
+    };
+    let OperationObjective::ObtainCash {
+        target: EntityRef::Business(business),
+    } = operation.objective()
+    else {
+        return Ok(CashProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
+    };
+    if outcome == OperationObjectiveOutcome::Failed {
+        return Ok(CashProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: false,
+        });
+    }
+
+    let gross = resolve_business_gross_potential(registry, state, *business)?;
+    let full_value = i128::from(gross.cents())
+        .checked_mul(i128::from(definition.business_take_basis_points()))
+        .ok_or(OperationResolutionError::CashProceedsOverflow {
+            operation: operation.id(),
+        })?
+        / 10_000_i128;
+    let mut value = match outcome {
+        OperationObjectiveOutcome::Achieved => full_value,
+        OperationObjectiveOutcome::Partial => {
+            full_value
+                .checked_mul(i128::from(definition.partial_take_basis_points()))
+                .ok_or(OperationResolutionError::CashProceedsOverflow {
+                    operation: operation.id(),
+                })?
+                / 10_000_i128
+        }
+        OperationObjectiveOutcome::Failed => {
+            unreachable!("failed cash operations return early")
+        }
+    };
+    let reference_at = operation
+        .resolution()
+        .map(|resolution| resolution.resolved_at())
+        .unwrap_or_else(|| state.now());
+    let recent_hits = count_recent_successful_takes(
+        state,
+        *business,
+        reference_at,
+        RECENT_HIT_WINDOW_MINUTES,
+        Some(operation.id()),
+    );
+    for _ in 0..recent_hits {
+        value = value.checked_mul(RECENT_HIT_VALUE_BASIS_POINTS).ok_or(
+            OperationResolutionError::CashProceedsOverflow {
+                operation: operation.id(),
+            },
+        )? / 10_000_i128;
+    }
+    let cents =
+        i64::try_from(value).map_err(|_| OperationResolutionError::CashProceedsOverflow {
+            operation: operation.id(),
+        })?;
+    if cents <= 0 {
+        return Ok(CashProceedsPlan {
+            proceeds: None,
+            depleted_by_recent_take: recent_hits > 0,
+        });
+    }
+    Ok(CashProceedsPlan {
+        proceeds: Some(crate::operations::OperationCashProceedsRecord::new(
+            EntityRef::Business(*business),
+            crate::finance::Money::from_cents(cents),
+        )),
+        depleted_by_recent_take: recent_hits > 0,
+    })
+}
+
 /// The canonical after-action phrasing for a yet-unliquidated operation property hold. The
 /// executive brief refreshes this clause in-place when the property is later liquidated, so the
 /// phrasing must be shared here rather than duplicated and allowed to drift.
@@ -1471,6 +1650,12 @@ pub(crate) fn unliquidated_property_clause(est_value_cents: i64) -> String {
     format!(
         "The crew secured property with an estimated held value of {est_value_cents} cents; it remains unliquidated."
     )
+}
+
+/// After-action phrasing for cash the crew is carrying home; it stays held until the
+/// canonical deposit command moves it into an organization account.
+pub(crate) fn undeposited_cash_clause(cents: i64) -> String {
+    format!("The crew took {cents} cents in cash; it remains undeposited.")
 }
 
 /// After-action phrasing when the same target was successfully hit recently: the haul came in
@@ -1631,17 +1816,23 @@ mod tests {
         DecisionContext, DecisionRequestDraft, DecisionResponse, OperationExceptionReason,
     };
     use crate::finance::finance_system::insert_account;
-    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{InformationDraft, InformationTopic};
+    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
     use crate::legal::patrol_system::{
         validate_establish_patrol_deployment, validate_revise_patrol_deployment,
     };
-    use crate::legal::{DayMinute, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow};
+    use crate::legal::{
+        Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
+        EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft,
+        PatrolWindow,
+    };
     use crate::operations::operation_system::{validate_authorize_operation, OperationError};
     use crate::operations::property_disposition::{
-        validate_dispose_property, PropertyDispositionDraft, PropertyDispositionError,
+        validate_deposit_operation_cash, validate_dispose_property, CashDispositionDraft,
+        PropertyDispositionDraft, PropertyDispositionError,
     };
     use crate::operations::{
         OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
@@ -1702,6 +1893,49 @@ mod tests {
         (resale_venue, cash_account, settlement_account)
     }
 
+    /// Compact cash-capable target for operation fixtures: a retail business in its own
+    /// mid-rated neighborhood, owned independently so no ownership side effects interfere.
+    fn make_fixture_business(registry: &Registry, state: &mut AppState, name: &str) -> BusinessId {
+        let neighborhood = insert_neighborhood(
+            state,
+            NeighborhoodDraft {
+                name: format!("{name} ward"),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: Rating::try_new(50).expect("fixture wealth should validate"),
+                        commercial_activity: Rating::try_new(50)
+                            .expect("fixture commerce should validate"),
+                        illicit_demand: Rating::try_new(50)
+                            .expect("fixture demand should validate"),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: Rating::try_new(30)
+                            .expect("fixture police presence should validate"),
+                        political_influence: Rating::try_new(50)
+                            .expect("fixture influence should validate"),
+                        social_cohesion: Rating::try_new(50)
+                            .expect("fixture cohesion should validate"),
+                        visible_violence_tolerance: Rating::try_new(50)
+                            .expect("fixture violence tolerance should validate"),
+                    },
+                },
+            },
+        )
+        .expect("fixture neighborhood should validate");
+        insert_business(
+            registry,
+            state,
+            BusinessDraft {
+                name: name.to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([BusinessFunction::CashIntensive]),
+                neighborhood,
+                owner: BusinessOwner::Independent,
+            },
+        )
+        .expect("fixture business should validate")
+    }
+
     fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId) {
         let registry = build_registry();
         let mut state = AppState::new(0x0A19_1933);
@@ -1714,15 +1948,7 @@ mod tests {
             },
         )
         .expect("operation organization fixture should validate");
-        let target = insert_organization(
-            &registry,
-            &mut state,
-            OrganizationDraft {
-                name: "Operation Test Target".to_owned(),
-                kind: OrganizationKind::Criminal,
-            },
-        )
-        .expect("operation target fixture should validate");
+        let target = make_fixture_business(&registry, &mut state, "Operation Test Target");
         let leader = insert_character(
             &registry,
             &mut state,
@@ -1748,8 +1974,8 @@ mod tests {
                 kind: OperationKind::Intimidation,
                 responsible_organization: organization,
                 leader,
-                objective: OperationObjective::Frighten {
-                    target: EntityRef::Organization(target),
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
                 },
                 approach: OperationApproach::Intimidating,
                 roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
@@ -1777,15 +2003,7 @@ mod tests {
             },
         )
         .expect("intelligence operation organization should validate");
-        let target = insert_organization(
-            &registry,
-            &mut state,
-            OrganizationDraft {
-                name: "Intelligence Test Target".to_owned(),
-                kind: OrganizationKind::Criminal,
-            },
-        )
-        .expect("intelligence target should validate");
+        let target = make_fixture_business(&registry, &mut state, "Intelligence Test Target");
         let leader = insert_character(
             &registry,
             &mut state,
@@ -1822,7 +2040,7 @@ mod tests {
                     source_kind: InformationSourceKind::DirectObservation,
                     topic,
                     source_entity: None,
-                    subject: EntityRef::Organization(target),
+                    subject: EntityRef::Business(target),
                     observed_at: state.now(),
                     reliability: Reliability::DirectAccess,
                     specificity: Specificity::Precise,
@@ -1842,8 +2060,8 @@ mod tests {
                 kind: OperationKind::Intimidation,
                 responsible_organization: organization,
                 leader,
-                objective: OperationObjective::Frighten {
-                    target: EntityRef::Organization(target),
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
                 },
                 approach: OperationApproach::Intimidating,
                 roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
@@ -2287,10 +2505,10 @@ mod tests {
             .referenced_entities()
             .into_iter()
             .find_map(|entity| match entity {
-                EntityRef::Organization(organization) => Some(organization),
+                EntityRef::Business(business) => Some(business),
                 _ => None,
             })
-            .expect("fixture objective should reference its target organization");
+            .expect("fixture objective should reference its target business");
 
         // Authorized before the pause: this window sits past the first operation's original
         // resolution deadline, so authorization sees no conflict.
@@ -2302,8 +2520,8 @@ mod tests {
                 kind: OperationKind::Intimidation,
                 responsible_organization: organization,
                 leader,
-                objective: OperationObjective::Frighten {
-                    target: EntityRef::Organization(target),
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
                 },
                 approach: OperationApproach::Intimidating,
                 roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
@@ -2766,9 +2984,13 @@ mod tests {
         .expect("due prepared operation should resolve deterministically");
         assert_eq!(plan.outcome.factors.intelligence_quality().value(), 99);
         assert_eq!(plan.outcome.factors.intelligence_adjustment(), -13);
-        assert_eq!(plan.outcome.execution_margin, 50);
+        // The fixture business sits in a police-presence-30 ward; Intimidation's authored
+        // pressure weight is 25, so difficulty carries 30 * 25 / 100 = 7 extra pressure.
+        assert_eq!(plan.outcome.execution_margin, 50 - 7);
         assert_eq!(plan.outcome.exposure.factors.intelligence_mitigation(), 19);
-        assert_eq!(plan.outcome.exposure.score, 33);
+        // Baseline score 33 plus the same ward's police-observation contribution
+        // (35 weight * presence 30 / 100 = 10) that an organization target never had.
+        assert_eq!(plan.outcome.exposure.score, 43);
         assert_eq!(plan.outcome.exposure.level, OperationExposureLevel::Trace);
 
         validate_operation_resolution_plan(&registry, &state, plan)
@@ -2776,6 +2998,286 @@ mod tests {
             .commit(&mut state)
             .expect("prepared causal resolution should commit");
         validate_state(&state).expect("intelligence-backed operation state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
+        let (registry, mut state, organization, operation) = make_operation_fixture();
+        for minute in 1..=25_u64 {
+            let outcome = run_tick(&registry, &mut state);
+            if !outcome.resolved_operations.is_empty() {
+                assert_eq!(outcome.resolved_operations, vec![operation]);
+                assert_eq!(outcome.now, SimTime::from_minutes(minute));
+                break;
+            }
+        }
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("resolved operation should persist");
+        assert_eq!(record.status(), OperationStatus::Completed);
+        let resolution = record.resolution().expect("completion should persist");
+        let proceeds = resolution
+            .cash_proceeds()
+            .expect("an achieved intimidation racket must hold its protection take");
+        assert!(proceeds.amount().cents() > 0);
+        let after_action = state
+            .intelligence()
+            .get_information(resolution.after_action_information())
+            .expect("completion should persist after-action information");
+        assert!(after_action.summary().contains("remains undeposited"));
+
+        let cash_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::StreetCash,
+                label: "Racket street cash".to_owned(),
+            },
+        )
+        .expect("street cash account should validate");
+        let settlement_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::Settlement,
+                label: "Racket settlement".to_owned(),
+            },
+        )
+        .expect("settlement account should validate");
+
+        let deposit = validate_deposit_operation_cash(
+            &state,
+            CashDispositionDraft {
+                operation,
+                cash_account,
+                settlement_account,
+            },
+        )
+        .expect("held cash should be depositable into an organization account");
+        assert_eq!(deposit.deposited_value(), proceeds.amount());
+        let outcome = deposit
+            .commit(&mut state)
+            .expect("cash deposit should commit atomically");
+        assert_eq!(outcome.deposited_value, proceeds.amount());
+        assert_eq!(
+            state
+                .finance()
+                .get_account(cash_account)
+                .expect("cash account should persist")
+                .balance(),
+            proceeds.amount()
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(settlement_account)
+                .expect("settlement account should persist")
+                .balance(),
+            Money::from_cents(-proceeds.amount().cents())
+        );
+
+        assert!(matches!(
+            validate_deposit_operation_cash(
+                &state,
+                CashDispositionDraft {
+                    operation,
+                    cash_account,
+                    settlement_account,
+                },
+            ),
+            Err(PropertyDispositionError::AlreadyDeposited(found)) if found == operation
+        ));
+        validate_state(&state).expect("cash disposition state should remain valid");
+        validate_invariants(&state);
+
+        let restored = restore_save(
+            &registry,
+            build_save(&registry, &state).expect("cash disposition state should save"),
+        )
+        .expect("cash disposition state should restore");
+        let restored_disposition = restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.cash_disposition())
+            .expect("restored state should preserve the cash disposition");
+        assert_eq!(restored_disposition.realized_value(), proceeds.amount());
+        assert_eq!(restored_disposition.transaction(), outcome.transaction);
+        validate_invariants(&restored);
+    }
+
+    #[test]
+    fn successful_extraction_frees_detained_member_through_canonical_release() {
+        let registry = build_registry();
+        let mut state = AppState::new(0x0E77_1933);
+        let crew = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Extraction Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("crew should validate");
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Extraction Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police should validate");
+        let mut make_member = |name: &str, supervisor: Option<CharacterId>| {
+            insert_character(
+                &registry,
+                &mut state,
+                CharacterDraft {
+                    name: name.to_owned(),
+                    organization: Some(crew),
+                    supervisor,
+                    autonomy: AutonomyLevel::Delegated,
+                    capabilities: BTreeMap::from([
+                        (
+                            CapabilityKind::Management,
+                            Rating::try_new(99).expect("fixture rating should be valid"),
+                        ),
+                        (
+                            CapabilityKind::Driving,
+                            Rating::try_new(99).expect("fixture rating should be valid"),
+                        ),
+                    ]),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .expect("member should validate")
+        };
+        let leader = make_member("Extraction Leader", None);
+        let driver = make_member("Extraction Driver", Some(leader));
+        let detainee = make_member("Detained Member", Some(leader));
+
+        // Put the member in custody through the canonical evidence-backed arrest path.
+        let investigation = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "Detention test case".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Character(detainee)]),
+            },
+        )
+        .expect("investigation should validate")
+        .commit(&mut state)
+        .expect("investigation should commit");
+        let evidence = validate_add_evidence(
+            &state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(detainee),
+                origin: None,
+                kind: EvidenceKind::Document,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: state.now(),
+            },
+        )
+        .expect("evidence should validate")
+        .commit(&mut state)
+        .expect("evidence should commit");
+        let arrest = crate::legal::arrest_system::validate_arrest(
+            &state,
+            ArrestDraft {
+                character: detainee,
+                investigation,
+                evidence: BTreeSet::from([evidence]),
+            },
+        )
+        .expect("evidence-backed arrest should validate")
+        .commit(&mut state)
+        .expect("arrest should commit");
+
+        // A free-detainee objective against someone not in custody must be rejected.
+        let free_error = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Impossible extraction".to_owned(),
+                kind: OperationKind::Extraction,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::FreeDetainee { target: leader },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([
+                    (RoleKind::Coordinator, leader),
+                    (RoleKind::Driver, driver),
+                ]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::from_minutes(1),
+            },
+        )
+        .expect_err("extraction requires a detained target");
+        assert!(matches!(
+            free_error,
+            OperationError::TargetNotDetained(character) if character == leader
+        ));
+
+        let extraction = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Bust-out extraction".to_owned(),
+                kind: OperationKind::Extraction,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::FreeDetainee { target: detainee },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([
+                    (RoleKind::Coordinator, leader),
+                    (RoleKind::Driver, driver),
+                ]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::from_minutes(1),
+            },
+        )
+        .expect("detained-target extraction should validate")
+        .commit(&mut state)
+        .expect("extraction should commit");
+        loop {
+            let outcome = run_tick(&registry, &mut state);
+            if !outcome.resolved_operations.is_empty() {
+                break;
+            }
+        }
+        let record = state
+            .operations()
+            .get_operation(extraction)
+            .expect("extraction should persist");
+        assert_eq!(record.status(), OperationStatus::Completed);
+        assert_ne!(
+            record
+                .resolution()
+                .map(|resolution| resolution.objective_outcome()),
+            Some(OperationObjectiveOutcome::Failed),
+            "a fully capable crew must not fail the extraction"
+        );
+        let released = state
+            .legal()
+            .get_arrest(arrest)
+            .expect("arrest should persist");
+        assert_eq!(
+            released.status(),
+            crate::legal::ArrestStatus::Released,
+            "successful extraction must release the detainee through canonical custody"
+        );
+        assert!(released.released_at().is_some());
+        validate_state(&state).expect("post-extraction state should remain valid");
         validate_invariants(&state);
     }
 

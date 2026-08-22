@@ -117,6 +117,10 @@ pub enum StateValidationError {
     InvalidOperationExposure { operation: OperationId },
     #[error("operation {operation} has invalid persisted property disposition")]
     InvalidOperationPropertyDisposition { operation: OperationId },
+    #[error("operation {operation} has invalid persisted cash proceeds")]
+    InvalidOperationCashProceeds { operation: OperationId },
+    #[error("operation {operation} has invalid persisted cash disposition")]
+    InvalidOperationCashDisposition { operation: OperationId },
     #[error("opportunity {opportunity} has invalid persisted provenance or lifecycle state")]
     InvalidOpportunity { opportunity: OpportunityId },
     #[error("organization {organization} has invalid legal jurisdiction state")]

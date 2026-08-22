@@ -113,6 +113,8 @@ pub enum OperationError {
     },
     #[error("property-acquisition objective target {0:?} is not a business")]
     InvalidPropertyTarget(EntityRef),
+    #[error("extraction target character {0} is not currently detained")]
+    TargetNotDetained(crate::core::id::CharacterId),
     #[error("objective {objective:?} cannot target administrative entity {target:?}")]
     InvalidObjectiveTarget {
         objective: OperationObjectiveKind,
@@ -328,6 +330,7 @@ impl<'registry> ValidatedOperation<'registry> {
                 awaiting_decision_since: None,
                 resolution: None,
                 property_disposition: None,
+                cash_disposition: None,
                 abort: None,
                 version: 1,
             },
@@ -704,36 +707,18 @@ pub(crate) fn is_valid_operation_objective(
                     *target,
                 )
         }
-        OperationObjective::ObtainCash { target }
-        | OperationObjective::Frighten { target }
-        | OperationObjective::DestroyEquipment { target } => {
-            kind != OperationKind::Surveillance && is_world_objective_target(*target)
+        OperationObjective::ObtainCash { target } => {
+            kind.supports_cash_acquisition() && matches!(target, EntityRef::Business(_))
         }
-        OperationObjective::MoveContraband {
-            origin,
-            destination,
-        } => {
-            kind != OperationKind::Surveillance
-                && is_world_objective_target(*origin)
-                && is_world_objective_target(*destination)
+        OperationObjective::Frighten { target } => {
+            kind == OperationKind::WitnessPressure && matches!(target, EntityRef::Character(_))
         }
-        OperationObjective::RemovePerson { .. } => kind != OperationKind::Surveillance,
+        OperationObjective::FreeDetainee { .. } => kind == OperationKind::Extraction,
     }
 }
 
 // Field actions may reference concrete world subjects and locations, never control-plane
 // records such as operations, investigations, evidence, accounts, decisions, or mandates.
-fn is_world_objective_target(target: EntityRef) -> bool {
-    matches!(
-        target,
-        EntityRef::Organization(_)
-            | EntityRef::Character(_)
-            | EntityRef::Neighborhood(_)
-            | EntityRef::Business(_)
-            | EntityRef::Enterprise(_)
-    )
-}
-
 // Historical intelligence and after-action records may refer to inactive entities, so the
 // general `is_entity_present` check remains existence-only. Action objectives have a stricter
 // contract: their concrete world subjects must still be actionable when the operation is
@@ -743,23 +728,26 @@ fn validate_active_field_objective_targets(
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     match objective {
-        OperationObjective::ObtainCash { target }
-        | OperationObjective::Frighten { target }
-        | OperationObjective::DestroyEquipment { target } => {
+        OperationObjective::ObtainCash { target } | OperationObjective::Frighten { target } => {
             validate_active_field_objective_target(state, *target)
-        }
-        OperationObjective::MoveContraband {
-            origin,
-            destination,
-        } => {
-            validate_active_field_objective_target(state, *origin)?;
-            validate_active_field_objective_target(state, *destination)
-        }
-        OperationObjective::RemovePerson { target } => {
-            validate_active_field_objective_target(state, EntityRef::Character(*target))
         }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::GatherInformation { .. } => Ok(()),
+        // Extraction targets a person who may legitimately be in custody, so the usual
+        // active-field-target check does not apply; custody state is validated separately.
+        OperationObjective::FreeDetainee { target } => {
+            let character = state
+                .world
+                .get_character(*target)
+                .ok_or(OperationError::MissingEntity(EntityRef::Character(*target)))?;
+            if character.lifecycle() != Lifecycle::Active {
+                return Err(OperationError::MissingEntity(EntityRef::Character(*target)));
+            }
+            if state.legal.active_arrest_for_character(*target).is_none() {
+                return Err(OperationError::TargetNotDetained(*target));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -875,18 +863,12 @@ fn validate_operation_objective(
             });
         }
         let invalid_target = match objective {
-            OperationObjective::ObtainCash { target }
-            | OperationObjective::Frighten { target }
-            | OperationObjective::DestroyEquipment { target } => Some(*target),
-            OperationObjective::MoveContraband {
-                origin,
-                destination,
-            } => [*origin, *destination]
-                .into_iter()
-                .find(|target| !is_world_objective_target(*target)),
-            OperationObjective::RemovePerson { .. }
-            | OperationObjective::AcquireProperty { .. }
-            | OperationObjective::GatherInformation { .. } => None,
+            OperationObjective::ObtainCash { target } | OperationObjective::Frighten { target } => {
+                Some(*target)
+            }
+            OperationObjective::AcquireProperty { .. }
+            | OperationObjective::GatherInformation { .. }
+            | OperationObjective::FreeDetainee { .. } => None,
         };
         if let Some(target) = invalid_target {
             return Err(OperationError::InvalidObjectiveTarget {
@@ -1607,11 +1589,11 @@ mod tests {
         target: EntityRef,
     ) -> OperationDraft {
         OperationDraft {
-            title: "Test intimidation".to_owned(),
+            title: "Test intimidation racket".to_owned(),
             kind: OperationKind::Intimidation,
             responsible_organization: organization,
             leader,
-            objective: OperationObjective::Frighten { target },
+            objective: OperationObjective::ObtainCash { target },
             approach: OperationApproach::Intimidating,
             roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
             intelligence: BTreeSet::new(),
@@ -1713,7 +1695,7 @@ mod tests {
             kind: OperationKind::Intimidation,
             responsible_organization: organization,
             leader,
-            objective: OperationObjective::Frighten { target },
+            objective: OperationObjective::ObtainCash { target },
             approach: OperationApproach::Intimidating,
             roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Lookout, leader)]),
             intelligence: BTreeSet::new(),
@@ -1740,11 +1722,11 @@ mod tests {
     fn operation_rejects_administrative_records_as_field_objective_targets() {
         let (registry, state, organization, leader, _) = make_test_operation_state();
         let draft = OperationDraft {
-            title: "Invalid mandate intimidation".to_owned(),
+            title: "Invalid mandate coercion".to_owned(),
             kind: OperationKind::Intimidation,
             responsible_organization: organization,
             leader,
-            objective: OperationObjective::Frighten {
+            objective: OperationObjective::ObtainCash {
                 target: EntityRef::Mandate(MandateId::from_raw(1)),
             },
             approach: OperationApproach::Intimidating,
@@ -1760,7 +1742,7 @@ mod tests {
         assert_eq!(
             error,
             OperationError::InvalidObjectiveTarget {
-                objective: OperationObjectiveKind::Frighten,
+                objective: OperationObjectiveKind::ObtainCash,
                 target: EntityRef::Mandate(MandateId::from_raw(1)),
             }
         );

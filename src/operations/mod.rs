@@ -28,16 +28,11 @@ pub enum OperationKind {
     Hijacking,
     Smuggling,
     Intimidation,
-    Kidnapping,
     Surveillance,
-    Sabotage,
-    Bribery,
     WitnessPressure,
     DocumentTheft,
     GamblingEvent,
-    CovertTransfer,
     Extraction,
-    RivalInfiltration,
 }
 
 impl OperationKind {
@@ -46,24 +41,28 @@ impl OperationKind {
     pub(crate) const fn supports_property_acquisition(self) -> bool {
         matches!(self, Self::Burglary | Self::Hijacking | Self::DocumentTheft)
     }
+
+    /// Whether this kind has an authored cash-proceeds effect and therefore may
+    /// authorize a cash-acquisition objective.
+    pub(crate) const fn supports_cash_acquisition(self) -> bool {
+        matches!(
+            self,
+            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent
+        )
+    }
 }
 
-pub const ALL_OPERATION_KINDS: [OperationKind; 15] = [
+pub const ALL_OPERATION_KINDS: [OperationKind; 10] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
     OperationKind::Hijacking,
     OperationKind::Smuggling,
     OperationKind::Intimidation,
-    OperationKind::Kidnapping,
     OperationKind::Surveillance,
-    OperationKind::Sabotage,
-    OperationKind::Bribery,
     OperationKind::WitnessPressure,
     OperationKind::DocumentTheft,
     OperationKind::GamblingEvent,
-    OperationKind::CovertTransfer,
     OperationKind::Extraction,
-    OperationKind::RivalInfiltration,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -112,14 +111,9 @@ pub enum OperationObjective {
     GatherInformation {
         target: EntityRef,
     },
-    DestroyEquipment {
-        target: EntityRef,
-    },
-    MoveContraband {
-        origin: EntityRef,
-        destination: EntityRef,
-    },
-    RemovePerson {
+    /// Extract a detained organization member from custody. Success releases the active
+    /// arrest through the canonical arrest-release path.
+    FreeDetainee {
         target: CharacterId,
     },
 }
@@ -130,9 +124,7 @@ pub enum OperationObjectiveKind {
     ObtainCash,
     Frighten,
     GatherInformation,
-    DestroyEquipment,
-    MoveContraband,
-    RemovePerson,
+    FreeDetainee,
 }
 
 impl OperationObjective {
@@ -142,9 +134,7 @@ impl OperationObjective {
             Self::ObtainCash { .. } => OperationObjectiveKind::ObtainCash,
             Self::Frighten { .. } => OperationObjectiveKind::Frighten,
             Self::GatherInformation { .. } => OperationObjectiveKind::GatherInformation,
-            Self::DestroyEquipment { .. } => OperationObjectiveKind::DestroyEquipment,
-            Self::MoveContraband { .. } => OperationObjectiveKind::MoveContraband,
-            Self::RemovePerson { .. } => OperationObjectiveKind::RemovePerson,
+            Self::FreeDetainee { .. } => OperationObjectiveKind::FreeDetainee,
         }
     }
 
@@ -153,13 +143,8 @@ impl OperationObjective {
             Self::AcquireProperty { target }
             | Self::ObtainCash { target }
             | Self::Frighten { target }
-            | Self::GatherInformation { target }
-            | Self::DestroyEquipment { target } => vec![*target],
-            Self::MoveContraband {
-                origin,
-                destination,
-            } => vec![*origin, *destination],
-            Self::RemovePerson { target } => vec![EntityRef::Character(*target)],
+            | Self::GatherInformation { target } => vec![*target],
+            Self::FreeDetainee { target } => vec![EntityRef::Character(*target)],
         }
     }
 }
@@ -367,6 +352,70 @@ impl OperationPropertyProceedsRecord {
     }
 }
 
+/// Cash taken directly by a completed operation. Unlike held property, cash needs no
+/// resale venue; it is deposited into an organization account through the canonical
+/// cash-disposition command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationCashProceedsRecord {
+    target: EntityRef,
+    amount: Money,
+}
+
+impl OperationCashProceedsRecord {
+    pub(crate) fn new(target: EntityRef, amount: Money) -> Self {
+        Self { target, amount }
+    }
+
+    pub fn target(self) -> EntityRef {
+        self.target
+    }
+
+    pub fn amount(self) -> Money {
+        self.amount
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationCashDispositionRecord {
+    disposed_at: SimTime,
+    realized_value: Money,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    transaction: LedgerTransactionId,
+    information: InformationId,
+    report: ReportId,
+}
+
+impl OperationCashDispositionRecord {
+    pub fn disposed_at(self) -> SimTime {
+        self.disposed_at
+    }
+
+    pub fn realized_value(self) -> Money {
+        self.realized_value
+    }
+
+    pub fn cash_account(self) -> FinancialAccountId {
+        self.cash_account
+    }
+
+    pub fn settlement_account(self) -> FinancialAccountId {
+        self.settlement_account
+    }
+
+    pub fn transaction(self) -> LedgerTransactionId {
+        self.transaction
+    }
+
+    pub fn information(self) -> InformationId {
+        self.information
+    }
+
+    pub fn report(self) -> ReportId {
+        self.report
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationPropertyDispositionRecord {
     disposed_at: SimTime,
@@ -487,6 +536,7 @@ pub struct OperationResolutionRecord {
     factors: OperationResolutionFactors,
     exposure: OperationExposureRecord,
     property_proceeds: Option<OperationPropertyProceedsRecord>,
+    cash_proceeds: Option<OperationCashProceedsRecord>,
     discovered_information: BTreeSet<InformationId>,
     legal_activity_information: Option<InformationId>,
     after_action_information: InformationId,
@@ -517,6 +567,10 @@ impl OperationResolutionRecord {
 
     pub fn property_proceeds(&self) -> Option<OperationPropertyProceedsRecord> {
         self.property_proceeds
+    }
+
+    pub fn cash_proceeds(&self) -> Option<OperationCashProceedsRecord> {
+        self.cash_proceeds
     }
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
@@ -570,6 +624,7 @@ struct OperationRuntime {
     awaiting_decision_since: Option<SimTime>,
     resolution: Option<OperationResolutionRecord>,
     property_disposition: Option<OperationPropertyDispositionRecord>,
+    cash_disposition: Option<OperationCashDispositionRecord>,
     abort: Option<OperationAbortRecord>,
     version: u32,
 }
@@ -668,6 +723,10 @@ impl OperationRecord {
 
     pub fn property_disposition(&self) -> Option<OperationPropertyDispositionRecord> {
         self.runtime.property_disposition
+    }
+
+    pub fn cash_disposition(&self) -> Option<OperationCashDispositionRecord> {
+        self.runtime.cash_disposition
     }
 
     pub fn abort_record(&self) -> Option<OperationAbortRecord> {

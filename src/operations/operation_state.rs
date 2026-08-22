@@ -3,8 +3,9 @@
 use crate::core::id::{InformationId, OperationId, OrganizationId, PoliceResponseId};
 use crate::core::time::SimTime;
 use crate::operations::{
-    OperationAbortPhase, OperationAbortRecord, OperationPropertyDispositionRecord, OperationRecord,
-    OperationResolutionRecord, OperationStatus,
+    OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
+    OperationPropertyDispositionRecord, OperationRecord, OperationResolutionRecord,
+    OperationStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -331,6 +332,39 @@ impl OperationState {
             "operation property may only be disposed once"
         );
         record.runtime.property_disposition = Some(disposition);
+        record.runtime.version = record
+            .runtime
+            .version
+            .checked_add(1)
+            .expect("operation version counter exhausted");
+    }
+
+    pub(crate) fn set_cash_disposition(
+        &mut self,
+        id: OperationId,
+        disposition: OperationCashDispositionRecord,
+    ) {
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated operation disappeared before cash disposition commit");
+        assert_eq!(
+            record.status(),
+            OperationStatus::Completed,
+            "only completed operations may deposit taken cash"
+        );
+        assert!(
+            record
+                .resolution()
+                .and_then(OperationResolutionRecord::cash_proceeds)
+                .is_some(),
+            "cash disposition requires persisted cash proceeds"
+        );
+        assert!(
+            record.runtime.cash_disposition.is_none(),
+            "operation cash may only be deposited once"
+        );
+        record.runtime.cash_disposition = Some(disposition);
         record.runtime.version = record
             .runtime
             .version

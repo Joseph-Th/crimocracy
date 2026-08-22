@@ -19,7 +19,10 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
-use crate::operations::{OperationKind, OperationPropertyDispositionRecord, OperationStatus};
+use crate::operations::{
+    OperationCashDispositionRecord, OperationKind, OperationPropertyDispositionRecord,
+    OperationStatus,
+};
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -51,8 +54,12 @@ pub enum PropertyDispositionError {
     OperationNotCompleted(OperationId),
     #[error("operation {0} has no held property proceeds")]
     NoHeldProperty(OperationId),
+    #[error("operation {0} has no held cash proceeds")]
+    NoHeldCash(OperationId),
     #[error("operation {0} property has already been disposed")]
     AlreadyDisposed(OperationId),
+    #[error("operation {0} cash has already been deposited")]
+    AlreadyDeposited(OperationId),
     #[error("business {0} does not exist")]
     MissingVenue(BusinessId),
     #[error("venue {venue} neighborhood {neighborhood} does not exist")]
@@ -431,5 +438,196 @@ pub(crate) fn build_disposition_summary(
         "Property from {operation_title} was liquidated through {venue_name} for {} cents from an estimated held value of {} cents.",
         realized_value.cents(),
         estimated_value.cents()
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CashDispositionDraft {
+    pub operation: OperationId,
+    pub cash_account: FinancialAccountId,
+    pub settlement_account: FinancialAccountId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CashDispositionOutcome {
+    pub transaction: LedgerTransactionId,
+    pub information: InformationId,
+    pub report: ReportId,
+    pub deposited_value: Money,
+}
+
+/// Moves a completed operation's held cash into an organization account. The settlement
+/// account acts as the fictitious external counterparty, mirroring enterprise settlements:
+/// the take comes from outside the ledger, so its credit is balanced against settlement.
+pub fn validate_deposit_operation_cash(
+    state: &AppState,
+    draft: CashDispositionDraft,
+) -> Result<ValidatedCashDisposition, PropertyDispositionError> {
+    let operation = state
+        .operations
+        .get_operation(draft.operation)
+        .ok_or(PropertyDispositionError::MissingOperation(draft.operation))?;
+    let proceeds = validate_operation_cash_state(operation)?;
+    let organization = operation.responsible_organization();
+    validate_accounts(
+        state,
+        organization,
+        draft.cash_account,
+        draft.settlement_account,
+    )?;
+    let amount = proceeds.amount();
+    let negative_value = Money::from_cents(amount.cents().checked_neg().ok_or(
+        PropertyDispositionError::ArithmeticOverflow(draft.operation),
+    )?);
+    let ledger = validate_record_transaction(
+        state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: format!("Cash deposit for {}", draft.operation),
+            postings: vec![
+                LedgerPosting {
+                    account: draft.cash_account,
+                    amount,
+                },
+                LedgerPosting {
+                    account: draft.settlement_account,
+                    amount: negative_value,
+                },
+            ],
+            authorization: None,
+        },
+    )?;
+    let deposit_summary = build_deposit_summary(operation.title(), amount);
+    let information = validate_record_information(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::Accountant,
+            topic: InformationTopic::FinancialPerformance,
+            source_entity: Some(proceeds.target()),
+            subject: EntityRef::Operation(draft.operation),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: deposit_summary.clone(),
+        },
+    )?;
+    let report = validate_record_report(
+        state,
+        ReportDraft {
+            recipient: organization,
+            kind: ReportKind::Financial,
+            title: "Cash deposit".to_owned(),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: deposit_summary,
+                sources: Vec::new(),
+                entities: BTreeSet::from([
+                    EntityRef::Operation(draft.operation),
+                    proceeds.target(),
+                ]),
+                decision: None,
+            }],
+        },
+    )?;
+    Ok(ValidatedCashDisposition {
+        draft,
+        expected_operation_version: operation.version(),
+        deposited_at: state.now(),
+        deposited_value: amount,
+        ledger,
+        information,
+        report,
+    })
+}
+
+pub struct ValidatedCashDisposition {
+    draft: CashDispositionDraft,
+    expected_operation_version: u32,
+    deposited_at: SimTime,
+    deposited_value: Money,
+    ledger: ValidatedLedgerTransaction,
+    information: ValidatedInformation,
+    report: ValidatedReport,
+}
+
+impl ValidatedCashDisposition {
+    pub fn deposited_value(&self) -> Money {
+        self.deposited_value
+    }
+
+    pub fn commit(
+        self,
+        state: &mut AppState,
+    ) -> Result<CashDispositionOutcome, PropertyDispositionError> {
+        state.ids.reserve_many(&[
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Information, 1),
+            (IdKind::Report, 1),
+        ])?;
+        let operation = state.operations.get_operation(self.draft.operation).ok_or(
+            PropertyDispositionError::MissingOperation(self.draft.operation),
+        )?;
+        if operation.version() != self.expected_operation_version {
+            return Err(PropertyDispositionError::StaleOperation {
+                operation: self.draft.operation,
+                expected: self.expected_operation_version,
+                found: operation.version(),
+            });
+        }
+        validate_operation_cash_state(operation)?;
+        if state.now() != self.deposited_at {
+            return Err(PropertyDispositionError::StaleTime {
+                expected: self.deposited_at,
+                found: state.now(),
+            });
+        }
+
+        let transaction = self.ledger.commit(state)?;
+        let information = self.information.commit(state)?;
+        let report = self.report.commit(state)?;
+        state.operations.set_cash_disposition(
+            self.draft.operation,
+            OperationCashDispositionRecord {
+                disposed_at: self.deposited_at,
+                realized_value: self.deposited_value,
+                cash_account: self.draft.cash_account,
+                settlement_account: self.draft.settlement_account,
+                transaction,
+                information,
+                report,
+            },
+        );
+        Ok(CashDispositionOutcome {
+            transaction,
+            information,
+            report,
+            deposited_value: self.deposited_value,
+        })
+    }
+}
+
+fn validate_operation_cash_state(
+    operation: &crate::operations::OperationRecord,
+) -> Result<crate::operations::OperationCashProceedsRecord, PropertyDispositionError> {
+    if operation.status() != OperationStatus::Completed {
+        return Err(PropertyDispositionError::OperationNotCompleted(
+            operation.id(),
+        ));
+    }
+    let proceeds = operation
+        .resolution()
+        .and_then(|resolution| resolution.cash_proceeds())
+        .ok_or(PropertyDispositionError::NoHeldCash(operation.id()))?;
+    if operation.cash_disposition().is_some() {
+        return Err(PropertyDispositionError::AlreadyDeposited(operation.id()));
+    }
+    Ok(proceeds)
+}
+
+pub(crate) fn build_deposit_summary(operation_title: &str, amount: Money) -> String {
+    format!(
+        "Cash from {operation_title} was deposited for {} cents.",
+        amount.cents()
     )
 }

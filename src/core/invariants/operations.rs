@@ -172,7 +172,8 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
             OperationStatus::Completed | OperationStatus::Aborted => {}
         }
         if operation.status() != OperationStatus::Completed
-            && operation.property_disposition().is_some()
+            && (operation.property_disposition().is_some()
+                || operation.cash_disposition().is_some())
         {
             return Err(StateValidationError::InvalidOperationPropertyDisposition {
                 operation: operation.id(),
@@ -268,6 +269,29 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                         });
                     }
                 }
+                if let Some(proceeds) = resolution.cash_proceeds() {
+                    let valid_target = matches!(
+                        operation.objective(),
+                        OperationObjective::ObtainCash { target }
+                            if *target == proceeds.target()
+                    );
+                    if !valid_target
+                        || resolution.objective_outcome() == OperationObjectiveOutcome::Failed
+                        || proceeds.amount().cents() <= 0
+                    {
+                        return Err(StateValidationError::InvalidOperationCashProceeds {
+                            operation: operation.id(),
+                        });
+                    }
+                }
+                validate_operation_cash_disposition(
+                    state,
+                    operation,
+                    resolution,
+                    &mut property_disposition_transactions,
+                    &mut property_disposition_information,
+                    &mut property_disposition_reports,
+                )?;
                 validate_operation_property_disposition(
                     state,
                     operation,
@@ -611,6 +635,124 @@ fn validate_operation_property_disposition(
     Ok(())
 }
 
+fn validate_operation_cash_disposition(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &OperationResolutionRecord,
+    transactions: &mut BTreeSet<LedgerTransactionId>,
+    information_ids: &mut BTreeSet<InformationId>,
+    reports: &mut BTreeSet<ReportId>,
+) -> Result<(), StateValidationError> {
+    use crate::operations::property_disposition::build_deposit_summary;
+
+    let Some(disposition) = operation.cash_disposition() else {
+        return Ok(());
+    };
+    let invalid = || StateValidationError::InvalidOperationCashDisposition {
+        operation: operation.id(),
+    };
+    let proceeds = resolution.cash_proceeds().ok_or_else(invalid)?;
+    if disposition.disposed_at() < resolution.resolved_at()
+        || disposition.disposed_at() > state.now()
+        || disposition.realized_value() != proceeds.amount()
+        || !transactions.insert(disposition.transaction())
+        || !information_ids.insert(disposition.information())
+        || !reports.insert(disposition.report())
+    {
+        return Err(invalid());
+    }
+
+    let cash = state
+        .finance
+        .get_account(disposition.cash_account())
+        .ok_or_else(invalid)?;
+    let settlement = state
+        .finance
+        .get_account(disposition.settlement_account())
+        .ok_or_else(invalid)?;
+    let expected_owner = FinancialOwner::Organization(operation.responsible_organization());
+    if disposition.cash_account() == disposition.settlement_account()
+        || cash.owner() != expected_owner
+        || settlement.owner() != expected_owner
+        || !matches!(
+            cash.kind(),
+            AccountKind::StreetCash | AccountKind::ConcealedCash
+        )
+        || settlement.kind() != AccountKind::Settlement
+    {
+        return Err(invalid());
+    }
+
+    let transaction = state
+        .finance
+        .get_transaction(disposition.transaction())
+        .ok_or_else(invalid)?;
+    let negative_value = disposition
+        .realized_value()
+        .cents()
+        .checked_neg()
+        .map(Money::from_cents)
+        .ok_or_else(invalid)?;
+    let has_cash_posting = transaction.postings().iter().any(|posting| {
+        posting.account == disposition.cash_account()
+            && posting.amount == disposition.realized_value()
+    });
+    let has_settlement_posting = transaction.postings().iter().any(|posting| {
+        posting.account == disposition.settlement_account() && posting.amount == negative_value
+    });
+    if transaction.occurred_at() != disposition.disposed_at()
+        || transaction.memo() != format!("Cash deposit for {}", operation.id())
+        || transaction.postings().len() != 2
+        || !has_cash_posting
+        || !has_settlement_posting
+        || transaction.budget_usage().is_some()
+    {
+        return Err(invalid());
+    }
+
+    let summary = build_deposit_summary(operation.title(), proceeds.amount());
+    let information = state
+        .intelligence
+        .get_information(disposition.information())
+        .ok_or_else(invalid)?;
+    if information.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
+        || information.source_kind() != InformationSourceKind::Accountant
+        || information.topic() != InformationTopic::FinancialPerformance
+        || information.source_entity() != Some(proceeds.target())
+        || information.subject() != EntityRef::Operation(operation.id())
+        || information.observed_at() != disposition.disposed_at()
+        || information.recorded_at() != disposition.disposed_at()
+        || information.reliability() != Reliability::DirectAccess
+        || information.specificity() != Specificity::Precise
+        || information.summary() != summary
+    {
+        return Err(invalid());
+    }
+    let report = state
+        .reports
+        .get_report(disposition.report())
+        .ok_or_else(invalid)?;
+    if report.recipient() != operation.responsible_organization()
+        || report.kind() != ReportKind::Financial
+        || report.title() != "Cash deposit"
+        || report.generated_at() != disposition.disposed_at()
+        || report.entries().len() != 1
+    {
+        return Err(invalid());
+    }
+    let entry = &report.entries()[0];
+    if entry.attention != AttentionClass::Notable
+        || entry.summary != summary
+        || !entry.sources.is_empty()
+        || entry.entities
+            != BTreeSet::from([EntityRef::Operation(operation.id()), proceeds.target()])
+        || entry.decision.is_some()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn validate_operation_discoveries(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
@@ -654,15 +796,10 @@ fn validate_operation_discoveries(
         | OperationKind::Hijacking
         | OperationKind::Smuggling
         | OperationKind::Intimidation
-        | OperationKind::Kidnapping
-        | OperationKind::Sabotage
-        | OperationKind::Bribery
         | OperationKind::WitnessPressure
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
-        | OperationKind::CovertTransfer
-        | OperationKind::Extraction
-        | OperationKind::RivalInfiltration => {
+        | OperationKind::Extraction => {
             if !resolution.discovered_information().is_empty() {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),

@@ -278,6 +278,7 @@ pub struct OperationExecutionDefinition {
     pub(crate) exposure: OperationExposureDefinition,
     pub(crate) police_response: OperationPoliceResponseDefinition,
     pub(crate) property_proceeds: Option<OperationPropertyProceedsDefinition>,
+    pub(crate) cash_proceeds: Option<OperationCashProceedsDefinition>,
 }
 #[derive(Clone, Debug)]
 pub struct OperationDifficultyDefinition {
@@ -324,6 +325,15 @@ pub struct OperationPropertyProceedsDefinition {
     pub(crate) business_gross_basis_points: u32,
     pub(crate) partial_recovery_basis_points: u16,
     pub(crate) liquidation_recovery_basis_points: u16,
+}
+/// Authored cash-take economics for kinds whose success yields money directly rather
+/// than held property: `business_take_basis_points` of the target business's gross
+/// potential on a fully achieved objective, scaled by `partial_take_basis_points` on a
+/// partial outcome.
+#[derive(Clone, Copy, Debug)]
+pub struct OperationCashProceedsDefinition {
+    pub(crate) business_take_basis_points: u32,
+    pub(crate) partial_take_basis_points: u16,
 }
 impl OperationExecutionDefinition {
     pub fn duration(&self) -> SimDuration {
@@ -419,6 +429,10 @@ impl OperationExecutionDefinition {
     pub fn property_proceeds(&self) -> Option<OperationPropertyProceedsDefinition> {
         self.property_proceeds
     }
+
+    pub fn cash_proceeds(&self) -> Option<OperationCashProceedsDefinition> {
+        self.cash_proceeds
+    }
 }
 impl OperationPropertyProceedsDefinition {
     pub fn business_gross_basis_points(self) -> u32 {
@@ -429,6 +443,14 @@ impl OperationPropertyProceedsDefinition {
     }
     pub fn liquidation_recovery_basis_points(self) -> u16 {
         self.liquidation_recovery_basis_points
+    }
+}
+impl OperationCashProceedsDefinition {
+    pub fn business_take_basis_points(self) -> u32 {
+        self.business_take_basis_points
+    }
+    pub fn partial_take_basis_points(self) -> u16 {
+        self.partial_take_basis_points
     }
 }
 impl OperationDefinition {

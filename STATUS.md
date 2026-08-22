@@ -19,7 +19,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Intelligence | Provenance-bearing information, typed topics, holder indexes, transfers, lineage | `src/intelligence/` via `intelligence_system` |
 | Reports and history | Player-facing reports, executive briefs, financial reports, entity-linked campaign events | `src/reports/` and `src/history/` |
 | Finance | Typed accounts and balanced multi-account ledger | `src/finance/` via `finance_system` |
-| Operations | Semantic plans, objectives, approaches, roles, participant reservations, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, recent-take depletion on repeated targets, venue-sensitive property disposition | `src/operations/` via `operation_system` and `operation_execution` |
+| Operations | Semantic plans, objectives, approaches, roles, participant reservations, intelligence, timing, contingencies, deterministic outcomes, exposure, surveillance, police response, after-action records, recent-take depletion on repeated targets, venue-sensitive property disposition, held-cash deposition into organization accounts, custody release through extraction | `src/operations/` via `operation_system` and `operation_execution` |
 | Opportunities | Information-backed discovery and open/dismissed/expired/converted lifecycle | `src/opportunities/` via `opportunity_system` |
 | Decisions | Durable typed requests, recipient/context indexes, versioned resolution, attention classes | `src/decisions/` via `decision_system` |
 | Delegation | Organization-owned mandates, responsibility scopes, policy overrides, budget authority, revision, revocation, dependency checks | `src/delegation/` via `delegation_system` |
@@ -55,8 +55,8 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 19.
+The current authored content revision is 20.
 
-The current in-memory state schema version is 45.
+The current in-memory state schema version is 46.
 
-The compiled operation vocabulary contains only constraints and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.
+The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.

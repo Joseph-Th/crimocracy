@@ -11,14 +11,14 @@ use crate::operations::{
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, ExecutiveBriefDefinitionSpec,
-    InvestigationWorkDefinitionSpec, OperationDifficultyDefinition, OperationExecutionDefinition,
-    OperationExposureDefinition, OperationIntelligenceDefinition,
-    OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
-    RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
-    RecruitmentInformationQualityDefinition, RecruitmentRelationshipDefinition,
-    RecruitmentRelationshipSupportDefinition, RecruitmentScoringDefinition,
-    RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition, RecruitmentWeightsDefinition,
-    Registry, RegistryBuilder,
+    InvestigationWorkDefinitionSpec, OperationCashProceedsDefinition,
+    OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
+    OperationIntelligenceDefinition, OperationPoliceResponseDefinition,
+    OperationPropertyProceedsDefinition, RecruitmentDefinitionSpec,
+    RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
+    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
+    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
+    RecruitmentWeightsDefinition, Registry, RegistryBuilder,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, DriveKind,
@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 19;
+pub const CURRENT_CONTENT_REVISION: u32 = 20;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -574,16 +574,11 @@ fn operation_name(kind: OperationKind) -> &'static str {
         OperationKind::Hijacking => "Hijacking",
         OperationKind::Smuggling => "Smuggling",
         OperationKind::Intimidation => "Intimidation",
-        OperationKind::Kidnapping => "Kidnapping",
         OperationKind::Surveillance => "Surveillance",
-        OperationKind::Sabotage => "Sabotage",
-        OperationKind::Bribery => "Bribery",
         OperationKind::WitnessPressure => "Witness pressure",
         OperationKind::DocumentTheft => "Document theft",
         OperationKind::GamblingEvent => "Gambling event",
-        OperationKind::CovertTransfer => "Covert transfer",
         OperationKind::Extraction => "Extraction",
-        OperationKind::RivalInfiltration => "Rival infiltration",
     }
 }
 fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
@@ -593,16 +588,11 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::Hijacking => &[RoleKind::Coordinator, RoleKind::Driver],
         OperationKind::Smuggling => &[RoleKind::Coordinator, RoleKind::Driver],
         OperationKind::Intimidation => &[RoleKind::Coordinator],
-        OperationKind::Kidnapping => &[RoleKind::Coordinator, RoleKind::Driver],
         OperationKind::Surveillance => &[RoleKind::Surveillance],
-        OperationKind::Sabotage => &[RoleKind::Coordinator],
-        OperationKind::Bribery => &[RoleKind::Negotiator],
         OperationKind::WitnessPressure => &[RoleKind::Coordinator],
         OperationKind::DocumentTheft => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
         OperationKind::GamblingEvent => &[RoleKind::Coordinator],
-        OperationKind::CovertTransfer => &[RoleKind::Coordinator],
         OperationKind::Extraction => &[RoleKind::Coordinator, RoleKind::Driver],
-        OperationKind::RivalInfiltration => &[RoleKind::Coordinator],
     };
     roles.iter().copied().collect()
 }
@@ -614,16 +604,11 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::Hijacking => (35, 50, 45, 48),
         OperationKind::Smuggling => (90, 48, 35, 35),
         OperationKind::Intimidation => (20, 42, 25, 42),
-        OperationKind::Kidnapping => (60, 65, 55, 62),
         OperationKind::Surveillance => (120, 40, 20, 24),
-        OperationKind::Sabotage => (50, 55, 40, 44),
-        OperationKind::Bribery => (30, 45, 20, 28),
         OperationKind::WitnessPressure => (30, 50, 35, 48),
         OperationKind::DocumentTheft => (30, 50, 40, 36),
         OperationKind::GamblingEvent => (180, 38, 30, 45),
-        OperationKind::CovertTransfer => (45, 42, 30, 30),
         OperationKind::Extraction => (60, 58, 50, 52),
-        OperationKind::RivalInfiltration => (180, 68, 25, 26),
     };
     let role_capabilities = BTreeMap::from([
         (
@@ -665,20 +650,15 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
     ]);
     let leader_capability = match kind {
         OperationKind::Surveillance => CapabilityKind::Surveillance,
-        OperationKind::Bribery => CapabilityKind::Negotiation,
         OperationKind::WitnessPressure => CapabilityKind::Intimidation,
         OperationKind::Burglary
         | OperationKind::Robbery
         | OperationKind::Hijacking
         | OperationKind::Smuggling
         | OperationKind::Intimidation
-        | OperationKind::Kidnapping
-        | OperationKind::Sabotage
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
-        | OperationKind::CovertTransfer
-        | OperationKind::Extraction
-        | OperationKind::RivalInfiltration => CapabilityKind::Management,
+        | OperationKind::Extraction => CapabilityKind::Management,
     };
     let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
         .into_iter()
@@ -720,16 +700,11 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::Hijacking => (18, 10, Some(5), 16, 22),
         OperationKind::Smuggling => (28, 15, None, 12, 18),
         OperationKind::Intimidation => (24, 10, None, 12, 18),
-        OperationKind::Kidnapping => (16, 10, Some(8), 20, 26),
         OperationKind::Surveillance => (45, 18, None, 10, 14),
-        OperationKind::Sabotage => (22, 12, Some(10), 16, 20),
-        OperationKind::Bribery => (48, 20, None, 8, 12),
         OperationKind::WitnessPressure => (24, 12, None, 14, 20),
         OperationKind::DocumentTheft => (20, 12, Some(8), 14, 18),
         OperationKind::GamblingEvent => (35, 15, None, 10, 16),
-        OperationKind::CovertTransfer => (32, 15, None, 12, 16),
         OperationKind::Extraction => (18, 10, Some(8), 18, 24),
-        OperationKind::RivalInfiltration => (48, 20, None, 10, 14),
     };
     OperationExecutionDefinition {
         difficulty: OperationDifficultyDefinition {
@@ -789,36 +764,51 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             OperationKind::Robbery
             | OperationKind::Smuggling
             | OperationKind::Intimidation
-            | OperationKind::Kidnapping
             | OperationKind::Surveillance
-            | OperationKind::Sabotage
-            | OperationKind::Bribery
             | OperationKind::WitnessPressure
             | OperationKind::GamblingEvent
-            | OperationKind::CovertTransfer
-            | OperationKind::Extraction
-            | OperationKind::RivalInfiltration => None,
+            | OperationKind::Extraction => None,
+        },
+        cash_proceeds: match kind {
+            // Robbery takes the till directly; intimidation collects protection money;
+            // a gambling event keeps the house edge; a smuggling run is paid on delivery.
+            OperationKind::Robbery => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 40_000,
+                partial_take_basis_points: 8_000,
+            }),
+            OperationKind::Intimidation => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 15_000,
+                partial_take_basis_points: 3_000,
+            }),
+            OperationKind::GamblingEvent => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 20_000,
+                partial_take_basis_points: 4_000,
+            }),
+            OperationKind::Smuggling => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 18_000,
+                partial_take_basis_points: 4_000,
+            }),
+            OperationKind::Burglary
+            | OperationKind::Hijacking
+            | OperationKind::Surveillance
+            | OperationKind::WitnessPressure
+            | OperationKind::DocumentTheft
+            | OperationKind::Extraction => None,
         },
     }
 }
 
 fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
     match kind {
-        OperationKind::Burglary | OperationKind::DocumentTheft | OperationKind::Sabotage => {
-            EvidenceKind::Fingerprint
-        }
+        OperationKind::Burglary | OperationKind::DocumentTheft => EvidenceKind::Fingerprint,
         OperationKind::Robbery
         | OperationKind::Hijacking
         | OperationKind::Smuggling
-        | OperationKind::CovertTransfer
         | OperationKind::Extraction => EvidenceKind::VehicleDescription,
-        OperationKind::Intimidation
-        | OperationKind::Kidnapping
-        | OperationKind::WitnessPressure => EvidenceKind::WitnessTestimony,
-        OperationKind::Surveillance | OperationKind::RivalInfiltration => {
-            EvidenceKind::Surveillance
+        OperationKind::Intimidation | OperationKind::WitnessPressure => {
+            EvidenceKind::WitnessTestimony
         }
-        OperationKind::Bribery => EvidenceKind::CommunicationRecord,
+        OperationKind::Surveillance => EvidenceKind::Surveillance,
         OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
     }
 }
@@ -833,7 +823,7 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::PoliceActivity,
             InformationTopic::Route,
         ],
-        OperationKind::DocumentTheft | OperationKind::Sabotage => &[
+        OperationKind::DocumentTheft => &[
             InformationTopic::TargetSecurity,
             InformationTopic::Personnel,
             InformationTopic::Schedule,
@@ -846,20 +836,13 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::PoliceActivity,
             InformationTopic::Route,
         ],
-        OperationKind::Hijacking
-        | OperationKind::Smuggling
-        | OperationKind::CovertTransfer
-        | OperationKind::Extraction => &[
+        OperationKind::Hijacking | OperationKind::Smuggling | OperationKind::Extraction => &[
             InformationTopic::Schedule,
             InformationTopic::PoliceActivity,
             InformationTopic::Route,
             InformationTopic::Personnel,
         ],
-        OperationKind::Intimidation
-        | OperationKind::Kidnapping
-        | OperationKind::WitnessPressure
-        | OperationKind::Bribery
-        | OperationKind::RivalInfiltration => &[
+        OperationKind::Intimidation | OperationKind::WitnessPressure => &[
             InformationTopic::Personnel,
             InformationTopic::Relationship,
             InformationTopic::PoliceActivity,
