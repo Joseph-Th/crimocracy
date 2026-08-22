@@ -606,7 +606,9 @@ fn validate_mandate_content(
         }
     }
     for (kind, setting) in standing_orders {
-        registry.get_policy(*kind);
+        // Registry lookups cannot miss for the closed policy vocabulary; the kind/setting
+        // agreement below is what this validator actually checks.
+        let _ = registry.get_policy(*kind);
         if setting.kind() != *kind {
             return Err(DelegationError::PolicyKindMismatch {
                 expected: *kind,

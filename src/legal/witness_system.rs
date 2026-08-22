@@ -639,10 +639,9 @@ mod tests {
             fixture
                 .state
                 .legal()
-                .evidence_from_source(EntityRef::Character(fixture.witness))
-                .map(|record| record.id())
-                .collect::<Vec<_>>(),
-            vec![outcome.evidence]
+                .get_evidence(outcome.evidence)
+                .map(|record| record.source()),
+            Some(Some(EntityRef::Character(fixture.witness)))
         );
         assert_eq!(
             fixture

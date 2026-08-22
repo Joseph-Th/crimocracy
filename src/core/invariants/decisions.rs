@@ -56,9 +56,11 @@ pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidation
         }
 
         if decision.status() == DecisionStatus::Resolved {
-            let resolution = decision
-                .resolution()
-                .expect("resolved decision must contain a resolution");
+            let resolution = decision.resolution().ok_or(
+                StateValidationError::ResolvedDecisionWithoutResolution {
+                    decision: decision.id(),
+                },
+            )?;
             if resolution.resolved_at() < decision.requested_at()
                 || resolution.resolved_at() > state.now()
             {
@@ -219,9 +221,11 @@ fn validate_operation_decision(
             }
         }
         DecisionStatus::Resolved => {
-            let resolution = decision
-                .resolution()
-                .expect("resolved decision must contain a resolution");
+            let resolution = decision.resolution().ok_or(
+                StateValidationError::ResolvedDecisionWithoutResolution {
+                    decision: decision.id(),
+                },
+            )?;
             match resolution.response() {
                 DecisionResponse::Continue => {
                     if operation.status() == OperationStatus::AwaitingDecision {
@@ -249,9 +253,11 @@ fn validate_operation_decision(
                     let abort = operation.abort_record();
                     if operation.status() != OperationStatus::Aborted
                         || !abort.is_some_and(|abort| {
+                            // A decision abort names its decision; an automatic deadline abort
+                            // of a paused operation is the only other abort that may pair with
+                            // this resolution, and both must carry the pause phase.
                             (abort.cause() == OperationAbortCause::Decision(decision.id())
-                                || (abort.cause() == OperationAbortCause::DeadlineMissed
-                                    && abort.phase() == OperationAbortPhase::AwaitingDecision))
+                                || abort.cause() == OperationAbortCause::DeadlineMissed)
                                 && abort.phase() == OperationAbortPhase::AwaitingDecision
                                 && abort.aborted_at() == resolution.resolved_at()
                         })
@@ -354,9 +360,11 @@ fn validate_recruitment_approval_decision(
             }
         }
         DecisionStatus::Resolved => {
-            let resolution = decision
-                .resolution()
-                .expect("resolved decision must contain a resolution");
+            let resolution = decision.resolution().ok_or(
+                StateValidationError::ResolvedDecisionWithoutResolution {
+                    decision: decision.id(),
+                },
+            )?;
             match resolution.response() {
                 DecisionResponse::Approve => {
                     let attempt =

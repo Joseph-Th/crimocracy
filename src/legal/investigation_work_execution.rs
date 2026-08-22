@@ -965,7 +965,7 @@ fn resolve_interview_statement_draft(
 /// Schedules witness interviews for staffed active cases whose registered witnesses have not
 /// given a statement yet. Witnesses typically enter a case after the initial evidence review
 /// is already scheduled, so this runs every tick over the (small) set of active cases.
-pub fn schedule_due_witness_interviews(
+pub fn apply_due_witness_interview_scheduling(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
@@ -999,6 +999,8 @@ pub fn schedule_due_witness_interviews(
             .map(|witness| witness.id())
             .collect();
         for case_witness in witnesses {
+            // Any interview work in any status covers this witness: scheduled work will
+            // produce the statement, completed work already has.
             let already_scheduled_or_done = state
                 .legal
                 .work_for_investigation(investigation_id)
@@ -1010,17 +1012,6 @@ pub fn schedule_due_witness_interviews(
                 continue;
             }
             let focus = InvestigationWorkFocus::witness(case_witness);
-            if state
-                .legal
-                .scheduled_work_for_focus(
-                    investigation_id,
-                    InvestigationWorkKind::WitnessInterview,
-                    focus,
-                )
-                .is_some()
-            {
-                continue;
-            }
             let work = validate_schedule_investigation_work(
                 registry,
                 state,

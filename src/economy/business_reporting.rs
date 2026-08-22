@@ -269,7 +269,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(business),
                 kind: AccountKind::LegitimateOperating,
-                label: "Operating".to_owned(),
             },
         )
         .expect("operating account fixture should validate");
@@ -278,7 +277,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(business),
                 kind: AccountKind::Settlement,
-                label: "Settlement".to_owned(),
             },
         )
         .expect("settlement account fixture should validate");

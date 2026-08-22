@@ -327,7 +327,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::StreetCash,
-                label: "Enterprise cash".to_owned(),
             },
         )
         .expect("cash account fixture should validate");
@@ -336,7 +335,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::Settlement,
-                label: "Enterprise settlement".to_owned(),
             },
         )
         .expect("settlement account fixture should validate");

@@ -725,7 +725,8 @@ pub(crate) fn validate_operation_resolution_plan(
         },
     )?;
     // Witness pressure degrades the target's cooperation on every active case where they
-    // are the named witness; each degradation is validated here so commit re-checks only
+    // are the named witness and the case is run by another authority — the same contract
+    // authorization enforces. Each degradation is validated here so commit re-checks only
     // staleness.
     let mut witness_intimidation = Vec::new();
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
@@ -736,6 +737,7 @@ pub(crate) fn validate_operation_resolution_plan(
             },
         ) = (record.kind(), record.objective())
         {
+            let responsible_organization = record.responsible_organization();
             let targets: Vec<_> = state
                 .legal
                 .case_witnesses()
@@ -746,6 +748,7 @@ pub(crate) fn validate_operation_resolution_plan(
                         .get_investigation(witness.investigation())
                         .is_some_and(|investigation| {
                             investigation.status() == crate::legal::InvestigationStatus::Active
+                                && investigation.owner() != responsible_organization
                         })
                 })
                 .map(|witness| (witness.id(), witness.cooperation()))
@@ -2038,7 +2041,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::StreetCash,
-                label: "Fixture liquidation cash".to_owned(),
             },
         )
         .expect("liquidation cash account should validate");
@@ -2047,15 +2049,12 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::Settlement,
-                label: "Fixture liquidation settlement".to_owned(),
             },
         )
         .expect("liquidation settlement account should validate");
         (resale_venue, cash_account, settlement_account)
     }
 
-    /// Compact cash-capable target for operation fixtures: a retail business in its own
-    /// mid-rated neighborhood, owned independently so no ownership side effects interfere.
     /// Compact cash-capable target for operation fixtures. When `owner` is set the business
     /// belongs to that character so its owner can surface as an incident witness.
     fn make_fixture_business_with_owner(
@@ -3205,7 +3204,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::StreetCash,
-                label: "Racket street cash".to_owned(),
             },
         )
         .expect("street cash account should validate");
@@ -3214,7 +3212,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::Settlement,
-                label: "Racket settlement".to_owned(),
             },
         )
         .expect("settlement account should validate");
@@ -3421,6 +3418,38 @@ mod tests {
         .expect("detained-target extraction should validate")
         .commit(&mut state)
         .expect("extraction should commit");
+
+        // A second live extraction against the same custody is rejected: it could only
+        // resolve after the first freed the target and would then be uncommittable.
+        let duplicate_error = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Duplicate extraction".to_owned(),
+                kind: OperationKind::Extraction,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::FreeDetainee { target: detainee },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([
+                    (RoleKind::Coordinator, leader),
+                    (RoleKind::Driver, driver),
+                ]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::from_minutes(1),
+            },
+        )
+        .expect_err("a detainee supports exactly one live extraction plan");
+        assert!(matches!(
+            duplicate_error,
+            OperationError::DetaineeAlreadyTargeted {
+                character,
+                operation
+            } if character == detainee && operation == extraction
+        ));
+        let operation_count = state.operations().operations().count();
         loop {
             let outcome = run_tick(&registry, &mut state);
             if !outcome.resolved_operations.is_empty() {
@@ -3449,6 +3478,11 @@ mod tests {
             "successful extraction must release the detainee through canonical custody"
         );
         assert!(released.released_at().is_some());
+        assert_eq!(
+            state.operations().operations().count(),
+            operation_count,
+            "the rejected duplicate extraction must not create a record"
+        );
         validate_state(&state).expect("post-extraction state should remain valid");
         validate_invariants(&state);
     }

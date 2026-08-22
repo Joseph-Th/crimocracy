@@ -249,9 +249,6 @@ pub struct EnterpriseCyclePlan {
 }
 
 impl EnterpriseCyclePlan {
-    pub fn enterprise(&self) -> EnterpriseId {
-        self.snapshot.enterprise
-    }
     pub fn gross_revenue(&self) -> Money {
         self.economics.gross_revenue
     }
@@ -260,9 +257,6 @@ impl EnterpriseCyclePlan {
     }
     pub fn net_cash(&self) -> Money {
         self.economics.net_cash
-    }
-    pub fn variance_basis_points(&self) -> i16 {
-        self.economics.variance_basis_points
     }
     pub fn investigation_heat(&self) -> Money {
         self.economics.investigation_heat
@@ -330,7 +324,7 @@ pub fn decide_enterprise_cycle(
     let gross_before_variance =
         resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
     let gross_revenue =
-        apply_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
+        resolve_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
     let cost = resolve_operating_cost(
         state,
         enterprise,
@@ -1079,6 +1073,9 @@ fn validate_enterprise_accounts(
             ))
         }
     }
+    // Settlement-account exclusivity is permanent, including after the incumbent closes:
+    // cycle history and provenance keep referencing the account, so reassigning it would
+    // corrupt past settlements' ownership trail.
     if let Some(existing) = state
         .enterprises
         .get_by_settlement_account(settlement_account)
@@ -1283,12 +1280,12 @@ fn weighted_rating(
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
-fn apply_basis_point_variance(
+fn resolve_basis_point_variance(
     enterprise: EnterpriseId,
     amount: Money,
     basis_points: i16,
 ) -> Result<Money, EnterpriseError> {
-    crate::finance::helpers::apply_basis_point_variance(amount, basis_points)
+    crate::finance::helpers::resolve_basis_point_variance(amount, basis_points)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
@@ -1329,8 +1326,6 @@ mod tests {
     use crate::operations::{
         OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
     };
-    use crate::reports::enterprise_financial_report::validate_enterprise_financial_report;
-    use crate::reports::ReportKind;
     use crate::world::world_system::{
         insert_business, insert_character, insert_neighborhood, insert_organization,
         validate_transfer_business_ownership, WorldError,
@@ -1420,7 +1415,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::StreetCash,
-                label: "Enterprise cash".to_owned(),
             },
         )
         .expect("cash account fixture should validate");
@@ -1429,7 +1423,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(organization),
                 kind: AccountKind::Settlement,
-                label: "Enterprise external settlement".to_owned(),
             },
         )
         .expect("settlement account fixture should validate");
@@ -2587,28 +2580,6 @@ mod tests {
                 .balance(),
             enterprise_summary.totals.net_cash
         );
-        let report = validate_enterprise_financial_report(
-            &fixture.state,
-            fixture.organization,
-            period_start,
-            period_end,
-        )
-        .expect("financial report should synthesize only recipient-known enterprise information")
-        .commit(&mut fixture.state)
-        .expect("enterprise financial report should commit");
-        let report = fixture
-            .state
-            .reports()
-            .get_report(report)
-            .expect("generated financial report should persist");
-        assert_eq!(report.kind(), ReportKind::Financial);
-        assert_eq!(report.entries().len(), 2);
-        assert_eq!(report.entries()[0].attention, AttentionClass::Routine);
-        assert_eq!(report.entries()[1].attention, AttentionClass::Notable);
-        assert_eq!(report.entries()[1].sources.len(), 1);
-        assert!(report.entries()[1]
-            .entities
-            .contains(&EntityRef::Enterprise(enterprise)));
         validate_invariants(&fixture.state);
     }
 }

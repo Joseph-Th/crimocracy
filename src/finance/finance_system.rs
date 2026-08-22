@@ -8,16 +8,14 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::finance::{
-    build_budget_usage, AccountLifecycle, BudgetUsageRecord, FinancialAccountDraft,
-    FinancialAccountRecord, LedgerTransactionDraft, LedgerTransactionRecord, Money,
+    build_budget_usage, BudgetUsageRecord, FinancialAccountDraft, FinancialAccountRecord,
+    LedgerTransactionDraft, LedgerTransactionRecord, Money,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum FinanceError {
-    #[error("financial account label must not be empty")]
-    EmptyAccountLabel,
     #[error("ledger transaction memo must not be empty")]
     EmptyMemo,
     #[error("entity {0:?} does not exist")]
@@ -32,6 +30,8 @@ pub enum FinanceError {
     ZeroPosting(FinancialAccountId),
     #[error("ledger transaction postings do not balance to zero; net cents {net_cents}")]
     Unbalanced { net_cents: i64 },
+    #[error("ledger transaction posting sum overflowed the balance accumulator")]
+    PostingSumOverflow,
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error("ledger transaction would overflow account {0}")]
@@ -77,9 +77,6 @@ pub fn insert_account(
     state: &mut AppState,
     draft: FinancialAccountDraft,
 ) -> Result<FinancialAccountId, FinanceError> {
-    if draft.label.trim().is_empty() {
-        return Err(FinanceError::EmptyAccountLabel);
-    }
     if !crate::core::entity::is_entity_present(state, draft.owner.entity()) {
         return Err(FinanceError::MissingEntity(draft.owner.entity()));
     }
@@ -88,9 +85,7 @@ pub fn insert_account(
         id,
         owner: draft.owner,
         kind: draft.kind,
-        label: draft.label,
         balance: Money::ZERO,
-        lifecycle: AccountLifecycle::Open,
         version: 1,
     });
     Ok(id)
@@ -185,13 +180,9 @@ pub fn validate_record_transaction(
         }
         net_cents = net_cents
             .checked_add(i128::from(posting.amount.cents()))
-            .ok_or(FinanceError::Unbalanced {
-                net_cents: posting.amount.cents(),
-            })?;
+            .ok_or(FinanceError::PostingSumOverflow)?;
         if net_cents > i128::from(i64::MAX) || net_cents < i128::from(i64::MIN) {
-            return Err(FinanceError::Unbalanced {
-                net_cents: posting.amount.cents(),
-            });
+            return Err(FinanceError::PostingSumOverflow);
         }
         let account = state
             .finance
@@ -400,7 +391,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::AccountedFunds,
-                label: "Delegated funds".to_owned(),
             },
         )
         .expect("funding account should validate");
@@ -409,7 +399,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::LegitimateOperating,
-                label: "Operating account".to_owned(),
             },
         )
         .expect("destination account should validate");
@@ -464,7 +453,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::StreetCash,
-                label: "Street cash".to_owned(),
             },
         )
         .expect("street cash fixture should validate");
@@ -473,7 +461,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::ConcealedCash,
-                label: "Safe".to_owned(),
             },
         )
         .expect("concealed cash fixture should validate");
@@ -482,7 +469,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::Settlement,
-                label: "Opening settlement".to_owned(),
             },
         )
         .expect("concealed cash fixture should validate");
@@ -648,7 +634,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::StreetCash,
-                label: "Street cash".to_owned(),
             },
         )
         .expect("street cash fixture should validate");
@@ -657,7 +642,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::ConcealedCash,
-                label: "Safe".to_owned(),
             },
         )
         .expect("concealed cash fixture should validate");
@@ -666,7 +650,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::Settlement,
-                label: "Opening settlement".to_owned(),
             },
         )
         .expect("concealed cash fixture should validate");
@@ -754,7 +737,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::StreetCash,
-                label: "First".to_owned(),
             },
         )
         .expect("first account fixture should validate");
@@ -763,7 +745,6 @@ mod tests {
             FinancialAccountDraft {
                 owner,
                 kind: AccountKind::ConcealedCash,
-                label: "Second".to_owned(),
             },
         )
         .expect("second account fixture should validate");

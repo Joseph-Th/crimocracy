@@ -1,6 +1,5 @@
 //! Player-attention classification and persistent auto-pause preferences used across subsystems.
 
-use crate::core::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -29,8 +28,4 @@ impl Default for AttentionSettings {
             auto_pause: BTreeSet::from([AttentionClass::Exception, AttentionClass::Crisis]),
         }
     }
-}
-
-pub fn set_auto_pause(state: &mut AppState, attention: AttentionClass, enabled: bool) {
-    state.set_attention_auto_pause(attention, enabled);
 }

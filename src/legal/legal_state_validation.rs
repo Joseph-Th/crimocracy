@@ -438,15 +438,6 @@ impl LegalState {
         }
         for informant in self.informants.values() {
             let id = informant.id();
-            if !self
-                .indexes
-                .informants
-                .by_character
-                .get(&informant.character())
-                .is_some_and(|ids| ids.contains(&id))
-            {
-                return false;
-            }
             let active_index = self
                 .indexes
                 .informants
@@ -464,17 +455,6 @@ impl LegalState {
                     && (record.character(), record.handler()) == *key
             }) {
                 return false;
-            }
-        }
-        for (character, ids) in &self.indexes.informants.by_character {
-            for id in ids {
-                if !self
-                    .informants
-                    .get(id)
-                    .is_some_and(|record| record.character() == *character)
-                {
-                    return false;
-                }
             }
         }
         for disclosure in self.informant_disclosures.values() {
@@ -546,17 +526,6 @@ impl LegalState {
                 .is_some_and(|record| (record.investigation(), record.source_information()) == *key)
             {
                 return false;
-            }
-        }
-        for (source, ids) in &self.indexes.evidence.evidence_by_source {
-            for id in ids {
-                if !self
-                    .evidence
-                    .get(id)
-                    .is_some_and(|record| record.source() == Some(*source))
-                {
-                    return false;
-                }
             }
         }
         for witness in self.case_witnesses.values() {
@@ -666,17 +635,6 @@ impl LegalState {
                     .evidence
                     .evidence_by_origin
                     .get(&origin)
-                    .is_some_and(|ids| ids.contains(&evidence.id()))
-                {
-                    return false;
-                }
-            }
-            if let Some(source) = evidence.source() {
-                if !self
-                    .indexes
-                    .evidence
-                    .evidence_by_source
-                    .get(&source)
                     .is_some_and(|ids| ids.contains(&evidence.id()))
                 {
                     return false;
@@ -1016,16 +974,6 @@ impl LegalState {
                     "Index Completeness: evidence origin index is missing evidence"
                 );
             }
-            if let Some(source) = evidence.source() {
-                debug_assert!(
-                    self.indexes
-                        .evidence
-                        .evidence_by_source
-                        .get(&source)
-                        .is_some_and(|ids| ids.contains(&evidence.id())),
-                    "Index Completeness: evidence source index is missing evidence"
-                );
-            }
             debug_assert!(
                 self.indexes
                     .evidence
@@ -1104,14 +1052,6 @@ impl LegalState {
             );
         }
         for informant in self.informants.values() {
-            debug_assert!(
-                self.indexes
-                    .informants
-                    .by_character
-                    .get(&informant.character())
-                    .is_some_and(|ids| ids.contains(&informant.id())),
-                "Index Completeness: character informant index is missing a relationship"
-            );
             let active = self
                 .indexes
                 .informants

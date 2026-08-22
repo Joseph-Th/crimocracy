@@ -271,18 +271,6 @@ impl RecruitmentState {
             .filter_map(|id| self.records.get(id))
     }
 
-    pub fn attempts_for_candidate_organization(
-        &self,
-        candidate: CharacterId,
-        organization: OrganizationId,
-    ) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
-        self.by_candidate_organization
-            .get(&(candidate, organization))
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
     pub fn latest_attempt_for(
         &self,
         candidate: CharacterId,

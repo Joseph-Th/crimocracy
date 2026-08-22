@@ -55,8 +55,6 @@ pub enum BusinessEconomyError {
     EconomyNotActive(BusinessId),
     #[error("business {0} operating economy is not suspended")]
     EconomyNotSuspended(BusinessId),
-    #[error("business {0} operating economy is already closed")]
-    EconomyClosed(BusinessId),
     #[error("business {business} is not due for a cycle until {due_at:?}")]
     CycleNotDue {
         business: BusinessId,
@@ -184,9 +182,6 @@ pub struct BusinessCyclePlan {
 }
 
 impl BusinessCyclePlan {
-    pub fn business(&self) -> BusinessId {
-        self.snapshot.business
-    }
     pub fn gross_revenue(&self) -> Money {
         self.economics.gross_revenue
     }
@@ -195,9 +190,6 @@ impl BusinessCyclePlan {
     }
     pub fn net_cash(&self) -> Money {
         self.economics.net_cash
-    }
-    pub fn variance_basis_points(&self) -> i16 {
-        self.economics.variance_basis_points
     }
     pub fn attention(&self) -> AttentionClass {
         self.economics.attention
@@ -250,7 +242,7 @@ pub fn decide_business_cycle(
     let profile = neighborhood.profile();
     let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
     let gross_revenue =
-        apply_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
+        resolve_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
     let police_cost = weighted_rating(
         business,
         economics.police_cost_per_point(),
@@ -560,9 +552,6 @@ pub fn validate_suspend_business_economy(
         BusinessOperatingStatus::Suspended => {
             return Err(BusinessEconomyError::EconomyNotActive(business))
         }
-        BusinessOperatingStatus::Closed => {
-            return Err(BusinessEconomyError::EconomyClosed(business))
-        }
     }
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
@@ -587,9 +576,6 @@ pub fn validate_resume_business_economy(
             return Err(BusinessEconomyError::EconomyNotSuspended(business))
         }
         BusinessOperatingStatus::Suspended => {}
-        BusinessOperatingStatus::Closed => {
-            return Err(BusinessEconomyError::EconomyClosed(business))
-        }
     }
     validate_accounts(
         state,
@@ -731,12 +717,12 @@ fn weighted_rating(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
-fn apply_basis_point_variance(
+fn resolve_basis_point_variance(
     business: BusinessId,
     amount: Money,
     basis_points: i16,
 ) -> Result<Money, BusinessEconomyError> {
-    crate::finance::helpers::apply_basis_point_variance(amount, basis_points)
+    crate::finance::helpers::resolve_basis_point_variance(amount, basis_points)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
@@ -831,7 +817,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(business),
                 kind: AccountKind::LegitimateOperating,
-                label: "Business operating funds".to_owned(),
             },
         )
         .expect("operating account should validate");
@@ -840,7 +825,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(business),
                 kind: AccountKind::Settlement,
-                label: "Business customer and supplier settlement".to_owned(),
             },
         )
         .expect("settlement account should validate");

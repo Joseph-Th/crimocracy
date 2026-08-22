@@ -13,11 +13,12 @@ use crate::world::BusinessOwner;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Business economies run or pause; closure is not a modeled lifecycle (the enterprise domain
+/// owns full termination semantics).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BusinessOperatingStatus {
     Active,
     Suspended,
-    Closed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

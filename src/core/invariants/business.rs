@@ -91,7 +91,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                     });
                 }
             }
-            BusinessOperatingStatus::Suspended | BusinessOperatingStatus::Closed => {
+            BusinessOperatingStatus::Suspended => {
                 if economy.next_cycle_at().is_some() {
                     return Err(StateValidationError::InvalidBusinessEconomySchedule {
                         business: economy.business(),

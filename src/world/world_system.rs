@@ -827,7 +827,7 @@ mod tests {
         );
 
         state.advance_clock(SimDuration::from_minutes(15));
-        let change = validate_transfer_business_ownership(
+        let transferred = validate_transfer_business_ownership(
             &state,
             business,
             BusinessOwner::Organization(second_owner),
@@ -858,8 +858,10 @@ mod tests {
         );
         let change = state
             .world()
-            .get_business_ownership_change(change)
+            .business_ownership_history(business)
+            .find(|record| record.previous_owner().is_some())
             .expect("ownership change should persist");
+        assert_eq!(change.id(), transferred);
         assert_eq!(
             change.previous_owner(),
             Some(BusinessOwner::Organization(first_owner))

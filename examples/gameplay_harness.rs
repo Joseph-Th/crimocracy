@@ -1711,7 +1711,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(sponsor),
             kind: AccountKind::AccountedFunds,
-            label: "Harbor legal reserve".to_owned(),
         },
     )?;
     let reserve_source = insert_account(
@@ -1719,7 +1718,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(sponsor),
             kind: AccountKind::Settlement,
-            label: "Harbor legal reserve source".to_owned(),
         },
     )?;
     let provider = insert_account(
@@ -1727,7 +1725,6 @@ fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>>
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(firm),
             kind: AccountKind::LegitimateOperating,
-            label: "Vale & Mercer client receipts".to_owned(),
         },
     )?;
     validate_record_transaction(
@@ -3057,7 +3054,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Business(expansion_front),
             kind: AccountKind::LegitimateOperating,
-            label: "Pier Nine legitimate operating".to_owned(),
         },
     )?;
     let expansion_business_settlement = insert_account(
@@ -3065,7 +3061,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Business(expansion_front),
             kind: AccountKind::Settlement,
-            label: "Pier Nine legitimate settlement".to_owned(),
         },
     )?;
     validate_establish_business_economy(
@@ -3083,7 +3078,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
-            label: "Harbor District float".to_owned(),
         },
     )?;
     let expansion_settlement = insert_account(
@@ -3091,7 +3085,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
-            label: "Harbor District gambling settlement".to_owned(),
         },
     )?;
 
@@ -3100,7 +3093,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Business(front),
             kind: AccountKind::LegitimateOperating,
-            label: "Fulton legitimate operating".to_owned(),
         },
     )?;
     let business_settlement = insert_account(
@@ -3108,7 +3100,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Business(front),
             kind: AccountKind::Settlement,
-            label: "Fulton legitimate settlement".to_owned(),
         },
     )?;
     validate_establish_business_economy(
@@ -3132,7 +3123,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: cash_kind,
-            label: format!("{} cash ({:?})", variation.neighborhood_name(), cash_kind),
         },
     )?;
     let enterprise_settlement = insert_account(
@@ -3140,7 +3130,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
-            label: format!("{} gambling settlement", variation.neighborhood_name()),
         },
     )?;
     let liquidation_cash = insert_account(
@@ -3148,7 +3137,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
-            label: "Mercer resale cash".to_owned(),
         },
     )?;
     let liquidation_settlement = insert_account(
@@ -3156,7 +3144,6 @@ fn build_scenario(
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
-            label: "Mercer resale settlement".to_owned(),
         },
     )?;
     let mandate = validate_assign_mandate(
@@ -5887,12 +5874,18 @@ fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
         || !outcome.resolved_operations.is_empty()
         || !outcome.staffed_investigations.is_empty()
         || !outcome.scheduled_investigation_work.is_empty()
+        || !outcome.scheduled_witness_interviews.is_empty()
         || !outcome.resolved_investigation_work.is_empty()
+        || !outcome.evidence_arrests.is_empty()
+        || !outcome.informant_recruitments.is_empty()
+        || !outcome.informant_disclosures.is_empty()
+        || !outcome.automatic_legal_support.is_empty()
         || !outcome.business_cycles.is_empty()
         || !outcome.enterprise_cycles.is_empty()
         || !outcome.recruitment_attempts.is_empty()
         || !outcome.expired_opportunities.is_empty()
         || !outcome.cold_case_suspensions.is_empty()
+        || !outcome.cold_case_closures.is_empty()
         || outcome.executive_brief.is_some()
 }
 

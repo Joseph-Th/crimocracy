@@ -290,7 +290,11 @@ fn validate_investigation_transition_dependencies(
             work: work.id(),
         });
     }
-    if transition != InvestigationTransition::Resume {
+    // Suspending a case while one of its arrests still holds someone in custody would shelve
+    // live institutional work, so only Resume escapes this gate. Closing stays allowed: a case
+    // whose every identified subject is detained is cleared by arrest, and prosecution works
+    // from the arrest and its evidence rather than from an active investigation.
+    if transition == InvestigationTransition::Suspend {
         if let Some(arrest) = state
             .legal
             .arrests_for_investigation(investigation_id)
@@ -376,7 +380,8 @@ pub(crate) fn apply_cold_case_decay(
         }
         // An operation-originated case whose every identified subject is in custody is fully
         // worked: the institutional trail ends, so the case closes rather than sitting active
-        // forever. Cases with subjects still at large keep their investigator attention.
+        // forever. Closing is allowed while arrests hold (cleared by arrest); cases with
+        // subjects still at large keep their investigator attention.
         let identified_subjects: Vec<CharacterId> = record
             .subjects()
             .iter()
@@ -2169,6 +2174,149 @@ mod tests {
             .commit(&mut state)
             .expect("resume should commit");
         validate_state(&state).expect("resumed cold case state should validate");
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xC1EA_1933);
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Cleared Case Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let criminal = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Cleared Case Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("criminal fixture should validate");
+        let leader = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Cleared Case Leader".to_owned(),
+                organization: Some(criminal),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Surveillance, rating(80)),
+                    (CapabilityKind::Management, rating(80)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("leader fixture should validate");
+        let lieutenant = insert_character(
+            &registry,
+            &mut state,
+            CharacterDraft {
+                name: "Cleared Case Lieutenant".to_owned(),
+                organization: Some(criminal),
+                supervisor: Some(leader),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(60))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("lieutenant fixture should validate");
+        let origin = crate::operations::operation_system::validate_authorize_operation(
+            &registry,
+            &state,
+            crate::operations::OperationDraft {
+                title: "Origin surveillance".to_owned(),
+                kind: crate::operations::OperationKind::Surveillance,
+                responsible_organization: criminal,
+                leader,
+                objective: crate::operations::OperationObjective::GatherInformation {
+                    target: EntityRef::Organization(criminal),
+                },
+                approach: crate::operations::OperationApproach::Covert,
+                roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            },
+        )
+        .expect("origin operation should validate")
+        .commit(&mut state)
+        .expect("origin operation should commit");
+        let identified = validate_incident_intake(
+            &state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: "Cleared identified inquiry".to_owned(),
+                subjects: BTreeSet::from([
+                    EntityRef::Operation(origin),
+                    EntityRef::Character(lieutenant),
+                ]),
+                evidence: vec![crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Character(lieutenant),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::KnownAssociation,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: state.now(),
+                }],
+                origin_operation: Some(origin),
+                notified_organizations: BTreeSet::from([criminal]),
+                witness: None,
+            },
+        )
+        .expect("identified incident intake should validate")
+        .commit(&mut state)
+        .expect("identified incident intake should commit")
+        .investigation;
+        let evidence = *state
+            .legal()
+            .get_investigation(identified)
+            .and_then(|record| record.evidence().iter().next())
+            .expect("intake recorded its evidence");
+
+        // The subject's arrest sits under this very case; the case is cleared by arrest and
+        // must close through decay instead of lingering active with a held investigator slot.
+        crate::legal::arrest_system::validate_arrest(
+            &state,
+            crate::legal::ArrestDraft {
+                character: lieutenant,
+                investigation: identified,
+                evidence: BTreeSet::from([evidence]),
+            },
+        )
+        .expect("evidence-backed arrest should validate")
+        .commit(&mut state)
+        .expect("evidence-backed arrest should commit");
+
+        state.advance_clock(SimDuration::from_minutes(121));
+        let decayed = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("cold-case decay should resolve");
+        assert_eq!(
+            decayed,
+            ColdCaseDecayOutcome {
+                suspended: Vec::new(),
+                closed: vec![identified]
+            }
+        );
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(identified)
+                .map(|record| record.status()),
+            Some(InvestigationStatus::Closed)
+        );
+        validate_state(&state).expect("cleared-case state should validate");
         validate_invariants(&state);
     }
 

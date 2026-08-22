@@ -74,21 +74,13 @@ impl FinancialOwner {
     }
 }
 
-/// Accounts are opened once and never transition; freeze/close flows are out of modeled scope,
-/// so no lifecycle other than `Open` can exist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AccountLifecycle {
-    Open,
-}
-
+/// Accounts are opened once and never transition; freeze/close flows are out of modeled scope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FinancialAccountRecord {
     id: FinancialAccountId,
     owner: FinancialOwner,
     kind: AccountKind,
-    label: String,
     balance: Money,
-    lifecycle: AccountLifecycle,
     version: u32,
 }
 
@@ -102,14 +94,8 @@ impl FinancialAccountRecord {
     pub fn kind(&self) -> AccountKind {
         self.kind
     }
-    pub fn label(&self) -> &str {
-        &self.label
-    }
     pub fn balance(&self) -> Money {
         self.balance
-    }
-    pub fn lifecycle(&self) -> AccountLifecycle {
-        self.lifecycle
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -357,7 +343,6 @@ impl FinanceState {
 pub struct FinancialAccountDraft {
     pub owner: FinancialOwner,
     pub kind: AccountKind,
-    pub label: String,
 }
 
 pub struct LedgerTransactionDraft {

@@ -1092,7 +1092,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(sponsor),
                 kind: AccountKind::AccountedFunds,
-                label: "Legal reserve".to_owned(),
             },
         )
         .expect("payer account should validate");
@@ -1101,7 +1100,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(sponsor),
                 kind: AccountKind::Settlement,
-                label: "Opening settlement".to_owned(),
             },
         )
         .expect("settlement account should validate");
@@ -1110,7 +1108,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(firm),
                 kind: AccountKind::LegitimateOperating,
-                label: "Client trust receipts".to_owned(),
             },
         )
         .expect("provider account should validate");

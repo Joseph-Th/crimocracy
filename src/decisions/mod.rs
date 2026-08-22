@@ -220,7 +220,6 @@ impl DecisionRequestRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DecisionState {
     records: BTreeMap<DecisionRequestId, DecisionRequestRecord>,
-    by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
     by_operation: BTreeMap<OperationId, BTreeSet<DecisionRequestId>>,
     pending_by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
     pending_by_context: BTreeMap<DecisionPendingKey, DecisionRequestId>,
@@ -297,7 +296,6 @@ impl DecisionState {
         let recipient = record.recipient();
         let operation = record.context().operation();
         let pending_key = record.context().pending_key();
-        self.by_recipient.entry(recipient).or_default().insert(id);
         if let Some(operation) = operation {
             self.by_operation.entry(operation).or_default().insert(id);
         }
@@ -352,13 +350,6 @@ impl DecisionState {
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         for record in self.records.values() {
-            if !self
-                .by_recipient
-                .get(&record.recipient())
-                .is_some_and(|ids| ids.contains(&record.id()))
-            {
-                return false;
-            }
             if let Some(operation) = record.context().operation() {
                 if !self
                     .by_operation
@@ -397,17 +388,6 @@ impl DecisionState {
             }
         }
 
-        for (recipient, ids) in &self.by_recipient {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.recipient() == *recipient)
-                {
-                    return false;
-                }
-            }
-        }
         for (operation, ids) in &self.by_operation {
             for id in ids {
                 if !self

@@ -1,7 +1,7 @@
 //! Serializable application state; subsystem state is owned here and mutated through systems.
 
 use crate::contacts::ContactState;
-use crate::core::attention::{AttentionClass, AttentionSettings};
+use crate::core::attention::AttentionSettings;
 use crate::core::id::{IdCounters, OrganizationId};
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::DecisionState;
@@ -22,7 +22,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 47;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 48;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -182,14 +182,6 @@ impl AppState {
         self.campaign.player_organization = Some(organization);
     }
 
-    pub(crate) fn set_attention_auto_pause(&mut self, attention: AttentionClass, enabled: bool) {
-        if enabled {
-            self.campaign.attention.auto_pause.insert(attention);
-        } else {
-            self.campaign.attention.auto_pause.remove(&attention);
-        }
-    }
-
     pub(crate) fn advance_clock(&mut self, duration: SimDuration) {
         self.simulation.now = self.simulation.now + duration;
     }
@@ -232,7 +224,7 @@ impl Default for AppState {
 mod tests {
     use super::*;
     use crate::build_registry;
-    use crate::core::attention::{set_auto_pause, AttentionClass};
+    use crate::core::attention::AttentionClass;
     use crate::core::entity::EntityRef;
     use crate::core::id::IdKind;
     use crate::core::invariants::{validate_state, StateValidationError};
@@ -484,7 +476,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(garage),
                 kind: AccountKind::LegitimateOperating,
-                label: "Fulton Garage operating funds".to_owned(),
             },
         )
         .expect("business operating account fixture should validate");
@@ -493,7 +484,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Business(garage),
                 kind: AccountKind::Settlement,
-                label: "Fulton Garage customer settlement".to_owned(),
             },
         )
         .expect("business settlement account fixture should validate");
@@ -515,7 +505,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(player),
                 kind: AccountKind::AccountedFunds,
-                label: "Delegated funding".to_owned(),
             },
         )
         .expect("budget funding account fixture should validate");
@@ -524,7 +513,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(player),
                 kind: AccountKind::Payable,
-                label: "Delegated expenses".to_owned(),
             },
         )
         .expect("budget destination account fixture should validate");
@@ -791,7 +779,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(player_organization),
                 kind: AccountKind::StreetCash,
-                label: "South Ward enterprise cash".to_owned(),
             },
         )
         .expect("enterprise cash account should validate");
@@ -800,7 +787,6 @@ mod tests {
             FinancialAccountDraft {
                 owner: FinancialOwner::Organization(player_organization),
                 kind: AccountKind::Settlement,
-                label: "South Ward enterprise settlement".to_owned(),
             },
         )
         .expect("enterprise settlement account should validate");
@@ -1461,8 +1447,9 @@ mod tests {
             run_tick(&registry, &mut state);
         }
 
-        set_auto_pause(&mut state, AttentionClass::Exception, false);
-        set_auto_pause(&mut state, AttentionClass::Notable, true);
+        // Attention preferences persist with the campaign envelope so a restored campaign
+        // keeps its pause behavior.
+        let default_auto_pause = state.attention_settings().clone();
         let leader = state
             .operations()
             .get_operation(operation)
@@ -1483,7 +1470,8 @@ mod tests {
         .expect("pending decision should validate")
         .commit(&mut state)
         .expect("validated pending decision should remain current");
-        assert!(!request.requests_pause);
+        // Exception-class requests pause by default.
+        assert!(request.requests_pause);
 
         let recipient = state
             .player_organization()
@@ -1516,12 +1504,18 @@ mod tests {
             bincode::deserialize(&bytes).expect("save envelope should deserialize");
         let mut restored = restore_save(&registry, decoded).expect("pending save should restore");
 
-        assert!(!restored
-            .attention_settings()
-            .is_auto_pause_enabled(AttentionClass::Exception));
-        assert!(restored
-            .attention_settings()
-            .is_auto_pause_enabled(AttentionClass::Notable));
+        assert_eq!(
+            restored
+                .attention_settings()
+                .is_auto_pause_enabled(AttentionClass::Exception),
+            default_auto_pause.is_auto_pause_enabled(AttentionClass::Exception)
+        );
+        assert_eq!(
+            restored
+                .attention_settings()
+                .is_auto_pause_enabled(AttentionClass::Notable),
+            default_auto_pause.is_auto_pause_enabled(AttentionClass::Notable)
+        );
         assert_eq!(
             restored
                 .operations()

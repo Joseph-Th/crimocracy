@@ -744,13 +744,6 @@ impl WorldState {
         self.businesses.records.get(&id)
     }
 
-    pub fn get_business_ownership_change(
-        &self,
-        id: BusinessOwnershipChangeId,
-    ) -> Option<&BusinessOwnershipChangeRecord> {
-        self.businesses.ownership_changes.get(&id)
-    }
-
     pub fn characters_in_organization(
         &self,
         id: OrganizationId,

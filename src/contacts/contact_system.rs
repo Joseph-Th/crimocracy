@@ -380,7 +380,7 @@ pub fn validate_contact_disclosure(
     })
 }
 
-pub const fn resolve_information_source_kind(kind: ContactKind) -> InformationSourceKind {
+pub(crate) const fn resolve_information_source_kind(kind: ContactKind) -> InformationSourceKind {
     match kind {
         ContactKind::Police => InformationSourceKind::PoliceContact,
         ContactKind::Legal => InformationSourceKind::Lawyer,

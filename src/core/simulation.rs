@@ -150,7 +150,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // operation resolving earlier in this same minute is interviewable as soon as its case
     // has an investigator.
     let witness_interviews =
-        crate::legal::investigation_work_execution::schedule_due_witness_interviews(
+        crate::legal::investigation_work_execution::apply_due_witness_interview_scheduling(
             registry, state,
         )
         .expect("valid state should schedule due witness interviews");

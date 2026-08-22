@@ -697,7 +697,12 @@ pub(super) fn validate_legal_reports_and_history(
                 });
                 if arrest.released_at().is_some()
                     || arrest.version() != 1
-                    || investigation.status() != InvestigationStatus::Active
+                    || !matches!(
+                        investigation.status(),
+                        // A closed case may still hold its detainee: the case was cleared by
+                        // arrest, and custody outlives the institutional casework.
+                        InvestigationStatus::Active | InvestigationStatus::Closed
+                    )
                     || character.lifecycle() != Lifecycle::Active
                     || authority.lifecycle() != Lifecycle::Active
                     || state

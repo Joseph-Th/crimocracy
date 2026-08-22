@@ -121,6 +121,12 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationPropertyLiquidationRecovery(OperationKind),
     #[error("operation {0:?} property-proceeds definition does not match its objective contract")]
     OperationPropertyObjectiveContractMismatch(OperationKind),
+    #[error("operation {0:?} cash-take business multiplier must be in 1..=100000 basis points")]
+    InvalidOperationCashTakeMultiplier(OperationKind),
+    #[error("operation {0:?} partial cash take must be nonzero and no greater than the full take")]
+    InvalidOperationPartialCashTake(OperationKind),
+    #[error("operation {0:?} cash-proceeds definition does not match its objective contract")]
+    OperationCashObjectiveContractMismatch(OperationKind),
     #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
     MissingOperationRoleCapability {
         operation: OperationKind,
@@ -592,6 +598,20 @@ impl RegistryBuilder {
         if execution.property_proceeds.is_some() != kind.supports_property_acquisition() {
             return Err(RegistryBuildError::OperationPropertyObjectiveContractMismatch(kind));
         }
+        if let Some(cash) = execution.cash_proceeds {
+            if !(1..=100_000).contains(&cash.business_take_basis_points) {
+                return Err(RegistryBuildError::InvalidOperationCashTakeMultiplier(kind));
+            }
+            let partial = u32::from(cash.partial_take_basis_points);
+            if partial == 0 || partial > cash.business_take_basis_points {
+                return Err(RegistryBuildError::InvalidOperationPartialCashTake(kind));
+            }
+        }
+        if execution.cash_proceeds.is_some() != kind.supports_cash_acquisition() {
+            return Err(RegistryBuildError::OperationCashObjectiveContractMismatch(
+                kind,
+            ));
+        }
         for role in &required_roles {
             if !execution.difficulty.role_capabilities.contains_key(role) {
                 return Err(RegistryBuildError::MissingOperationRoleCapability {
@@ -661,6 +681,10 @@ impl RegistryBuilder {
             economics.wealth_revenue_per_point,
             economics.management_revenue_per_point,
             economics.police_cost_per_point,
+            // Surcharges are applied as per-cycle costs at settlement; a negative value
+            // would silently turn active investigations or supporting businesses revenue.
+            economics.support_surcharge_per_business,
+            economics.heat_surcharge_per_active_case,
         ];
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeEnterpriseEconomicValue(kind));

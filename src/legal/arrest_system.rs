@@ -388,23 +388,24 @@ pub fn apply_autonomous_evidence_arrests(
         })
         .collect();
 
+    // One pass over the live operation set per tick, not per candidate: every participant
+    // bound to a non-terminal operation is protected from custody conversion.
+    let mut booked_characters = std::collections::BTreeSet::new();
+    for status in [
+        OperationStatus::Authorized,
+        OperationStatus::InProgress,
+        OperationStatus::AwaitingDecision,
+    ] {
+        for operation in state.operations().operations_with_status(status) {
+            booked_characters.extend(operation.participants().iter().copied());
+        }
+    }
+
     let mut arrests = Vec::new();
     for (investigation_id, character) in candidates {
         // A detained character may not hold any non-terminal operation booking; skip
         // suspects whose crew work is still live rather than tearing it up mid-flight.
-        let is_booked = [
-            OperationStatus::Authorized,
-            OperationStatus::InProgress,
-            OperationStatus::AwaitingDecision,
-        ]
-        .iter()
-        .any(|status| {
-            state
-                .operations()
-                .operations_with_status(*status)
-                .any(|operation| operation.participants().contains(&character))
-        });
-        if is_booked {
+        if booked_characters.contains(&character) {
             continue;
         }
         if state.legal.active_arrest_for_character(character).is_some() {
@@ -760,16 +761,18 @@ mod tests {
     }
 
     #[test]
-    fn active_detention_blocks_case_shutdown_and_membership_escape_until_release() {
+    fn active_detention_blocks_case_suspension_and_membership_escape_until_release() {
         let mut fixture = fixture();
         let arrest = arrest_fixture(&mut fixture);
 
+        // Suspension stays blocked while an arrest holds someone in custody; closing remains
+        // allowed because a case whose subject is detained is cleared by arrest.
         let transition_error = validate_transition_investigation(
             &fixture.state,
             fixture.investigation,
-            InvestigationTransition::Close,
+            InvestigationTransition::Suspend,
         )
-        .expect_err("active detention must keep its source case open");
+        .expect_err("active detention must keep its source case unsuspended");
         assert_eq!(
             transition_error,
             InvestigationError::ActiveArrestBlocksTransition {
@@ -777,6 +780,12 @@ mod tests {
                 arrest,
             }
         );
+        validate_transition_investigation(
+            &fixture.state,
+            fixture.investigation,
+            InvestigationTransition::Close,
+        )
+        .expect("a cleared case must close while its subject is in custody");
         let reassignment_error =
             validate_reassign_character(&fixture.state, fixture.suspect, None, None)
                 .expect_err("detained character must not escape custody through reassignment");

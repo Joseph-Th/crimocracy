@@ -165,6 +165,8 @@ pub enum StateValidationError {
     EmptyDecisionSummary { decision: DecisionRequestId },
     #[error("decision {decision} has no available responses")]
     DecisionHasNoResponses { decision: DecisionRequestId },
+    #[error("resolved decision {decision} carries no resolution record")]
+    ResolvedDecisionWithoutResolution { decision: DecisionRequestId },
     #[error("decision {decision} has invalid persisted context state")]
     InvalidDecisionContext { decision: DecisionRequestId },
     #[error("decision {decision} requester {requester} is not operation {operation}'s leader")]

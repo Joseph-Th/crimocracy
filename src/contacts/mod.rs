@@ -165,8 +165,6 @@ impl ContactDisclosureRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ContactIndexes {
     by_sponsor: BTreeMap<OrganizationId, BTreeSet<ContactId>>,
-    by_handler: BTreeMap<CharacterId, BTreeSet<ContactId>>,
-    by_contact: BTreeMap<CharacterId, BTreeSet<ContactId>>,
     active_by_sponsor_contact: BTreeMap<(OrganizationId, CharacterId), ContactId>,
     active_by_handler: BTreeMap<CharacterId, BTreeSet<ContactId>>,
     active_by_contact: BTreeMap<CharacterId, BTreeSet<ContactId>>,
@@ -279,16 +277,6 @@ impl ContactState {
             .entry(record.sponsor())
             .or_default()
             .insert(id);
-        self.indexes
-            .by_handler
-            .entry(record.handler())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .by_contact
-            .entry(record.contact())
-            .or_default()
-            .insert(id);
         let previous = self
             .indexes
             .active_by_sponsor_contact
@@ -372,16 +360,6 @@ impl ContactState {
                 .by_sponsor
                 .get(&record.sponsor())
                 .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .by_handler
-                    .get(&record.handler())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .by_contact
-                    .get(&record.contact())
-                    .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
             }
@@ -440,26 +418,6 @@ impl ContactState {
                     .contacts
                     .get(id)
                     .is_some_and(|record| record.sponsor() == *sponsor)
-            }) {
-                return false;
-            }
-        }
-        for (handler, ids) in &self.indexes.by_handler {
-            if ids.iter().any(|id| {
-                !self
-                    .contacts
-                    .get(id)
-                    .is_some_and(|record| record.handler() == *handler)
-            }) {
-                return false;
-            }
-        }
-        for (contact, ids) in &self.indexes.by_contact {
-            if ids.iter().any(|id| {
-                !self
-                    .contacts
-                    .get(id)
-                    .is_some_and(|record| record.contact() == *contact)
             }) {
                 return false;
             }

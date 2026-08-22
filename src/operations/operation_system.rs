@@ -115,6 +115,13 @@ pub enum OperationError {
     InvalidPropertyTarget(EntityRef),
     #[error("extraction target character {0} is not currently detained")]
     TargetNotDetained(crate::core::id::CharacterId),
+    #[error(
+        "detainee {character} is already the extraction target of non-terminal operation {operation}"
+    )]
+    DetaineeAlreadyTargeted {
+        character: crate::core::id::CharacterId,
+        operation: OperationId,
+    },
     #[error("character {0} is not a named witness on any active case")]
     TargetNotCaseWitness(crate::core::id::CharacterId),
     #[error("objective {objective:?} cannot target administrative entity {target:?}")]
@@ -785,9 +792,43 @@ fn validate_active_field_objective_targets(
             if state.legal.active_arrest_for_character(*target).is_none() {
                 return Err(OperationError::TargetNotDetained(*target));
             }
+            // One detainee, one live extraction plan: a second non-terminal extraction against
+            // the same custody could resolve only after the first freed the target, and would
+            // then be unable to commit. The target becomes plannable again once the prior
+            // operation reaches a terminal state.
+            if let Some(operation) = find_non_terminal_extraction_targeting(state, *target) {
+                return Err(OperationError::DetaineeAlreadyTargeted {
+                    character: *target,
+                    operation,
+                });
+            }
             Ok(())
         }
     }
+}
+
+/// Smallest non-terminal operation whose objective extracts the given detainee, if any.
+/// The status buckets are scanned in fixed order and ties break on operation id, so the
+/// reported operation is deterministic.
+fn find_non_terminal_extraction_targeting(
+    state: &AppState,
+    target_character: CharacterId,
+) -> Option<OperationId> {
+    [
+        OperationStatus::Authorized,
+        OperationStatus::InProgress,
+        OperationStatus::AwaitingDecision,
+    ]
+    .iter()
+    .flat_map(|status| state.operations.operations_with_status(*status))
+    .filter(|operation| {
+        matches!(
+            operation.objective(),
+            OperationObjective::FreeDetainee { target } if *target == target_character
+        )
+    })
+    .map(|operation| operation.id())
+    .min()
 }
 
 fn validate_active_field_objective_target(

@@ -1,6 +1,5 @@
 //! Persisted player-facing reports; specialized synthesis modules build artifacts that `report_system` validates before insertion.
 
-pub mod enterprise_financial_report;
 pub mod executive_brief;
 pub mod organization_financial_report;
 pub mod report_system;

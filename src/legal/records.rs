@@ -1379,7 +1379,6 @@ pub(super) struct InvestigationIndexes {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct EvidenceIndexes {
     pub(super) evidence_by_origin: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
-    pub(super) evidence_by_source: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
     pub(super) evidence_by_kind: BTreeMap<EvidenceKind, BTreeSet<EvidenceId>>,
     pub(super) derived_evidence_by_source: BTreeMap<EvidenceId, BTreeSet<EvidenceId>>,
 }
@@ -1395,7 +1394,6 @@ pub(super) struct WitnessIndexes {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct InformantIndexes {
     pub(super) active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
-    pub(super) by_character: BTreeMap<CharacterId, BTreeSet<InformantId>>,
     pub(super) disclosures_by_informant: BTreeMap<InformantId, BTreeSet<InformantDisclosureId>>,
     pub(super) disclosure_by_evidence: BTreeMap<EvidenceId, InformantDisclosureId>,
     pub(super) disclosures_by_information: BTreeMap<InformationId, BTreeSet<InformantDisclosureId>>,

@@ -3,7 +3,7 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     CharacterId, IdExhaustionError, IdKind, InformantDisclosureId, InformantId, InformationId,
-    InvestigationId, OrganizationId,
+    InvestigationId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
@@ -14,7 +14,7 @@ use crate::legal::{
     InvestigationStatus,
 };
 use crate::world::{Lifecycle, OrganizationKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -463,6 +463,15 @@ pub fn apply_detainee_informant_recruitment(
             if org == handler {
                 return None;
             }
+            // An informant already working this handler keeps that arrangement; a second
+            // establishment would be rejected as a duplicate, so no new decision is drawn.
+            if state
+                .legal
+                .active_informant_for(character, handler)
+                .is_some()
+            {
+                return None;
+            }
             let minutes_in_custody = now
                 .as_minutes()
                 .saturating_sub(arrest.arrested_at().as_minutes());
@@ -501,6 +510,25 @@ pub fn apply_detainee_informant_recruitment(
 pub fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
+    // Active cases owned by each handler, keyed by their origin operation. Built once per
+    // pass in investigation-id order so the smallest matching case id wins deterministically.
+    let mut cases_by_handler_origin: BTreeMap<
+        OrganizationId,
+        BTreeMap<OperationId, InvestigationId>,
+    > = BTreeMap::new();
+    for investigation in state.legal.investigations() {
+        if investigation.status() != InvestigationStatus::Active {
+            continue;
+        }
+        if let Some(origin) = investigation.origin_operation() {
+            cases_by_handler_origin
+                .entry(investigation.owner())
+                .or_default()
+                .entry(origin)
+                .or_insert(investigation.id());
+        }
+    }
+
     let candidates: Vec<(InformantId, InformationId, InvestigationId)> = state
         .legal
         .informants()
@@ -516,23 +544,18 @@ pub fn apply_informant_disclosures(
                 let EntityRef::Operation(operation) = information.subject() else {
                     continue;
                 };
-                let investigation = state.legal.investigations().find(|investigation| {
-                    investigation.owner() == handler
-                        && investigation.status() == InvestigationStatus::Active
-                        && investigation.origin_operation() == Some(operation)
-                });
-                if let Some(investigation) = investigation {
+                if let Some(&investigation) = cases_by_handler_origin
+                    .get(&handler)
+                    .and_then(|cases| cases.get(&operation))
+                {
                     // Skip knowledge already traded into this case; the disclosure index is
                     // the authority on what has been disclosed.
                     let already_disclosed = state
                         .legal
-                        .informant_disclosure_for_case_information(
-                            investigation.id(),
-                            information.id(),
-                        )
+                        .informant_disclosure_for_case_information(investigation, information.id())
                         .is_some();
                     if !already_disclosed {
-                        pairs.push((informant.id(), information.id(), investigation.id()));
+                        pairs.push((informant.id(), information.id(), investigation));
                     }
                 }
             }
@@ -562,6 +585,7 @@ mod tests {
     use crate::build_registry;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::core::time::SimDuration;
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{
         InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
@@ -569,6 +593,7 @@ mod tests {
     use crate::legal::investigation_system::{
         validate_add_evidence, validate_open_investigation, InvestigationError,
     };
+    use crate::legal::ArrestDraft;
     use crate::legal::{EvidenceDraft, InvestigationDraft};
     use crate::world::world_system::{
         insert_character, insert_organization, validate_reassign_character, WorldError,
@@ -971,5 +996,81 @@ mod tests {
             information
         );
         validate_invariants(&restored);
+    }
+
+    #[test]
+    fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
+        let mut fixture = fixture();
+        let case = crate::legal::investigation_system::validate_open_investigation(
+            &fixture.state,
+            InvestigationDraft {
+                owner: fixture.police,
+                title: "Member custody inquiry".to_owned(),
+                subjects: BTreeSet::from([EntityRef::Character(fixture.member)]),
+            },
+        )
+        .expect("subject case should validate")
+        .commit(&mut fixture.state)
+        .expect("subject case should commit");
+        let evidence = crate::legal::investigation_system::validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation: case,
+                custodian: fixture.police,
+                subject: EntityRef::Character(fixture.member),
+                origin: None,
+                kind: EvidenceKind::KnownAssociation,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("case evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("case evidence should commit");
+
+        // The member already works for this handler from an earlier stint; a re-arrest must
+        // not draw a second recruitment decision, which establishment would reject and the
+        // tick pipeline would treat as a bug.
+        validate_establish_informant(
+            &fixture.state,
+            InformantDraft {
+                character: fixture.member,
+                handler: fixture.police,
+            },
+        )
+        .expect("informant establishment should validate")
+        .commit(&mut fixture.state)
+        .expect("informant establishment should commit");
+        crate::legal::arrest_system::validate_arrest(
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.member,
+                investigation: case,
+                evidence: BTreeSet::from([evidence]),
+            },
+        )
+        .expect("custody arrest should validate")
+        .commit(&mut fixture.state)
+        .expect("custody arrest should commit");
+
+        fixture.state.advance_clock(SimDuration::from_minutes(
+            RECRUITMENT_DECISION_OFFSET_MINUTES as u32,
+        ));
+        let recruited = apply_detainee_informant_recruitment(&mut fixture.state)
+            .expect("recruitment pass should resolve without aborting the tick");
+        assert!(recruited.is_empty());
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .informants()
+                .filter(|informant| informant.status() == InformantStatus::Active)
+                .count(),
+            1
+        );
+        validate_state(&fixture.state).expect("post-pass state should validate");
+        validate_invariants(&fixture.state);
     }
 }

@@ -15,7 +15,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::legal::records::{
-    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceKind, EvidenceRecord, EvidenceStrength,
+    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
     InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
     InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
@@ -88,18 +88,6 @@ impl LegalState {
             .get(&(character, handler))
             .and_then(|id| self.informants.get(id))
     }
-    pub fn informants_for_character(
-        &self,
-        character: CharacterId,
-    ) -> impl Iterator<Item = &InformantRecord> {
-        self.indexes
-            .informants
-            .by_character
-            .get(&character)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.informants.get(id))
-    }
     pub fn informant_disclosures_from_information(
         &self,
         information: InformationId,
@@ -142,6 +130,8 @@ impl LegalState {
             .get(&character)
             .and_then(|id| self.arrests.get(id))
     }
+    /// Test-only observation surface; production reads go through case-scoped getters.
+    #[cfg(test)]
     pub fn arrests_for_character(
         &self,
         character: CharacterId,
@@ -229,6 +219,8 @@ impl LegalState {
             .get(&(arrest, prosecutor_office))
             .and_then(|id| self.prosecution_cases.get(id))
     }
+    /// Test-only observation surface; production reads go through case-scoped getters.
+    #[cfg(test)]
     pub fn prosecution_cases_for_arrest(
         &self,
         arrest: ArrestId,
@@ -315,17 +307,6 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.evidence.get(id))
     }
-    /// Test-only observation surface: production evidence reads go through case-scoped getters.
-    #[cfg(test)]
-    pub fn evidence_from_source(&self, source: EntityRef) -> impl Iterator<Item = &EvidenceRecord> {
-        self.indexes
-            .evidence
-            .evidence_by_source
-            .get(&source)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.evidence.get(id))
-    }
     pub fn derived_evidence_from(
         &self,
         source: EvidenceId,
@@ -338,6 +319,8 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.evidence.get(id))
     }
+    /// Test-only observation surface; production reads go through case-scoped getters.
+    #[cfg(test)]
     pub fn investigations_for_subject(
         &self,
         subject: EntityRef,
@@ -373,6 +356,8 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.case_witnesses.get(id))
     }
+    /// Test-only observation surface; production reads go through case-scoped getters.
+    #[cfg(test)]
     pub fn witness_statement_for_evidence(
         &self,
         evidence: EvidenceId,
@@ -430,7 +415,12 @@ impl LegalState {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
-    pub fn evidence_of_kind(&self, kind: EvidenceKind) -> impl Iterator<Item = &EvidenceRecord> {
+    /// Test-only observation surface; production reads go through case-scoped getters.
+    #[cfg(test)]
+    pub fn evidence_of_kind(
+        &self,
+        kind: crate::legal::EvidenceKind,
+    ) -> impl Iterator<Item = &EvidenceRecord> {
         self.indexes
             .evidence
             .evidence_by_kind
@@ -630,12 +620,6 @@ impl LegalState {
             previous_active.is_none(),
             "Ownership Exclusivity: duplicate active informant relationship inserted"
         );
-        self.indexes
-            .informants
-            .by_character
-            .entry(record.character())
-            .or_default()
-            .insert(id);
         let previous = self.informants.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -754,14 +738,6 @@ impl LegalState {
                 .evidence
                 .evidence_by_origin
                 .entry(origin)
-                .or_default()
-                .insert(record.id());
-        }
-        if let Some(source) = record.source() {
-            self.indexes
-                .evidence
-                .evidence_by_source
-                .entry(source)
                 .or_default()
                 .insert(record.id());
         }
