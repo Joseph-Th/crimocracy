@@ -772,6 +772,129 @@ const fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str 
     }
 }
 
+/// Flat retainer the organization commits when its standing policy promises automatic legal
+/// support. A flat authored fee keeps the automatic path honest: no discretionary spending
+/// is made in the organization's name beyond what the policy promises.
+const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
+
+/// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
+/// organization that runs the Automatic policy gets counsel retained through the canonical
+/// representation path, paid from the organization's first funded cash account through its
+/// first active Legal-channel contact. Organizations without those prerequisites see no
+/// action — the policy promises support, and this stage delivers it only when the pieces
+/// exist for the canonical transaction to carry it.
+pub fn apply_automatic_legal_support(
+    state: &mut AppState,
+) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
+    use crate::finance::{AccountKind, FinancialOwner};
+    use crate::world::{Lifecycle, OrganizationKind as OrgKind, PolicyKind, PolicySetting};
+
+    let candidates: Vec<crate::core::id::ArrestId> = state
+        .legal
+        .arrests()
+        .filter(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
+        .filter(|arrest| {
+            state
+                .legal
+                .active_representation_for_arrest(arrest.id())
+                .is_none()
+        })
+        .filter_map(|arrest| {
+            let defendant = arrest.character();
+            let organization = state.world.get_character(defendant)?.organization()?;
+            let record = state.world.get_organization(organization)?;
+            if record.lifecycle() != Lifecycle::Active || record.kind() != OrgKind::Criminal {
+                return None;
+            }
+            matches!(
+                record.policy(PolicyKind::AssociateLegalSupport),
+                Some(PolicySetting::AssociateLegalSupport(
+                    crate::world::LegalSupportPolicy::Automatic,
+                )),
+            )
+            .then_some(arrest.id())
+        })
+        .collect();
+
+    let mut retained = Vec::new();
+    for arrest_id in candidates {
+        let arrest = state
+            .legal
+            .get_arrest(arrest_id)
+            .expect("indexed detained arrest must exist");
+        let defendant = arrest.character();
+        let Some(sponsor) = state
+            .world
+            .get_character(defendant)
+            .and_then(|record| record.organization())
+        else {
+            continue;
+        };
+        // First active Legal-channel contact of the sponsor, by contact id order.
+        let Some(contact) = state
+            .contacts
+            .contacts_for_sponsor(sponsor)
+            .find(|contact| {
+                contact.status() == crate::contacts::ContactStatus::Active
+                    && contact.kind() == crate::contacts::ContactKind::Legal
+            })
+            .map(|contact| contact.id())
+        else {
+            continue;
+        };
+
+        // The payer must be a sponsor-owned cash account that can cover the flat retainer;
+        // the provider account is the counsel institution's operating account.
+        let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
+        let institution = state
+            .contacts
+            .get_contact(contact)
+            .map(|contact| contact.institution());
+        let Some(institution) = institution else {
+            continue;
+        };
+        let payer_account = state.finance.accounts().find(|account| {
+            account.owner() == FinancialOwner::Organization(sponsor)
+                && matches!(
+                    account.kind(),
+                    AccountKind::StreetCash
+                        | AccountKind::ConcealedCash
+                        | AccountKind::AccountedFunds
+                        | AccountKind::LegitimateOperating
+                )
+                && account.balance() >= fee
+        });
+        let Some(payer_account) = payer_account else {
+            continue;
+        };
+        let provider_account = state.finance.accounts().find(|account| {
+            account.owner() == FinancialOwner::Organization(institution)
+                && account.kind() == AccountKind::LegitimateOperating
+        });
+        let Some(provider_account) = provider_account else {
+            continue;
+        };
+
+        let draft = LegalRepresentationDraft {
+            arrest: arrest_id,
+            sponsor,
+            contact,
+            fee,
+            payer_account: payer_account.id(),
+            provider_account: provider_account.id(),
+            authorization: None,
+        };
+        if validate_representation_dependencies(state, &draft).is_err() {
+            // Prerequisites drifted since the snapshot (case closed, contact inactive);
+            // the policy stage simply waits rather than forcing a partial transaction.
+            continue;
+        }
+        let representation = validate_retain_legal_representation(state, draft)?.commit(state)?;
+        retained.push(representation);
+    }
+    Ok(retained)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,6 +905,7 @@ mod tests {
     };
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+    use crate::core::simulation::run_tick;
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
     use crate::finance::finance_system::{insert_account, validate_record_transaction};
@@ -795,9 +919,11 @@ mod tests {
     use crate::registry::Registry;
     use crate::social::relationship_system::validate_set_relationship;
     use crate::social::{RelationshipDimensions, RelationshipLevel};
+    use crate::world::world_system::set_policy;
     use crate::world::world_system::{
         insert_character, insert_organization, validate_reassign_character,
     };
+    use crate::world::PolicySetting;
     use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1058,6 +1184,63 @@ mod tests {
         .expect("legal representation should validate")
         .commit(&mut fixture.state)
         .expect("legal representation should commit")
+    }
+
+    #[test]
+    fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
+        let mut fx = fixture();
+        // Flip the sponsor's standing policy to automatic support through the canonical
+        // owner path; the default CaseByCase setting never acts on its own.
+        set_policy(
+            &fx.registry,
+            &mut fx.state,
+            fx.sponsor,
+            PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+        )
+        .expect("automatic legal-support policy should validate");
+        let payer_before = fx
+            .state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer account should exist")
+            .balance();
+
+        let outcome = run_tick(&fx.registry, &mut fx.state);
+        assert_eq!(
+            outcome.automatic_legal_support.len(),
+            1,
+            "the tick must retain counsel for the detained member exactly once"
+        );
+        let representation = fx
+            .state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .expect("automatic policy should have retained counsel");
+        assert_eq!(representation.sponsor(), fx.sponsor);
+        assert_eq!(
+            fx.state
+                .finance()
+                .get_account(fx.payer)
+                .expect("payer account should exist")
+                .balance()
+                .cents(),
+            payer_before.cents() - 5_000,
+            "the flat authored retainer must be the only cost of the automatic path"
+        );
+
+        // A second tick must not retain again: the arrest is already represented.
+        let outcome = run_tick(&fx.registry, &mut fx.state);
+        assert!(outcome.automatic_legal_support.is_empty());
+        validate_state(&fx.state).expect("automatic support state should remain valid");
+        validate_invariants(&fx.state);
+
+        // The default CaseByCase policy never fires on its own.
+        let untouched = fixture();
+        assert!(untouched
+            .state
+            .legal()
+            .active_representation_for_arrest(untouched.arrest)
+            .is_none());
     }
 
     #[test]

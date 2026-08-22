@@ -185,28 +185,14 @@ pub enum AutonomyLevel {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PolicyKind {
-    CollectionForce,
-    PatrolBribery,
     IndependentRecruitment,
-    CasualtyResponse,
     AssociateLegalSupport,
 }
 
-pub const ALL_POLICY_KINDS: [PolicyKind; 5] = [
-    PolicyKind::CollectionForce,
-    PolicyKind::PatrolBribery,
+pub const ALL_POLICY_KINDS: [PolicyKind; 2] = [
     PolicyKind::IndependentRecruitment,
-    PolicyKind::CasualtyResponse,
     PolicyKind::AssociateLegalSupport,
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ForcePolicy {
-    None,
-    ThreatsOnly,
-    NonLethal,
-    LethalIfNecessary,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ApprovalPolicy {
@@ -215,11 +201,19 @@ pub enum ApprovalPolicy {
     Delegated,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum CasualtyPolicy {
-    ContinueWithinPlan,
-    RequestDecision,
-    Abort,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicySetting {
+    IndependentRecruitment(ApprovalPolicy),
+    AssociateLegalSupport(LegalSupportPolicy),
+}
+
+impl PolicySetting {
+    pub const fn kind(self) -> PolicyKind {
+        match self {
+            Self::IndependentRecruitment(_) => PolicyKind::IndependentRecruitment,
+            Self::AssociateLegalSupport(_) => PolicyKind::AssociateLegalSupport,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -227,27 +221,6 @@ pub enum LegalSupportPolicy {
     None,
     CaseByCase,
     Automatic,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PolicySetting {
-    CollectionForce(ForcePolicy),
-    PatrolBribery(ApprovalPolicy),
-    IndependentRecruitment(ApprovalPolicy),
-    CasualtyResponse(CasualtyPolicy),
-    AssociateLegalSupport(LegalSupportPolicy),
-}
-
-impl PolicySetting {
-    pub const fn kind(self) -> PolicyKind {
-        match self {
-            Self::CollectionForce(_) => PolicyKind::CollectionForce,
-            Self::PatrolBribery(_) => PolicyKind::PatrolBribery,
-            Self::IndependentRecruitment(_) => PolicyKind::IndependentRecruitment,
-            Self::CasualtyResponse(_) => PolicyKind::CasualtyResponse,
-            Self::AssociateLegalSupport(_) => PolicyKind::AssociateLegalSupport,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

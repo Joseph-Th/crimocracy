@@ -15,6 +15,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Domain | Capability | Owner and entry point |
 | --- | --- | --- |
 | World | Organizations, characters, neighborhoods, businesses, institutional profiles, membership, supervision, designation | `src/world/` via `world_system` |
+| Organizational policies | Behavioral standing policies consumed by recruitment autonomy and automatic legal-support retention | `src/world/` (settings) via `delegation_system` overrides, `legal_representation_system` execution |
 | Social | Directional relationships with source and target indexes | `src/social/` via `relationship_system` |
 | Intelligence | Provenance-bearing information, typed topics, holder indexes, transfers, lineage | `src/intelligence/` via `intelligence_system` |
 | Reports and history | Player-facing reports, executive briefs, financial reports, entity-linked campaign events | `src/reports/` and `src/history/` |
@@ -55,8 +56,8 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 21.
+The current authored content revision is 22.
 
 The current in-memory state schema version is 47.
 
-The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.
+The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

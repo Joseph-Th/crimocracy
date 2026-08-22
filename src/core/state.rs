@@ -295,8 +295,8 @@ mod tests {
         insert_organization, validate_reassign_character, WorldError,
     };
     use crate::world::{
-        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
-        CapabilityKind, CharacterDraft, DriveKind, ForcePolicy, NeighborhoodDraft,
+        ApprovalPolicy, AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind,
+        BusinessOwner, CapabilityKind, CharacterDraft, DriveKind, NeighborhoodDraft,
         NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
         OrganizationDraft, OrganizationKind, PolicyKind, PolicySetting, Rating, TraitKind,
     };
@@ -675,8 +675,8 @@ mod tests {
                     ResponsibilityScope::Function(ResponsibilityFunction::Operations),
                 ]),
                 standing_orders: BTreeMap::from([(
-                    PolicyKind::CollectionForce,
-                    PolicySetting::CollectionForce(ForcePolicy::None),
+                    PolicyKind::IndependentRecruitment,
+                    PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
                 )]),
                 budget: Some(BudgetAuthority {
                     funding_account: budget_funding,
@@ -1285,11 +1285,12 @@ mod tests {
         let manager = mandate_record.manager();
         let organization = mandate_record.organization();
 
-        let delegated = resolve_policy_for_manager(&state, manager, PolicyKind::CollectionForce)
-            .expect("manager policy should resolve");
+        let delegated =
+            resolve_policy_for_manager(&state, manager, PolicyKind::IndependentRecruitment)
+                .expect("manager policy should resolve");
         assert_eq!(
             delegated.setting,
-            PolicySetting::CollectionForce(ForcePolicy::None)
+            PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated)
         );
         assert_eq!(delegated.source, PolicySource::Mandate(mandate));
 
@@ -1298,11 +1299,12 @@ mod tests {
             .commit(&mut state)
             .expect("validated revocation should remain current");
 
-        let inherited = resolve_policy_for_manager(&state, manager, PolicyKind::CollectionForce)
-            .expect("organization policy should resolve after revocation");
+        let inherited =
+            resolve_policy_for_manager(&state, manager, PolicyKind::IndependentRecruitment)
+                .expect("organization policy should resolve after revocation");
         assert_eq!(
             inherited.setting,
-            PolicySetting::CollectionForce(ForcePolicy::ThreatsOnly)
+            PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
         );
         assert_eq!(inherited.source, PolicySource::Organization(organization));
         assert!(state.delegation().active_for_manager(manager).is_none());

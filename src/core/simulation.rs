@@ -54,6 +54,7 @@ pub struct TickOutcome {
     pub evidence_arrests: Vec<crate::core::id::ArrestId>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
+    pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
@@ -190,6 +191,12 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("valid state should resolve detainee informant recruitment decisions");
     let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
         .expect("valid state should record due informant disclosures");
+    // Automatic legal-support governance runs last in the custody cluster: it sees every
+    // arrest made this minute and retains counsel through the canonical representation path
+    // when the organization's standing policy promises it.
+    let automatic_legal_support =
+        crate::legal::legal_representation_system::apply_automatic_legal_support(state)
+            .expect("valid state should resolve automatic legal-support retention");
     // Cold-case decay runs after detective work resolution so the case's last-activity instant is
     // final for the minute; an authored institutional-inactivity window then shelves operation-
     // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
@@ -267,6 +274,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         evidence_arrests,
         informant_recruitments,
         informant_disclosures,
+        automatic_legal_support,
         business_cycles,
         enterprise_cycles,
         recruitment_attempts,

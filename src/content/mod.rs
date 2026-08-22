@@ -21,13 +21,12 @@ use crate::registry::{
     RecruitmentWeightsDefinition, Registry, RegistryBuilder,
 };
 use crate::world::{
-    ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, CasualtyPolicy, DriveKind,
-    ForcePolicy, LegalSupportPolicy, PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS,
-    ALL_DRIVE_KINDS, ALL_TRAIT_KINDS,
+    ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, DriveKind, LegalSupportPolicy,
+    PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 21;
+pub const CURRENT_CONTENT_REVISION: u32 = 22;
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::new();
@@ -430,7 +429,10 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 600,
             },
-            Some(PolicyKind::CollectionForce),
+            // No special standing-order authority is required to manage a protection
+            // racket; the former collection-force axis had no execution effect and was
+            // removed with the rest of the inert policy vocabulary.
+            None,
             BTreeSet::new(),
             BTreeSet::new(),
         ),
@@ -505,24 +507,9 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
 fn register_policies(builder: &mut RegistryBuilder) {
     let definitions = [
         (
-            PolicyKind::CollectionForce,
-            "Collection force",
-            PolicySetting::CollectionForce(ForcePolicy::ThreatsOnly),
-        ),
-        (
-            PolicyKind::PatrolBribery,
-            "Patrol bribery",
-            PolicySetting::PatrolBribery(ApprovalPolicy::RequireApproval),
-        ),
-        (
             PolicyKind::IndependentRecruitment,
             "Independent recruitment",
             PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
-        ),
-        (
-            PolicyKind::CasualtyResponse,
-            "Casualty response",
-            PolicySetting::CasualtyResponse(CasualtyPolicy::RequestDecision),
         ),
         (
             PolicyKind::AssociateLegalSupport,

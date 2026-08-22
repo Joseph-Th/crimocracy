@@ -514,10 +514,7 @@ impl ResolvedPolicy {
     pub fn independent_recruitment_approval(&self) -> crate::world::ApprovalPolicy {
         match self.setting {
             PolicySetting::IndependentRecruitment(approval) => approval,
-            PolicySetting::CollectionForce(_)
-            | PolicySetting::PatrolBribery(_)
-            | PolicySetting::CasualtyResponse(_)
-            | PolicySetting::AssociateLegalSupport(_) => {
+            PolicySetting::AssociateLegalSupport(_) => {
                 unreachable!("independent-recruitment resolution returned another policy kind")
             }
         }
