@@ -52,6 +52,8 @@ pub struct TickOutcome {
     pub scheduled_witness_interviews: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub evidence_arrests: Vec<crate::core::id::ArrestId>,
+    pub informant_recruitments: Vec<crate::core::id::InformantId>,
+    pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
@@ -180,6 +182,14 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // the same minute's arrest decision.
     let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
         .expect("valid state should convert qualifying case evidence into custody");
+    // Detainee informant recruitment runs right after custody conversion: a member arrested
+    // exactly one cadence window ago faces their single recruitment decision this minute, and
+    // active informants disclose personally-held knowledge into their handler's cases.
+    let informant_recruitments =
+        crate::legal::informant_system::apply_detainee_informant_recruitment(state)
+            .expect("valid state should resolve detainee informant recruitment decisions");
+    let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
+        .expect("valid state should record due informant disclosures");
     // Cold-case decay runs after detective work resolution so the case's last-activity instant is
     // final for the minute; an authored institutional-inactivity window then shelves operation-
     // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
@@ -255,6 +265,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         scheduled_witness_interviews: witness_interviews,
         resolved_investigation_work,
         evidence_arrests,
+        informant_recruitments,
+        informant_disclosures,
         business_cycles,
         enterprise_cycles,
         recruitment_attempts,
@@ -292,7 +304,10 @@ pub enum RandomDecisionError {
     EmptyChoiceSet,
 }
 
-fn draw_index(rng: &mut impl RngCore, choice_count: usize) -> Result<usize, RandomDecisionError> {
+pub(crate) fn draw_index(
+    rng: &mut impl RngCore,
+    choice_count: usize,
+) -> Result<usize, RandomDecisionError> {
     if choice_count == 0 {
         return Err(RandomDecisionError::EmptyChoiceSet);
     }

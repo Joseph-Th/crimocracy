@@ -442,6 +442,15 @@ impl ValidatedOperationResolution {
             (IdKind::HistoryEvent, 1),
             (IdKind::Report, 1),
         ];
+        // Every participant personally knows how the job they were part of ended; that
+        // private knowledge is what an arrested participant can later trade as an informant.
+        let operation = state
+            .operations
+            .get_operation(self.plan.snapshot.operation)
+            .expect("resolution plan operation must exist");
+        let participant_count =
+            u32::try_from(operation.participants().len()).expect("participant count must fit u32");
+        budget.push((IdKind::Information, participant_count));
         if let Some(incident) = self.incident.as_ref() {
             budget.push((IdKind::Investigation, 1));
             budget.push((IdKind::Evidence, incident_evidence_count));
@@ -534,6 +543,41 @@ impl ValidatedOperationResolution {
             intimidation
                 .commit(state)
                 .expect("validated witness intimidation must commit atomically");
+        }
+        // Personal after-action knowledge for each participant: the crew knows what went
+        // down even though the organization's own record is the org-held after-action.
+        let operation_id = self.plan.snapshot.operation;
+        let leader = state
+            .operations()
+            .get_operation(operation_id)
+            .map(|record| {
+                (
+                    record.participants(),
+                    record.leader(),
+                    record.title().to_owned(),
+                )
+            })
+            .expect("completed operation must persist");
+        let (participants, op_leader, title) = leader;
+        for participant in participants {
+            let _personal_knowledge = validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Character(participant),
+                    source_kind: InformationSourceKind::AfterAction,
+                    topic: crate::intelligence::InformationTopic::OperationalOutcome,
+                    source_entity: Some(EntityRef::Character(op_leader)),
+                    subject: EntityRef::Operation(operation_id),
+                    observed_at: self.plan.snapshot.resolved_at,
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: format!(
+                        "You took part in {title}, which ended with objective {}.",
+                        outcome_label(self.plan.outcome.objective_outcome)
+                    ),
+                },
+            )?
+            .commit(state)?;
         }
         Ok(self.plan.snapshot.operation)
     }
@@ -1930,6 +1974,7 @@ mod tests {
     use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{InformationDraft, InformationTopic};
+    use crate::legal::informant_system::RECRUITMENT_DECISION_OFFSET_MINUTES;
     use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
     use crate::legal::jurisdiction_system::validate_set_jurisdiction;
     use crate::legal::patrol_system::{
@@ -1956,7 +2001,7 @@ mod tests {
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
-        CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        CharacterDraft, DriveKind, NeighborhoodDraft, NeighborhoodEconomyProfile,
         NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -3500,8 +3545,13 @@ mod tests {
                         Rating::try_new(99).expect("fixture rating should be valid"),
                     ),
                 ]),
+                // A maximal Safety drive makes the detained leader maximally susceptible to
+                // the fear-of-prison informant flip.
+                drives: BTreeMap::from([(
+                    DriveKind::Safety,
+                    Rating::try_new(99).expect("fixture rating should be valid"),
+                )]),
                 traits: BTreeSet::new(),
-                drives: BTreeMap::new(),
             },
         )
         .expect("leader should validate");
@@ -3630,6 +3680,50 @@ mod tests {
             arrest_record.evidence().len() >= 2,
             "custody requires corroboration beyond a single item"
         );
+
+        // One authored cadence window into custody, the detained member faces their single
+        // recruitment decision. With a maximal Safety drive the fear-of-prison chance is
+        // high, and this seed's deterministic roll lands inside it. The flipped member
+        // personally knows how their crew's job ended (every participant holds that
+        // after-action knowledge), so the same pipeline pass discloses it into the
+        // handler's case about that operation as InformantStatement evidence.
+        let decision_minute =
+            arrest_record.arrested_at().as_minutes() + RECRUITMENT_DECISION_OFFSET_MINUTES;
+        loop {
+            let outcome = run_tick(&registry, &mut state);
+            let flipped = state
+                .legal()
+                .active_informant_for(suspect, police)
+                .is_some();
+            let disclosed = state
+                .legal()
+                .get_investigation(investigation)
+                .expect("case should persist")
+                .evidence()
+                .iter()
+                .filter_map(|id| state.legal().get_evidence(*id))
+                .any(|evidence| evidence.kind() == EvidenceKind::InformantStatement);
+            if flipped && disclosed {
+                break;
+            }
+            assert!(
+                !flipped || outcome.informant_disclosures.is_empty(),
+                "a qualifying informant disclosure must record immediately"
+            );
+            assert!(
+                outcome.now.as_minutes() < decision_minute + 10,
+                "the recruitment draw must happen exactly at the cadence minute"
+            );
+        }
+        let case_has_informant_evidence = state
+            .legal()
+            .get_investigation(investigation)
+            .expect("case should persist")
+            .evidence()
+            .iter()
+            .filter_map(|id| state.legal().get_evidence(*id))
+            .any(|evidence| evidence.kind() == EvidenceKind::InformantStatement);
+        assert!(case_has_informant_evidence);
 
         validate_state(&state).expect("witness pipeline state should remain valid");
         validate_invariants(&state);

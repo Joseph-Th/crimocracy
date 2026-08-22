@@ -8,8 +8,8 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
-    Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
-    EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
+    Admissibility, ArrestStatus, EvidenceAssessment, EvidenceConnection, EvidenceIdentity,
+    EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
     InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
     InvestigationStatus,
 };
@@ -426,6 +426,134 @@ pub(crate) const fn informant_reliability(reliability: Reliability) -> EvidenceR
         Reliability::GenerallyReliable => EvidenceReliability::Credible,
         Reliability::DirectAccess => EvidenceReliability::HighlyReliable,
     }
+}
+
+/// A detained member gets exactly one recruitment decision, one authored cadence after the
+/// arrest. No extra per-arrest state is needed: the decision instant is a pure function of
+/// `arrested_at`, and the single draw consumes the state-owned investigation stream.
+pub(crate) const RECRUITMENT_DECISION_OFFSET_MINUTES: u64 = 1_440;
+/// Base flip chance in percent; fear of prison (the character's Safety drive) adds up to
+/// 50 points on top.
+const BASE_FLIP_CHANCE_PERCENT: u32 = 25;
+
+/// Runs the police institution's detainee-to-informant pipeline: exactly one recruitment
+/// draw per detained criminal member, one cadence window after their arrest. Members with
+/// something personal to hide behind stay quiet; scared ones talk.
+pub fn apply_detainee_informant_recruitment(
+    state: &mut AppState,
+) -> Result<Vec<InformantId>, InformantError> {
+    use crate::world::OrganizationKind as OrgKind;
+
+    let now = state.now();
+    let candidates: Vec<(CharacterId, OrganizationId)> = state
+        .legal
+        .arrests()
+        .filter(|arrest| arrest.status() == ArrestStatus::Detained)
+        .filter_map(|arrest| {
+            let handler = arrest.authority();
+            let character = arrest.character();
+            let record = state.world.get_character(character)?;
+            // Only members of criminal organizations have an organization to inform on,
+            // and only while they still belong to one.
+            let org = record.organization()?;
+            let org_record = state.world.get_organization(org)?;
+            if org_record.kind() != OrgKind::Criminal {
+                return None;
+            }
+            if org == handler {
+                return None;
+            }
+            let minutes_in_custody = now
+                .as_minutes()
+                .saturating_sub(arrest.arrested_at().as_minutes());
+            (minutes_in_custody == RECRUITMENT_DECISION_OFFSET_MINUTES)
+                .then_some((character, handler))
+        })
+        .collect();
+
+    let mut recruited = Vec::new();
+    for (character, handler) in candidates {
+        let safety = state
+            .world
+            .get_character(character)
+            .and_then(|record| record.drive(crate::world::DriveKind::Safety))
+            .map(|rating| u32::from(rating.value()))
+            .unwrap_or(0);
+        let chance = BASE_FLIP_CHANCE_PERCENT + safety / 2;
+        let roll = {
+            let rng = state.investigation_rng_mut();
+            crate::core::simulation::draw_index(rng, 100).unwrap_or(usize::MAX)
+        };
+        if roll as u32 >= chance {
+            continue;
+        }
+        let informant = validate_establish_informant(state, InformantDraft { character, handler })?
+            .commit(state)?;
+        recruited.push(informant);
+    }
+    Ok(recruited)
+}
+
+/// Active informants disclose what they personally know into their handler's active cases:
+/// each piece of personally-held information whose subject matches a case's origin operation
+/// is disclosed at most once (the disclosure index rejects duplicates). This is what makes an
+/// informant more than a flag: their knowledge becomes InformantStatement evidence.
+pub fn apply_informant_disclosures(
+    state: &mut AppState,
+) -> Result<Vec<InformantDisclosureId>, InformantError> {
+    let candidates: Vec<(InformantId, InformationId, InvestigationId)> = state
+        .legal
+        .informants()
+        .filter(|informant| informant.status() == InformantStatus::Active)
+        .flat_map(|informant| {
+            let handler = informant.handler();
+            let character = informant.character();
+            let mut pairs = Vec::new();
+            for information in state
+                .intelligence
+                .information_for_holder(KnowledgeHolder::Character(character))
+            {
+                let EntityRef::Operation(operation) = information.subject() else {
+                    continue;
+                };
+                let investigation = state.legal.investigations().find(|investigation| {
+                    investigation.owner() == handler
+                        && investigation.status() == InvestigationStatus::Active
+                        && investigation.origin_operation() == Some(operation)
+                });
+                if let Some(investigation) = investigation {
+                    // Skip knowledge already traded into this case; the disclosure index is
+                    // the authority on what has been disclosed.
+                    let already_disclosed = state
+                        .legal
+                        .informant_disclosure_for_case_information(
+                            investigation.id(),
+                            information.id(),
+                        )
+                        .is_some();
+                    if !already_disclosed {
+                        pairs.push((informant.id(), information.id(), investigation.id()));
+                    }
+                }
+            }
+            pairs
+        })
+        .collect();
+
+    let mut disclosures = Vec::new();
+    for (informant, information, investigation) in candidates {
+        let disclosure = validate_record_informant_disclosure(
+            state,
+            InformantDisclosureDraft {
+                informant,
+                investigation,
+                source_information: information,
+            },
+        )?
+        .commit(state)?;
+        disclosures.push(disclosure);
+    }
+    Ok(disclosures)
 }
 
 #[cfg(test)]
