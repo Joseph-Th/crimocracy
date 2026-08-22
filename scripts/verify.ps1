@@ -12,10 +12,11 @@
 # Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
 #   2. cargo test --locked --lib --tests --quiet   (lib + integration, excludes examples)
-#   3. cargo test --locked --quiet --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
-#   4. gameplay-harness full mode (--samples 1): exercises every narrative/probe contract
+#   3. cargo test --locked --quiet --example gameplay_harness --lib   (harness unit tests)
+#   4. cargo test --locked --quiet --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
+#   5. gameplay-harness full mode (--samples 1): exercises every narrative/probe contract
 #      that smoke mode does not cover, in seconds
-#   5. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+#   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
 # driver hash. Clippy is last: you get test signal even if lint fails. The smoke
@@ -219,7 +220,7 @@ if ($Fast) {
 
 $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
-Write-Host "FULL GATE  (fmt -> tests -> harness smoke -> harness full -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+Write-Host "FULL GATE  (fmt -> tests -> harness units -> harness smoke -> harness full -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
 if ($NoFmt) {
     Write-Host "  fmt --check                 SKIP (--NoFmt)" -ForegroundColor Yellow
@@ -228,6 +229,10 @@ if ($NoFmt) {
 }
 
 Invoke-CargoStage "lib+integration tests" @("test", "--locked", "--lib", "--tests", "--quiet")
+
+# The harness example carries its own unit tests for options parsing and the financial
+# branch contracts; --lib --tests never compiles example test targets, so run them here.
+Invoke-CargoStage "harness unit tests" @("test", "--locked", "--quiet", "--example", "gameplay_harness", "--lib")
 
 Assert-SmokeContractSelectable
 Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
@@ -245,5 +250,5 @@ if ($NoClippy) {
 
 $gate.Stop()
 Write-Host ""
-Write-Host "GATE PASS  5/5  in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
+Write-Host "GATE PASS  6/6  in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
 Write-Host "  tip: use -Fast for iteration, -Filter <name> for one test, -Jobs N on a hot machine" -ForegroundColor DarkGray

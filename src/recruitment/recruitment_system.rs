@@ -718,7 +718,7 @@ fn validate_recruitment_plan_with_authority(
             },
         },
     )?;
-    let departure_report = match (plan.context.outcome, plan.context.previous_organization) {
+    let member_report = match (plan.context.outcome, plan.context.previous_organization) {
         (RecruitmentOutcome::Accepted, Some(previous_organization)) => {
             let previous = state
                 .world
@@ -747,7 +747,44 @@ fn validate_recruitment_plan_with_authority(
                 },
             )?)
         }
-        (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, _) => None,
+        // A member who turns down an outside pitch reports that approach to their own
+        // leadership, including who made it: loyalty keeps the organization informed even when
+        // membership does not move. The defector case above stays deliberately silent about the
+        // destination because a departing member tells nobody.
+        (RecruitmentOutcome::Refused, Some(current_organization)) => {
+            let current = state
+                .world
+                .get_organization(current_organization)
+                .expect("candidate membership must reference an existing organization");
+            Some(validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: current_organization,
+                    kind: ReportKind::AfterAction,
+                    title: "Personnel approach".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Notable,
+                        summary: format!(
+                            "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
+                            candidate.name(),
+                            current.name(),
+                            recruiter.name(),
+                            organization.name(),
+                            current.name()
+                        ),
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([
+                            EntityRef::Character(plan.draft.candidate),
+                            EntityRef::Character(plan.draft.recruiter),
+                            EntityRef::Organization(plan.draft.target_organization),
+                            EntityRef::Organization(current_organization),
+                        ]),
+                        decision: None,
+                    }],
+                },
+            )?)
+        }
+        (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, None) => None,
     };
     Ok(ValidatedRecruitmentAttempt {
         plan,
@@ -756,7 +793,7 @@ fn validate_recruitment_plan_with_authority(
         reassignment,
         history,
         outcome_information,
-        departure_report,
+        member_report,
     })
 }
 
@@ -767,7 +804,9 @@ pub struct ValidatedRecruitmentAttempt {
     reassignment: Option<ValidatedCharacterReassignment>,
     history: Option<ValidatedHistoryEvent>,
     outcome_information: ValidatedInformation,
-    departure_report: Option<ValidatedReport>,
+    /// Player-facing report to the candidate's organization: the departure notice on an
+    /// accepted defection, or the refused-approach loyalty report when membership holds.
+    member_report: Option<ValidatedReport>,
 }
 
 impl ValidatedRecruitmentAttempt {
@@ -777,7 +816,7 @@ impl ValidatedRecruitmentAttempt {
             budget.push((IdKind::HistoryEvent, 1));
         }
         budget.push((IdKind::Information, 1));
-        if self.departure_report.is_some() {
+        if self.member_report.is_some() {
             budget.push((IdKind::Report, 1));
         }
         budget.push((IdKind::RecruitmentAttempt, 1));
@@ -817,7 +856,7 @@ impl ValidatedRecruitmentAttempt {
             }
         };
         let outcome_information = self.outcome_information.commit(state)?;
-        if let Some(report) = self.departure_report {
+        if let Some(report) = self.member_report {
             report.commit(state)?;
         }
         let id = state.ids.next_recruitment_attempt()?;

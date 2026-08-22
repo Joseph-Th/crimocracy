@@ -594,6 +594,11 @@ struct RunMetrics {
     exposure_score: Option<i16>,
     exposure_level: Option<crimocracy::operations::OperationExposureLevel>,
     investigation_created: bool,
+    /// True once any operation-originated case was staffed during the session, whatever
+    /// operation it came from. District street heat keys off every active operation-originated
+    /// case, so branch-heating contracts must use this session-wide signal rather than the
+    /// burglary's own resolution record.
+    session_case_staffed: bool,
     evidence_count: usize,
     investigation_work_scheduled: u32,
     investigation_work_resolved: u32,
@@ -615,6 +620,9 @@ struct RunMetrics {
     executive_brief_count: usize,
     autonomous_recruitment_attempts: u32,
     player_personnel_departures: u32,
+    /// Refused autonomous poaching approaches against this organization's members. Each one
+    /// produced a player-visible loyalty report naming the outside recruiter.
+    player_poach_warnings: u32,
     defector: Option<crimocracy::core::id::CharacterId>,
     defection_minute: Option<u64>,
     defector_trail_confirmed: Option<bool>,
@@ -679,6 +687,7 @@ struct Aggregate {
     executive_brief_total: u64,
     autonomous_recruitment_attempts: u64,
     player_personnel_departures: u64,
+    player_poach_warnings: u64,
 }
 
 impl Aggregate {
@@ -741,6 +750,7 @@ impl Aggregate {
         self.executive_brief_total += metrics.executive_brief_count as u64;
         self.autonomous_recruitment_attempts += u64::from(metrics.autonomous_recruitment_attempts);
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
+        self.player_poach_warnings += u64::from(metrics.player_poach_warnings);
     }
 
     fn percent(&self, value: u64) -> f64 {
@@ -790,7 +800,7 @@ impl Aggregate {
        pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  cases opened {:>5.1}%  case work {}/{}
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
-       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  departures {:>3}",
+       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -817,6 +827,7 @@ impl Aggregate {
             self.player_report_total,
             self.executive_brief_total,
             self.autonomous_recruitment_attempts,
+            self.player_poach_warnings,
             self.player_personnel_departures,
         );
     }
@@ -1013,6 +1024,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         rush.print("RUSH");
         press.print("PRESS");
         recon.print("RECON");
+        print_convergence_observation(profile, &rush, &press, &recon);
         println!(
             "[BATCH PASS] {} matched-seed checks passed.",
             profile.label()
@@ -1024,7 +1036,11 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("\n--- ARTIFACTS ---");
     let narrative_runs = [(&rush, seed), (&press, seed), (&recon, seed)];
     for (metrics, run_seed) in narrative_runs {
-        let _ = persist_run_artifact(&artifact_dir, run_seed, ScenarioProfile::NightTrap, metrics);
+        if let Ok(path) =
+            persist_run_artifact(&artifact_dir, run_seed, ScenarioProfile::NightTrap, metrics)
+        {
+            println!("[ARTIFACT] wrote {}", path.display());
+        }
     }
     // Also capture the batch aggregate summary.
     {
@@ -1837,6 +1853,7 @@ fn run_strategy_batch(
     let mut rush_aggregate = Aggregate::default();
     let mut press_aggregate = Aggregate::default();
     let mut recon_aggregate = Aggregate::default();
+    let mut artifacts_written = 0_u64;
     for offset in 0..samples {
         let sample_seed = seed.wrapping_add(offset + 1);
         let rush = play_session(registry, Strategy::Rush, profile, sample_seed, false, true)?;
@@ -1850,13 +1867,25 @@ fn run_strategy_batch(
         validate_strategy_evidence(profile, &recon)?;
         validate_branch_financial_isolation(&rush, &press, &recon)?;
         if let Some(dir) = artifact_dir {
-            let _ = persist_run_artifact(dir, sample_seed, profile, &rush);
-            let _ = persist_run_artifact(dir, sample_seed, profile, &press);
-            let _ = persist_run_artifact(dir, sample_seed, profile, &recon);
+            // Batch runs summarize persistence instead of printing one line per file: the
+            // per-run seeds and raw metrics land on disk either way.
+            for metrics in [&rush, &press, &recon] {
+                if persist_run_artifact(dir, sample_seed, profile, metrics).is_ok() {
+                    artifacts_written += 1;
+                }
+            }
         }
         rush_aggregate.add(&rush);
         press_aggregate.add(&press);
         recon_aggregate.add(&recon);
+    }
+    if let Some(dir) = artifact_dir {
+        println!(
+            "[ARTIFACT] wrote {} {} run artifact(s) to {}",
+            artifacts_written,
+            profile.label(),
+            dir.display()
+        );
     }
     if samples >= MIN_SAMPLES_FOR_VARIATION_CONTRACT {
         let observed = rush_aggregate.fixture_variations.len();
@@ -1883,9 +1912,12 @@ fn validate_branch_financial_isolation(
     // campaign-day boundary (`maybe_capture_matched_financials`), and the contract below is
     // window-honest by construction:
     //   1. legitimate business economics are isolated from legal state: identical everywhere;
-    //   2. branches without a created investigation share identical enterprise economics;
-    //   3. a branch whose investigation went active pays the district heat surcharge, so its
-    //      enterprise net never exceeds an unheated branch's over the same window.
+    //   2. branches without any staffed operation-originated case share identical enterprise
+    //      economics;
+    //   3. a branch with a staffed case pays the district heat surcharge, so its enterprise net
+    //      never exceeds an unheated branch's over the same window. The heating signal is
+    //      session-wide (`session_case_staffed`) because casing itself can be made: a
+    //      surveillance-originated case heats the home district exactly like a burglary's.
     let matched = |run: &RunMetrics| {
         let strategy = run.strategy.expect("run must record its strategy");
         match (
@@ -1916,9 +1948,9 @@ fn validate_branch_financial_isolation(
     }
 
     let branches = [
-        (rush.investigation_created, rush_enterprise),
-        (press.investigation_created, press_enterprise),
-        (recon.investigation_created, recon_enterprise),
+        (rush.session_case_staffed, rush_enterprise),
+        (press.session_case_staffed, press_enterprise),
+        (recon.session_case_staffed, recon_enterprise),
     ];
     let unheated_nets: Vec<i64> = branches
         .iter()
@@ -1961,7 +1993,7 @@ fn persist_run_artifact(
     seed: u64,
     profile: ScenarioProfile,
     metrics: &RunMetrics,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<PathBuf, Box<dyn Error>> {
     fs::create_dir_all(dir)?;
     let strategy_label = metrics
         .strategy
@@ -2002,6 +2034,8 @@ fn persist_run_artifact(
         "matched_enterprise_net_cents": metrics.matched_enterprise_net_cents,
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
+        "player_poach_warnings": metrics.player_poach_warnings,
+        "session_case_staffed": metrics.session_case_staffed,
         "raw": {
             "second_opportunity_discovered": metrics.second_opportunity_discovered,
             "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),
@@ -2009,8 +2043,7 @@ fn persist_run_artifact(
         }
     });
     fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
-    println!("[ARTIFACT] wrote {}", path.display());
-    Ok(())
+    Ok(path)
 }
 
 fn play_session(
@@ -4435,6 +4468,9 @@ fn observe_tick(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
+    if !outcome.staffed_investigations.is_empty() {
+        metrics.session_case_staffed = true;
+    }
     if narrative {
         for operation in &outcome.started_operations {
             let record = scenario
@@ -4662,13 +4698,20 @@ fn observe_tick(
             .recruitment()
             .get_attempt(*attempt)
             .expect("autonomous recruitment attempt must persist");
-        if attempt.previous_organization() == Some(scenario.player)
-            && attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Accepted
-        {
-            metrics.player_personnel_departures =
-                metrics.player_personnel_departures.saturating_add(1);
-            metrics.defector = Some(attempt.candidate());
-            metrics.defection_minute = Some(outcome.now.as_minutes());
+        if attempt.previous_organization() == Some(scenario.player) {
+            match attempt.outcome() {
+                crimocracy::recruitment::RecruitmentOutcome::Accepted => {
+                    metrics.player_personnel_departures =
+                        metrics.player_personnel_departures.saturating_add(1);
+                    metrics.defector = Some(attempt.candidate());
+                    metrics.defection_minute = Some(outcome.now.as_minutes());
+                }
+                // The member stayed loyal and reported the pitch through the production
+                // loyalty-report path; the organization now knows it was targeted and by whom.
+                crimocracy::recruitment::RecruitmentOutcome::Refused => {
+                    metrics.player_poach_warnings = metrics.player_poach_warnings.saturating_add(1);
+                }
+            }
         }
         if narrative {
             let recruiter = scenario
@@ -4702,6 +4745,30 @@ fn observe_tick(
                 attempt.factors().trait_adjustment(),
             );
             narrate_recruitment_causality(scenario, metrics, attempt, candidate);
+            if attempt.previous_organization() == Some(scenario.player)
+                && attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Refused
+            {
+                // Quote the loyalty report the production path delivered to the player, so the
+                // narrative shows the organization's own information rather than a reconstruction.
+                if let Some(report) =
+                    scenario
+                        .state
+                        .reports()
+                        .reports_for(scenario.player)
+                        .find(|report| {
+                            report.title() == "Personnel approach"
+                                && report.generated_at() == outcome.now
+                        })
+                {
+                    for entry in report.entries() {
+                        println!(
+                            "[POACH WARNING] {}: {}",
+                            stamp(outcome.now.as_minutes()),
+                            entry.summary
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -5615,7 +5682,7 @@ fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics.variation.expect("fixture variation must be set").label(),
         terminal_label(metrics),
@@ -5646,6 +5713,7 @@ fn print_metrics(metrics: &RunMetrics) {
         metrics.player_report_count,
         metrics.executive_brief_count,
         metrics.autonomous_recruitment_attempts,
+        metrics.player_poach_warnings,
         metrics.player_personnel_departures,
         optional_cents(metrics.legitimate_net_cents),
         optional_cents(metrics.enterprise_net_cents),
@@ -5676,6 +5744,39 @@ fn print_metrics(metrics: &RunMetrics) {
 
 fn optional_cents(value: Option<i64>) -> String {
     value.map_or_else(|| "-".to_owned(), |cents| format!("{cents}c"))
+}
+
+/// A sensitivity profile earns its place by making at least one policy treatment behave
+/// differently from the others. When every strategy converges on the same outcome mix with no
+/// police pressure, say so explicitly: that is evidence about the scenario's discrimination, not
+/// a failure, but a reader should not have to infer it from three identical blocks.
+fn print_convergence_observation(
+    profile: ScenarioProfile,
+    rush: &Aggregate,
+    press: &Aggregate,
+    recon: &Aggregate,
+) {
+    let outcome_mix = |aggregate: &Aggregate| {
+        (
+            aggregate.achieved,
+            aggregate.partial,
+            aggregate.failed,
+            aggregate.aborted,
+        )
+    };
+    let converged = outcome_mix(rush) == outcome_mix(press)
+        && outcome_mix(press) == outcome_mix(recon)
+        && rush.police_arrived == press.police_arrived
+        && press.police_arrived == recon.police_arrived;
+    if converged {
+        println!(
+            "[OBSERVATION] {}: all strategies converged ({}/{} achieved, {} police arrivals). Under this scenario the patrol timing removes the information decision, so policy choice carries no leverage here; treat this block as a control, not a contrast.",
+            profile.label(),
+            rush.achieved,
+            rush.samples,
+            rush.police_arrived,
+        );
+    }
 }
 
 fn optional_minute(value: Option<u64>) -> String {
@@ -5792,19 +5893,31 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         rush.legitimate_net_cents == press.legitimate_net_cents
             && press.legitimate_net_cents == recon.legitimate_net_cents
     };
-    let (press_enterprise_window, recon_enterprise_window) = match (
-        press.matched_enterprise_net_cents,
-        recon.matched_enterprise_net_cents,
-    ) {
-        (Some(press_matched), Some(recon_matched)) => (press_matched, recon_matched),
-        _ => (
-            press.enterprise_net_cents.unwrap_or(0),
-            recon.enterprise_net_cents.unwrap_or(0),
-        ),
+    // Any branch that drew a case pays district heat; the checkpoint shows when a heated
+    // branch demonstrably earned less than an unheated one over the same matched window. With
+    // casing risk live, more than one branch can be heated, so compare against any unheated
+    // branch rather than hard-coding RECON as the clean control.
+    let enterprise_window = |run: &RunMetrics| {
+        run.matched_enterprise_net_cents
+            .or(run.enterprise_net_cents)
     };
-    let enterprise_heat_shown = press_enterprise_window < recon_enterprise_window
-        && press.investigation_created
-        && !recon.investigation_created;
+    let heat_branches = [
+        (rush.session_case_staffed, enterprise_window(rush)),
+        (press.session_case_staffed, enterprise_window(press)),
+        (recon.session_case_staffed, enterprise_window(recon)),
+    ];
+    let heated_nets: Vec<i64> = heat_branches
+        .iter()
+        .filter_map(|(heated, net)| if *heated { *net } else { None })
+        .collect();
+    let unheated_nets: Vec<i64> = heat_branches
+        .iter()
+        .filter_map(|(heated, net)| if *heated { None } else { *net })
+        .collect();
+    let enterprise_heat_shown = !heated_nets.is_empty()
+        && unheated_nets
+            .iter()
+            .any(|unheated| heated_nets.iter().any(|heated| heated < unheated));
     print_loop_checkpoint(
         "routine",
         legitimate_isolated,
@@ -5836,6 +5949,14 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         terminal_label(rush),
     );
     println!(
+        "  - Information risk: RECON's own casing can be made — surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}.",
+        if recon.session_case_staffed && !recon.investigation_created {
+            "; this fixture's recon run drew exactly that kind of case from its own surveillance"
+        } else {
+            ", which this fixture's skilled scout in a quiet district avoided"
+        },
+    );
+    println!(
         "  - Exception leverage: PRESS chose Continue at {} surfaced decision(s); RUSH chose Abort through its standing contingency, producing {} versus {}.",
         press.decision_requests,
         terminal_label(press),
@@ -5847,13 +5968,13 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; over the same campaign-day window enterprise heat cut gambling net to {} versus RECON's {}, then recovered after the shelf; RECON realized {} of resale cash via a low-police venue.",
+        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; over the same campaign-day window enterprise heat cut gambling net to {} while an unheated branch earned {}; RECON realized {} of resale cash via a low-police venue.",
         press.evidence_count,
         press.player_legal_activity_information,
         press.counterintelligence_scheduled_at.unwrap_or_default(),
         press.case_cold_minute.unwrap_or_default(),
-        optional_dollars(Some(press_enterprise_window)),
-        optional_dollars(Some(recon_enterprise_window)),
+        optional_dollars(enterprise_window(press)),
+        optional_dollars(enterprise_window(rush).or_else(|| enterprise_window(recon))),
         optional_dollars(recon.property_realized_cash_cents),
     );
     println!(
@@ -5874,7 +5995,7 @@ fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMe
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
     );
     println!(
-        "  - A defector's destination is discoverable only through the player's own surveillance watch; there is still no modeled way to pre-empt a defection, win a member back, or retaliate. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
+        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; winning a member back or retaliating after a defection is still not modeled. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
         "  - The delegation pillar now carries real weight in the narrative arc: PRESS re-scopes its lieutenant's mandate mid-crisis to open a second district. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."
@@ -6408,6 +6529,9 @@ mod tests {
         let mut metrics = RunMetrics {
             strategy: Some(strategy),
             investigation_created,
+            // A burglary-originated case is by definition a staffed session case, so the
+            // heating signal and the burglary resolution record move together in fixtures.
+            session_case_staffed: investigation_created,
             matched_financial_boundary_minute: Some(2_880),
             ..RunMetrics::default()
         };
@@ -6416,6 +6540,27 @@ mod tests {
             metrics.matched_enterprise_net_cents = Some(enterprise);
         }
         metrics
+    }
+
+    #[test]
+    fn surveillance_originated_case_heats_only_its_own_branch() {
+        let mut rush = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        let press = branch_metrics(Strategy::Press, false, Some((19_775, 45_120)));
+        let recon = branch_metrics(Strategy::Recon, false, Some((19_775, 45_120)));
+        // A casing case staffed in one branch must carry the same heat guarantee as a
+        // burglary case: it may never out-earn an unheated branch over the shared window.
+        rush.session_case_staffed = true;
+        rush.matched_enterprise_net_cents = Some(46_120);
+        assert!(
+            validate_branch_financial_isolation(&rush, &press, &recon).is_err(),
+            "a cased branch must not out-earn unheated branches on the session-wide signal"
+        );
+        // A case opened after the boundary flags heating without changing that window's net;
+        // equal-to-unheated nets stay within the contract's heat-only-lowers guarantee.
+        let mut post_boundary = branch_metrics(Strategy::Rush, false, Some((19_775, 45_120)));
+        post_boundary.session_case_staffed = true;
+        validate_branch_financial_isolation(&post_boundary, &press, &recon)
+            .expect("post-boundary case staffing must not violate the matched-window contract");
     }
 
     #[test]

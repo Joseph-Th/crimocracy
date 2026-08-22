@@ -1028,6 +1028,74 @@ fn strong_incumbent_attachment_can_produce_refusal_without_membership_mutation()
 }
 
 #[test]
+fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state);
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("refusal should validate")
+        .commit(&mut fixture.state)
+        .expect("refusal should persist without moving candidate");
+    // A loyal member reports the outside pitch to their own leadership, so the organization
+    // learns both that it happened and who made it — without any membership change.
+    let approach_reports: Vec<_> = fixture
+        .state
+        .reports()
+        .reports_for(fixture.source)
+        .filter(|report| report.title() == "Personnel approach")
+        .collect();
+    assert_eq!(approach_reports.len(), 1);
+    assert_eq!(approach_reports[0].entries().len(), 1);
+    assert_eq!(
+        approach_reports[0].entries()[0].attention,
+        AttentionClass::Notable
+    );
+    let recruiter_name = fixture
+        .state
+        .world()
+        .get_character(fixture.recruiter)
+        .expect("recruiter should persist")
+        .name()
+        .to_owned();
+    let target_name = fixture
+        .state
+        .world()
+        .get_organization(fixture.target)
+        .expect("target organization should persist")
+        .name()
+        .to_owned();
+    let summary = &approach_reports[0].entries()[0].summary;
+    assert!(summary.contains("turned the approach down"));
+    assert!(summary.contains(&recruiter_name));
+    assert!(summary.contains(&target_name));
+    let entities = &approach_reports[0].entries()[0].entities;
+    assert!(entities.contains(&EntityRef::Character(fixture.candidate)));
+    assert!(entities.contains(&EntityRef::Character(fixture.recruiter)));
+    assert!(entities.contains(&EntityRef::Organization(fixture.target)));
+    assert!(entities.contains(&EntityRef::Organization(fixture.source)));
+    validate_state(&fixture.state).expect("refused-approach state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn recruitment_cooldown_blocks_spam_and_allows_a_later_social_reassessment() {
     let mut accepted_fixture = fixture();
     let draft = protection_draft(&accepted_fixture);

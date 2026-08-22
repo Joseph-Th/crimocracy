@@ -26,7 +26,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 22;
+pub const CURRENT_CONTENT_REVISION: u32 = 23;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -520,7 +520,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::Hijacking => (35, 50, 45, 48),
         OperationKind::Smuggling => (90, 48, 35, 35),
         OperationKind::Intimidation => (20, 42, 25, 42),
-        OperationKind::Surveillance => (120, 40, 20, 24),
+        OperationKind::Surveillance => (120, 40, 20, 50),
         OperationKind::WitnessPressure => (30, 50, 35, 48),
         OperationKind::DocumentTheft => (30, 50, 40, 36),
         OperationKind::GamblingEvent => (180, 38, 30, 45),

@@ -24,7 +24,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Opportunities | Information-backed discovery and open/dismissed/expired/converted lifecycle | `src/opportunities/` via `opportunity_system` |
 | Decisions | Durable typed requests, recipient/context indexes, versioned resolution, attention classes | `src/decisions/` via `decision_system` |
 | Delegation | Organization-owned mandates, responsibility scopes, policy overrides, budget authority, revision, revocation, dependency checks | `src/delegation/` via `delegation_system` |
-| Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment | `src/recruitment/` via `recruitment_system` |
+| Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment, refused-approach loyalty reporting to the candidate's organization | `src/recruitment/` via `recruitment_system` |
 | Enterprises | Routine criminal enterprises, authored economics, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement, financial reporting | `src/enterprises/` via `enterprise_execution` and reporting modules |
 | Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting | `src/economy/` via `business_economy_system` and reporting modules |
 | Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing, detective work, witness interviews and named testimony, cold cases, autonomous evidence-threshold arrests/custody, detainee informant recruitment and disclosures, representation, prosecution referral | `src/legal/` via named legal system modules |
@@ -56,7 +56,7 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 22.
+The current authored content revision is 23.
 
 The current in-memory state schema version is 50.
 
