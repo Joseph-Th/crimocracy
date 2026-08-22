@@ -26,7 +26,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment | `src/recruitment/` via `recruitment_system` |
 | Enterprises | Routine criminal enterprises, authored economics, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement, financial reporting | `src/enterprises/` via `enterprise_execution` and reporting modules |
 | Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting | `src/economy/` via `business_economy_system` and reporting modules |
-| Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing, detective work, cold cases, arrests/custody, representation, prosecution referral, witnesses, informants | `src/legal/` via named legal system modules |
+| Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing, detective work, witness interviews and named testimony, cold cases, autonomous evidence-threshold arrests/custody, representation, prosecution referral, witnesses, informants | `src/legal/` via named legal system modules |
 | Institutional contacts | Person-mediated Police, Legal, Political, Press, Labor, and Professional channels with provenance-preserving disclosure | `src/contacts/` via `contact_system` |
 
 ## Cross-cutting guarantees
@@ -55,8 +55,8 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 20.
+The current authored content revision is 21.
 
-The current in-memory state schema version is 46.
+The current in-memory state schema version is 47.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Unsupported tactical axes are not represented as inert plan fields.

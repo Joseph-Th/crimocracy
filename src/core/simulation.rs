@@ -51,6 +51,7 @@ pub struct TickOutcome {
     pub scheduled_investigation_work: Vec<InvestigationWorkId>,
     pub scheduled_witness_interviews: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
+    pub evidence_arrests: Vec<crate::core::id::ArrestId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
@@ -174,6 +175,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated investigation work must commit atomically");
         resolved_investigation_work.push(resolved);
     }
+    // The police institution converts accumulated case evidence into custody after detective
+    // work resolves, so an interview or forensic analysis finishing this minute is visible to
+    // the same minute's arrest decision.
+    let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
+        .expect("valid state should convert qualifying case evidence into custody");
     // Cold-case decay runs after detective work resolution so the case's last-activity instant is
     // final for the minute; an authored institutional-inactivity window then shelves operation-
     // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
@@ -248,6 +254,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         scheduled_investigation_work,
         scheduled_witness_interviews: witness_interviews,
         resolved_investigation_work,
+        evidence_arrests,
         business_cycles,
         enterprise_cycles,
         recruitment_attempts,

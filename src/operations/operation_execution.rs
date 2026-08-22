@@ -3543,6 +3543,7 @@ mod tests {
             .resolution()
             .expect("resolution should persist")
             .exposure();
+        let suspect = exposure.identified_character();
         assert!(
             exposure.level() as i32 >= 2,
             "an intimidating shakedown at a quiet ward must at least be witnessed"
@@ -3559,35 +3560,9 @@ mod tests {
             .collect();
         assert_eq!(witnesses, vec![owner]);
 
-        // Once staffing assigns the detective, the tick schedules an interview whose success
-        // records real testimony evidence through the witness-statement path.
-        loop {
-            let outcome = run_tick(&registry, &mut state);
-            let has_statement = state
-                .legal()
-                .case_witness_for(investigation, owner)
-                .is_some_and(|witness| !witness.statements().is_empty());
-            if has_statement {
-                break;
-            }
-            assert!(
-                outcome.now.as_minutes() < 20_000,
-                "the interview pipeline should produce a statement well before this bound"
-            );
-        }
-        let case_witness = state
-            .legal()
-            .case_witness_for(investigation, owner)
-            .expect("witness record should persist");
-        assert_eq!(
-            case_witness.cooperation(),
-            crate::legal::WitnessCooperation::Reluctant,
-            "a presence-30 ward leaves the witness reluctant"
-        );
-        assert_eq!(case_witness.statements().len(), 1);
-
-        // Witness pressure against that same witness is now authorizable, and its success
-        // degrades cooperation one step on the active case.
+        // Witness pressure against that same witness is now authorizable while the crew's
+        // exposed leader is still free: authorizing it before testimony lands also books
+        // him, which legally blocks the institution from arresting mid-operation.
         let _pressure = validate_authorize_operation(
             &registry,
             &state,
@@ -3610,21 +3585,52 @@ mod tests {
         .expect("pressure against a named witness should validate")
         .commit(&mut state)
         .expect("pressure operation should commit");
-        loop {
+
+        // Drive the pipeline: staffing schedules the interview whose success records real
+        // testimony through the witness-statement path; the pressure operation resolves and
+        // degrades cooperation one step; once the leader's crew work is terminal and his
+        // case holds corroborated testimony, the precinct arrests him through the canonical
+        // validated path.
+        let suspect = suspect.expect("an identifying shakedown must expose a specific participant");
+        let arrested_at = loop {
             let outcome = run_tick(&registry, &mut state);
-            if !outcome.resolved_operations.is_empty() {
-                break;
+            let has_statement = state
+                .legal()
+                .case_witness_for(investigation, owner)
+                .is_some_and(|witness| !witness.statements().is_empty());
+            if let Some(arrest) = state.legal().active_arrest_for_character(suspect) {
+                assert!(
+                    has_statement,
+                    "custody must not precede the corroborating witness statement"
+                );
+                break arrest.id();
             }
-        }
+            assert!(
+                outcome.now.as_minutes() < 20_000,
+                "the pipeline should reach custody well before this bound"
+            );
+        };
         let pressured = state
             .legal()
             .case_witness_for(investigation, owner)
             .expect("witness record should persist");
-        assert_ne!(
+        assert_eq!(pressured.statements().len(), 1);
+        assert_eq!(
             pressured.cooperation(),
-            crate::legal::WitnessCooperation::Reluctant,
-            "successful witness pressure must move cooperation off its prior step"
+            crate::legal::WitnessCooperation::Hostile,
+            "successful witness pressure must have moved cooperation off reluctant"
         );
+        let arrest_record = state
+            .legal()
+            .get_arrest(arrested_at)
+            .expect("arrest persists");
+        assert_eq!(arrest_record.character(), suspect);
+        assert_eq!(arrest_record.authority(), police);
+        assert!(
+            arrest_record.evidence().len() >= 2,
+            "custody requires corroboration beyond a single item"
+        );
+
         validate_state(&state).expect("witness pipeline state should remain valid");
         validate_invariants(&state);
     }

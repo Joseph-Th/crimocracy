@@ -346,6 +346,118 @@ pub fn validate_release_arrest(
     })
 }
 
+/// Evidence bar for the autonomous conversion step: at least two qualifying items, at
+/// least one of them Strong or Direct. Qualifying evidence targets the subject directly,
+/// is held by the case's own authority, and is neither inadmissible nor weak. This is a
+/// deliberately conservative institutional gate — it consumes case evidence that already
+/// exists; it never generates new leads.
+const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
+
+/// Runs the police institution's evidence-to-custody conversion across operation-originated
+/// cases: when an identified subject has enough admissible non-weak evidence against them,
+/// the owning authority makes the arrest through the canonical validated path. Subjects who
+/// currently hold any non-terminal operation booking are left alone until their work ends.
+pub fn apply_autonomous_evidence_arrests(
+    state: &mut AppState,
+) -> Result<Vec<ArrestId>, ArrestError> {
+    let candidates: Vec<(InvestigationId, CharacterId)> = state
+        .legal()
+        .investigations()
+        .filter(|investigation| {
+            investigation.status() == InvestigationStatus::Active
+                && investigation.origin_operation().is_some()
+        })
+        .flat_map(|investigation| {
+            investigation
+                .subjects()
+                .iter()
+                .filter_map(|subject| match subject {
+                    EntityRef::Character(character) => Some((investigation.id(), *character)),
+                    EntityRef::Organization(_)
+                    | EntityRef::Neighborhood(_)
+                    | EntityRef::Business(_)
+                    | EntityRef::Operation(_)
+                    | EntityRef::Investigation(_)
+                    | EntityRef::Evidence(_)
+                    | EntityRef::FinancialAccount(_)
+                    | EntityRef::DecisionRequest(_)
+                    | EntityRef::Mandate(_)
+                    | EntityRef::Enterprise(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut arrests = Vec::new();
+    for (investigation_id, character) in candidates {
+        // A detained character may not hold any non-terminal operation booking; skip
+        // suspects whose crew work is still live rather than tearing it up mid-flight.
+        let is_booked = [
+            OperationStatus::Authorized,
+            OperationStatus::InProgress,
+            OperationStatus::AwaitingDecision,
+        ]
+        .iter()
+        .any(|status| {
+            state
+                .operations()
+                .operations_with_status(*status)
+                .any(|operation| operation.participants().contains(&character))
+        });
+        if is_booked {
+            continue;
+        }
+        if state.legal.active_arrest_for_character(character).is_some() {
+            continue;
+        }
+
+        let investigation = match state.legal.get_investigation(investigation_id) {
+            Some(investigation) if investigation.status() == InvestigationStatus::Active => {
+                investigation
+            }
+            _ => continue,
+        };
+        let owner = investigation.owner();
+        let qualifying: Vec<EvidenceId> = investigation
+            .evidence()
+            .iter()
+            .filter_map(|id| state.legal.get_evidence(*id))
+            .filter(|evidence| evidence.subject() == EntityRef::Character(character))
+            .filter(|evidence| evidence.custodian() == owner)
+            .filter(|evidence| evidence.strength() != crate::legal::EvidenceStrength::Weak)
+            .filter(|evidence| {
+                evidence.admissibility() != crate::legal::Admissibility::Inadmissible
+            })
+            .map(|evidence| evidence.id())
+            .collect();
+        let has_strong = qualifying.iter().any(|id| {
+            matches!(
+                state
+                    .legal
+                    .get_evidence(*id)
+                    .map(crate::legal::EvidenceRecord::strength),
+                Some(crate::legal::EvidenceStrength::Strong)
+                    | Some(crate::legal::EvidenceStrength::Direct)
+            )
+        });
+        if qualifying.len() < MIN_ARREST_QUALIFYING_EVIDENCE || !has_strong {
+            continue;
+        }
+
+        let arrest = validate_arrest(
+            state,
+            ArrestDraft {
+                character,
+                investigation: investigation_id,
+                evidence: qualifying.into_iter().collect(),
+            },
+        )?
+        .commit(state)?;
+        arrests.push(arrest);
+    }
+    Ok(arrests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
