@@ -18,6 +18,8 @@ use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
 };
 use crimocracy::opportunities::OperationOpportunityDraft;
+use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
+use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome};
 use crimocracy::registry::Registry;
 use crimocracy::reports::ReportKind;
 use crimocracy::world::territory_influence::resolve_neighborhood_influence;
@@ -692,6 +694,12 @@ pub fn play_session(
         if narrative && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
             run_defector_trail(&mut scenario, narrative, &mut metrics)?;
         }
+        // The trail's answer invites one more player move: a personal re-approach to the
+        // defector through the canonical executive recruitment path. Its outcome is production
+        // scoring, not authoring, and a refusal leaks the approach to the rival.
+        if narrative && metrics.defector_trail_confirmed.is_some() {
+            run_win_back_attempt(&mut scenario, narrative, &mut metrics)?;
+        }
         if narrative {
             run_second_act(&mut scenario, strategy, narrative, &mut metrics)?;
         }
@@ -1316,6 +1324,139 @@ pub fn run_defector_trail(
                 "[VERIFY DEFECTOR] None of the watched rivals showed {defector_name}; the personnel watch did not directly confirm where the member landed."
             ),
         }
+    }
+    Ok(())
+}
+
+/// The player's answer to a confirmed defector: one personal re-approach through the canonical
+/// executive recruitment path. Nothing here reads hidden state — the pitch resolves through the
+/// same production scoring the rival's poaching used (recruiter bond versus fresh attachment to
+/// the new organization, plus membership resistance). A refusal carries a real intelligence cost:
+/// production rules deliver a loyalty report to the rival naming our recruiter, so reaching out
+/// tells the rival its poach succeeded and who came asking.
+pub fn run_win_back_attempt(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    let Some(defector) = metrics.defector else {
+        return Ok(());
+    };
+    let defector_name = scenario
+        .state
+        .world()
+        .get_character(defector)
+        .expect("departed character must persist")
+        .name()
+        .to_owned();
+    let boss_name = scenario
+        .state
+        .world()
+        .get_character(scenario.boss)
+        .expect("boss must persist")
+        .name()
+        .to_owned();
+    let player_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.player)
+        .expect("player organization must persist")
+        .name()
+        .to_owned();
+    let rival_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.rival)
+        .expect("rival organization must persist")
+        .name()
+        .to_owned();
+    if narrative {
+        println!(
+            "[DECIDE]  {boss_name} makes one personal appeal to {defector_name}: come home to {player_name}."
+        );
+    }
+    let attempt_at = scenario.state.now();
+    let attempt = validate_recruitment_attempt(
+        scenario.registry,
+        &scenario.state,
+        RecruitmentDraft {
+            target_organization: scenario.player,
+            recruiter: scenario.boss,
+            candidate: defector,
+            approach: RecruitmentApproach::PersonalAppeal,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let record = scenario
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("committed win-back attempt must be queryable");
+    let accepted = record.outcome() == RecruitmentOutcome::Accepted;
+    metrics.win_back_attempted = true;
+    metrics.win_back_accepted = Some(accepted);
+    metrics.win_back_margin = Some(record.margin());
+    if narrative {
+        println!(
+            "[NARRATION] The {:?} pitch resolved at margin {}: {boss_name}'s old bond pulls one way; {defector_name}'s fresh attachment to {}'s protection and ordinary membership resistance pull the other.",
+            record.approach(),
+            record.margin(),
+            rival_name,
+        );
+        println!(
+            "[DEV AUDIT] Win-back factors: drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, membership resistance {}, trait adjustment {}.",
+            record.factors().drive_alignment(),
+            record.factors().relationship_support(),
+            record.factors().incumbent_attachment(),
+            record.factors().incumbent_resentment(),
+            record.factors().membership_resistance(),
+            record.factors().trait_adjustment(),
+        );
+    }
+    if accepted {
+        let membership = scenario
+            .state
+            .world()
+            .get_character(defector)
+            .expect("defector must persist")
+            .organization();
+        debug_assert_eq!(
+            membership,
+            Some(scenario.player),
+            "an accepted win-back must move membership back through the canonical reassignment"
+        );
+        if narrative {
+            println!(
+                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again — and both organizations now know exactly how much his loyalty is worth."
+            );
+        }
+        return Ok(());
+    }
+    // Refusal cost: the production loyalty-report path tells the candidate's current
+    // organization who tried to recruit them. Audit-only here — the acting policy never reads
+    // rival reports — but the narration may explain the mechanism because it follows from the
+    // player-visible refusal itself.
+    let leaked = scenario
+        .state
+        .reports()
+        .reports_for(scenario.rival)
+        .any(|report| {
+            report.title() == "Personnel approach" && report.generated_at() == attempt_at
+        });
+    metrics.win_back_refusal_leaked_to_rival = Some(leaked);
+    if narrative {
+        if leaked {
+            println!(
+                "[DEV AUDIT] Production rules delivered {defector_name}'s loyalty report to {rival_name} leadership naming {boss_name}: the refusal itself told the rival its poach succeeded and who came asking."
+            );
+        } else {
+            println!(
+                "[DEV AUDIT] No loyalty report reached {rival_name} for this refusal; the leak contract expects one through the canonical path."
+            );
+        }
+        println!(
+            "[WIN BACK]  {defector_name} stayed with {rival_name}. The door closed politely — and {player_name} paid for the knock with a piece of its own cover."
+        );
     }
     Ok(())
 }

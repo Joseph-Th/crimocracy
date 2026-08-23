@@ -167,6 +167,41 @@ pub fn validate_defector_trail_evidence(metrics: &RunMetrics) -> Result<(), Harn
     }
 }
 
+/// Full-mode narrative sessions must close the personnel loop end to end: whenever a departure
+/// actually happened and the defector trail confirmed a landing spot, leadership must make the
+/// one canonical executive re-approach. A refused re-approach must surface its intelligence cost
+/// — the production loyalty report the rival receives naming our recruiter. A session without a
+/// departure must not fabricate a win-back.
+pub fn validate_win_back_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    let strategy = metrics
+        .strategy
+        .ok_or(HarnessContractError::MissingStrategy)?;
+    if metrics.player_personnel_departures == 0 {
+        if !metrics.win_back_attempted {
+            return Ok(());
+        }
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "a session without an autonomous departure must not attempt a win-back",
+        });
+    }
+    if !metrics.win_back_attempted || metrics.win_back_accepted.is_none() {
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "after a confirmed defector trail, leadership must attempt the canonical executive win-back re-approach",
+        });
+    }
+    match metrics.win_back_accepted {
+        Some(true) => Ok(()),
+        Some(false) if metrics.win_back_refusal_leaked_to_rival == Some(true) => Ok(()),
+        Some(false) => Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "a refused win-back must surface its intelligence cost through the production loyalty report delivered to the recruiting organization",
+        }),
+        None => unreachable!("an attempted win-back always records its outcome"),
+    }
+}
+
 /// Full-mode narrative sessions must close the second-wind arc through canonical production paths:
 /// every branch discovers the reopened second score at the same minute, then either rebuilds and
 /// recovers value from it (RUSH via executive recruitment + morning-lull hit, RECON via fresh

@@ -566,6 +566,16 @@ pub struct RunMetrics {
     pub defector: Option<crimocracy::core::id::CharacterId>,
     pub defection_minute: Option<u64>,
     pub defector_trail_confirmed: Option<bool>,
+    /// Win-back evidence: once the trail confirmed where a defector landed, leadership made one
+    /// canonical executive re-approach through the recruitment path.
+    pub win_back_attempted: bool,
+    /// Whether that re-approach was accepted; `None` when no attempt was made.
+    pub win_back_accepted: Option<bool>,
+    /// The authored margin the win-back attempt resolved at, quoted from the attempt record.
+    pub win_back_margin: Option<i16>,
+    /// On refusal, production rules deliver a loyalty report to the recruiting organization
+    /// naming our recruiter: reaching out carries an intelligence cost. `None` when not refused.
+    pub win_back_refusal_leaked_to_rival: Option<bool>,
     // Act-2 (second wind) evidence: the narrative branches either rebuild and recover value on a
     // reopened second score or deliberately let it lapse as the price of standing down.
     pub second_opportunity: Option<OpportunityId>,

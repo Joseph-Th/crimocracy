@@ -716,6 +716,14 @@ pub fn print_metrics(metrics: &RunMetrics) {
             optional_cents(metrics.expansion_net_cents),
         );
     }
+    if metrics.win_back_attempted {
+        println!(
+            "        win-back: attempted (accepted {:?}, margin {:?}), refusal leak to rival {:?}",
+            metrics.win_back_accepted,
+            metrics.win_back_margin,
+            metrics.win_back_refusal_leaked_to_rival,
+        );
+    }
 }
 
 pub fn optional_cents(value: Option<i64>) -> String {
@@ -861,6 +869,15 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         defector_trail_shown,
         "after a departure, the organization can confirm where the defector landed through its own canonical surveillance channel instead of the report leaking the rival",
     );
+    let win_back_shown = rush.win_back_attempted
+        && press.win_back_attempted
+        && rush.win_back_accepted.is_some()
+        && !recon.win_back_attempted;
+    print_loop_checkpoint(
+        "win-back",
+        win_back_shown,
+        "after confirming where a defector landed, leadership can make one canonical executive re-approach; the pitch resolves through production scoring, and a refusal leaks the approach to the rival through the loyalty report that names the outside recruiter",
+    );
     // Window honesty: compare branches at their shared campaign-day boundary when both captured
     // it, because the PRESS narrative arc deliberately runs longer than RUSH/RECON and raw
     // cumulative totals over different observation lengths are not comparable.
@@ -977,7 +994,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
     );
     println!(
-        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; winning a member back or retaliating after a defection is still not modeled. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
+        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways — surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
         "  - The delegation pillar now carries real weight in the narrative arc: PRESS re-scopes its lieutenant's mandate mid-crisis to open a second district. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."

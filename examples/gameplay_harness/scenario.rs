@@ -328,6 +328,27 @@ pub fn build_scenario(
     )?
     .commit(&mut state);
 
+    // The burglar also carries an older personal bond to the boss himself: Carlo vouched for
+    // him, but Marrow is the one who pulled him out of trouble years ago. Act-1 rival poaching
+    // never reads this edge (its factors use only candidate-to-recruiter and
+    // candidate-to-incumbent), so it exists solely so a player-authored win-back re-approach
+    // has a real recruiter relationship to stand on.
+    validate_set_relationship(
+        &state,
+        burglar,
+        boss,
+        RelationshipDimensions {
+            trust: level(55),
+            respect: level(45),
+            fear: level(10),
+            affection: level(40),
+            dependence: level(0),
+            resentment: level(0),
+            debt: level(20),
+        },
+    )?
+    .commit(&mut state);
+
     // Danny's pitch leverages a long-standing personal debt to Marrow, so the relationship edges
     // run from the candidate to the recruiter and the executive recruitment path stays canonical.
     // The margin calculation reads only this authored relationship plus the registry definitions.

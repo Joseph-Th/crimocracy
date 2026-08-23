@@ -75,7 +75,10 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             ScenarioProfile::NightTrap,
             seed,
             false,
-            false,
+            // Observe the whole first campaign day, not just the operation: smoke evidence must
+            // include the rival's autonomous recruitment pass and its consequences instead of
+            // structurally zeroed personnel counters.
+            true,
         )?;
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
@@ -171,6 +174,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_defector_trail_evidence(&rush)?;
     validate_defector_trail_evidence(&press)?;
     validate_defector_trail_evidence(&recon)?;
+    validate_win_back_evidence(&rush)?;
+    validate_win_back_evidence(&press)?;
+    validate_win_back_evidence(&recon)?;
     validate_second_act_evidence(&rush)?;
     validate_second_act_evidence(&press)?;
     validate_second_act_evidence(&recon)?;
