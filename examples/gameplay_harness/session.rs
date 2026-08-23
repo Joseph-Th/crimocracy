@@ -1,6 +1,8 @@
 //! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
 
-use crimocracy::contacts::contact_system::validate_contact_disclosure;
+use crimocracy::contacts::contact_system::{
+    pending_disclosure_sources, validate_contact_disclosure,
+};
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{OperationId, OrganizationId};
 use crimocracy::core::simulation::run_tick;
@@ -22,6 +24,71 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 use crate::*;
+
+/// The standing police-contact channel, used the way a player uses it: ask the handler what the
+/// contact can tell us, then hear one fresh item through the canonical disclosure path. Returns
+/// the parsed case-activity sightline when the disclosure carried one. The acting policy never
+/// enumerates hidden knowledge — `pending_disclosure_sources` exposes only what the channel
+/// itself offers, and everything the organization learns arrives as a derived information record.
+pub fn read_police_contact(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<Option<bool>, Box<dyn Error>> {
+    let sources = pending_disclosure_sources(&scenario.state, scenario.police_contact);
+    let Some(source) = sources.into_iter().find(|source| {
+        scenario
+            .state
+            .intelligence()
+            .get_information(*source)
+            .is_some_and(|information| information.topic() == InformationTopic::LegalActivity)
+    }) else {
+        return Ok(None);
+    };
+    let boss_name = scenario
+        .state
+        .world()
+        .get_character(scenario.boss)
+        .expect("boss must persist")
+        .name()
+        .to_owned();
+    let detective_name = scenario
+        .state
+        .world()
+        .get_character(scenario.detective)
+        .expect("detective must persist")
+        .name()
+        .to_owned();
+    if narrative {
+        println!(
+            "[CONTACT] {boss_name} quietly asks {detective_name} what the precinct is doing about it."
+        );
+    }
+    let disclosure = validate_contact_disclosure(&scenario.state, scenario.police_contact, source)?
+        .commit(&mut scenario.state)?;
+    metrics.contact_reads += 1;
+    let disclosed = scenario
+        .state
+        .contacts()
+        .get_disclosure(disclosure)
+        .expect("committed contact disclosure must be queryable")
+        .disclosed_information();
+    let record = scenario
+        .state
+        .intelligence()
+        .get_information(disclosed)
+        .expect("disclosed contact information must persist");
+    let read = observe_authority_case_sightline_summary(record.summary());
+    if narrative {
+        println!(
+            "[LEARN]   {:?} / {:?}: {}",
+            record.reliability(),
+            record.specificity(),
+            record.summary()
+        );
+    }
+    Ok(read)
+}
 
 pub fn play_session(
     registry: &Registry,
@@ -488,12 +555,12 @@ pub fn play_session(
                 ),
             }
         }
-        // The narrative session waits out the authored cold-case window and re-checks the
-        // precinct through the same player-visible surveillance channel. Batch sessions observe
-        // one day and stop while the case is still hot, keeping the matched financial window intact.
-        // The re-check lands just past the authored inactivity window plus the initial evidence
-        // review the authority runs, so session timing tracks registry content instead of
-        // hard-coded minutes drifting from authored content.
+        // The narrative session stands down but does not go deaf: once per campaign day the
+        // organization asks its precinct contact what the institution knows. The lead
+        // detective's own knowledge is production state — recorded when he took the case and
+        // refreshed when the authority shelves it — so each new development arrives as a fresh,
+        // disclosable record through the canonical channel. Batch sessions observe one day and
+        // stop while the case is still hot, keeping the matched financial window intact.
         if narrative {
             let case_open_minute = metrics
                 .case_open_minute
@@ -507,15 +574,14 @@ pub fn play_session(
                 .registry
                 .get_investigation_work(InvestigationWorkKind::PatternAnalysis)
                 .duration();
-            // The inactivity window may be extended by any work that touches the case. Use the
-            // longest authored work duration so the estimate covers EvidenceReview (180m) and
-            // PatternAnalysis (360m) without hard-coding either value.
+            // The shelf cannot land before the authored inactivity window plus the initial
+            // evidence review that extends the case's activity instant; start daily polling
+            // from there and keep polling until the channel carries the shelved read.
             let longest_work = evidence_review_duration.max(pattern_analysis_duration);
-            let mut recheck_at = SimTime::from_minutes(
+            let mut poll_at = SimTime::from_minutes(
                 case_open_minute
                     + u64::from(cold_case_window.as_minutes())
-                    + u64::from(longest_work.as_minutes())
-                    + u64::from(COLD_CASE_RECHECK_SLACK_MINUTES),
+                    + u64::from(longest_work.as_minutes()),
             );
             // PRESS notices the reopened second score at the same canonical minute every narrative
             // branch does, while it is still standing down. The branch then deliberately schedules
@@ -545,46 +611,43 @@ pub fn play_session(
                 run_until(&mut scenario, matched_boundary, narrative, &mut metrics)?;
             }
             establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-            run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
-            // The shelf estimate assumes only auto-scheduled work advances the case's
-            // last-activity instant. If some later work or evidence event pushed that
-            // instant past the estimate, extend once by the longest authored work plus slack so
-            // the narrative still observes the deterministic shelf instead of misreading a
-            // still-hot case through its own surveillance.
-            if metrics.case_cold_minute.is_none() {
-                recheck_at = recheck_at
-                    + longest_work
-                    + SimDuration::from_minutes(COLD_CASE_RECHECK_SLACK_MINUTES);
-                run_until(&mut scenario, recheck_at, narrative, &mut metrics)?;
+            if narrative {
+                println!(
+                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only — has anything moved on the case?"
+                );
             }
-            let recheck_title = format!("{police_name} case re-check");
-            let recheck_at = scenario.state.now() + SimDuration::ONE_MINUTE;
-            let recheck = authorize_surveillance_target(
-                &mut scenario,
-                EntityRef::Organization(police),
-                &recheck_title,
-                recheck_at,
-            )?;
-            run_until_operation_terminal(&mut scenario, recheck, narrative, &mut metrics)?;
-            let recheck_operation = scenario
-                .state
-                .operations()
-                .get_operation(recheck)
-                .expect("recheck operation must persist");
-            if let Some(resolution) = recheck_operation.resolution() {
-                metrics.cold_case_confirmed =
-                    observe_authority_case_sightline(&scenario, resolution).map(|active| !active);
+            // Bounded polling loop: the authored cold-case decay guarantees a deterministic shelf,
+            // so the poll terminates when the refreshed investigator knowledge becomes disclosable.
+            for _ in 0..40 {
+                if scenario.state.now() < poll_at {
+                    run_until(&mut scenario, poll_at, narrative, &mut metrics)?;
+                }
+                let read = read_police_contact(&mut scenario, narrative, &mut metrics)?;
+                match read {
+                    Some(false) => {
+                        metrics.cold_case_confirmed = Some(true);
+                        println!(
+                            "[CONSEQUENCE RESOLVED] The channel confirms the precinct shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
+                        );
+                        break;
+                    }
+                    Some(true) => {
+                        println!(
+                            "[VERIFY]  The channel says detectives are still actively developing the case; keep the district dark."
+                        );
+                    }
+                    None => {}
+                }
+                poll_at = poll_at
+                    + SimDuration::from_minutes(
+                        u32::try_from(campaign_day_minutes)
+                            .expect("authored campaign day must fit the duration type"),
+                    );
             }
-            match metrics.cold_case_confirmed {
-                Some(true) => println!(
-                    "[CONSEQUENCE RESOLVED] The precinct has shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
-                ),
-                Some(false) => println!(
-                    "[VERIFY]  The precinct is still developing the case; keep standing down."
-                ),
-                None => println!(
-                    "[VERIFY]  The re-check did not produce a dependable read on the case's activity."
-                ),
+            if metrics.cold_case_confirmed.is_none() {
+                println!(
+                    "[VERIFY]  The channel never produced a dependable read on the case's activity."
+                );
             }
         }
     }
@@ -635,6 +698,9 @@ pub fn play_session(
             run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
         }
         let financials = resolve_financial_view(&scenario)?;
+        let mut financials = financials;
+        financials.payroll_paid_cents = metrics.payroll_paid_cents;
+        financials.payroll_short_cents = metrics.payroll_short_cents;
         metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
         if let Some(expansion) = metrics.expansion_enterprise {
@@ -860,10 +926,10 @@ pub fn run_second_act(
             // Close the self-inflicted-heat loop through the contact channel: the after-action
             // on the casing reported an opened case, so leadership asks its precinct channel
             // what detectives are doing rather than surveilling the precinct again. The
-            // fixture authors the detective's own knowledge from world truth; the acting
-            // decision, disclosure, and everything the organization learns flow through the
-            // canonical contact and information paths.
-            if let Some(investigation) = self_heat_investigation {
+            // detective's knowledge of his own case is production state — recorded when he took
+            // the case as lead — and the acting decision, disclosure, and everything the
+            // organization learns flow through the canonical contact and information paths.
+            if let Some(_investigation) = self_heat_investigation {
                 let neighborhood_name = scenario
                     .state
                     .world()
@@ -878,59 +944,13 @@ pub fn run_second_act(
                     .expect("police organization must persist")
                     .name()
                     .to_owned();
-                let boss_name = scenario
-                    .state
-                    .world()
-                    .get_character(scenario.boss)
-                    .expect("boss must persist")
-                    .name()
-                    .to_owned();
-                let detective_name = scenario
-                    .state
-                    .world()
-                    .get_character(scenario.detective)
-                    .expect("detective must persist")
-                    .name()
-                    .to_owned();
                 if narrative {
                     println!(
                         "[DECIDE]  The after-action on our own casing says it drew attention: {police_name} opened a case out of that surveillance. Before anything else touches {neighborhood_name}, leadership uses the channel it keeps inside the precinct."
                     );
-                    println!(
-                        "[CONTACT] {boss_name} quietly asks {detective_name} what {police_name} is doing about it."
-                    );
                 }
-                // The detective's own knowledge is fixture-authored from world truth; the
-                // disclosure derives the organization's copy through the canonical path.
-                let contact_knowledge = author_detective_case_knowledge(scenario, investigation)?;
-                let disclosure = validate_contact_disclosure(
-                    &scenario.state,
-                    scenario.police_contact,
-                    contact_knowledge,
-                )?
-                .commit(&mut scenario.state)?;
-                let disclosed = scenario
-                    .state
-                    .contacts()
-                    .get_disclosure(disclosure)
-                    .expect("committed contact disclosure must be queryable")
-                    .disclosed_information();
-                let record = scenario
-                    .state
-                    .intelligence()
-                    .get_information(disclosed)
-                    .expect("disclosed contact information must persist");
-                // The acting policy reads only the surfaced summary, exactly like the
-                // authority-sightline parse used by the precinct-watch channel.
-                metrics.self_heat_case_active =
-                    observe_authority_case_sightline_summary(record.summary());
+                metrics.self_heat_case_active = read_police_contact(scenario, narrative, metrics)?;
                 if narrative {
-                    println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
-                        record.summary()
-                    );
                     match metrics.self_heat_case_active {
                         Some(true) => println!(
                             "[VERIFY]  The channel confirms detectives are still developing the case our casing opened; {neighborhood_name} stays quiet past this window."

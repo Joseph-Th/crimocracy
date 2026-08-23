@@ -581,6 +581,28 @@ pub fn build_scenario(
             kind: AccountKind::Settlement,
         },
     )?;
+    // Seed operating capital: the organization opens with a small general treasury so the
+    // daily payroll pass is a live carrying cost from the first campaign day. The offsetting
+    // posting sits in a settlement account the financial view deliberately ignores.
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Seed the family treasury".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: liquidation_settlement,
+                    amount: Money::from_cents(-80_000),
+                },
+                LedgerPosting {
+                    account: liquidation_cash,
+                    amount: Money::from_cents(80_000),
+                },
+            ],
+            authorization: None,
+        },
+    )?
+    .commit(&mut state)?;
     let mandate = validate_assign_mandate(
         &state,
         MandateDraft {
@@ -767,52 +789,10 @@ pub fn observe_authority_case_sightline_summary(summary: &str) -> Option<bool> {
     }
 }
 
-/// Fixture-authored contact knowledge: what the precinct's lead detective personally knows
-/// about a case's activity. Like every authored source (Lena Orr's street rumor, the delivery
-/// clerk's observation), this is synthetic setup committed through the canonical information
-/// path — here conditioned on world truth so the channel never becomes an oracle that reports
-/// what the plot needs rather than what the institution knows. Everything downstream — the
-/// decision to ask, the disclosure derivation, what the organization learns — is production.
-pub fn author_detective_case_knowledge(
-    scenario: &mut Scenario,
-    investigation: crimocracy::core::id::InvestigationId,
-) -> Result<crimocracy::core::id::InformationId, Box<dyn Error>> {
-    let police_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.police)
-        .expect("police organization must persist")
-        .name()
-        .to_owned();
-    let case_still_active = scenario
-        .state
-        .legal()
-        .get_investigation(investigation)
-        .is_some_and(|record| record.status() == crimocracy::legal::InvestigationStatus::Active);
-    let summary = if case_still_active {
-        format!("{police_name} detectives are still actively developing the case opened by the second-score surveillance.")
-    } else {
-        format!(
-            "{police_name} has already shelved the case opened by the second-score surveillance."
-        )
-    };
-    Ok(validate_record_information(
-        &scenario.state,
-        InformationDraft {
-            holder: KnowledgeHolder::Character(scenario.detective),
-            source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::LegalActivity,
-            source_entity: Some(EntityRef::Organization(scenario.police)),
-            subject: EntityRef::Organization(scenario.police),
-            observed_at: scenario.state.now(),
-            reliability: Reliability::DirectAccess,
-            specificity: Specificity::Specific,
-            summary,
-        },
-    )?
-    .commit(&mut scenario.state)?)
-}
-
+/// Fixture-authored contact knowledge was deleted: the lead detective's case knowledge is now
+/// production state, recorded when staffing assigns him the case and refreshed when cold-case
+/// decay shelves or closes it (`legal::case_knowledge`). Contact channels read it through the
+/// canonical pending-disclosure and disclosure paths.
 pub fn authorize_burglary(
     scenario: &mut Scenario,
     strategy: Strategy,

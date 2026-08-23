@@ -39,6 +39,14 @@ pub fn validate_run_metrics(
     {
         return Err(HarnessContractError::MissingFinancialObservation { strategy });
     }
+    // Payroll is the standing carrying cost of headcount: any session that crosses a
+    // campaign-day boundary must have met its wages from organizational cash.
+    if require_financials && metrics.payroll_paid_cents <= 0 {
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "a session crossing a campaign-day boundary must meet payroll through the canonical ledger path",
+        });
+    }
     Ok(())
 }
 
@@ -110,8 +118,9 @@ pub fn validate_strategy_evidence(
 }
 
 /// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
-/// reads that the case is hot, waits out the authored cold window, and verifies the case was
-/// shelved through their own surveillance rather than hidden case access.
+/// reads that the case is hot, then polls its standing police contact until the channel itself
+/// carries the shelved read — the contact's knowledge being production investigator state, not
+/// hidden case access.
 pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
@@ -121,12 +130,13 @@ pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), Harnes
         && metrics.case_cold_minute.is_some()
         && metrics.case_cold_minute.unwrap_or_default()
             > metrics.burglary_terminal_minute.unwrap_or_default()
+        && metrics.contact_reads > 0
     {
         Ok(())
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
-            evidence: "the surfaced case must cool through the authored cold window and the player's own re-check must confirm the shelf",
+            evidence: "the surfaced case must cool through the authored cold window and the player's standing police contact must confirm the shelf through a canonical disclosure",
         })
     }
 }

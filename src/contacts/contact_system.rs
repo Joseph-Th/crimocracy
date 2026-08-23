@@ -512,6 +512,41 @@ fn validate_disclosure_source(
     Ok(())
 }
 
+/// The contact-channel "ask what he knows" surface: the information records the contact
+/// personally holds, inside the channel's institutional domain, that this sponsor has not
+/// already been told. Returning identities and nothing more keeps content behind the canonical
+/// disclosure path; the caller chooses which topics to actually hear about.
+pub fn pending_disclosure_sources(
+    state: &crate::core::state::AppState,
+    contact: ContactId,
+) -> Vec<InformationId> {
+    let Some(record) = state.contacts().get_contact(contact) else {
+        return Vec::new();
+    };
+    if record.status() != ContactStatus::Active {
+        return Vec::new();
+    }
+    let topics = disclosable_topics(record.kind());
+    let mut sources = Vec::new();
+    for topic in topics {
+        for information in state
+            .intelligence()
+            .information_for_holder_by_topic(KnowledgeHolder::Character(record.contact()), *topic)
+        {
+            if state
+                .contacts()
+                .disclosure_from_source(contact, information.id())
+                .is_none()
+            {
+                sources.push(information.id());
+            }
+        }
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// Topics each contact channel credibly knows through its institution.
 fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
     match kind {

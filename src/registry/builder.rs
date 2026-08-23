@@ -160,6 +160,14 @@ pub(crate) enum RegistryBuildError {
     DuplicateLegalConfig,
     #[error("legal cold-case window must be positive")]
     InvalidLegalColdWindow,
+    #[error("missing upkeep configuration definition")]
+    MissingUpkeepConfig,
+    #[error("duplicate upkeep configuration definition")]
+    DuplicateUpkeepConfig,
+    #[error("upkeep per-member daily wage must be positive")]
+    InvalidUpkeepWage,
+    #[error("upkeep shortfall resentment increment must be positive")]
+    InvalidUpkeepResentment,
     #[error("executive brief cadence must be positive")]
     InvalidExecutiveBriefCadence,
     #[error("executive brief must suppress routine source entries")]
@@ -197,6 +205,7 @@ pub(crate) struct RegistryBuilder {
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
     executive_brief: Option<ExecutiveBriefDefinition>,
     legal: Option<LegalConfigDefinition>,
+    upkeep: Option<UpkeepConfigDefinition>,
 }
 
 impl RegistryBuilder {
@@ -223,6 +232,25 @@ impl RegistryBuilder {
             return Err(RegistryBuildError::InvalidLegalColdWindow);
         }
         self.legal = Some(LegalConfigDefinition { cold_case_window });
+        Ok(())
+    }
+    pub(crate) fn register_upkeep(
+        &mut self,
+        spec: UpkeepConfigSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.upkeep.is_some() {
+            return Err(RegistryBuildError::DuplicateUpkeepConfig);
+        }
+        if spec.per_member_daily.cents() <= 0 {
+            return Err(RegistryBuildError::InvalidUpkeepWage);
+        }
+        if spec.shortfall_resentment == 0 {
+            return Err(RegistryBuildError::InvalidUpkeepResentment);
+        }
+        self.upkeep = Some(UpkeepConfigDefinition {
+            per_member_daily: spec.per_member_daily,
+            shortfall_resentment: spec.shortfall_resentment,
+        });
         Ok(())
     }
     pub(crate) fn register_executive_brief(
@@ -792,6 +820,7 @@ impl RegistryBuilder {
             .executive_brief
             .ok_or(RegistryBuildError::MissingExecutiveBrief)?;
         let legal = self.legal.ok_or(RegistryBuildError::MissingLegalConfig)?;
+        let upkeep = self.upkeep.ok_or(RegistryBuildError::MissingUpkeepConfig)?;
         Ok(Registry {
             content_revision,
             recruitment,
@@ -802,6 +831,7 @@ impl RegistryBuilder {
             businesses: self.businesses,
             executive_brief,
             legal,
+            upkeep,
         })
     }
 }

@@ -576,3 +576,24 @@ impl ExecutiveBriefDefinition {
         self.max_source_entries
     }
 }
+#[derive(Clone, Copy, Debug)]
+pub struct UpkeepConfigSpec {
+    pub per_member_daily: Money,
+    /// Resentment increment applied to each unpaid member's relationship toward their
+    /// supervisor when a payroll run cannot fully fund itself.
+    pub shortfall_resentment: u8,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct UpkeepConfigDefinition {
+    pub(super) per_member_daily: Money,
+    pub(super) shortfall_resentment: u8,
+}
+impl UpkeepConfigDefinition {
+    /// Daily wage owed per active organization member.
+    pub fn per_member_daily(self) -> Money {
+        self.per_member_daily
+    }
+    pub fn shortfall_resentment(self) -> u8 {
+        self.shortfall_resentment
+    }
+}

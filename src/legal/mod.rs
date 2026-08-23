@@ -9,6 +9,7 @@
 
 pub mod arrest_system;
 pub mod case_graph;
+pub mod case_knowledge;
 pub mod informant_system;
 pub mod investigation_system;
 pub mod investigation_work_execution;

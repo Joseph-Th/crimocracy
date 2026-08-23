@@ -31,6 +31,7 @@ pub struct Registry {
     businesses: BTreeMap<BusinessKind, BusinessDefinition>,
     executive_brief: ExecutiveBriefDefinition,
     legal: LegalConfigDefinition,
+    upkeep: UpkeepConfigDefinition,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +87,9 @@ impl Registry {
     }
     pub fn executive_brief(&self) -> ExecutiveBriefDefinition {
         self.executive_brief
+    }
+    pub fn upkeep(&self) -> UpkeepConfigDefinition {
+        self.upkeep
     }
     pub(crate) fn default_policies(&self) -> BTreeMap<PolicyKind, PolicySetting> {
         self.policies

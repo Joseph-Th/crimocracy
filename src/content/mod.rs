@@ -18,7 +18,7 @@ use crate::registry::{
     RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
     RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
     RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
-    RecruitmentWeightsDefinition, Registry, RegistryBuilder,
+    RecruitmentWeightsDefinition, Registry, RegistryBuilder, UpkeepConfigSpec,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, DriveKind, LegalSupportPolicy,
@@ -26,7 +26,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 23;
+pub const CURRENT_CONTENT_REVISION: u32 = 24;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -71,6 +71,7 @@ pub fn build_registry() -> Registry {
     register_enterprises(&mut builder);
     register_businesses(&mut builder);
     register_executive_brief(&mut builder);
+    register_upkeep(&mut builder);
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
@@ -84,6 +85,17 @@ fn register_executive_brief(builder: &mut RegistryBuilder) {
             max_source_entries: 8,
         })
         .unwrap_or_else(|error| panic!("invalid executive brief registry: {error}"));
+}
+
+fn register_upkeep(builder: &mut RegistryBuilder) {
+    builder
+        .register_upkeep(UpkeepConfigSpec {
+            // Daily street wage per member: small next to one enterprise cycle, large enough
+            // that an idle organization feels carrying costs and headcount is a real decision.
+            per_member_daily: Money::from_cents(15_00),
+            shortfall_resentment: 12,
+        })
+        .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));
 }
 
 fn register_recruitment(builder: &mut RegistryBuilder) {

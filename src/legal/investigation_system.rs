@@ -415,6 +415,10 @@ pub(crate) fn apply_cold_case_decay(
                 transition
                     .commit(state)
                     .expect("validated cold-case closure must commit atomically");
+                crate::legal::case_knowledge::record_lead_case_activity_knowledge(
+                    state,
+                    investigation,
+                );
                 closed.push(investigation);
             }
             continue;
@@ -431,6 +435,9 @@ pub(crate) fn apply_cold_case_decay(
         transition
             .commit(state)
             .expect("validated cold-case suspension must commit atomically");
+        // The lead's knowledge must track the institution: shelving refreshes what the
+        // investigator personally knows so contact channels can carry the news outward.
+        crate::legal::case_knowledge::record_lead_case_activity_knowledge(state, investigation);
         suspended.push(investigation);
     }
     Ok(ColdCaseDecayOutcome { suspended, closed })
@@ -590,6 +597,10 @@ pub(crate) fn apply_autonomous_investigator_staffing(
         if assignment.commit(state).is_err() {
             continue;
         }
+        // The new lead personally knows the case's activity; record that knowledge so contact
+        // channels can disclose it without any case-graph read. A failure to record must not
+        // abort the staffing pass.
+        crate::legal::case_knowledge::record_lead_case_activity_knowledge(state, investigation_id);
         staffed.push((investigation_id, investigator));
     }
     Ok(staffed)

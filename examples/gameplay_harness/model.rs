@@ -26,9 +26,6 @@ pub const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
 /// longer operations. The guard uses the per-operation duration plus this slack, which is sized
 /// to cover police arrival variance and decision deferral for the longest authored operation.
 pub const OPERATION_WAIT_SLACK_MINUTES: u32 = 240;
-/// Small deterministic margin past the authored cold-case shelf instant so the narrative re-check
-/// observes a case the simulation has already shelved, without depending on in-tick scheduling.
-pub const COLD_CASE_RECHECK_SLACK_MINUTES: u32 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessMode {
@@ -577,6 +574,12 @@ pub struct RunMetrics {
     pub expansion_enterprise: Option<EnterpriseId>,
     pub expansion_established: bool,
     pub expansion_net_cents: Option<i64>,
+    /// Canonical police-contact channel usage: how many times the organization asked its
+    /// standing contact what the institution knows and received a fresh disclosure.
+    pub contact_reads: u32,
+    /// Payroll evidence across the session: what wages cost and where they went unpaid.
+    pub payroll_paid_cents: i64,
+    pub payroll_short_cents: i64,
 }
 
 #[derive(Default)]
@@ -614,6 +617,9 @@ pub struct Aggregate {
     pub autonomous_recruitment_attempts: u64,
     pub player_personnel_departures: u64,
     pub player_poach_warnings: u64,
+    pub contact_reads: u64,
+    pub payroll_paid_total_cents: i128,
+    pub payroll_short_total_cents: i128,
 }
 
 impl Aggregate {
@@ -677,6 +683,9 @@ impl Aggregate {
         self.autonomous_recruitment_attempts += u64::from(metrics.autonomous_recruitment_attempts);
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
         self.player_poach_warnings += u64::from(metrics.player_poach_warnings);
+        self.contact_reads += u64::from(metrics.contact_reads);
+        self.payroll_paid_total_cents += i128::from(metrics.payroll_paid_cents);
+        self.payroll_short_total_cents += i128::from(metrics.payroll_short_cents);
     }
 
     pub fn percent(&self, value: u64) -> f64 {
@@ -723,10 +732,11 @@ impl Aggregate {
         println!(
             "{label:<6} samples {:>2}  fixtures {:?}
        outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}
-       pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  cases opened {:>5.1}%  case work {}/{}
+       pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
-       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}",
+       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}
+                 payroll paid {:>7.0}c  unpaid {:>6.0}c",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -755,6 +765,9 @@ impl Aggregate {
             self.autonomous_recruitment_attempts,
             self.player_poach_warnings,
             self.player_personnel_departures,
+            self.contact_reads,
+            self.payroll_paid_total_cents as f64 / self.samples as f64,
+            self.payroll_short_total_cents as f64 / self.samples as f64,
         );
     }
 }
@@ -776,6 +789,9 @@ pub struct FinancialView {
     /// Organization-owned balances grouped by account kind, so the readout shows the cash
     /// position a boss would actually govern, not only cycle flows.
     pub cash_position: Vec<(AccountKind, i64)>,
+    /// Session-to-date wage costs from observed payroll outcomes.
+    pub payroll_paid_cents: i64,
+    pub payroll_short_cents: i64,
 }
 
 #[derive(Clone)]

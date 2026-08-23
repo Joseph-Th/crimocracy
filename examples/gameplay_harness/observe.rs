@@ -20,6 +20,21 @@ pub fn observe_tick(
     if !outcome.staffed_investigations.is_empty() {
         metrics.session_case_staffed = true;
     }
+    for payroll in outcome
+        .payrolls
+        .iter()
+        .filter(|payroll| payroll.organization == scenario.player)
+    {
+        metrics.payroll_paid_cents += payroll.paid.cents();
+        metrics.payroll_short_cents += payroll.short.cents();
+        if narrative && payroll.short.cents() > 0 {
+            println!(
+                "[PAYROLL]  {}: the day's wages went unpaid ({} owed). The crew will remember.",
+                stamp(outcome.now.as_minutes()),
+                format_cents(payroll.owed.cents())
+            );
+        }
+    }
     if narrative {
         for operation in &outcome.started_operations {
             let record = scenario
@@ -46,9 +61,9 @@ pub fn observe_tick(
         }
     }
 
-    // A cold case shelved by its owning authority is a player-visible consequence resolution: the
-    // organization can verify it later through its own surveillance, and the narrative prints the
-    // institutional beat when the authored inactivity window elapses.
+    // A cold-case shelf is an institutional beat, not player-visible news: the organization
+    // learns it through its own channels (precinct surveillance or the police contact). The
+    // narrative prints it only as a hidden-state audit marker.
     if let Some(case) = scenario.investigation {
         if outcome.cold_case_suspensions.contains(&case) {
             metrics.case_cold_minute = Some(outcome.now.as_minutes());
@@ -66,7 +81,7 @@ pub fn observe_tick(
                     .expect("case owner must persist")
                     .name();
                 println!(
-                    "[CASE COLD] {}: {} shelved the case after sustained routine investigation found no actionable subject.",
+                    "[DEV AUDIT] minute {}: {} shelved the case (hidden institutional beat; the organization learns this through its own channels).",
                     stamp(outcome.now.as_minutes()),
                     owner_name
                 );

@@ -57,6 +57,7 @@ pub struct TickOutcome {
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
+    pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
@@ -246,6 +247,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated enterprise cycle must commit atomically");
         enterprise_cycles.push(cycle);
     }
+    // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
+    // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
+    // already in place when a rival pitches them.
+    let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
     let recruitment_attempts = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve due autonomous recruitment");
     // Executive synthesis runs last so a due brief sees every report and decision created by
@@ -278,6 +283,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         automatic_legal_support,
         business_cycles,
         enterprise_cycles,
+        payrolls,
         recruitment_attempts,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay.suspended,

@@ -14,7 +14,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 
 | Domain | Capability | Owner and entry point |
 | --- | --- | --- |
-| World | Organizations, characters, neighborhoods, businesses, institutional profiles, membership, supervision, designation | `src/world/` via `world_system` |
+| World | Organizations, characters, neighborhoods, businesses, institutional profiles, membership, supervision, designation, daily payroll with shortfall resentment and reporting | `src/world/` via `world_system` and `payroll_execution` |
 | Organizational policies | Behavioral standing policies consumed by recruitment autonomy and automatic legal-support retention | `src/world/` (settings) via `delegation_system` overrides, `legal_representation_system` execution |
 | Social | Directional relationships with source and target indexes | `src/social/` via `relationship_system` |
 | Intelligence | Provenance-bearing information, typed topics, holder indexes, transfers, lineage | `src/intelligence/` via `intelligence_system` |
@@ -27,8 +27,8 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment, refused-approach loyalty reporting to the candidate's organization | `src/recruitment/` via `recruitment_system` |
 | Enterprises | Routine criminal enterprises, authored economics, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement, financial reporting | `src/enterprises/` via `enterprise_execution` and reporting modules |
 | Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting | `src/economy/` via `business_economy_system` and reporting modules |
-| Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing, detective work, witness interviews and named testimony, cold cases, autonomous evidence-threshold arrests/custody, detainee informant recruitment and disclosures, representation, prosecution referral | `src/legal/` via named legal system modules |
-| Institutional contacts | Person-mediated Police, Legal, Political, Press, Labor, and Professional channels with provenance-preserving disclosure | `src/contacts/` via `contact_system` |
+| Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing with investigator-held case-activity knowledge, detective work, witness interviews and named testimony, cold cases, autonomous evidence-threshold arrests/custody, detainee informant recruitment and disclosures, representation, prosecution referral | `src/legal/` via named legal system modules |
+| Institutional contacts | Person-mediated Police, Legal, Political, Press, Labor, and Professional channels with provenance-preserving disclosure and a read-only pending-disclosure offer surface | `src/contacts/` via `contact_system` |
 
 ## Cross-cutting guarantees
 
@@ -56,7 +56,7 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 23.
+The current authored content revision is 24.
 
 The current in-memory state schema version is 51.
 

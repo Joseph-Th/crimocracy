@@ -493,6 +493,8 @@ pub fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<
         liquidated_property_operations,
         liquidated_property_cash_cents: liquidated_property_cash.cents(),
         cash_position,
+        payroll_paid_cents: 0,
+        payroll_short_cents: 0,
     })
 }
 
@@ -549,6 +551,11 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
             lines.join(", "),
         );
     }
+    println!(
+        "  Payroll to date: {} paid across the crew, {} unpaid.",
+        format_cents(view.payroll_paid_cents),
+        format_cents(view.payroll_short_cents),
+    );
 }
 
 /// Short leader-readable label for an organization account kind in the financial view.
