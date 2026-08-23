@@ -13,7 +13,7 @@ use crate::legal::{
     InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
     InvestigationStatus,
 };
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -25,18 +25,14 @@ pub enum InformantError {
     MissingHandler(OrganizationId),
     #[error("organization {0} cannot handle confidential informants")]
     InvalidHandlerKind(OrganizationId),
-    #[error("character {0} is not active")]
-    InactiveCharacter(CharacterId),
-    #[error("handler organization {0} is not active")]
-    InactiveHandler(OrganizationId),
     #[error("character {character} belongs to handler organization {handler}")]
     CharacterBelongsToHandler {
         character: CharacterId,
         handler: OrganizationId,
     },
     #[error(
-        "character {character} already has active informant relationship {informant} with handler {handler}"
-    )]
+    "character {character} already has active informant relationship {informant} with handler {handler}"
+  )]
     AlreadyActive {
         character: CharacterId,
         handler: OrganizationId,
@@ -51,8 +47,8 @@ pub enum InformantError {
     #[error("investigation {0} is not active")]
     InactiveInvestigation(InvestigationId),
     #[error(
-        "informant {informant} is handled by {handler}, which does not own investigation {investigation}"
-    )]
+    "informant {informant} is handled by {handler}, which does not own investigation {investigation}"
+  )]
     HandlerInvestigationMismatch {
         informant: InformantId,
         handler: OrganizationId,
@@ -66,32 +62,32 @@ pub enum InformantError {
         character: CharacterId,
     },
     #[error(
-        "information {information} already has disclosure {disclosure} in investigation {investigation}"
-    )]
+    "information {information} already has disclosure {disclosure} in investigation {investigation}"
+  )]
     DuplicateDisclosure {
         investigation: InvestigationId,
         information: InformationId,
         disclosure: InformantDisclosureId,
     },
     #[error(
-        "character {character} changed after informant validation; expected version {expected}, found {found}"
-    )]
+    "character {character} changed after informant validation; expected version {expected}, found {found}"
+  )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
         found: u32,
     },
     #[error(
-        "informant {informant} changed after validation; expected version {expected}, found {found}"
-    )]
+    "informant {informant} changed after validation; expected version {expected}, found {found}"
+  )]
     StaleInformant {
         informant: InformantId,
         expected: u32,
         found: u32,
     },
     #[error(
-        "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
-    )]
+    "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
+  )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
@@ -158,9 +154,6 @@ fn validate_establishment_dependencies(
         .world
         .get_character(draft.character)
         .ok_or(InformantError::MissingCharacter(draft.character))?;
-    if character.lifecycle() != Lifecycle::Active {
-        return Err(InformantError::InactiveCharacter(draft.character));
-    }
     validate_handler(state, draft.handler)?;
     if character.organization() == Some(draft.handler) {
         return Err(InformantError::CharacterBelongsToHandler {
@@ -191,9 +184,6 @@ fn validate_handler(state: &AppState, handler: OrganizationId) -> Result<(), Inf
         OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
     ) {
         return Err(InformantError::InvalidHandlerKind(handler));
-    }
-    if organization.lifecycle() != Lifecycle::Active {
-        return Err(InformantError::InactiveHandler(handler));
     }
     Ok(())
 }
@@ -363,13 +353,10 @@ fn validate_disclosure_dependencies(
     if informant.status() != InformantStatus::Active {
         return Err(InformantError::InactiveInformant(draft.informant));
     }
-    let character = state
+    let _ = state
         .world
         .get_character(informant.character())
         .ok_or(InformantError::MissingCharacter(informant.character()))?;
-    if character.lifecycle() != Lifecycle::Active {
-        return Err(InformantError::InactiveCharacter(informant.character()));
-    }
     validate_handler(state, informant.handler())?;
 
     let investigation = state

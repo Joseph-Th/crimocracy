@@ -1,5 +1,6 @@
 //! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
 
+pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
 pub mod operation_state;
 pub mod operation_system;
@@ -156,6 +157,31 @@ impl OperationObjective {
             | Self::GatherInformation { target }
             | Self::DisruptBusiness { target } => vec![*target],
             Self::FreeDetainee { target } => vec![EntityRef::Character(*target)],
+        }
+    }
+
+    /// The business whose stock or ready cash this objective takes value out of, if any.
+    /// Property and cash takes share the recency-depletion window: both need time to replace.
+    pub(crate) fn taken_business(&self) -> Option<BusinessId> {
+        let target = match self {
+            Self::AcquireProperty { target } | Self::ObtainCash { target } => target,
+            Self::Frighten { .. }
+            | Self::GatherInformation { .. }
+            | Self::FreeDetainee { .. }
+            | Self::DisruptBusiness { .. } => return None,
+        };
+        match target {
+            EntityRef::Business(business) => Some(*business),
+            EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => None,
         }
     }
 }

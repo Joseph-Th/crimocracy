@@ -30,6 +30,7 @@ use crate::legal::{
     Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
     EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
 };
+use crate::operations::operation_economics::RECENT_HIT_WINDOW_MINUTES;
 use crate::operations::operation_system::{validate_authorize_operation, OperationError};
 use crate::operations::property_disposition::{
     validate_deposit_operation_cash, validate_dispose_property, CashDispositionDraft,
@@ -114,11 +115,6 @@ fn make_fixture_business_with_owner(
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(30)
                         .expect("fixture police presence should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture influence should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture cohesion should validate"),
-                    visible_violence_tolerance: Rating::try_new(50)
-                        .expect("fixture violence tolerance should validate"),
                 },
             },
         },
@@ -340,11 +336,6 @@ fn make_exposed_business_operation_fixture_with_contingencies(
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(90)
                         .expect("fixture police presence should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture influence should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture cohesion should validate"),
-                    visible_violence_tolerance: Rating::try_new(30)
-                        .expect("fixture violence tolerance should validate"),
                 },
             },
         },
@@ -1315,15 +1306,15 @@ fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
     );
 
     assert!(matches!(
-        validate_deposit_operation_cash(
-            &state,
-            CashDispositionDraft {
-                operation,
-                cash_account,
-                settlement_account,
-            },
-        ),
-        Err(PropertyDispositionError::AlreadyDeposited(found)) if found == operation
+      validate_deposit_operation_cash(
+        &state,
+        CashDispositionDraft {
+          operation,
+          cash_account,
+          settlement_account,
+        },
+      ),
+      Err(PropertyDispositionError::AlreadyDeposited(found)) if found == operation
     ));
     validate_state(&state).expect("cash disposition state should remain valid");
     validate_invariants(&state);
@@ -1454,8 +1445,8 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     )
     .expect_err("extraction requires a detained target");
     assert!(matches!(
-        free_error,
-        OperationError::TargetNotDetained(character) if character == leader
+      free_error,
+      OperationError::TargetNotDetained(character) if character == leader
     ));
 
     let extraction = validate_authorize_operation(
@@ -1500,11 +1491,11 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     )
     .expect_err("a detainee supports exactly one live extraction plan");
     assert!(matches!(
-        duplicate_error,
-        OperationError::DetaineeAlreadyTargeted {
-            character,
-            operation
-        } if character == detainee && operation == extraction
+      duplicate_error,
+      OperationError::DetaineeAlreadyTargeted {
+        character,
+        operation
+      } if character == detainee && operation == extraction
     ));
     let operation_count = state.operations().operations().count();
     loop {
@@ -2195,11 +2186,11 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
         .expect("response decision should persist");
     assert_eq!(decision.requested_at(), response_due);
     assert!(matches!(
-        decision.context(),
-        DecisionContext::OperationException {
-            operation: decision_operation,
-            reason: OperationExceptionReason::PoliceArrival(decision_response),
-        } if decision_operation == operation && decision_response == response_id
+      decision.context(),
+      DecisionContext::OperationException {
+        operation: decision_operation,
+        reason: OperationExceptionReason::PoliceArrival(decision_response),
+      } if decision_operation == operation && decision_response == response_id
     ));
     assert!(decision.summary().contains("response reached"));
     let operation_record = state
@@ -2383,11 +2374,11 @@ fn police_arrival_during_another_decision_becomes_deferred_follow_up() {
         .get_decision(follow_up.decision)
         .expect("deferred response decision should persist");
     assert!(matches!(
-        follow_up_record.context(),
-        DecisionContext::OperationException {
-            operation: decision_operation,
-            reason: OperationExceptionReason::PoliceArrival(decision_response),
-        } if decision_operation == operation && decision_response == response_id
+      follow_up_record.context(),
+      DecisionContext::OperationException {
+        operation: decision_operation,
+        reason: OperationExceptionReason::PoliceArrival(decision_response),
+      } if decision_operation == operation && decision_response == response_id
     ));
     assert_eq!(
         state
@@ -2422,11 +2413,11 @@ fn police_arrival_during_another_decision_becomes_deferred_follow_up() {
             .decisions()
             .decisions_for_operation(operation)
             .filter(|decision| matches!(
-                decision.context(),
-                DecisionContext::OperationException {
-                    reason: OperationExceptionReason::PoliceArrival(candidate),
-                    ..
-                } if candidate == response_id
+              decision.context(),
+              DecisionContext::OperationException {
+                reason: OperationExceptionReason::PoliceArrival(candidate),
+                ..
+              } if candidate == response_id
             ))
             .count(),
         1
@@ -2825,17 +2816,17 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
         -32_148
     );
     assert!(matches!(
-        validate_dispose_property(
-            &registry,
-            &achieved_state,
-            PropertyDispositionDraft {
-                operation,
-                venue: resale_venue,
-                cash_account,
-                settlement_account,
-            },
-        ),
-        Err(PropertyDispositionError::AlreadyDisposed(found)) if found == operation
+      validate_dispose_property(
+        &registry,
+        &achieved_state,
+        PropertyDispositionDraft {
+          operation,
+          venue: resale_venue,
+          cash_account,
+          settlement_account,
+        },
+      ),
+      Err(PropertyDispositionError::AlreadyDisposed(found)) if found == operation
     ));
     let liquidated_report = validate_organization_financial_report(
         &achieved_state,

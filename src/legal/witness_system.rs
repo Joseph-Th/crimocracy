@@ -11,7 +11,6 @@ use crate::legal::{
     EvidenceIdentity, EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength,
     InvestigationStatus, WitnessCooperation, WitnessStatementDraft, WitnessStatementRecord,
 };
-use crate::world::Lifecycle;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -22,8 +21,6 @@ pub enum WitnessError {
     InactiveInvestigation(InvestigationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("character {0} is not active and cannot be registered as a current witness")]
-    InactiveWitness(CharacterId),
     #[error("character {witness} is already registered as case witness {existing} for investigation {investigation}")]
     DuplicateCaseWitness {
         investigation: InvestigationId,
@@ -157,13 +154,10 @@ fn validate_registration_dependencies(
     if investigation.status() != InvestigationStatus::Active {
         return Err(WitnessError::InactiveInvestigation(draft.investigation));
     }
-    let witness = state
+    let _ = state
         .world
         .get_character(draft.witness)
         .ok_or(WitnessError::MissingCharacter(draft.witness))?;
-    if witness.lifecycle() != Lifecycle::Active {
-        return Err(WitnessError::InactiveWitness(draft.witness));
-    }
     if let Some(existing) = state
         .legal
         .case_witness_for(draft.investigation, draft.witness)
@@ -410,13 +404,10 @@ fn validate_current_witness_character(
     state: &AppState,
     witness: CharacterId,
 ) -> Result<(), WitnessError> {
-    let record = state
+    let _ = state
         .world
         .get_character(witness)
         .ok_or(WitnessError::MissingCharacter(witness))?;
-    if record.lifecycle() != Lifecycle::Active {
-        return Err(WitnessError::InactiveWitness(witness));
-    }
     Ok(())
 }
 

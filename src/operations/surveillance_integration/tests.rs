@@ -86,9 +86,6 @@ fn fixture(observer_skill: u8, with_patrol: bool) -> Fixture {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(55),
-                    political_influence: rating(45),
-                    social_cohesion: rating(50),
-                    visible_violence_tolerance: rating(30),
                 },
             },
         },
@@ -311,8 +308,8 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
         .get_information(resolution.after_action_information())
         .expect("after-action information should persist");
     assert!(after_action.summary().contains(
-        "Surveillance produced 2 usable target observations: police activity around Northside Market; access intelligence at Market Social Club."
-    ));
+    "Surveillance produced 2 usable target observations: police activity around Northside Market; access intelligence at Market Social Club."
+  ));
 
     let envelope = build_save(&fixture.registry, &fixture.state)
         .expect("surveillance discoveries should save");

@@ -12,7 +12,7 @@ use crate::legal::{
     EvidenceRecord, IncidentIntakeDraft, InvestigationDraft, InvestigationRecord,
     InvestigationStatus, InvestigatorRole,
 };
-use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
+use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
 use thiserror::Error;
 
@@ -26,8 +26,6 @@ pub enum InvestigationError {
     MissingOrganization(OrganizationId),
     #[error("organization {0} cannot own an investigation")]
     InvalidOwnerKind(OrganizationId),
-    #[error("organization {0} is not active and cannot own new legal work")]
-    InactiveOwner(OrganizationId),
     #[error("entity {0:?} does not exist")]
     MissingEntity(EntityRef),
     #[error("investigation {0} does not exist")]
@@ -39,8 +37,6 @@ pub enum InvestigationError {
         investigator: CharacterId,
         owner: OrganizationId,
     },
-    #[error("character {0} is not active and cannot be assigned investigative work")]
-    InactiveInvestigator(CharacterId),
     #[error("character {investigator} is detained under arrest {arrest}")]
     DetainedInvestigator {
         investigator: CharacterId,
@@ -190,9 +186,6 @@ fn validate_investigation_draft(
             return Err(InvestigationError::InvalidOwnerKind(draft.owner))
         }
     }
-    if owner.lifecycle() != Lifecycle::Active {
-        return Err(InvestigationError::InactiveOwner(draft.owner));
-    }
     for subject in &draft.subjects {
         if !is_entity_present(state, *subject) {
             return Err(InvestigationError::MissingEntity(*subject));
@@ -307,20 +300,14 @@ fn validate_investigation_transition_dependencies(
         }
     }
     if transition == InvestigationTransition::Resume {
-        let owner = state.world.get_organization(investigation.owner()).ok_or(
+        let _ = state.world.get_organization(investigation.owner()).ok_or(
             InvestigationError::MissingOrganization(investigation.owner()),
         )?;
-        if owner.lifecycle() != Lifecycle::Active {
-            return Err(InvestigationError::InactiveOwner(investigation.owner()));
-        }
         for investigator_id in investigation.assigned_investigators() {
             let investigator = state
                 .world
                 .get_character(*investigator_id)
                 .ok_or(InvestigationError::MissingCharacter(*investigator_id))?;
-            if investigator.lifecycle() != Lifecycle::Active {
-                return Err(InvestigationError::InactiveInvestigator(*investigator_id));
-            }
             if let Some(arrest) = state.legal.active_arrest_for_character(*investigator_id) {
                 return Err(InvestigationError::DetainedInvestigator {
                     investigator: *investigator_id,
@@ -545,8 +532,7 @@ pub(crate) fn apply_autonomous_investigator_staffing(
                     .legal
                     .active_investigation_for_investigator(*investigator)
                     .is_none_or(|active| active.id() == investigation_id);
-                (record.lifecycle() == Lifecycle::Active
-                    && case_is_this_one
+                (case_is_this_one
                     && record.organization() == Some(owner)
                     && state
                         .legal
@@ -562,11 +548,10 @@ pub(crate) fn apply_autonomous_investigator_staffing(
                 .world
                 .characters_in_organization(owner)
                 .filter(|record| {
-                    record.lifecycle() == Lifecycle::Active
-                        && state
-                            .legal
-                            .active_arrest_for_character(record.id())
-                            .is_none()
+                    state
+                        .legal
+                        .active_arrest_for_character(record.id())
+                        .is_none()
                         && state
                             .legal
                             .active_investigation_for_investigator(record.id())
@@ -623,9 +608,6 @@ fn validate_investigator_assignment_dependencies(
         .world
         .get_character(investigator_id)
         .ok_or(InvestigationError::MissingCharacter(investigator_id))?;
-    if investigator.lifecycle() != Lifecycle::Active {
-        return Err(InvestigationError::InactiveInvestigator(investigator_id));
-    }
     if let Some(arrest) = state.legal.active_arrest_for_character(investigator_id) {
         return Err(InvestigationError::DetainedInvestigator {
             investigator: investigator_id,
@@ -841,7 +823,7 @@ fn validate_evidence_draft(
     if investigation.status() != InvestigationStatus::Active {
         return Err(InvestigationError::InactiveInvestigation);
     }
-    let custodian = state
+    let _ = state
         .world
         .get_organization(draft.custodian)
         .ok_or(InvestigationError::MissingOrganization(draft.custodian))?;
@@ -850,9 +832,6 @@ fn validate_evidence_draft(
             investigation: draft.investigation,
             custodian: draft.custodian,
         });
-    }
-    if custodian.lifecycle() != Lifecycle::Active {
-        return Err(InvestigationError::InactiveOwner(draft.custodian));
     }
     if !is_entity_present(state, draft.subject) {
         return Err(InvestigationError::MissingEntity(draft.subject));
@@ -1003,14 +982,12 @@ fn validate_incident_intake_dependencies(
         }
     }
     if let Some(witness) = &draft.witness {
-        let record = state.world.get_character(witness.character).ok_or(
-            InvestigationError::MissingEntity(EntityRef::Character(witness.character)),
-        )?;
-        if record.lifecycle() != Lifecycle::Active {
-            return Err(InvestigationError::MissingEntity(EntityRef::Character(
+        state
+            .world
+            .get_character(witness.character)
+            .ok_or(InvestigationError::MissingEntity(EntityRef::Character(
                 witness.character,
-            )));
-        }
+            )))?;
         // A case's subject cannot also be its named witness.
         if draft
             .subjects

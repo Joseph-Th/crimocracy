@@ -35,7 +35,7 @@ use crate::intelligence::{
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::{
-    AutonomyLevel, BusinessFunction, BusinessOwner, CapabilityKind, Lifecycle, NeighborhoodProfile,
+    AutonomyLevel, BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile,
     PolicyKind, Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -84,6 +84,12 @@ pub enum EnterpriseError {
     MissingNetworkFunction { function: BusinessFunction },
     #[error("supporting business {business} changed after validation; expected version {expected}, found {found}")]
     StaleSupportingBusiness {
+        business: BusinessId,
+        expected: u32,
+        found: u32,
+    },
+    #[error("hosted business {business} changed after validation; expected version {expected}, found {found}")]
+    StaleHostBusiness {
         business: BusinessId,
         expected: u32,
         found: u32,
@@ -262,7 +268,7 @@ pub(crate) fn apply_due_autonomous_enterprises(
         // Posture gate: an outfit whose police fear runs above the authored ceiling keeps
         // its head down for the day. Reputation therefore throttles rival growth, not just
         // how candidates judge it.
-        let police_fear = crate::reputation::reputation_system::resolved_score(
+        let police_fear = crate::reputation::reputation_system::resolve_score(
             registry,
             &state.reputation,
             organization,
@@ -276,8 +282,7 @@ pub(crate) fn apply_due_autonomous_enterprises(
         let Some(manager_record) = state.world().get_character(manager) else {
             continue;
         };
-        if manager_record.lifecycle() != Lifecycle::Active
-            || state.legal().active_arrest_for_character(manager).is_some()
+        if state.legal().active_arrest_for_character(manager).is_some()
             || !matches!(
                 manager_record.autonomy(),
                 AutonomyLevel::Delegated | AutonomyLevel::Broad
@@ -362,7 +367,6 @@ fn select_autonomous_expansion(
     let owned_venues: BTreeMap<BusinessId, &crate::world::BusinessRecord> = state
         .world()
         .businesses_owned_by_organization(organization)
-        .filter(|business| business.lifecycle() == Lifecycle::Active)
         .map(|business| (business.id(), business))
         .collect();
 
@@ -746,7 +750,7 @@ impl ValidatedEnterpriseCycle {
                 .get_business(business_id)
                 .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
             if business.version() != expected {
-                return Err(EnterpriseError::StaleSupportingBusiness {
+                return Err(EnterpriseError::StaleHostBusiness {
                     business: business_id,
                     expected,
                     found: business.version(),
@@ -841,7 +845,7 @@ pub fn validate_enterprise_cycle_plan(
             .get_business(business_id)
             .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
         if business.version() != expected {
-            return Err(EnterpriseError::StaleSupportingBusiness {
+            return Err(EnterpriseError::StaleHostBusiness {
                 business: business_id,
                 expected,
                 found: business.version(),
@@ -1102,13 +1106,10 @@ fn validate_enterprise_environment(
     authority: MandateAuthority,
     location: EnterpriseLocation,
 ) -> Result<(), EnterpriseError> {
-    let organization_record = state
+    let _ = state
         .world
         .get_organization(organization)
         .ok_or(EnterpriseError::InvalidOrganization(organization))?;
-    if organization_record.lifecycle() != Lifecycle::Active {
-        return Err(EnterpriseError::InvalidOrganization(organization));
-    }
     let resolved = resolve_mandate_authority(state, authority)?;
     if resolved.organization() != organization {
         return Err(EnterpriseError::AuthorityOrganizationMismatch {
@@ -1155,13 +1156,10 @@ fn resolve_location_neighborhood(
 ) -> Result<crate::core::id::NeighborhoodId, EnterpriseError> {
     match location {
         EnterpriseLocation::Neighborhood(id) => {
-            let neighborhood = state
+            let _ = state
                 .world
                 .get_neighborhood(id)
                 .ok_or(EnterpriseError::InvalidLocation(location))?;
-            if neighborhood.lifecycle() != Lifecycle::Active {
-                return Err(EnterpriseError::InvalidLocation(location));
-            }
             Ok(id)
         }
         EnterpriseLocation::Business(id) => {
@@ -1169,16 +1167,10 @@ fn resolve_location_neighborhood(
                 .world
                 .get_business(id)
                 .ok_or(EnterpriseError::InvalidLocation(location))?;
-            if business.lifecycle() != Lifecycle::Active {
-                return Err(EnterpriseError::InvalidLocation(location));
-            }
-            let neighborhood = state
+            let _ = state
                 .world
                 .get_neighborhood(business.neighborhood())
                 .ok_or(EnterpriseError::InvalidLocation(location))?;
-            if neighborhood.lifecycle() != Lifecycle::Active {
-                return Err(EnterpriseError::InvalidLocation(location));
-            }
             Ok(business.neighborhood())
         }
     }
@@ -1284,9 +1276,6 @@ fn validate_supporting_businesses(
             .world
             .get_business(*business_id)
             .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
-        if business.lifecycle() != Lifecycle::Active {
-            return Err(EnterpriseError::InvalidSupportingBusiness(*business_id));
-        }
         if business.owner() != BusinessOwner::Organization(organization) {
             return Err(EnterpriseError::SupportingBusinessOwnershipMismatch {
                 business: *business_id,
@@ -1548,11 +1537,11 @@ fn resolve_investigation_heat_surcharge(
         .investigations_for_owner(authority)
         .filter(|investigation| {
             investigation.status() == crate::legal::InvestigationStatus::Active
-                && investigation.origin_operation().is_some()
-                && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
-                    state, investigation,
-                )
-                .contains(&neighborhood)
+        && investigation.origin_operation().is_some()
+        && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
+          state, investigation,
+        )
+        .contains(&neighborhood)
         })
         .count();
     if active == 0 {

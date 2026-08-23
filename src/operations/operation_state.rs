@@ -1,11 +1,11 @@
 //! Operation state storage and index maintenance; sibling `operations` types define records.
 
-use crate::core::id::{InformationId, OperationId, OrganizationId, PoliceResponseId};
+use crate::core::id::{BusinessId, InformationId, OperationId, OrganizationId, PoliceResponseId};
 use crate::core::time::SimTime;
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
-    OperationPropertyDispositionRecord, OperationRecord, OperationResolutionRecord,
-    OperationStatus,
+    OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
+    OperationResolutionRecord, OperationStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +40,10 @@ pub struct OperationState {
     by_discovered_information: BTreeMap<InformationId, OperationId>,
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
     in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
+    /// Successful property/cash takes per target business as (resolved_at, operation_id).
+    /// Feeds recency-depletion economics without scanning the full completed bucket, which
+    /// grows for the life of the campaign.
+    successful_takes_by_business: BTreeMap<BusinessId, BTreeSet<(SimTime, OperationId)>>,
 }
 
 impl OperationState {
@@ -330,7 +334,53 @@ impl OperationState {
             record.runtime.resolution = Some(resolution);
             record.runtime.awaiting_decision_since = None;
         }
+        // A successful take against a business enters the recency-depletion index at its own
+        // resolution instant, so later takes price the target without a full-history scan.
+        let record = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before completion commit");
+        let resolution = record
+            .resolution()
+            .expect("just-attached resolution must be present");
+        if matches!(
+            resolution.objective_outcome(),
+            OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
+        ) {
+            if let Some(business) = record.objective().taken_business() {
+                self.successful_takes_by_business
+                    .entry(business)
+                    .or_default()
+                    .insert((resolution.resolved_at(), id));
+            }
+        }
         self.change_status(id, OperationStatus::Completed);
+    }
+
+    /// Successful takes against `business` resolved inside the recency window before `at`,
+    /// excluding `exclude` itself. Served from the depletion index, ordered by resolution time.
+    pub(crate) fn recent_successful_takes(
+        &self,
+        business: BusinessId,
+        at: SimTime,
+        window_minutes: i64,
+        exclude: Option<OperationId>,
+    ) -> u32 {
+        let at_minutes = i64::try_from(at.as_minutes()).unwrap_or(i64::MAX);
+        let lower_bound =
+            SimTime::from_minutes(at_minutes.saturating_sub(window_minutes).max(0) as u64);
+        self.successful_takes_by_business
+            .get(&business)
+            .map(|takes| {
+                takes
+                    .range((
+                        std::ops::Bound::Excluded(&(lower_bound, OperationId::from_raw(0))),
+                        std::ops::Bound::Included(&(at, OperationId::from_raw(u32::MAX))),
+                    ))
+                    .filter(|(_, operation_id)| Some(*operation_id) != exclude)
+                    .count() as u32
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn set_property_disposition(
@@ -498,6 +548,21 @@ impl OperationState {
                         return false;
                     }
                 }
+                // Recency-depletion index membership must match exactly: a completed
+                // successful business take is indexed; everything else is not.
+                let taken_business = record.objective().taken_business();
+                let should_index = taken_business.is_some()
+                    && record.status() == OperationStatus::Completed
+                    && matches!(
+                        resolution.objective_outcome(),
+                        OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
+                    );
+                let indexed = taken_business
+                    .and_then(|business| self.successful_takes_by_business.get(&business))
+                    .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
+                if indexed != should_index {
+                    return false;
+                }
             }
         }
         for (organization, ids) in &self.by_organization {
@@ -567,75 +632,13 @@ impl OperationState {
         true
     }
 
+    /// Debug builds re-derive the full index consistency check on every mutation boundary;
+    /// `has_consistent_indexes` is the single authority so the two can never drift apart.
     #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),
             "Derived Data Consistency: operation indexes disagree with source records"
         );
-        for record in self.records.values() {
-            debug_assert!(
-                self.by_organization
-                    .get(&record.responsible_organization())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: operation organization index is missing an operation"
-            );
-            debug_assert_eq!(
-                self.active_by_organization
-                    .get(&record.responsible_organization())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                !matches!(
-                    record.status(),
-                    OperationStatus::Completed | OperationStatus::Aborted
-                ),
-                "Derived Data Consistency: operation active index disagrees with lifecycle"
-            );
-            debug_assert!(
-                self.by_status
-                    .get(&record.status())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: operation status index is missing an operation"
-            );
-            if let Some(resolution) = record.resolution() {
-                for information in resolution.discovered_information() {
-                    debug_assert_eq!(
-                        self.by_discovered_information.get(information),
-                        Some(&record.id()),
-                        "Index Completeness: operation discovery index is missing information"
-                    );
-                }
-            }
-        }
-        for (status, ids) in &self.by_status {
-            for id in ids {
-                let record = self
-                    .records
-                    .get(id)
-                    .expect("Index Completeness: operation status index points to missing record");
-                debug_assert_eq!(
-                    record.status(),
-                    *status,
-                    "Derived Data Consistency: operation status index disagrees with record"
-                );
-            }
-        }
-        for record in self.records.values() {
-            debug_assert_eq!(
-                self.authorized_by_start
-                    .get(&record.scheduled_for())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                record.status() == OperationStatus::Authorized,
-                "Derived Data Consistency: operation authorization schedule disagrees with lifecycle"
-            );
-            debug_assert_eq!(
-                record.resolution_due_at().is_some_and(|due_at| {
-                    self.in_progress_by_resolution_due
-                        .get(&due_at)
-                        .is_some_and(|ids| ids.contains(&record.id()))
-                }),
-                record.status() == OperationStatus::InProgress,
-                "Derived Data Consistency: operation resolution schedule disagrees with lifecycle"
-            );
-        }
     }
 }

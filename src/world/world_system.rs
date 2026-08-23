@@ -13,8 +13,8 @@ use crate::registry::Registry;
 use crate::world::{
     BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
     CharacterCapabilities, CharacterDisposition, CharacterDraft, CharacterIdentity,
-    CharacterMembership, CharacterRecord, CharacterRuntime, Lifecycle, NeighborhoodDraft,
-    NeighborhoodRecord, OrganizationDraft, OrganizationKind, OrganizationRecord, PolicySetting,
+    CharacterMembership, CharacterRecord, CharacterRuntime, NeighborhoodDraft, NeighborhoodRecord,
+    OrganizationDraft, OrganizationKind, OrganizationRecord, PolicySetting,
 };
 use thiserror::Error;
 
@@ -24,28 +24,20 @@ pub enum WorldError {
     EmptyName,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("organization {0} is not active")]
-    InactiveOrganization(OrganizationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("character {0} is not active")]
-    InactiveCharacter(CharacterId),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
-    #[error("neighborhood {0} is not active")]
-    InactiveNeighborhood(NeighborhoodId),
     #[error("business {0} does not exist")]
     MissingBusiness(BusinessId),
-    #[error("business {0} is not active")]
-    InactiveBusiness(BusinessId),
     #[error("business {business} is already owned by {owner:?}")]
     BusinessOwnershipUnchanged {
         business: BusinessId,
         owner: BusinessOwner,
     },
     #[error(
-        "character {character} already has this organization and supervisor; reassignment unchanged"
-    )]
+    "character {character} already has this organization and supervisor; reassignment unchanged"
+  )]
     CharacterReassignmentUnchanged { character: CharacterId },
     #[error(
         "business {business} changed after validation; expected version {expected}, found {found}"
@@ -54,6 +46,14 @@ pub enum WorldError {
         business: BusinessId,
         expected: u32,
         found: u32,
+    },
+    #[error(
+        "business {business} is owned by {actual:?}, not the validated previous owner {expected:?}"
+    )]
+    BusinessOwnerChanged {
+        business: BusinessId,
+        expected: BusinessOwner,
+        actual: BusinessOwner,
     },
     #[error("business {business} supports active enterprise {enterprise} for organization {organization}")]
     ActiveEnterpriseSupport {
@@ -108,11 +108,9 @@ pub enum WorldError {
         supervisor: CharacterId,
         arrest: ArrestId,
     },
-    #[error("supervisor {0} is not active")]
-    InactiveSupervisor(CharacterId),
     #[error(
-        "character {character} is active informant {informant} for target handler organization {handler}"
-    )]
+    "character {character} is active informant {informant} for target handler organization {handler}"
+  )]
     ActiveInformantHandlerAssignment {
         character: CharacterId,
         handler: OrganizationId,
@@ -161,7 +159,6 @@ pub fn insert_organization(
         id,
         name: draft.name,
         kind: draft.kind,
-        lifecycle: Lifecycle::Active,
         policies,
     });
     Ok(id)
@@ -175,9 +172,6 @@ pub fn designate_player_organization(
         .world
         .get_organization(organization)
         .ok_or(WorldError::MissingOrganization(organization))?;
-    if record.lifecycle() != Lifecycle::Active {
-        return Err(WorldError::InactiveOrganization(organization));
-    }
     if record.kind() != OrganizationKind::Criminal {
         return Err(WorldError::InvalidPlayerOrganization(organization));
     }
@@ -197,7 +191,6 @@ pub fn insert_neighborhood(
         id,
         name: draft.name,
         profile: draft.profile,
-        lifecycle: Lifecycle::Active,
     });
     Ok(id)
 }
@@ -229,10 +222,7 @@ pub fn insert_character(
             traits: draft.traits,
             drives: draft.drives,
         },
-        runtime: CharacterRuntime {
-            lifecycle: Lifecycle::Active,
-            version: 1,
-        },
+        runtime: CharacterRuntime { version: 1 },
     });
     Ok(id)
 }
@@ -306,9 +296,6 @@ fn validate_reassignment_preconditions(
         .world
         .get_character(character)
         .ok_or(WorldError::MissingCharacter(character))?;
-    if record.lifecycle() != Lifecycle::Active {
-        return Err(WorldError::InactiveCharacter(character));
-    }
     if supervisor == Some(character) {
         return Err(WorldError::SelfSupervision { character });
     }
@@ -426,13 +413,10 @@ pub fn insert_business(
     if draft.name.trim().is_empty() {
         return Err(WorldError::EmptyName);
     }
-    let neighborhood = state
+    let _ = state
         .world
         .get_neighborhood(draft.neighborhood)
         .ok_or(WorldError::MissingNeighborhood(draft.neighborhood))?;
-    if neighborhood.lifecycle() != Lifecycle::Active {
-        return Err(WorldError::InactiveNeighborhood(draft.neighborhood));
-    }
     registry.get_business(draft.kind);
     validate_business_owner(state, draft.owner)?;
     state
@@ -457,7 +441,6 @@ pub fn insert_business(
             functions,
             neighborhood,
             owner,
-            lifecycle: Lifecycle::Active,
             version: 1,
         },
         BusinessOwnershipChangeRecord {
@@ -491,10 +474,10 @@ impl ValidatedBusinessOwnershipTransfer {
             });
         }
         if record.owner() != self.previous_owner {
-            return Err(WorldError::StaleBusiness {
+            return Err(WorldError::BusinessOwnerChanged {
                 business: self.business,
-                expected: self.expected_version,
-                found: record.version(),
+                expected: self.previous_owner,
+                actual: record.owner(),
             });
         }
         validate_business_owner(state, self.new_owner)?;
@@ -590,9 +573,6 @@ fn validate_transferable_business(
         .world
         .get_business(business)
         .ok_or(WorldError::MissingBusiness(business))?;
-    if record.lifecycle() != Lifecycle::Active {
-        return Err(WorldError::InactiveBusiness(business));
-    }
     Ok(record)
 }
 
@@ -600,23 +580,17 @@ fn validate_business_owner(state: &AppState, owner: BusinessOwner) -> Result<(),
     match owner {
         BusinessOwner::Independent => Ok(()),
         BusinessOwner::Organization(id) => {
-            let organization = state
+            state
                 .world
                 .get_organization(id)
                 .ok_or(WorldError::MissingOrganization(id))?;
-            if organization.lifecycle() != Lifecycle::Active {
-                return Err(WorldError::InactiveOrganization(id));
-            }
             Ok(())
         }
         BusinessOwner::Character(id) => {
-            let character = state
+            state
                 .world
                 .get_character(id)
                 .ok_or(WorldError::MissingCharacter(id))?;
-            if character.lifecycle() != Lifecycle::Active {
-                return Err(WorldError::InactiveCharacter(id));
-            }
             Ok(())
         }
     }
@@ -628,13 +602,10 @@ pub fn set_policy(
     organization: OrganizationId,
     setting: PolicySetting,
 ) -> Result<(), WorldError> {
-    let organization_record = state
+    state
         .world
         .get_organization(organization)
         .ok_or(WorldError::MissingOrganization(organization))?;
-    if organization_record.lifecycle() != Lifecycle::Active {
-        return Err(WorldError::InactiveOrganization(organization));
-    }
     registry.get_policy(setting.kind());
     state.world.set_policy(organization, setting);
     Ok(())
@@ -646,13 +617,10 @@ fn validate_membership(
     supervisor: Option<CharacterId>,
 ) -> Result<(), WorldError> {
     if let Some(organization_id) = organization {
-        let organization_record = state
+        state
             .world
             .get_organization(organization_id)
             .ok_or(WorldError::MissingOrganization(organization_id))?;
-        if organization_record.lifecycle() != Lifecycle::Active {
-            return Err(WorldError::InactiveOrganization(organization_id));
-        }
     }
     // A supervision chain is an organization hierarchy; an unassigned character cannot report
     // to a supervisor because no organization would own the relationship.
@@ -666,9 +634,6 @@ fn validate_membership(
             .world
             .get_character(supervisor_id)
             .ok_or(WorldError::MissingCharacter(supervisor_id))?;
-        if supervisor_record.lifecycle() != Lifecycle::Active {
-            return Err(WorldError::InactiveSupervisor(supervisor_id));
-        }
         if let Some(arrest) = state.legal.active_arrest_for_character(supervisor_id) {
             return Err(WorldError::DetainedSupervisor {
                 supervisor: supervisor_id,

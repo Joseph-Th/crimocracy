@@ -12,13 +12,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
-/// Records are removed from state by deletion, never flagged; the single variant replaces
-/// the former Active/Inactive/Removed trio whose non-active states were unreachable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Lifecycle {
-    Active,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OrganizationKind {
     Criminal,
@@ -230,7 +223,6 @@ pub struct OrganizationRecord {
     id: OrganizationId,
     name: String,
     kind: OrganizationKind,
-    lifecycle: Lifecycle,
     policies: BTreeMap<PolicyKind, PolicySetting>,
 }
 
@@ -245,10 +237,6 @@ impl OrganizationRecord {
 
     pub fn kind(&self) -> OrganizationKind {
         self.kind
-    }
-
-    pub fn lifecycle(&self) -> Lifecycle {
-        self.lifecycle
     }
 
     pub fn policy(&self, kind: PolicyKind) -> Option<PolicySetting> {
@@ -282,7 +270,6 @@ struct CharacterDisposition {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CharacterRuntime {
-    lifecycle: Lifecycle,
     version: u32,
 }
 
@@ -328,10 +315,6 @@ impl CharacterRecord {
         self.disposition.drives.get(&kind).copied()
     }
 
-    pub fn lifecycle(&self) -> Lifecycle {
-        self.runtime.lifecycle
-    }
-
     pub fn version(&self) -> u32 {
         self.runtime.version
     }
@@ -342,7 +325,6 @@ pub struct NeighborhoodRecord {
     id: NeighborhoodId,
     name: String,
     profile: NeighborhoodProfile,
-    lifecycle: Lifecycle,
 }
 
 impl NeighborhoodRecord {
@@ -357,10 +339,6 @@ impl NeighborhoodRecord {
     pub fn profile(&self) -> NeighborhoodProfile {
         self.profile
     }
-
-    pub fn lifecycle(&self) -> Lifecycle {
-        self.lifecycle
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,12 +348,11 @@ pub struct NeighborhoodEconomyProfile {
     pub illicit_demand: Rating,
 }
 
+/// Only institution attributes with a consuming system are modeled; unread authored ratings
+/// would persist forever without ever informing a decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeighborhoodInstitutionProfile {
     pub police_presence: Rating,
-    pub political_influence: Rating,
-    pub social_cohesion: Rating,
-    pub visible_violence_tolerance: Rating,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,7 +408,6 @@ pub struct BusinessRecord {
     functions: BTreeSet<BusinessFunction>,
     neighborhood: NeighborhoodId,
     owner: BusinessOwner,
-    lifecycle: Lifecycle,
     version: u32,
 }
 
@@ -462,10 +438,6 @@ impl BusinessRecord {
 
     pub fn owner(&self) -> BusinessOwner {
         self.owner
-    }
-
-    pub fn lifecycle(&self) -> Lifecycle {
-        self.lifecycle
     }
 
     pub fn version(&self) -> u32 {
@@ -1130,85 +1102,14 @@ impl WorldState {
         true
     }
 
+    /// Debug builds re-derive the full index consistency check on every mutation boundary;
+    /// `has_consistent_indexes` is the single authority so the two can never drift apart.
     #[cfg(debug_assertions)]
     pub(crate) fn debug_validate_indexes(&self) {
         debug_assert!(
             self.has_consistent_indexes(),
             "Derived Data Consistency: world indexes disagree with source records"
         );
-        for record in self.characters.records.values() {
-            if let Some(organization) = record.organization() {
-                debug_assert!(
-                    self.characters
-                        .by_organization
-                        .get(&organization)
-                        .is_some_and(|ids| ids.contains(&record.id())),
-                    "Index Completeness: character organization index is missing a member"
-                );
-            }
-            if let Some(supervisor) = record.supervisor() {
-                debug_assert!(
-                    self.characters
-                        .by_supervisor
-                        .get(&supervisor)
-                        .is_some_and(|ids| ids.contains(&record.id())),
-                    "Index Completeness: character supervisor index is missing a report"
-                );
-            }
-        }
-        for (organization, ids) in &self.characters.by_organization {
-            for id in ids {
-                let record = self.characters.records.get(id).expect(
-                    "Index Completeness: character organization index points to missing record",
-                );
-                debug_assert_eq!(
-                    record.organization(),
-                    Some(*organization),
-                    "Derived Data Consistency: character organization index disagrees with record"
-                );
-            }
-        }
-        for (supervisor, ids) in &self.characters.by_supervisor {
-            for id in ids {
-                let record = self
-                    .characters
-                    .records
-                    .get(id)
-                    .expect("Index Completeness: supervisor index points to missing record");
-                debug_assert_eq!(
-                    record.supervisor(),
-                    Some(*supervisor),
-                    "Derived Data Consistency: supervisor index disagrees with record"
-                );
-            }
-        }
-        for record in self.businesses.records.values() {
-            debug_assert!(
-                self.businesses
-                    .by_neighborhood
-                    .get(&record.neighborhood())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: business neighborhood index is missing a business"
-            );
-            if let BusinessOwner::Organization(organization) = record.owner() {
-                debug_assert!(
-                    self.businesses
-                        .by_organization_owner
-                        .get(&organization)
-                        .is_some_and(|ids| ids.contains(&record.id())),
-                    "Index Completeness: business owner index is missing a business"
-                );
-            }
-            if let BusinessOwner::Character(character) = record.owner() {
-                debug_assert!(
-                    self.businesses
-                        .by_character_owner
-                        .get(&character)
-                        .is_some_and(|ids| ids.contains(&record.id())),
-                    "Index Completeness: business character-owner index is missing a business"
-                );
-            }
-        }
     }
 }
 

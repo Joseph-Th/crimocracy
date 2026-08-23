@@ -82,9 +82,6 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(40),
-                    political_influence: rating(55),
-                    social_cohesion: rating(65),
-                    visible_violence_tolerance: rating(25),
                 },
             },
         },
@@ -309,9 +306,6 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(40),
-                    political_influence: rating(55),
-                    social_cohesion: rating(65),
-                    visible_violence_tolerance: rating(25),
                 },
             },
         },
@@ -1459,7 +1453,7 @@ fn police_fear_above_the_authored_ceiling_stalls_expansion_until_it_cools() {
 
     // Once the impression decays back under the ceiling the same mandate expands again.
     loop {
-        let fear = crate::reputation::reputation_system::resolved_score(
+        let fear = crate::reputation::reputation_system::resolve_score(
             &registry,
             &fixture.state.reputation,
             fixture.organization,
@@ -1512,9 +1506,6 @@ fn expansion_consolidates_led_districts_before_contested_ones() {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(40),
-                    political_influence: rating(50),
-                    social_cohesion: rating(60),
-                    visible_violence_tolerance: rating(25),
                 },
             },
         },

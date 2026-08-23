@@ -8,7 +8,7 @@ use crate::core::time::SimTime;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
 use crate::legal::{PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus};
 use crate::operations::OperationStatus;
-use crate::world::{Lifecycle, OrganizationKind, Rating};
+use crate::world::{OrganizationKind, Rating};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,16 +153,10 @@ fn validate_dispatch_dependencies(
         .world
         .get_organization(draft.authority)
         .ok_or(PoliceResponseError::MissingAuthority(draft.authority))?;
-    if authority.lifecycle() != Lifecycle::Active
-        || authority.kind() != OrganizationKind::LawEnforcement
-    {
+    if authority.kind() != OrganizationKind::LawEnforcement {
         return Err(PoliceResponseError::InvalidAuthority(draft.authority));
     }
-    if !state
-        .world
-        .get_neighborhood(draft.neighborhood)
-        .is_some_and(|record| record.lifecycle() == Lifecycle::Active)
-    {
+    if state.world.get_neighborhood(draft.neighborhood).is_none() {
         return Err(PoliceResponseError::InvalidNeighborhood(draft.neighborhood));
     }
     let operation = state

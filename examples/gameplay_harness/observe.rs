@@ -23,15 +23,15 @@ pub fn observe_tick(
     for payroll in outcome
         .payrolls
         .iter()
-        .filter(|payroll| payroll.organization == scenario.player)
+        .filter(|payroll| payroll.organization() == scenario.player)
     {
-        metrics.payroll_paid_cents += payroll.paid.cents();
-        metrics.payroll_short_cents += payroll.short.cents();
-        if narrative && payroll.short.cents() > 0 {
+        metrics.payroll_paid_cents += payroll.paid().cents();
+        metrics.payroll_short_cents += payroll.short().cents();
+        if narrative && payroll.short().cents() > 0 {
             println!(
                 "[PAYROLL]  {}: the day's wages went unpaid ({} owed). The crew will remember.",
                 stamp(outcome.now.as_minutes()),
-                format_cents(payroll.owed.cents())
+                format_cents(payroll.owed().cents())
             );
         }
     }

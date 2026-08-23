@@ -857,12 +857,6 @@ fn make_laundering_fixture() -> LaunderingFixture {
                 institutions: crate::world::NeighborhoodInstitutionProfile {
                     police_presence: crate::world::Rating::try_new(40)
                         .expect("fixture rating should validate"),
-                    political_influence: crate::world::Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    social_cohesion: crate::world::Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    visible_violence_tolerance: crate::world::Rating::try_new(20)
-                        .expect("fixture rating should validate"),
                 },
             },
         },

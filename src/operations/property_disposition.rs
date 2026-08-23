@@ -26,7 +26,7 @@ use crate::operations::{
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::{BusinessFunction, BusinessOwner, Lifecycle};
+use crate::world::{BusinessFunction, BusinessOwner};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -67,8 +67,6 @@ pub enum PropertyDispositionError {
         venue: BusinessId,
         neighborhood: crate::core::id::NeighborhoodId,
     },
-    #[error("business {0} is not active")]
-    InactiveVenue(BusinessId),
     #[error("business {0} does not provide resale-market access")]
     VenueNotResaleMarket(BusinessId),
     #[error("business {venue} is not owned by organization {organization}")]
@@ -327,9 +325,6 @@ fn validate_venue(
     venue: &crate::world::BusinessRecord,
     organization: crate::core::id::OrganizationId,
 ) -> Result<(), PropertyDispositionError> {
-    if venue.lifecycle() != Lifecycle::Active {
-        return Err(PropertyDispositionError::InactiveVenue(venue.id()));
-    }
     if venue.owner() != BusinessOwner::Organization(organization) {
         return Err(PropertyDispositionError::VenueOwnerMismatch {
             venue: venue.id(),
@@ -435,10 +430,10 @@ pub(crate) fn build_disposition_summary(
     realized_value: Money,
 ) -> String {
     format!(
-        "Property from {operation_title} was liquidated through {venue_name} for {} from an estimated held value of {}.",
-        crate::finance::helpers::format_money_cents(realized_value.cents()),
-        crate::finance::helpers::format_money_cents(estimated_value.cents())
-    )
+    "Property from {operation_title} was liquidated through {venue_name} for {} from an estimated held value of {}.",
+    crate::finance::helpers::format_money_cents(realized_value.cents()),
+    crate::finance::helpers::format_money_cents(estimated_value.cents())
+  )
 }
 
 #[derive(Clone, Copy, Debug)]

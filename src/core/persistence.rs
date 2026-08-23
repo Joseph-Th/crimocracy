@@ -1,7 +1,7 @@
 //! Versioned persistence envelope; serialization adapters remain outside the simulation core.
 
 use crate::core::invariants::{
-    validate_invariants, validate_state, validate_state_against_registry, StateValidationError,
+    validate_state, validate_state_against_registry, StateValidationError,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::registry::Registry;
@@ -26,7 +26,6 @@ pub enum SaveError {
 pub fn build_save(registry: &Registry, state: &AppState) -> Result<SaveEnvelope, SaveError> {
     validate_state(state)?;
     validate_state_against_registry(registry, state)?;
-    validate_invariants(state);
     Ok(SaveEnvelope {
         format_version: CURRENT_SAVE_FORMAT_VERSION,
         content_revision: registry.content_revision(),
@@ -67,6 +66,5 @@ pub fn restore_save(registry: &Registry, envelope: SaveEnvelope) -> Result<AppSt
     }
     validate_state(&envelope.state).map_err(LoadError::InvalidState)?;
     validate_state_against_registry(registry, &envelope.state).map_err(LoadError::InvalidState)?;
-    validate_invariants(&envelope.state);
     Ok(envelope.state)
 }

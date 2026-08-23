@@ -16,7 +16,8 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::{
-    OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
+    OperationApproach, OperationDraft, OperationKind, OperationObjective, OperationObjectiveKind,
+    RoleKind,
 };
 use crate::world::world_system::{
     insert_business, insert_character, insert_neighborhood, insert_organization,
@@ -67,11 +68,6 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(50).expect("fixture rating should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture rating should validate"),
-                    visible_violence_tolerance: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
                 },
             },
         },
@@ -1136,7 +1132,10 @@ fn sabotage_objective_is_rejected_for_non_sabotage_kinds() {
         .expect_err("intimidation cannot carry a sabotage objective");
     assert!(matches!(
         error,
-        OperationError::InvalidObjectiveTarget { .. }
+        OperationError::InvalidObjectiveForKind {
+            kind: OperationKind::Intimidation,
+            objective: OperationObjectiveKind::DisruptBusiness,
+        }
     ));
 }
 
@@ -1175,8 +1174,8 @@ fn sabotage_of_a_business_without_an_operating_economy_is_rejected_atomically() 
     };
     assert!(
         matches!(
-            error,
-            OperationError::TargetWithoutOperatingEconomy(economyless) if economyless == business
+          error,
+          OperationError::TargetWithoutOperatingEconomy(economyless) if economyless == business
         ),
         "unexpected error: {error}"
     );

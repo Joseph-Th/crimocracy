@@ -21,7 +21,7 @@ use crate::legal::{
 };
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
+use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -52,8 +52,6 @@ pub enum ProsecutionError {
     MissingLegalKnowledge(CharacterId),
     #[error("defendant {0} does not exist")]
     MissingDefendant(CharacterId),
-    #[error("defendant {0} is not active")]
-    InactiveDefendant(CharacterId),
     #[error("arrest {arrest} already has open prosecution case {case} in office {office}")]
     DuplicateOpenCase {
         arrest: ArrestId,
@@ -248,13 +246,10 @@ fn validate_opening_dependencies(
         .ok_or(ProsecutionError::MissingArrest(draft.arrest))?;
     // The defendant is the subject of every artifact this case produces; opening a case against
     // an inactive person would assert the office reviewed someone who no longer exists.
-    let defendant = state
+    let _ = state
         .world
         .get_character(arrest.character())
         .ok_or(ProsecutionError::MissingDefendant(arrest.character()))?;
-    if defendant.lifecycle() != Lifecycle::Active {
-        return Err(ProsecutionError::InactiveDefendant(arrest.character()));
-    }
     if let Some(existing) = state
         .legal
         .open_prosecution_case_for(draft.arrest, draft.prosecutor_office)
@@ -286,8 +281,7 @@ fn validate_opening_dependencies(
         .world
         .get_organization(arrest.authority())
         .ok_or(ProsecutionError::MissingSourceAuthority(arrest.authority()))?;
-    if source_authority.lifecycle() != Lifecycle::Active
-        || source_authority.kind() != OrganizationKind::LawEnforcement
+    if source_authority.kind() != OrganizationKind::LawEnforcement
         || investigation.owner() != arrest.authority()
     {
         return Err(ProsecutionError::InvalidSourceAuthority(arrest.authority()));
@@ -298,7 +292,7 @@ fn validate_opening_dependencies(
         .ok_or(ProsecutionError::MissingProsecutorOffice(
             draft.prosecutor_office,
         ))?;
-    if office.lifecycle() != Lifecycle::Active || office.kind() != OrganizationKind::Prosecutor {
+    if office.kind() != OrganizationKind::Prosecutor {
         return Err(ProsecutionError::InvalidProsecutorOffice(
             draft.prosecutor_office,
         ));
@@ -473,8 +467,7 @@ fn validate_source_case_and_office(
         .ok_or(ProsecutionError::MissingSourceAuthority(
             case.source_authority(),
         ))?;
-    if source.lifecycle() != Lifecycle::Active || source.kind() != OrganizationKind::LawEnforcement
-    {
+    if source.kind() != OrganizationKind::LawEnforcement {
         return Err(ProsecutionError::InvalidSourceAuthority(
             case.source_authority(),
         ));
@@ -496,7 +489,7 @@ fn validate_source_case_and_office(
         .ok_or(ProsecutionError::MissingProsecutorOffice(
             case.prosecutor_office(),
         ))?;
-    if office.lifecycle() != Lifecycle::Active || office.kind() != OrganizationKind::Prosecutor {
+    if office.kind() != OrganizationKind::Prosecutor {
         return Err(ProsecutionError::InvalidProsecutorOffice(
             case.prosecutor_office(),
         ));
@@ -514,7 +507,7 @@ fn validate_lead_prosecutor(
         .world
         .get_character(prosecutor)
         .ok_or(ProsecutionError::MissingLeadProsecutor(prosecutor))?;
-    if lead.lifecycle() != Lifecycle::Active || lead.organization() != Some(office) {
+    if lead.organization() != Some(office) {
         return Err(ProsecutionError::InvalidLeadProsecutor { prosecutor, office });
     }
     if state
@@ -648,7 +641,7 @@ impl ValidatedProsecutionCaseResolution {
 
         let information = self.information.commit(state)?;
         let report = self.report.commit(state)?;
-        state.legal.resolve_prosecution_case(
+        state.legal.apply_prosecution_resolution(
             self.case,
             self.resolution,
             self.resolved_at,
@@ -714,7 +707,7 @@ fn validate_resolution_dependencies(
         .ok_or(ProsecutionError::MissingProsecutorOffice(
             case.prosecutor_office(),
         ))?;
-    if office.lifecycle() != Lifecycle::Active || office.kind() != OrganizationKind::Prosecutor {
+    if office.kind() != OrganizationKind::Prosecutor {
         return Err(ProsecutionError::InvalidProsecutorOffice(
             case.prosecutor_office(),
         ));
@@ -722,13 +715,10 @@ fn validate_resolution_dependencies(
     validate_lead_prosecutor(state, case.prosecutor_office(), case.lead_prosecutor())?;
     // Resolving the case emits defendant-named artifacts; an inactive defendant cannot be
     // meaningfully reviewed, so resolution must not proceed against one.
-    let defendant = state
+    let _ = state
         .world
         .get_character(case.defendant())
         .ok_or(ProsecutionError::MissingDefendant(case.defendant()))?;
-    if defendant.lifecycle() != Lifecycle::Active {
-        return Err(ProsecutionError::InactiveDefendant(case.defendant()));
-    }
     Ok(case)
 }
 

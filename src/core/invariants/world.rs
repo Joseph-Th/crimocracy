@@ -1,6 +1,8 @@
 //! Release-safe structural validation for the world, social, and contact subsystems.
 
-use crate::contacts::contact_system::{expected_contact_kind, resolve_information_source_kind};
+use crate::contacts::contact_system::{
+    resolve_contact_kind_for_institution_kind, resolve_information_source_kind,
+};
 use crate::contacts::ContactRelationshipSnapshot;
 use crate::contacts::ContactStatus;
 use crate::core::entity::{is_entity_present, EntityRef};
@@ -8,7 +10,7 @@ use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder};
-use crate::world::{BusinessOwner, Lifecycle, OrganizationKind, ALL_POLICY_KINDS};
+use crate::world::{BusinessOwner, OrganizationKind, ALL_POLICY_KINDS};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidationError> {
@@ -325,7 +327,7 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
             },
         )?;
         if sponsor.kind() != OrganizationKind::Criminal
-            || expected_contact_kind(institution.kind()) != Some(contact.kind())
+            || resolve_contact_kind_for_institution_kind(institution.kind()) != Some(contact.kind())
             || contact.handler() == contact.contact()
             || contact.version() == 0
             || contact.established_at() > state.now()
@@ -343,12 +345,8 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
         match contact.status() {
             ContactStatus::Active => {
                 if contact.terminated_at().is_some()
-                    || sponsor.lifecycle() != Lifecycle::Active
-                    || handler.lifecycle() != Lifecycle::Active
                     || handler.organization() != Some(contact.sponsor())
-                    || source.lifecycle() != Lifecycle::Active
                     || source.organization() != Some(contact.institution())
-                    || institution.lifecycle() != Lifecycle::Active
                     || state
                         .contacts
                         .active_contact_for(contact.sponsor(), contact.contact())

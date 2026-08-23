@@ -10,22 +10,16 @@ use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
-use crate::world::{BusinessOwner, Lifecycle};
+use crate::world::BusinessOwner;
 use std::collections::BTreeSet;
 
 pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {
-        let business = state.world.get_business(economy.business()).ok_or(
+        let _ = state.world.get_business(economy.business()).ok_or(
             StateValidationError::InvalidBusinessEconomy {
                 business: economy.business(),
             },
         )?;
-        let neighborhood = state
-            .world
-            .get_neighborhood(business.neighborhood())
-            .ok_or(StateValidationError::InvalidBusinessEconomy {
-                business: economy.business(),
-            })?;
         let operating = state
             .finance
             .get_account(economy.operating_account())
@@ -74,13 +68,6 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                         business: economy.business(),
                     },
                 )?;
-                if business.lifecycle() != Lifecycle::Active
-                    || neighborhood.lifecycle() != Lifecycle::Active
-                {
-                    return Err(StateValidationError::InvalidBusinessEconomy {
-                        business: economy.business(),
-                    });
-                }
                 if next_cycle_at <= economy.established_at()
                     || economy
                         .last_cycle_at()
@@ -203,7 +190,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
 
 pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
     for enterprise in state.enterprises.enterprises() {
-        let organization = state
+        state
             .world
             .get_organization(enterprise.organization())
             .ok_or(StateValidationError::InvalidEnterpriseAuthority {
@@ -231,12 +218,12 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
 
         let (neighborhood_id, location_is_active) = match enterprise.location() {
             EnterpriseLocation::Neighborhood(id) => {
-                let neighborhood = state.world.get_neighborhood(id).ok_or(
+                state.world.get_neighborhood(id).ok_or(
                     StateValidationError::InvalidEnterpriseLocation {
                         enterprise: enterprise.id(),
                     },
                 )?;
-                (id, neighborhood.lifecycle() == Lifecycle::Active)
+                (id, true)
             }
             EnterpriseLocation::Business(id) => {
                 let business = state.world.get_business(id).ok_or(
@@ -244,17 +231,13 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                         enterprise: enterprise.id(),
                     },
                 )?;
-                let neighborhood = state
+                state
                     .world
                     .get_neighborhood(business.neighborhood())
                     .ok_or(StateValidationError::InvalidEnterpriseLocation {
                         enterprise: enterprise.id(),
                     })?;
-                (
-                    business.neighborhood(),
-                    business.lifecycle() == Lifecycle::Active
-                        && neighborhood.lifecycle() == Lifecycle::Active,
-                )
+                (business.neighborhood(), true)
             }
         };
 
@@ -347,17 +330,13 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                         enterprise: enterprise.id(),
                     },
                 )?;
-                if organization.lifecycle() != Lifecycle::Active
-                    || manager.lifecycle() != Lifecycle::Active
-                    || manager.organization() != Some(enterprise.organization())
+                if manager.organization() != Some(enterprise.organization())
                     || mandate.status() != MandateStatus::Active
                     || !mandate.scopes().contains(&authority.scope)
                     || !authority_covers_location
                     || !location_is_active
                     || supporting_businesses.iter().any(|business| {
-                        business.lifecycle() != Lifecycle::Active
-                            || business.owner()
-                                != BusinessOwner::Organization(enterprise.organization())
+                        business.owner() != BusinessOwner::Organization(enterprise.organization())
                     })
                 {
                     return Err(StateValidationError::InvalidEnterpriseAuthority {

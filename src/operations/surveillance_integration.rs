@@ -17,7 +17,7 @@ use crate::legal::{InvestigationStatus, PatrolWindow};
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
 };
-use crate::world::{BusinessFunction, Lifecycle, OrganizationKind, Rating};
+use crate::world::{BusinessFunction, OrganizationKind, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -82,13 +82,11 @@ enum SurveillanceTargetSnapshot {
     Neighborhood {
         id: NeighborhoodId,
         name: String,
-        lifecycle: Lifecycle,
         patrol: PatrolPatternSnapshot,
     },
     Business {
         id: BusinessId,
         name: String,
-        lifecycle: Lifecycle,
         functions: BTreeSet<BusinessFunction>,
         neighborhood: NeighborhoodId,
         neighborhood_name: String,
@@ -97,14 +95,12 @@ enum SurveillanceTargetSnapshot {
     Character {
         id: CharacterId,
         name: String,
-        lifecycle: Lifecycle,
         organization: Option<(OrganizationId, String)>,
         supervisor: Option<(CharacterId, String)>,
     },
     Organization {
         id: OrganizationId,
         name: String,
-        lifecycle: Lifecycle,
         active_members: Vec<(CharacterId, String)>,
         // Present for law-enforcement/legal-authority targets so the player's known case can be
         // re-checked through canonical surveillance after standing down.
@@ -263,30 +259,30 @@ pub(crate) fn surveillance_after_action_clause(
     let plan = plan?;
     let findings = plan.observation_findings().collect::<Vec<_>>().join("; ");
     let clause = match outcome {
-        OperationObjectiveOutcome::Achieved => format!(
-            "Surveillance produced {} usable target observation{}{}.",
-            plan.observation_count(),
-            if plan.observation_count() == 1 { "" } else { "s" },
-            if findings.is_empty() {
-                String::new()
-            } else {
-                format!(": {findings}")
-            }
-        ),
-        OperationObjectiveOutcome::Partial => format!(
-            "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
-            plan.observation_count(),
-            if plan.observation_count() == 1 { "" } else { "s" },
-            if findings.is_empty() {
-                String::new()
-            } else {
-                format!(" Covered: {findings}.")
-            }
-        ),
-        OperationObjectiveOutcome::Failed => {
-            "Surveillance produced no target observation reliable enough for planning.".to_owned()
-        }
-    };
+    OperationObjectiveOutcome::Achieved => format!(
+      "Surveillance produced {} usable target observation{}{}.",
+      plan.observation_count(),
+      if plan.observation_count() == 1 { "" } else { "s" },
+      if findings.is_empty() {
+        String::new()
+      } else {
+        format!(": {findings}")
+      }
+    ),
+    OperationObjectiveOutcome::Partial => format!(
+      "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
+      plan.observation_count(),
+      if plan.observation_count() == 1 { "" } else { "s" },
+      if findings.is_empty() {
+        String::new()
+      } else {
+        format!(" Covered: {findings}.")
+      }
+    ),
+    OperationObjectiveOutcome::Failed => {
+      "Surveillance produced no target observation reliable enough for planning.".to_owned()
+    }
+  };
     Some(clause)
 }
 
@@ -418,7 +414,6 @@ fn resolve_target_snapshot(
             Ok(SurveillanceTargetSnapshot::Neighborhood {
                 id,
                 name: neighborhood.name().to_owned(),
-                lifecycle: neighborhood.lifecycle(),
                 patrol: resolve_patrol_pattern(state, id, at),
             })
         }
@@ -434,7 +429,6 @@ fn resolve_target_snapshot(
             Ok(SurveillanceTargetSnapshot::Business {
                 id,
                 name: business.name().to_owned(),
-                lifecycle: business.lifecycle(),
                 functions: business.functions().clone(),
                 neighborhood: business.neighborhood(),
                 neighborhood_name: neighborhood.name().to_owned(),
@@ -463,7 +457,6 @@ fn resolve_target_snapshot(
             Ok(SurveillanceTargetSnapshot::Character {
                 id,
                 name: character.name().to_owned(),
-                lifecycle: character.lifecycle(),
                 organization,
                 supervisor,
             })
@@ -476,30 +469,35 @@ fn resolve_target_snapshot(
             let active_members = state
                 .world
                 .characters_in_organization(id)
-                .filter(|character| character.lifecycle() == Lifecycle::Active)
                 .map(|character| (character.id(), character.name().to_owned()))
                 .collect();
             let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
-                Some(LawEnforcementCaseSightline {
-                    // Every operation-originated case the surveiller has been surfaced by this
-                    // authority, resolved through the owner index rather than a world scan. The
-                    // sightline is "still being worked" while any known case is active: that is the
-                    // player-relevant heat signal, and it never reveals evidence, subjects, or
-                    // internal case details.
-                    active_case_against_surveiller: state.legal.investigations_for_owner(id).any(
-                        |case| {
-                            case.status() == InvestigationStatus::Active
-                                && case.notified_organizations().contains(&surveiller)
-                        },
-                    ),
-                })
+                // A sightline exists only once this authority has surfaced an operation-
+                // originated case to the surveiller; before that there is nothing to re-read,
+                // so surveillance falls back to ordinary personnel observation instead of
+                // fabricating a "shelved" read about a case that never touched this organization.
+                state
+                    .legal
+                    .investigations_for_owner(id)
+                    .any(|case| case.notified_organizations().contains(&surveiller))
+                    .then(|| LawEnforcementCaseSightline {
+                        // "Still being worked" while any known case is active: that is the
+                        // player-relevant heat signal, and it never reveals evidence, subjects,
+                        // or internal case details.
+                        active_case_against_surveiller: state
+                            .legal
+                            .investigations_for_owner(id)
+                            .any(|case| {
+                                case.status() == InvestigationStatus::Active
+                                    && case.notified_organizations().contains(&surveiller)
+                            }),
+                    })
             } else {
                 None
             };
             Ok(SurveillanceTargetSnapshot::Organization {
                 id,
                 name: organization.name().to_owned(),
-                lifecycle: organization.lifecycle(),
                 active_members,
                 law_enforcement_sightline,
             })
@@ -617,19 +615,16 @@ fn build_observations(
         return Vec::new();
     };
     match snapshot {
-        SurveillanceTargetSnapshot::Neighborhood {
-            id,
-            name,
-            patrol,
-            lifecycle: _,
-        } => vec![SurveillanceObservation {
-            topic: InformationTopic::PoliceActivity,
-            subject: EntityRef::Neighborhood(*id),
-            reliability,
-            specificity,
-            summary: patrol_summary(name, patrol, outcome, observed_at),
-            finding: format!("police activity around {name}"),
-        }],
+        SurveillanceTargetSnapshot::Neighborhood { id, name, patrol } => {
+            vec![SurveillanceObservation {
+                topic: InformationTopic::PoliceActivity,
+                subject: EntityRef::Neighborhood(*id),
+                reliability,
+                specificity,
+                summary: patrol_summary(name, patrol, outcome, observed_at),
+                finding: format!("police activity around {name}"),
+            }]
+        }
         SurveillanceTargetSnapshot::Business {
             id,
             name,
@@ -637,7 +632,6 @@ fn build_observations(
             neighborhood,
             neighborhood_name,
             patrol,
-            lifecycle: _,
         } => {
             let mut observations = vec![SurveillanceObservation {
                 topic: InformationTopic::PoliceActivity,
@@ -664,7 +658,6 @@ fn build_observations(
             name,
             organization,
             supervisor,
-            lifecycle: _,
         } => vec![SurveillanceObservation {
             topic: InformationTopic::Personnel,
             subject: EntityRef::Character(*id),
@@ -678,7 +671,6 @@ fn build_observations(
             name,
             active_members,
             law_enforcement_sightline,
-            lifecycle: _,
         } => match law_enforcement_sightline {
             Some(sightline) => vec![SurveillanceObservation {
                 topic: InformationTopic::LegalActivity,
@@ -780,15 +772,15 @@ fn patrol_summary(
     if outcome == OperationObjectiveOutcome::Partial {
         let presence = patrol.current_presence.unwrap_or(patrol.baseline_presence);
         return format!(
-            "Police activity around {neighborhood_name} appeared {} during the observation period; a dependable daily patrol pattern was not established.",
-            police_presence_label(presence)
-        );
+      "Police activity around {neighborhood_name} appeared {} during the observation period; a dependable daily patrol pattern was not established.",
+      police_presence_label(presence)
+    );
     }
     if patrol.deployments.is_empty() {
         return format!(
-            "No stable daily patrol deployment pattern was confirmed around {neighborhood_name}; visible police activity appears {} overall.",
-            police_presence_label(patrol.baseline_presence)
-        );
+      "No stable daily patrol deployment pattern was confirmed around {neighborhood_name}; visible police activity appears {} overall.",
+      police_presence_label(patrol.baseline_presence)
+    );
     }
     let mut windows = Vec::new();
     for deployment in &patrol.deployments {
@@ -819,11 +811,11 @@ fn patrol_summary(
     let minute = u16::try_from(observed_at.as_minutes() % 1_440)
         .expect("minute-of-day remainder must fit u16");
     format!(
-        "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}{extra_clause}. Around {}, activity was {}.",
-        windows.join(", "),
-        format_day_minute(rounded_half_hour(minute)),
-        police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
-    )
+    "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}{extra_clause}. Around {}, activity was {}.",
+    windows.join(", "),
+    format_day_minute(rounded_half_hour(minute)),
+    police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
+  )
 }
 
 fn approximate_patrol_window(window: PatrolWindow) -> String {
@@ -924,17 +916,17 @@ fn authority_sightline_summary(
     // organization already knows exists; it never reveals evidence, subjects, or case internals.
     if outcome == OperationObjectiveOutcome::Partial {
         return format!(
-            "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
-        );
+      "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
+    );
     }
     if active_case_against_surveiller {
         format!(
-            "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
-        )
+      "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
+    )
     } else {
         format!(
-            "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
-        )
+      "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
+    )
     }
 }
 
@@ -986,9 +978,9 @@ fn investigation_summary(
         String::new()
     };
     format!(
-        "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}{staffing_clause}",
-        investigation_status_label(status)
-    )
+    "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}{staffing_clause}",
+    investigation_status_label(status)
+  )
 }
 
 fn enterprise_summary(

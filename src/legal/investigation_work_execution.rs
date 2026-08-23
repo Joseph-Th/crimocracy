@@ -17,7 +17,7 @@ use crate::legal::{
     InvestigationWorkStatus, WitnessCooperation, WitnessStatementDraft,
 };
 use crate::registry::{InvestigationWorkDefinition, Registry};
-use crate::world::{CapabilityKind, Lifecycle, Rating};
+use crate::world::{CapabilityKind, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -34,8 +34,6 @@ pub enum InvestigationWorkError {
         investigation: InvestigationId,
         investigator: CharacterId,
     },
-    #[error("investigator {0} is not active")]
-    InactiveInvestigator(CharacterId),
     #[error("investigator {investigator} is detained under arrest {arrest}")]
     DetainedInvestigator {
         investigator: CharacterId,
@@ -300,11 +298,6 @@ fn validate_case_and_investigator(
             investigation: investigation_id,
             investigator: investigator_id,
         });
-    }
-    if investigator.lifecycle() != Lifecycle::Active {
-        return Err(InvestigationWorkError::InactiveInvestigator(
-            investigator_id,
-        ));
     }
     if let Some(arrest) = state.legal.active_arrest_for_character(investigator_id) {
         return Err(InvestigationWorkError::DetainedInvestigator {
@@ -931,10 +924,10 @@ pub(crate) fn resolve_improved_evidence_reliability(
     }
 }
 
-/// Builds the canonical statement an interview records. The testimony targets the strongest
-/// available character subject already in the case graph (minimum ID for determinism), or
-/// the case's origin operation when no person has been tied to the case yet. Confidence is
-/// a deterministic function of the interview margin.
+/// Builds the canonical statement an interview records. The testimony targets the character
+/// subject backed by the strongest evidence already in the case graph (minimum ID breaking
+/// strength ties), or the case's origin operation when no person has been tied to the case
+/// yet. Confidence is a deterministic function of the interview margin.
 fn resolve_interview_statement_draft(
     state: &AppState,
     work: &InvestigationWorkRecord,
@@ -942,6 +935,7 @@ fn resolve_interview_statement_draft(
     margin: i16,
 ) -> Result<WitnessStatementDraft, InvestigationWorkError> {
     use crate::core::id::OperationId;
+    use std::cmp::Reverse;
 
     let investigation = state
         .legal
@@ -951,9 +945,9 @@ fn resolve_interview_statement_draft(
         .evidence()
         .iter()
         .filter_map(|id| state.legal.get_evidence(*id))
+        .filter(|evidence| matches!(evidence.subject(), EntityRef::Character(_)))
+        .max_by_key(|evidence| (evidence.strength(), Reverse(evidence.subject())))
         .map(|evidence| evidence.subject())
-        .filter(|subject| matches!(subject, EntityRef::Character(_)))
-        .min()
         .or_else(|| {
             investigation
                 .origin_operation()

@@ -39,11 +39,11 @@ impl CaseActivityStatus {
     fn summary(self, authority_name: &str, case_title: &str) -> String {
         match self {
             Self::Active => format!(
-                "{authority_name} detectives are still actively developing the case \"{case_title}\"."
-            ),
-            Self::Shelved => format!(
-                "{authority_name} has already shelved the case \"{case_title}\"."
-            ),
+        "{authority_name} detectives are still actively developing the case \"{case_title}\"."
+      ),
+            Self::Shelved => {
+                format!("{authority_name} has already shelved the case \"{case_title}\".")
+            }
             Self::Closed => format!("{authority_name} has closed the case \"{case_title}\"."),
         }
     }

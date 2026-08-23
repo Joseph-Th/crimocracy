@@ -20,7 +20,7 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::registry::{BusinessEconomicsDefinition, Registry};
-use crate::world::{BusinessOwner, Lifecycle, NeighborhoodProfile};
+use crate::world::{BusinessOwner, NeighborhoodProfile};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -31,8 +31,6 @@ pub enum BusinessEconomyError {
     MissingBusinessEconomy(BusinessId),
     #[error("business {0} references a missing neighborhood")]
     MissingBusinessNeighborhood(BusinessId),
-    #[error("business {0} is not active")]
-    InactiveBusiness(BusinessId),
     #[error("business {0} already has an operating economy record")]
     ExistingBusinessEconomy(BusinessId),
     #[error("financial account {0} does not exist")]
@@ -236,9 +234,6 @@ pub fn decide_business_cycle(
         .world
         .get_neighborhood(business_record.neighborhood())
         .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
-    if neighborhood.lifecycle() != Lifecycle::Active {
-        return Err(BusinessEconomyError::InactiveBusiness(business));
-    }
     let profile = neighborhood.profile();
     let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
     // Sabotage damage degrades earning power for the authored horizon; costs keep running.
@@ -625,9 +620,6 @@ pub(crate) fn resolve_business_gross_potential(
         .world
         .get_neighborhood(business_record.neighborhood())
         .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
-    if neighborhood.lifecycle() != Lifecycle::Active {
-        return Err(BusinessEconomyError::InactiveBusiness(business));
-    }
     resolve_gross_before_variance(
         business,
         registry.get_business(business_record.kind()).economics(),
@@ -643,9 +635,6 @@ fn validate_business(
         .world
         .get_business(business)
         .ok_or(BusinessEconomyError::MissingBusiness(business))?;
-    if business_record.lifecycle() != Lifecycle::Active {
-        return Err(BusinessEconomyError::InactiveBusiness(business));
-    }
     Ok(business_record)
 }
 

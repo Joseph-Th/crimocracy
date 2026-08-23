@@ -9,7 +9,7 @@ use crate::registry::Registry;
 use crate::reports::report_system::validate_record_report;
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::reputation::{AudienceKind, ReputationDimension, ReputationRecord, ReputationState};
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -30,9 +30,8 @@ pub fn apply_reputation_delta(
     dimension: ReputationDimension,
     delta: i8,
 ) -> Result<u8, ReputationError> {
-    match state.world().get_organization(organization) {
-        Some(record) if record.lifecycle() == Lifecycle::Active => {}
-        _ => return Err(ReputationError::MissingOrganization(organization)),
+    if state.world().get_organization(organization).is_none() {
+        return Err(ReputationError::MissingOrganization(organization));
     }
     apply_delta(registry, state, organization, audience, dimension, delta)
 }
@@ -45,7 +44,7 @@ fn apply_delta(
     dimension: ReputationDimension,
     delta: i8,
 ) -> Result<u8, ReputationError> {
-    let current = resolved_score(
+    let current = resolve_score(
         registry,
         &state.reputation,
         organization,
@@ -76,7 +75,7 @@ fn apply_delta(
 
 /// The effective score for an impression: the stored value where touched, otherwise the
 /// authored baseline.
-pub fn resolved_score(
+pub fn resolve_score(
     registry: &Registry,
     reputation: &ReputationState,
     organization: OrganizationId,
@@ -189,7 +188,7 @@ pub(crate) fn apply_operation_reputation_consequences(
 /// organization legitimately knows how its own street standing moved after its own
 /// operation, so each shift becomes a Notable entry in a canonical Standing report —
 /// which the executive brief then surfaces. Rival organizations never receive these.
-pub(crate) fn record_standing_feedback(
+pub(crate) fn apply_standing_feedback(
     state: &mut AppState,
     organization: OrganizationId,
     shifts: &[AppliedStandingShift],
@@ -276,7 +275,7 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
     let mut adjusted = 0_usize;
     for (organization, audience) in touched {
         for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
-            let current = resolved_score(
+            let current = resolve_score(
                 registry,
                 &state.reputation,
                 organization,
@@ -347,7 +346,6 @@ impl ReputationRecord {
             reliability: baseline,
             competence: baseline,
             treachery: baseline,
-            version: 1,
         }
     }
 }
@@ -551,7 +549,7 @@ mod tests {
         for day in 1..=30 {
             state.advance_clock(SimDuration::from_minutes(1_440));
             apply_daily_reputation_decay(&registry, &mut state);
-            last = resolved_score(
+            last = resolve_score(
                 &registry,
                 &state.reputation,
                 organization,
@@ -584,7 +582,7 @@ mod tests {
         .expect("adjustment should apply");
         state.advance_clock(SimDuration::from_minutes(1_000));
         assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 0);
-        let score = resolved_score(
+        let score = resolve_score(
             &registry,
             &state.reputation,
             organization,
@@ -757,7 +755,7 @@ mod tests {
     fn player_standing_shifts_surface_as_notable_standing_reports() {
         let (registry, mut state, organization) = make_state_with_player();
 
-        record_standing_feedback(
+        apply_standing_feedback(
             &mut state,
             organization,
             &[
@@ -808,7 +806,7 @@ mod tests {
             OperationExposureLevel::Witnessed,
         )
         .expect("consequences should apply");
-        record_standing_feedback(
+        apply_standing_feedback(
             &mut state,
             organization,
             &[
@@ -836,7 +834,7 @@ mod tests {
     #[test]
     fn shifts_that_move_nothing_produce_no_feedback() {
         let (_, mut state, organization) = make_state_with_player();
-        record_standing_feedback(&mut state, organization, &[]).expect("empty feedback is a no-op");
+        apply_standing_feedback(&mut state, organization, &[]).expect("empty feedback is a no-op");
         assert_eq!(standing_reports(&state, organization), 0);
         validate_invariants(&state);
     }

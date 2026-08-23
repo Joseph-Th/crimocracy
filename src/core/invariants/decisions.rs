@@ -15,7 +15,7 @@ use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationContingency, OperationStatus,
 };
 use crate::recruitment::RecruitmentPolicySource;
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 
 pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
     for decision in state.decisions.decisions() {
@@ -170,11 +170,11 @@ fn validate_operation_decision(
                 .decisions_for_operation(operation_id)
                 .filter(|candidate| {
                     matches!(
-                        candidate.context(),
-                        DecisionContext::OperationException {
-                            reason: OperationExceptionReason::PoliceArrival(candidate_response),
-                            ..
-                        } if candidate_response == response_id
+                      candidate.context(),
+                      DecisionContext::OperationException {
+                        reason: OperationExceptionReason::PoliceArrival(candidate_response),
+                        ..
+                      } if candidate_response == response_id
                     )
                 })
                 .count();
@@ -397,7 +397,7 @@ fn validate_recruitment_approval_decision(
 
 pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidationError> {
     for mandate in state.delegation.mandates() {
-        let organization = state.world.get_organization(mandate.organization()).ok_or(
+        state.world.get_organization(mandate.organization()).ok_or(
             StateValidationError::MissingEntity {
                 context: "mandate organization",
                 entity: EntityRef::Organization(mandate.organization()),
@@ -470,16 +470,7 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
             }
         }
         match mandate.status() {
-            MandateStatus::Active => {
-                if organization.lifecycle() != Lifecycle::Active
-                    || manager.lifecycle() != Lifecycle::Active
-                {
-                    return Err(StateValidationError::ActiveMandateInvalidManager {
-                        mandate: mandate.id(),
-                        manager: mandate.manager(),
-                    });
-                }
-            }
+            MandateStatus::Active => {}
             MandateStatus::Revoked => {}
         }
     }

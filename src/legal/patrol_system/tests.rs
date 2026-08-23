@@ -1,4 +1,4 @@
-//! Focused tests for patrol deployment scheduling, presence resolution, and transitions.
+//! Focused tests for patrol deployment validation and presence resolution.
 
 use super::*;
 use crate::build_registry;
@@ -29,11 +29,6 @@ fn make_fixture() -> (crate::Registry, AppState, OrganizationId, NeighborhoodId)
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(60).expect("fixture rating should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture rating should validate"),
-                    visible_violence_tolerance: Rating::try_new(40)
-                        .expect("fixture rating should validate"),
                 },
             },
         },
@@ -96,10 +91,9 @@ fn patrol_windows_wrap_midnight_and_leave_real_coverage_gaps() {
         Some(80)
     );
     assert_eq!(
-        // Minute 300 sits in a real coverage gap: no window covers it, so scheduled patrol
-        // presence is absent and consumers fall back to the ambient baseline.
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(300)),
-        None
+        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(300))
+            .map(Rating::value),
+        Some(0)
     );
     assert_eq!(
         resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(540))
@@ -150,11 +144,6 @@ fn active_patrol_blocks_jurisdiction_contraction_until_suspended() {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(50).expect("fixture rating should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture rating should validate"),
-                    visible_violence_tolerance: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
                 },
             },
         },

@@ -31,7 +31,6 @@ use crate::operations::{
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::Lifecycle;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -47,8 +46,6 @@ pub enum OperationError {
     EmptyTitle,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("organization {0} is not active")]
-    InactiveOrganization(OrganizationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
     #[error("entity {0:?} does not exist")]
@@ -69,16 +66,14 @@ pub enum OperationError {
         leader: CharacterId,
         organization: OrganizationId,
     },
-    #[error("character {0} assigned to an operation is not active")]
-    InactiveParticipant(CharacterId),
     #[error("character {character} is already committed to overlapping operation {operation}")]
     ParticipantBusy {
         character: CharacterId,
         operation: OperationId,
     },
     #[error(
-        "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
-    )]
+    "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
+  )]
     ForeignParticipant {
         character: CharacterId,
         expected: OrganizationId,
@@ -90,16 +85,16 @@ pub enum OperationError {
         arrest: ArrestId,
     },
     #[error(
-        "character {character} changed after operation validation; expected version {expected}, found {found}"
-    )]
+    "character {character} changed after operation validation; expected version {expected}, found {found}"
+  )]
     StaleParticipant {
         character: CharacterId,
         expected: u32,
         found: u32,
     },
     #[error(
-        "operation authorization expired at simulation minute {scheduled_for}; current minute is {now}"
-    )]
+    "operation authorization expired at simulation minute {scheduled_for}; current minute is {now}"
+  )]
     AuthorizationExpired { scheduled_for: u64, now: u64 },
     #[error("operation approach is not supported by the operation definition")]
     UnsupportedApproach,
@@ -117,8 +112,8 @@ pub enum OperationError {
     #[error("extraction target character {0} is not currently detained")]
     TargetNotDetained(crate::core::id::CharacterId),
     #[error(
-        "detainee {character} is already the extraction target of non-terminal operation {operation}"
-    )]
+    "detainee {character} is already the extraction target of non-terminal operation {operation}"
+  )]
     DetaineeAlreadyTargeted {
         character: crate::core::id::CharacterId,
         operation: OperationId,
@@ -133,8 +128,8 @@ pub enum OperationError {
     #[error("operation objective target {0:?} is inactive")]
     InactiveObjectiveTarget(EntityRef),
     #[error(
-        "character {character} is assigned to multiple operation roles: {first_role:?} and {second_role:?}"
-    )]
+    "character {character} is assigned to multiple operation roles: {first_role:?} and {second_role:?}"
+  )]
     DuplicateRoleParticipant {
         character: CharacterId,
         first_role: RoleKind,
@@ -166,16 +161,16 @@ pub enum OperationError {
         transition: OperationTransition,
     },
     #[error(
-        "operation {operation} changed after abort validation; expected version {expected}, found {found}"
-    )]
+    "operation {operation} changed after abort validation; expected version {expected}, found {found}"
+  )]
     StaleAbortOperation {
         operation: OperationId,
         expected: u32,
         found: u32,
     },
     #[error(
-        "operation {operation} abort was validated at {expected:?}, but simulation time is now {found:?}"
-    )]
+    "operation {operation} abort was validated at {expected:?}, but simulation time is now {found:?}"
+  )]
     StaleAbortTime {
         operation: OperationId,
         expected: SimTime,
@@ -222,17 +217,12 @@ impl<'registry> ValidatedOperation<'registry> {
                 now: state.now().as_minutes(),
             });
         }
-        let organization = state
+        let _ = state
             .world
             .get_organization(self.draft.responsible_organization)
             .ok_or(OperationError::MissingOrganization(
                 self.draft.responsible_organization,
             ))?;
-        if organization.lifecycle() != Lifecycle::Active {
-            return Err(OperationError::InactiveOrganization(
-                self.draft.responsible_organization,
-            ));
-        }
         for (participant, expected) in &self.expected_participant_versions {
             let record = state
                 .world
@@ -244,9 +234,6 @@ impl<'registry> ValidatedOperation<'registry> {
                     expected: *expected,
                     found: record.version(),
                 });
-            }
-            if record.lifecycle() != Lifecycle::Active {
-                return Err(OperationError::InactiveParticipant(*participant));
             }
             if record.organization() != Some(self.draft.responsible_organization) {
                 return Err(OperationError::ForeignParticipant {
@@ -366,24 +353,17 @@ pub fn validate_authorize_operation<'registry>(
     if draft.title.trim().is_empty() {
         return Err(OperationError::EmptyTitle);
     }
-    let organization = state
+    let _ = state
         .world
         .get_organization(draft.responsible_organization)
         .ok_or(OperationError::MissingOrganization(
             draft.responsible_organization,
         ))?;
-    if organization.lifecycle() != Lifecycle::Active {
-        return Err(OperationError::InactiveOrganization(
-            draft.responsible_organization,
-        ));
-    }
     let leader = state
         .world
         .get_character(draft.leader)
         .ok_or(OperationError::MissingCharacter(draft.leader))?;
-    if leader.lifecycle() != Lifecycle::Active
-        || leader.organization() != Some(draft.responsible_organization)
-    {
+    if leader.organization() != Some(draft.responsible_organization) {
         return Err(OperationError::InvalidLeader {
             leader: draft.leader,
             organization: draft.responsible_organization,
@@ -440,9 +420,6 @@ pub fn validate_authorize_operation<'registry>(
             .world
             .get_character(*participant)
             .ok_or(OperationError::MissingCharacter(*participant))?;
-        if record.lifecycle() != Lifecycle::Active {
-            return Err(OperationError::InactiveParticipant(*participant));
-        }
         if record.organization() != Some(draft.responsible_organization) {
             return Err(OperationError::ForeignParticipant {
                 character: *participant,
@@ -722,6 +699,23 @@ pub(crate) fn is_information_subject_relevant(
     })
 }
 
+/// Whether the objective's target has a shape the objective could ever act on, independent of
+/// operation kind. Used only to choose the authorization error variant.
+fn is_plausible_objective_target(objective: &OperationObjective) -> bool {
+    match objective {
+        OperationObjective::AcquireProperty { target }
+        | OperationObjective::ObtainCash { target }
+        | OperationObjective::DisruptBusiness { target } => {
+            matches!(target, EntityRef::Business(_))
+        }
+        OperationObjective::Frighten { target } => matches!(target, EntityRef::Character(_)),
+        // Surveillance targets and extraction detainees are validated by their own gates.
+        OperationObjective::GatherInformation { .. } | OperationObjective::FreeDetainee { .. } => {
+            true
+        }
+    }
+}
+
 pub(crate) fn is_valid_operation_objective(
     kind: OperationKind,
     objective: &OperationObjective,
@@ -815,13 +809,10 @@ fn validate_active_field_objective_targets(
         // Extraction targets a person who may legitimately be in custody, so the usual
         // active-field-target check does not apply; custody state is validated separately.
         OperationObjective::FreeDetainee { target } => {
-            let character = state
+            let _ = state
                 .world
                 .get_character(*target)
                 .ok_or(OperationError::MissingEntity(EntityRef::Character(*target)))?;
-            if character.lifecycle() != Lifecycle::Active {
-                return Err(OperationError::MissingEntity(EntityRef::Character(*target)));
-            }
             if state.legal.active_arrest_for_character(*target).is_none() {
                 return Err(OperationError::TargetNotDetained(*target));
             }
@@ -856,8 +847,8 @@ fn find_non_terminal_extraction_targeting(
     .flat_map(|status| state.operations.operations_with_status(*status))
     .filter(|operation| {
         matches!(
-            operation.objective(),
-            OperationObjective::FreeDetainee { target } if *target == target_character
+          operation.objective(),
+          OperationObjective::FreeDetainee { target } if *target == target_character
         )
     })
     .map(|operation| operation.id())
@@ -868,46 +859,41 @@ fn validate_active_field_objective_target(
     state: &AppState,
     target: EntityRef,
 ) -> Result<(), OperationError> {
-    let active = match target {
+    match target {
         EntityRef::Organization(id) => {
             state
                 .world
                 .get_organization(id)
-                .ok_or(OperationError::MissingEntity(target))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(OperationError::MissingEntity(target))?;
         }
         EntityRef::Character(id) => {
             state
                 .world
                 .get_character(id)
-                .ok_or(OperationError::MissingEntity(target))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(OperationError::MissingEntity(target))?;
         }
         EntityRef::Neighborhood(id) => {
             state
                 .world
                 .get_neighborhood(id)
-                .ok_or(OperationError::MissingEntity(target))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(OperationError::MissingEntity(target))?;
         }
         EntityRef::Business(id) => {
             state
                 .world
                 .get_business(id)
-                .ok_or(OperationError::MissingEntity(target))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(OperationError::MissingEntity(target))?;
         }
         EntityRef::Enterprise(id) => {
-            state
+            let active = state
                 .enterprises
                 .get_enterprise(id)
                 .ok_or(OperationError::MissingEntity(target))?
                 .status()
-                == EnterpriseStatus::Active
+                == EnterpriseStatus::Active;
+            if !active {
+                return Err(OperationError::InactiveObjectiveTarget(target));
+            }
         }
         // Control-plane records never reach this match: `is_valid_operation_objective` rejects
         // them before activation checks run, so reaching this arm means a caller skipped that gate.
@@ -921,9 +907,6 @@ fn validate_active_field_objective_target(
                 "administrative objective targets are rejected by is_valid_operation_objective"
             )
         }
-    };
-    if !active {
-        return Err(OperationError::InactiveObjectiveTarget(target));
     }
     Ok(())
 }
@@ -948,48 +931,33 @@ fn validate_operation_objective(
             .world
             .get_business(*business)
             .ok_or(OperationError::MissingEntity(*target))?;
-        if business_record.lifecycle() != Lifecycle::Active {
-            return Err(OperationError::InactiveObjectiveTarget(*target));
-        }
-        let neighborhood = state
+        state
             .world
             .get_neighborhood(business_record.neighborhood())
             .ok_or(OperationError::MissingEntity(EntityRef::Neighborhood(
                 business_record.neighborhood(),
             )))?;
-        if neighborhood.lifecycle() != Lifecycle::Active {
-            return Err(OperationError::InactiveObjectiveTarget(
-                EntityRef::Neighborhood(business_record.neighborhood()),
-            ));
-        }
     }
     if !is_valid_operation_objective(kind, objective) {
-        if objective.kind() == OperationObjectiveKind::AcquireProperty {
-            return Err(OperationError::InvalidObjectiveForKind {
-                kind,
-                objective: objective.kind(),
-            });
-        }
-        if objective.kind() == OperationObjectiveKind::GatherInformation {
-            return Err(OperationError::InvalidObjectiveForKind {
-                kind,
-                objective: objective.kind(),
-            });
-        }
-        let invalid_target = match objective {
-            OperationObjective::ObtainCash { target } | OperationObjective::Frighten { target } => {
-                Some(*target)
+        // A rejection here is either a kind/objective mismatch or a target shape the
+        // objective can never act on. Only an implausible target shape reports the target;
+        // a well-formed target against an unsupported kind is a kind mismatch, so a normal
+        // business or character is never mislabeled as an administrative entity.
+        if !is_plausible_objective_target(objective) {
+            let invalid_target = match objective {
+                OperationObjective::ObtainCash { target }
+                | OperationObjective::Frighten { target } => Some(*target),
+                OperationObjective::DisruptBusiness { target } => Some(*target),
+                OperationObjective::AcquireProperty { .. }
+                | OperationObjective::GatherInformation { .. }
+                | OperationObjective::FreeDetainee { .. } => None,
+            };
+            if let Some(target) = invalid_target {
+                return Err(OperationError::InvalidObjectiveTarget {
+                    objective: objective.kind(),
+                    target,
+                });
             }
-            OperationObjective::DisruptBusiness { target } => Some(*target),
-            OperationObjective::AcquireProperty { .. }
-            | OperationObjective::GatherInformation { .. }
-            | OperationObjective::FreeDetainee { .. } => None,
-        };
-        if let Some(target) = invalid_target {
-            return Err(OperationError::InvalidObjectiveTarget {
-                objective: objective.kind(),
-                target,
-            });
         }
         return Err(OperationError::InvalidObjectiveForKind {
             kind,
@@ -1011,7 +979,7 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
     state
         .operations
         .get_operation(operation)
-        .and_then(earliest_operation_deadline)
+        .and_then(resolve_earliest_operation_deadline)
         .is_some_and(|deadline| state.now() >= deadline)
 }
 
@@ -1030,7 +998,8 @@ pub(crate) fn due_operations_with_missed_deadlines(state: &AppState) -> Vec<Oper
                 .operations_with_status(OperationStatus::AwaitingDecision),
         )
         .filter(|operation| {
-            earliest_operation_deadline(operation).is_some_and(|deadline| state.now() > deadline)
+            resolve_earliest_operation_deadline(operation)
+                .is_some_and(|deadline| state.now() > deadline)
         })
         .map(|operation| operation.id())
         .collect::<Vec<_>>();
@@ -1050,7 +1019,7 @@ pub(crate) fn validate_deadline_missed_operation(
     validate_operation_abort(state, operation, OperationAbortCause::DeadlineMissed)
 }
 
-fn earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
+fn resolve_earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
     record
         .constraints()
         .iter()
@@ -1149,7 +1118,7 @@ pub(crate) fn validate_begin_operation(
     if state.now() < record.scheduled_for() {
         return Err(OperationError::StartBeforeScheduled(operation));
     }
-    if let Some(deadline) = earliest_operation_deadline(record) {
+    if let Some(deadline) = resolve_earliest_operation_deadline(record) {
         if state.now() >= deadline {
             return Err(OperationError::DeadlineMissed {
                 operation,
@@ -1364,19 +1333,19 @@ fn validate_operation_abort(
             OperationAbortPhase::BeforeStart
         }
         (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
-            if earliest_operation_deadline(record)
+            if resolve_earliest_operation_deadline(record)
                 .is_some_and(|deadline| state.now() >= deadline) =>
         {
             OperationAbortPhase::BeforeStart
         }
         (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed)
-            if earliest_operation_deadline(record)
+            if resolve_earliest_operation_deadline(record)
                 .is_some_and(|deadline| state.now() >= deadline) =>
         {
             OperationAbortPhase::InProgress
         }
         (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed)
-            if earliest_operation_deadline(record)
+            if resolve_earliest_operation_deadline(record)
                 .is_some_and(|deadline| state.now() >= deadline) =>
         {
             OperationAbortPhase::AwaitingDecision
@@ -1443,35 +1412,35 @@ fn validate_operation_abort(
                         .get_police_response(response_id)
                         .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
                     Some(
-                        validate_record_information(
-                            state,
-                            InformationDraft {
-                                holder: KnowledgeHolder::Organization(
-                                    record.responsible_organization(),
-                                ),
-                                source_kind: InformationSourceKind::AfterAction,
-                                topic: InformationTopic::PoliceActivity,
-                                source_entity: Some(EntityRef::Organization(response.authority())),
-                                subject: EntityRef::Neighborhood(response.neighborhood()),
-                                observed_at: state.now(),
-                                reliability: Reliability::GenerallyReliable,
-                                specificity: Specificity::Specific,
-                                summary: format!(
-                                    "The crew of {} was debriefed after a {} response reached the target before entry; the organization expects active enforcement around {} at that hour.",
-                                    record.title(),
-                                    state
-                                        .world
-                                        .get_organization(response.authority())
-                                        .map_or("law-enforcement", |record| record.name()),
-                                    state
-                                        .world
-                                        .get_neighborhood(response.neighborhood())
-                                        .map_or("the district", |record| record.name()),
-                                ),
-                            },
-                        )
-                        .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?,
-                    )
+            validate_record_information(
+              state,
+              InformationDraft {
+                holder: KnowledgeHolder::Organization(
+                  record.responsible_organization(),
+                ),
+                source_kind: InformationSourceKind::AfterAction,
+                topic: InformationTopic::PoliceActivity,
+                source_entity: Some(EntityRef::Organization(response.authority())),
+                subject: EntityRef::Neighborhood(response.neighborhood()),
+                observed_at: state.now(),
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary: format!(
+                  "The crew of {} was debriefed after a {} response reached the target before entry; the organization expects active enforcement around {} at that hour.",
+                  record.title(),
+                  state
+                    .world
+                    .get_organization(response.authority())
+                    .map_or("law-enforcement", |record| record.name()),
+                  state
+                    .world
+                    .get_neighborhood(response.neighborhood())
+                    .map_or("the district", |record| record.name()),
+                ),
+              },
+            )
+            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?,
+          )
                 }
                 OperationAbortCause::AuthorityOrder
                 | OperationAbortCause::Decision(_)
@@ -1537,45 +1506,41 @@ fn build_abort_summary(
 ) -> Result<String, OperationError> {
     match cause {
         OperationAbortCause::AuthorityOrder => Ok(format!(
-            "{} was aborted by leadership after execution began. Objective resolution was not completed.",
-            operation.title()
-        )),
+      "{} was aborted by leadership after execution began. Objective resolution was not completed.",
+      operation.title()
+    )),
         OperationAbortCause::Decision(decision) => {
-            let decision = state
-                .decisions
-                .get_decision(decision)
-                .ok_or(OperationError::InvalidAbortArtifacts {
+            let decision = state.decisions.get_decision(decision).ok_or(
+                OperationError::InvalidAbortArtifacts {
                     operation: operation.id(),
-                })?;
+                },
+            )?;
             Ok(format!(
-                "{} was aborted after leadership reviewed an execution exception: {} Objective resolution was not completed.",
-                operation.title(),
-                decision.summary()
-            ))
+        "{} was aborted after leadership reviewed an execution exception: {} Objective resolution was not completed.",
+        operation.title(),
+        decision.summary()
+      ))
         }
         OperationAbortCause::PoliceArrival(response) => {
-            let response = state
-                .legal
-                .get_police_response(response)
-                .ok_or(OperationError::InvalidAbortArtifacts {
+            let response = state.legal.get_police_response(response).ok_or(
+                OperationError::InvalidAbortArtifacts {
                     operation: operation.id(),
-                })?;
-            let authority = state
-                .world
-                .get_organization(response.authority())
-                .ok_or(OperationError::InvalidAbortArtifacts {
+                },
+            )?;
+            let authority = state.world.get_organization(response.authority()).ok_or(
+                OperationError::InvalidAbortArtifacts {
                     operation: operation.id(),
-                })?;
+                },
+            )?;
             Ok(format!(
-                "{} was aborted under its standing contingency when a {} response was due to reach the target before entry. Objective resolution was not completed.",
-                operation.title(),
-                authority.name()
-            ))
+        "{} was aborted under its standing contingency when a {} response was due to reach the target before entry. Objective resolution was not completed.",
+        operation.title(),
+        authority.name()
+      ))
         }
         OperationAbortCause::DeadlineMissed => {
-            let deadline = earliest_operation_deadline(operation).expect(
-                "validated deadline abort must retain a completion deadline",
-            );
+            let deadline = resolve_earliest_operation_deadline(operation)
+                .expect("validated deadline abort must retain a completion deadline");
             let phase = match operation.status() {
                 OperationStatus::Authorized => "before execution could begin",
                 OperationStatus::InProgress | OperationStatus::AwaitingDecision => {

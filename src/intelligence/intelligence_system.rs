@@ -7,7 +7,6 @@ use crate::intelligence::{
     InformationDraft, InformationRecord, InformationSourceKind, InformationTransferDraft,
     KnowledgeHolder,
 };
-use crate::world::Lifecycle;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -40,8 +39,6 @@ pub enum IntelligenceError {
         information: InformationId,
         contact: CharacterId,
     },
-    #[error("information holder {0:?} is not currently active")]
-    InactiveHolder(KnowledgeHolder),
     #[error("source and recipient knowledge holders are identical")]
     SameHolder,
     #[error("knowledge cannot be transferred internally from {source_holder:?} to {recipient:?}")]
@@ -183,30 +180,10 @@ fn validate_information_draft(
             if state.world.get_character(id).is_none() {
                 return Err(IntelligenceError::MissingCharacter(id));
             }
-            if state
-                .world
-                .get_character(id)
-                .is_some_and(|record| record.lifecycle() != Lifecycle::Active)
-            {
-                // A detained or otherwise inactive person cannot keep recording fresh knowledge;
-                // only active holders may acquire new information.
-                return Err(IntelligenceError::InactiveHolder(
-                    KnowledgeHolder::Character(id),
-                ));
-            }
         }
         KnowledgeHolder::Organization(id) => {
             if state.world.get_organization(id).is_none() {
                 return Err(IntelligenceError::MissingOrganization(id));
-            }
-            if state
-                .world
-                .get_organization(id)
-                .is_some_and(|record| record.lifecycle() != Lifecycle::Active)
-            {
-                return Err(IntelligenceError::InactiveHolder(
-                    KnowledgeHolder::Organization(id),
-                ));
             }
         }
     }
@@ -369,26 +346,19 @@ fn validate_holder_active(
     state: &AppState,
     holder: KnowledgeHolder,
 ) -> Result<(), IntelligenceError> {
-    let active = match holder {
+    match holder {
         KnowledgeHolder::Character(character) => {
             state
                 .world
                 .get_character(character)
-                .ok_or(IntelligenceError::MissingCharacter(character))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(IntelligenceError::MissingCharacter(character))?;
         }
         KnowledgeHolder::Organization(organization) => {
             state
                 .world
                 .get_organization(organization)
-                .ok_or(IntelligenceError::MissingOrganization(organization))?
-                .lifecycle()
-                == Lifecycle::Active
+                .ok_or(IntelligenceError::MissingOrganization(organization))?;
         }
-    };
-    if !active {
-        return Err(IntelligenceError::InactiveHolder(holder));
     }
     Ok(())
 }

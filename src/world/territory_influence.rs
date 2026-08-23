@@ -15,7 +15,7 @@ use crate::core::id::{NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::delegation::MandateStatus;
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
-use crate::world::{BusinessOwner, Lifecycle};
+use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -96,37 +96,36 @@ pub fn resolve_neighborhood_influence(
     }
 
     // Economic presence: active enterprises whose hosted or district location resolves to
-    // this neighborhood. Ordered scans keep the derivation deterministic.
+    // this neighborhood. The location index serves district-hosted rackets directly and the
+    // neighborhood's own businesses cover venue-hosted ones, without scanning every racket
+    // in the city. Ordered scans keep the derivation deterministic.
     let mut enterprises_by_org: BTreeMap<OrganizationId, u32> = BTreeMap::new();
     let mut kinds_by_org: BTreeMap<OrganizationId, BTreeSet<EnterpriseKind>> = BTreeMap::new();
-    for record in state.enterprises().enterprises() {
-        if record.status() != EnterpriseStatus::Active {
-            continue;
-        }
-        let in_district = match record.location() {
-            EnterpriseLocation::Neighborhood(id) => id == neighborhood,
-            EnterpriseLocation::Business(business) => state
+    let neighborhood_enterprises = state
+        .enterprises()
+        .enterprises_at(EnterpriseLocation::Neighborhood(neighborhood))
+        .filter(|record| record.status() == EnterpriseStatus::Active)
+        .map(|record| (record.organization(), record.kind()))
+        .chain(
+            state
                 .world()
-                .get_business(business)
-                .is_some_and(|host| host.neighborhood() == neighborhood),
-        };
-        if !in_district {
-            continue;
-        }
-        let organization = record.organization();
+                .businesses_in_neighborhood(neighborhood)
+                .flat_map(|business| {
+                    state
+                        .enterprises()
+                        .enterprises_at(EnterpriseLocation::Business(business.id()))
+                })
+                .filter(|record| record.status() == EnterpriseStatus::Active)
+                .map(|record| (record.organization(), record.kind())),
+        );
+    for (organization, kind) in neighborhood_enterprises {
         *enterprises_by_org.entry(organization).or_default() += 1;
-        kinds_by_org
-            .entry(organization)
-            .or_default()
-            .insert(record.kind());
+        kinds_by_org.entry(organization).or_default().insert(kind);
     }
 
     // Property holdings: active district businesses owned outright.
     let mut venues_by_org: BTreeMap<OrganizationId, u32> = BTreeMap::new();
     for business in state.world().businesses_in_neighborhood(neighborhood) {
-        if business.lifecycle() != Lifecycle::Active {
-            continue;
-        }
         if let BusinessOwner::Organization(organization) = business.owner() {
             *venues_by_org.entry(organization).or_default() += 1;
         }
@@ -250,9 +249,6 @@ mod tests {
                     },
                     institutions: NeighborhoodInstitutionProfile {
                         police_presence: rating(40),
-                        political_influence: rating(50),
-                        social_cohesion: rating(60),
-                        visible_violence_tolerance: rating(25),
                     },
                 },
             },

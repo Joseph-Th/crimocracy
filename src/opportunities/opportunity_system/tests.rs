@@ -60,9 +60,6 @@ fn make_fixture() -> OpportunityFixture {
                 },
                 institutions: crate::world::NeighborhoodInstitutionProfile {
                     police_presence: crate::world::Rating::try_new(45).unwrap(),
-                    political_influence: crate::world::Rating::try_new(50).unwrap(),
-                    social_cohesion: crate::world::Rating::try_new(55).unwrap(),
-                    visible_violence_tolerance: crate::world::Rating::try_new(20).unwrap(),
                 },
             },
         },
@@ -434,9 +431,9 @@ fn opportunity_expiry_runs_in_stable_tick_pipeline_and_releases_duplicate_key() 
     assert_eq!(report.generated_at(), SimTime::from_minutes(2));
     assert_eq!(report.entries().len(), 1);
     assert_eq!(
-        report.entries()[0].summary,
-        "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
-    );
+    report.entries()[0].summary,
+    "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
+  );
     assert_eq!(report.entries()[0].sources, vec![fixture.source]);
     assert_eq!(
         fixture
@@ -532,9 +529,9 @@ fn expiry_report_reaches_later_executive_brief_after_discovery_window_has_closed
         .expect("second executive brief should persist")
         .entries();
     assert!(entries.iter().any(|entry| {
-        entry.summary
-            == "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
-    }));
+    entry.summary
+      == "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
+  }));
     assert!(!entries.iter().any(|entry| {
         entry.summary == "Bellmore Jewelry may be vulnerable around its Thursday delivery window."
     }));
@@ -648,8 +645,8 @@ fn conversion_token_rejects_operation_lifecycle_change_without_mutating_opportun
         .commit(&mut fixture.state)
         .expect_err("started operation must stale the older conversion token");
     assert!(matches!(
-        error,
-        OpportunityError::StaleOperation { operation: id, .. } if id == operation
+      error,
+      OpportunityError::StaleOperation { operation: id, .. } if id == operation
     ));
     assert_eq!(
         fixture

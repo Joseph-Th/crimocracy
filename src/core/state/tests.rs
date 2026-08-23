@@ -133,9 +133,6 @@ fn make_test_scenario() -> TestScenario {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(58),
-                    political_influence: rating(64),
-                    social_cohesion: rating(68),
-                    visible_violence_tolerance: rating(30),
                 },
             },
         },
@@ -595,21 +592,21 @@ fn test_mixed_scenario_soak_preserves_invariants() {
                     .expect("operation should exist")
                     .leader();
                 let request = validate_request_decision(
-                    &state,
-                    DecisionRequestDraft {
-                        requester: leader,
-                        context: DecisionContext::OperationException {
-                            operation,
-                            reason: OperationExceptionReason::UnexpectedCondition,
-                        },
-                        attention: AttentionClass::Exception,
-                        summary: "Execution encountered an unexpected condition outside delegated authority."
-                            .to_owned(),
-                    },
-                )
-                .expect("delegated exception should validate")
-                .commit(&mut state)
-                .expect("validated exception should remain current");
+          &state,
+          DecisionRequestDraft {
+            requester: leader,
+            context: DecisionContext::OperationException {
+              operation,
+              reason: OperationExceptionReason::UnexpectedCondition,
+            },
+            attention: AttentionClass::Exception,
+            summary: "Execution encountered an unexpected condition outside delegated authority."
+              .to_owned(),
+          },
+        )
+        .expect("delegated exception should validate")
+        .commit(&mut state)
+        .expect("validated exception should remain current");
                 assert!(request.requests_pause);
                 let recipient = state
                     .player_organization()

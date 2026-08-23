@@ -291,7 +291,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         )
         .expect("valid state should apply operation reputation consequences");
         if Some(organization) == player_organization {
-            crate::reputation::reputation_system::record_standing_feedback(
+            crate::reputation::reputation_system::apply_standing_feedback(
                 state,
                 organization,
                 &shifts,
@@ -363,7 +363,7 @@ fn draw_basis_point_variance(rng: &mut impl RngCore, limit: u16) -> i16 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-pub enum RandomDecisionError {
+pub(crate) enum RandomDecisionError {
     #[error("cannot choose from an empty choice set")]
     EmptyChoiceSet,
 }

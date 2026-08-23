@@ -663,10 +663,10 @@ impl LegalState {
             "Record Reference Validity: informant disclosure evidence ID mismatch"
         );
         debug_assert_eq!(
-            evidence.investigation(),
-            disclosure.investigation(),
-            "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
-        );
+      evidence.investigation(),
+      disclosure.investigation(),
+      "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
+    );
         self.insert_evidence(evidence, activity_at);
         let id = disclosure.id();
         self.indexes
@@ -714,13 +714,12 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before evidence commit");
-        // A named character becomes an identified suspect — unlocking arrest eligibility and
-        // cold-case exemption — only through evidence whose assessment is actionable: not
-        // weak, and not inadmissible. Unusable material stays in the case graph without
-        // promoting anyone to suspect status.
-        let promotes_character = record.strength() != EvidenceStrength::Weak
+        // A subject enters the case graph through evidence whose assessment is actionable:
+        // not weak, and not inadmissible. Unusable material stays in the case graph without
+        // promoting anyone — character, organization, or venue — to tracked-subject status.
+        let promotes_subject = record.strength() != EvidenceStrength::Weak
             && record.admissibility() != Admissibility::Inadmissible;
-        if !matches!(record.subject(), EntityRef::Character(_)) || promotes_character {
+        if promotes_subject {
             investigation.subjects.insert(record.subject());
             self.indexes
                 .investigations
@@ -1257,9 +1256,9 @@ impl LegalState {
             {
                 let removed = ids.remove(&id);
                 debug_assert!(
-                    removed,
-                    "Derived Data Consistency: neighborhood active patrol index changed before lifecycle commit"
-                );
+          removed,
+          "Derived Data Consistency: neighborhood active patrol index changed before lifecycle commit"
+        );
                 if ids.is_empty() {
                     self.indexes
                         .patrols
@@ -1613,7 +1612,7 @@ impl LegalState {
         let previous = self.prosecution_referrals.insert(referral_id, referral);
         debug_assert!(previous.is_none());
     }
-    pub(crate) fn resolve_prosecution_case(
+    pub(crate) fn apply_prosecution_resolution(
         &mut self,
         id: ProsecutionCaseId,
         resolution: ProsecutionCaseResolution,

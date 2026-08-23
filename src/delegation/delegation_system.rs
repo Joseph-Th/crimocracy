@@ -10,7 +10,7 @@ use crate::delegation::{
     ResolvedMandateAuthority, ResponsibilityScope,
 };
 use crate::finance::FinancialOwner;
-use crate::world::{Lifecycle, PolicyKind, PolicySetting};
+use crate::world::{PolicyKind, PolicySetting};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -18,8 +18,6 @@ use thiserror::Error;
 pub enum DelegationError {
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("organization {0} is not active")]
-    InactiveOrganization(OrganizationId),
     #[error("manager {0} does not exist")]
     MissingManager(CharacterId),
     #[error("manager {manager} is not an active member of organization {organization}")]
@@ -41,12 +39,8 @@ pub enum DelegationError {
     NoScopes,
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
-    #[error("neighborhood {0} is not active")]
-    InactiveNeighborhood(NeighborhoodId),
     #[error("business {0} does not exist")]
     MissingBusiness(BusinessId),
-    #[error("business {0} is not active")]
-    InactiveBusiness(BusinessId),
     #[error("standing order key {expected:?} does not match setting {actual:?}")]
     PolicyKindMismatch {
         expected: PolicyKind,
@@ -480,20 +474,15 @@ fn validate_manager(
     manager: CharacterId,
     organization: OrganizationId,
 ) -> Result<&crate::world::CharacterRecord, DelegationError> {
-    let organization_record = state
+    let _ = state
         .world
         .get_organization(organization)
         .ok_or(DelegationError::MissingOrganization(organization))?;
-    if organization_record.lifecycle() != Lifecycle::Active {
-        return Err(DelegationError::InactiveOrganization(organization));
-    }
     let manager_record = state
         .world
         .get_character(manager)
         .ok_or(DelegationError::MissingManager(manager))?;
-    if manager_record.lifecycle() != Lifecycle::Active
-        || manager_record.organization() != Some(organization)
-    {
+    if manager_record.organization() != Some(organization) {
         return Err(DelegationError::InvalidManager {
             manager,
             organization,
@@ -532,22 +521,16 @@ fn validate_scope_liveness(
     for scope in scopes {
         match scope {
             ResponsibilityScope::Neighborhood(id) => {
-                let record = state
+                let _ = state
                     .world
                     .get_neighborhood(*id)
                     .ok_or(DelegationError::MissingNeighborhood(*id))?;
-                if record.lifecycle() != Lifecycle::Active {
-                    return Err(DelegationError::InactiveNeighborhood(*id));
-                }
             }
             ResponsibilityScope::Business(id) => {
-                let record = state
+                let _ = state
                     .world
                     .get_business(*id)
                     .ok_or(DelegationError::MissingBusiness(*id))?;
-                if record.lifecycle() != Lifecycle::Active {
-                    return Err(DelegationError::InactiveBusiness(*id));
-                }
             }
             ResponsibilityScope::Function(_) => {}
         }

@@ -10,15 +10,13 @@ use crate::legal::{
     ArrestDraft, ArrestRecord, ArrestStatus, InvestigationStatus, InvestigationWorkStatus,
 };
 use crate::operations::OperationStatus;
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ArrestError {
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("character {0} is not active and cannot enter a new custody record")]
-    InactiveCharacter(CharacterId),
     #[error("arrest evidence {evidence} is too weak for custody: strength {strength:?}, reliability {reliability:?}")]
     InsufficientEvidence {
         evidence: EvidenceId,
@@ -76,16 +74,16 @@ pub enum ArrestError {
         work: InvestigationWorkId,
     },
     #[error(
-        "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
-    )]
+    "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
+  )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
     #[error(
-        "character {character} changed after arrest validation; expected version {expected}, found {found}"
-    )]
+    "character {character} changed after arrest validation; expected version {expected}, found {found}"
+  )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
@@ -181,13 +179,10 @@ fn validate_arrest_dependencies(
     state: &AppState,
     draft: &ArrestDraft,
 ) -> Result<OrganizationId, ArrestError> {
-    let character = state
+    let _ = state
         .world
         .get_character(draft.character)
         .ok_or(ArrestError::MissingCharacter(draft.character))?;
-    if character.lifecycle() != Lifecycle::Active {
-        return Err(ArrestError::InactiveCharacter(draft.character));
-    }
     if let Some(existing) = state.legal.active_arrest_for_character(draft.character) {
         return Err(ArrestError::AlreadyDetained {
             character: draft.character,
@@ -216,9 +211,7 @@ fn validate_arrest_dependencies(
         .world
         .get_organization(authority)
         .ok_or(ArrestError::InvalidAuthority(authority))?;
-    if authority_record.kind() != OrganizationKind::LawEnforcement
-        || authority_record.lifecycle() != Lifecycle::Active
-    {
+    if authority_record.kind() != OrganizationKind::LawEnforcement {
         return Err(ArrestError::InvalidAuthority(authority));
     }
 

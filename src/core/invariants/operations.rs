@@ -28,7 +28,7 @@ use crate::operations::{
     OperationResolutionRecord, OperationStatus,
 };
 use crate::reports::ReportKind;
-use crate::world::{BusinessFunction, BusinessOwner, Lifecycle};
+use crate::world::{BusinessFunction, BusinessOwner};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
@@ -41,13 +41,6 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
     let mut property_disposition_information = BTreeSet::new();
     let mut property_disposition_reports = BTreeSet::new();
     for operation in state.operations.operations() {
-        let organization = state
-            .world
-            .get_organization(operation.responsible_organization())
-            .ok_or(StateValidationError::MissingEntity {
-                context: "operation organization",
-                entity: EntityRef::Organization(operation.responsible_organization()),
-            })?;
         let leader = state.world.get_character(operation.leader()).ok_or(
             StateValidationError::MissingEntity {
                 context: "operation leader",
@@ -67,12 +60,6 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     entity: EntityRef::Character(*participant),
                 },
             )?;
-            if requires_active_participants && participant_record.lifecycle() != Lifecycle::Active {
-                return Err(StateValidationError::ActiveOperationInvalidParticipant {
-                    operation: operation.id(),
-                    participant: *participant,
-                });
-            }
             if requires_active_participants
                 && participant_record.organization() != Some(operation.responsible_organization())
             {
@@ -168,16 +155,6 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
             OperationStatus::Authorized
             | OperationStatus::InProgress
             | OperationStatus::AwaitingDecision => {
-                if organization.lifecycle() != Lifecycle::Active {
-                    return Err(StateValidationError::ActiveOperationInactiveOrganization {
-                        operation: operation.id(),
-                    });
-                }
-                if leader.lifecycle() != Lifecycle::Active {
-                    return Err(StateValidationError::ActiveOperationInvalidLeader {
-                        operation: operation.id(),
-                    });
-                }
                 if leader.organization() != Some(operation.responsible_organization()) {
                     return Err(StateValidationError::ActiveOperationInvalidLeader {
                         operation: operation.id(),
@@ -271,9 +248,9 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                 }
                 if let Some(proceeds) = resolution.property_proceeds() {
                     let valid_target = matches!(
-                        operation.objective(),
-                        OperationObjective::AcquireProperty { target }
-                            if *target == proceeds.target()
+                      operation.objective(),
+                      OperationObjective::AcquireProperty { target }
+                        if *target == proceeds.target()
                     );
                     if !valid_target
                         || resolution.objective_outcome() == OperationObjectiveOutcome::Failed
@@ -286,9 +263,9 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                 }
                 if let Some(proceeds) = resolution.cash_proceeds() {
                     let valid_target = matches!(
-                        operation.objective(),
-                        OperationObjective::ObtainCash { target }
-                            if *target == proceeds.target()
+                      operation.objective(),
+                      OperationObjective::ObtainCash { target }
+                        if *target == proceeds.target()
                     );
                     if !valid_target
                         || resolution.objective_outcome() == OperationObjectiveOutcome::Failed
@@ -1095,11 +1072,11 @@ fn validate_operation_abort_links(
                 .decisions()
                 .filter(|decision| {
                     matches!(
-                        decision.context(),
-                        DecisionContext::OperationException {
-                            operation: decision_operation,
-                            reason: _,
-                        } if decision_operation == operation.id()
+                      decision.context(),
+                      DecisionContext::OperationException {
+                        operation: decision_operation,
+                        reason: _,
+                      } if decision_operation == operation.id()
                     ) && decision.resolution().is_some_and(|resolution| {
                         resolution.response() == DecisionResponse::Continue
                             && resolution.resolved_at() == abort.aborted_at()
@@ -1150,11 +1127,11 @@ fn validate_operation_abort_links(
                 },
             )?;
             let decision_matches = matches!(
-                decision.context(),
-                DecisionContext::OperationException {
-                    operation: decision_operation,
-                    reason: _,
-                } if decision_operation == operation.id()
+              decision.context(),
+              DecisionContext::OperationException {
+                operation: decision_operation,
+                reason: _,
+              } if decision_operation == operation.id()
             );
             let resolution =
                 decision

@@ -15,7 +15,7 @@ use crate::intelligence::intelligence_system::{
 };
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
 use crate::social::{RelationshipDimensions, RelationshipRecord};
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -43,8 +43,6 @@ pub enum ContactError {
     },
     #[error("institutional contact character {0} does not exist")]
     MissingContact(CharacterId),
-    #[error("institutional contact character {0} is not active")]
-    InactiveContact(CharacterId),
     #[error("institutional contact character {0} has no institution")]
     ContactHasNoInstitution(CharacterId),
     #[error("institution {0} does not exist or is inactive")]
@@ -392,7 +390,9 @@ pub(crate) const fn resolve_information_source_kind(kind: ContactKind) -> Inform
     }
 }
 
-pub(crate) fn expected_contact_kind(kind: OrganizationKind) -> Option<ContactKind> {
+pub(crate) fn resolve_contact_kind_for_institution_kind(
+    kind: OrganizationKind,
+) -> Option<ContactKind> {
     match kind {
         OrganizationKind::LawEnforcement => Some(ContactKind::Police),
         OrganizationKind::LegalAuthority
@@ -416,18 +416,14 @@ fn validate_contact_dependencies(
         .world
         .get_organization(sponsor)
         .ok_or(ContactError::MissingSponsor(sponsor))?;
-    if sponsor_record.lifecycle() != Lifecycle::Active
-        || sponsor_record.kind() != OrganizationKind::Criminal
-    {
+    if sponsor_record.kind() != OrganizationKind::Criminal {
         return Err(ContactError::InvalidSponsor(sponsor));
     }
     let handler_record = state
         .world
         .get_character(handler)
         .ok_or(ContactError::MissingHandler(handler))?;
-    if handler_record.lifecycle() != Lifecycle::Active
-        || handler_record.organization() != Some(sponsor)
-    {
+    if handler_record.organization() != Some(sponsor) {
         return Err(ContactError::InvalidHandler { handler, sponsor });
     }
     if let Some(arrest) = state.legal.active_arrest_for_character(handler) {
@@ -440,9 +436,6 @@ fn validate_contact_dependencies(
         .world
         .get_character(contact)
         .ok_or(ContactError::MissingContact(contact))?;
-    if contact_record.lifecycle() != Lifecycle::Active {
-        return Err(ContactError::InactiveContact(contact));
-    }
     // A detained external contact cannot serve as an institutional channel: custody blocks
     // contact handling for the person themselves, which calls must not treat as a working source.
     if let Some(arrest) = state.legal.active_arrest_for_character(contact) {
@@ -466,10 +459,7 @@ fn resolve_contact_kind(
         .world
         .get_organization(institution)
         .ok_or(ContactError::InvalidInstitution(institution))?;
-    if institution_record.lifecycle() != Lifecycle::Active {
-        return Err(ContactError::InvalidInstitution(institution));
-    }
-    expected_contact_kind(institution_record.kind())
+    resolve_contact_kind_for_institution_kind(institution_record.kind())
         .ok_or(ContactError::CriminalInstitution(institution))
 }
 

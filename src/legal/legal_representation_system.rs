@@ -5,7 +5,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     ArrestId, CharacterId, ContactId, FinancialAccountId, IdExhaustionError, IdKind,
-    InvestigationId, LegalRepresentationId, OrganizationId,
+    LegalRepresentationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -23,12 +23,12 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::legal::{
-    ArrestStatus, InvestigationStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
+    ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
     LegalRepresentationRecord, LegalRepresentationStatus,
 };
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
+use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -68,8 +68,6 @@ pub enum LegalRepresentationError {
     },
     #[error("counsel character {0} does not exist")]
     MissingCounsel(CharacterId),
-    #[error("counsel character {0} is not active")]
-    InactiveCounsel(CharacterId),
     #[error("counsel character {0} is detained and cannot accept a new representation")]
     DetainedCounsel(CharacterId),
     #[error("counsel character {0} has no LegalKnowledge capability")]
@@ -85,11 +83,6 @@ pub enum LegalRepresentationError {
     },
     #[error("arrest {arrest} is not an active detention")]
     ArrestNotActive { arrest: ArrestId },
-    #[error("arrest {arrest} source investigation {investigation} is not active")]
-    InvestigationNotActive {
-        arrest: ArrestId,
-        investigation: InvestigationId,
-    },
     #[error("legal retainer fee must be greater than zero")]
     InvalidFee,
     #[error("financial account {0} does not exist")]
@@ -362,16 +355,6 @@ fn validate_representation_dependencies(
             arrest: draft.arrest,
         });
     }
-    let source_investigation = state
-        .legal
-        .get_investigation(arrest.investigation())
-        .ok_or(LegalRepresentationError::MissingArrest(draft.arrest))?;
-    if source_investigation.status() != InvestigationStatus::Active {
-        return Err(LegalRepresentationError::InvestigationNotActive {
-            arrest: draft.arrest,
-            investigation: arrest.investigation(),
-        });
-    }
     if let Some(existing) = state.legal.active_representation_for_arrest(draft.arrest) {
         return Err(LegalRepresentationError::AlreadyRepresented {
             arrest: draft.arrest,
@@ -383,15 +366,14 @@ fn validate_representation_dependencies(
         .world
         .get_organization(draft.sponsor)
         .ok_or(LegalRepresentationError::MissingSponsor(draft.sponsor))?;
-    if sponsor.lifecycle() != Lifecycle::Active || sponsor.kind() != OrganizationKind::Criminal {
+    if sponsor.kind() != OrganizationKind::Criminal {
         return Err(LegalRepresentationError::InvalidSponsor(draft.sponsor));
     }
 
     let defendant = state.world.get_character(arrest.character()).ok_or(
         LegalRepresentationError::MissingDefendant(arrest.character()),
     )?;
-    if defendant.lifecycle() != Lifecycle::Active || defendant.organization() != Some(draft.sponsor)
-    {
+    if defendant.organization() != Some(draft.sponsor) {
         return Err(LegalRepresentationError::InvalidDefendantMembership {
             defendant: arrest.character(),
             sponsor: draft.sponsor,
@@ -420,8 +402,7 @@ fn validate_representation_dependencies(
         .world
         .get_character(contact.handler())
         .ok_or(LegalRepresentationError::MissingHandler(contact.handler()))?;
-    if handler.lifecycle() != Lifecycle::Active
-        || handler.organization() != Some(draft.sponsor)
+    if handler.organization() != Some(draft.sponsor)
         || state
             .legal
             .active_arrest_for_character(contact.handler())
@@ -437,9 +418,6 @@ fn validate_representation_dependencies(
         .world
         .get_character(contact.contact())
         .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
-    if counsel.lifecycle() != Lifecycle::Active {
-        return Err(LegalRepresentationError::InactiveCounsel(contact.contact()));
-    }
     if state
         .legal
         .active_arrest_for_character(contact.contact())
@@ -460,9 +438,7 @@ fn validate_representation_dependencies(
     let institution = state.world.get_organization(contact.institution()).ok_or(
         LegalRepresentationError::MissingCounselInstitution(contact.institution()),
     )?;
-    if institution.lifecycle() != Lifecycle::Active
-        || institution.kind() != OrganizationKind::LegalServices
-    {
+    if institution.kind() != OrganizationKind::LegalServices {
         return Err(LegalRepresentationError::InvalidCounselInstitution(
             contact.institution(),
         ));
@@ -782,7 +758,7 @@ pub fn apply_automatic_legal_support(
     state: &mut AppState,
 ) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
     use crate::finance::{AccountKind, FinancialOwner};
-    use crate::world::{Lifecycle, OrganizationKind as OrgKind, PolicyKind, PolicySetting};
+    use crate::world::{OrganizationKind as OrgKind, PolicyKind, PolicySetting};
 
     // Automatic support concludes when the matter it covers does: a representation held for
     // a detainee who has left custody ends with `MatterConcluded`, freeing the Legal contact
@@ -825,7 +801,7 @@ pub fn apply_automatic_legal_support(
             let defendant = arrest.character();
             let organization = state.world.get_character(defendant)?.organization()?;
             let record = state.world.get_organization(organization)?;
-            if record.lifecycle() != Lifecycle::Active || record.kind() != OrgKind::Criminal {
+            if record.kind() != OrgKind::Criminal {
                 return None;
             }
             matches!(
@@ -902,7 +878,7 @@ pub fn apply_automatic_legal_support(
             authorization: None,
         };
         if validate_representation_dependencies(state, &draft).is_err() {
-            // Prerequisites drifted since the snapshot (case closed, contact inactive);
+            // Prerequisites drifted since the snapshot (contact inactive, custody released);
             // the policy stage simply waits rather than forcing a partial transaction.
             continue;
         }

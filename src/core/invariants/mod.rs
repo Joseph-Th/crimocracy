@@ -20,10 +20,10 @@ use crate::legal::investigation_work_execution::{
     resolve_pattern_admissibility, resolve_pattern_strength, resolve_work_factors_and_margin,
 };
 use crate::legal::{EvidenceKind, InvestigationWorkKind, InvestigationWorkOutcome};
+use crate::operations::operation_economics::resolve_property_proceeds;
 use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
-    resolve_property_proceeds,
 };
 use crate::operations::police_response_integration::resolve_police_arrival_delay;
 use crate::operations::property_disposition::resolve_property_liquidation_value;
@@ -89,8 +89,6 @@ pub enum StateValidationError {
     InvalidInstitutionalContact { contact: ContactId },
     #[error("institutional contact disclosure {disclosure} has invalid persisted provenance")]
     InvalidContactDisclosure { disclosure: ContactDisclosureId },
-    #[error("active operation {operation} belongs to an inactive organization")]
-    ActiveOperationInactiveOrganization { operation: OperationId },
     #[error("active operation {operation} has an inactive or foreign leader")]
     ActiveOperationInvalidLeader { operation: OperationId },
     #[error("active operation {operation} has inactive participant {participant}")]

@@ -13,8 +13,8 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    Money,
+    helpers::format_money_cents, AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting,
+    LedgerTransactionDraft, Money,
 };
 use crate::registry::Registry;
 use crate::reports::report_system::validate_record_report;
@@ -27,11 +27,11 @@ use std::collections::BTreeSet;
 /// One organization's resolved payroll run for a single campaign day.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayrollOutcome {
-    pub organization: OrganizationId,
-    pub owed: Money,
-    pub paid: Money,
-    pub short: Money,
-    pub unpaid_members: Vec<CharacterId>,
+    organization: OrganizationId,
+    owed: Money,
+    paid: Money,
+    short: Money,
+    unpaid_members: Vec<CharacterId>,
 }
 
 impl PayrollOutcome {
@@ -54,7 +54,7 @@ impl PayrollOutcome {
 
 /// Payroll shares the executive brief's day-boundary cadence: it runs exactly once per
 /// simulated day and never at minute zero before any campaign time has passed.
-pub fn is_payroll_due(now: SimTime) -> bool {
+fn is_payroll_due(now: SimTime) -> bool {
     let minutes = now.as_minutes();
     minutes != 0 && minutes.is_multiple_of(1_440)
 }
@@ -78,25 +78,35 @@ pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<Pay
         // An organization with no general cash economy at all has no payroll to run: its
         // members' standing is outside the modeled economy, and charging unpayable wages here
         // would manufacture resentment with no economic substrate behind it.
-        if funding_accounts(state, organization).is_empty() {
+        let funding = funding_accounts(state, organization);
+        if funding.is_empty() {
             continue;
         }
-        if let Some(outcome) = run_organization_payroll(registry, state, organization) {
+        if let Some(outcome) = apply_organization_payroll(registry, state, organization, &funding) {
             outcomes.push(outcome);
         }
     }
     outcomes
 }
 
-fn run_organization_payroll(
+fn apply_organization_payroll(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,
+    funding: &[FinancialAccountId],
 ) -> Option<PayrollOutcome> {
     let upkeep = registry.upkeep();
+    // Detained members cannot work and are excluded from the wage bill, matching how every
+    // other custody-facing system treats detention; wages resume on release.
     let members: Vec<(CharacterId, Option<CharacterId>)> = state
         .world
         .characters_in_organization(organization)
+        .filter(|record| {
+            state
+                .legal
+                .active_arrest_for_character(record.id())
+                .is_none()
+        })
         .map(|record| (record.id(), record.supervisor()))
         .collect();
     if members.is_empty() {
@@ -111,7 +121,7 @@ fn run_organization_payroll(
     // unpaid and resentful. Funding drains the organization's general cash accounts only —
     // enterprise floats are delegated working capital under mandate authority — ordered by
     // balance then ID so the debit split is deterministic.
-    let available: i64 = funding_accounts(state, organization)
+    let available: i64 = funding
         .iter()
         .filter_map(|account| state.finance().get_account(*account))
         .map(|record| record.balance().cents().max(0))
@@ -120,13 +130,13 @@ fn run_organization_payroll(
     let mut postings: Vec<LedgerPosting> = Vec::new();
     if fully_funded {
         let mut remaining = owed;
-        for account in funding_accounts(state, organization) {
+        for account in funding {
             if remaining.cents() == 0 {
                 break;
             }
             let balance = state
                 .finance()
-                .get_account(account)
+                .get_account(*account)
                 .map(|record| record.balance())
                 .unwrap_or(Money::ZERO);
             if balance.cents() <= 0 {
@@ -134,7 +144,7 @@ fn run_organization_payroll(
             }
             let debit = balance.min(remaining);
             postings.push(LedgerPosting {
-                account,
+                account: *account,
                 amount: debit.checked_neg().expect("positive balance negates"),
             });
             remaining = remaining
@@ -146,7 +156,7 @@ fn run_organization_payroll(
     if paid.cents() > 0 {
         for member in members
             .iter()
-            .map(|(member, _)| member_wage_account(state, *member))
+            .map(|(member, _)| get_or_insert_member_wage_account(state, *member))
         {
             postings.push(LedgerPosting {
                 account: member,
@@ -194,9 +204,12 @@ fn run_organization_payroll(
     Some(outcome)
 }
 
-/// The member's personal street-cash pocket. Created once on first pay and reused after;
+/// The member's personal street-cash pocket, created once on first pay and reused after;
 /// wages land where later financial-satisfaction and bribery systems can find them.
-fn member_wage_account(state: &mut AppState, member: CharacterId) -> FinancialAccountId {
+fn get_or_insert_member_wage_account(
+    state: &mut AppState,
+    member: CharacterId,
+) -> FinancialAccountId {
     let owner = FinancialOwner::Character(member);
     if let Some(existing) = state
         .finance()
@@ -288,36 +301,29 @@ fn report_payroll_shortfall(
         .collect::<std::collections::BTreeSet<_>>();
     entities.insert(EntityRef::Organization(organization));
     let report = validate_record_report(
-        state,
-        ReportDraft {
-            recipient: organization,
-            kind: ReportKind::Financial,
-            title: "Payroll ran short".to_owned(),
-            entries: vec![ReportEntry {
-                attention: AttentionClass::Notable,
-                summary: format!(
-                    "Payroll owed {} but only {} could be paid; {} went uncovered and the crew knows who went unpaid.",
-                    format_money(outcome.owed()),
-                    format_money(outcome.paid()),
-                    format_money(outcome.short()),
-                ),
-                sources: Vec::new(),
-                entities,
-                decision: None,
-            }],
-        },
-    )
-    .expect("a payroll shortfall report about live entities must validate");
+    state,
+    ReportDraft {
+      recipient: organization,
+      kind: ReportKind::Financial,
+      title: "Payroll ran short".to_owned(),
+      entries: vec![ReportEntry {
+        attention: AttentionClass::Notable,
+        summary: format!(
+          "Payroll owed {} but only {} could be paid; {} went uncovered and the crew knows who went unpaid.",
+          format_money_cents(outcome.owed().cents()),
+          format_money_cents(outcome.paid().cents()),
+          format_money_cents(outcome.short().cents()),
+        ),
+        sources: Vec::new(),
+        entities,
+        decision: None,
+      }],
+    },
+  )
+  .expect("a payroll shortfall report about live entities must validate");
     report
         .commit(state)
         .expect("validated payroll shortfall report must commit");
-}
-
-fn format_money(money: Money) -> String {
-    let cents = money.cents();
-    let dollars = cents / 100;
-    let remainder = cents % 100;
-    format!("${dollars}.{remainder:02}")
 }
 
 fn zero_dimensions() -> RelationshipDimensions {

@@ -27,11 +27,6 @@ fn make_fixture() -> (AppState, NeighborhoodId, OrganizationId, OrganizationId) 
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: Rating::try_new(60).expect("fixture rating should validate"),
-                    political_influence: Rating::try_new(50)
-                        .expect("fixture rating should validate"),
-                    social_cohesion: Rating::try_new(50).expect("fixture rating should validate"),
-                    visible_violence_tolerance: Rating::try_new(40)
-                        .expect("fixture rating should validate"),
                 },
             },
         },

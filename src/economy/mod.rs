@@ -32,6 +32,10 @@ pub struct BusinessEconomyRecord {
     last_cycle_at: Option<SimTime>,
     /// Sabotage damage horizon: while set and not yet passed, cycles earn degraded gross.
     disrupted_through: Option<SimTime>,
+    /// Street-cash volume this front has absorbed since its last operating cycle. The
+    /// laundering plausibility budget is per cycle, so splitting one large sum into many
+    /// transfers cannot hide more than the front's authored share of legitimate earnings.
+    laundered_this_cycle: Money,
     version: u32,
 }
 
@@ -62,6 +66,9 @@ impl BusinessEconomyRecord {
     }
     pub fn is_disrupted(&self, now: SimTime) -> bool {
         self.disrupted_through.is_some_and(|through| now <= through)
+    }
+    pub fn laundered_this_cycle(&self) -> Money {
+        self.laundered_this_cycle
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -230,6 +237,8 @@ impl EconomyState {
             .expect("validated business economy disappeared before cycle commit");
         record.last_cycle_at = Some(cycle.occurred_at());
         record.next_cycle_at = Some(next_cycle_at);
+        // A new operating cycle starts a fresh laundering plausibility window.
+        record.laundered_this_cycle = Money::ZERO;
         record.version = record
             .version
             .checked_add(1)
@@ -302,6 +311,24 @@ impl EconomyState {
             Some(current) if current > disrupted_through => current,
             _ => disrupted_through,
         });
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("business economy version counter exhausted");
+    }
+
+    /// Records laundered street-cash volume absorbed by this front in its current cycle. The
+    /// economy owner keeps the running total so laundering plausibility stays a per-cycle
+    /// budget rather than a per-transfer allowance.
+    pub(crate) fn record_laundered_volume(&mut self, business: BusinessId, amount: Money) {
+        let record = self
+            .businesses
+            .get_mut(&business)
+            .expect("validated front business economy disappeared before laundering commit");
+        record.laundered_this_cycle = record
+            .laundered_this_cycle
+            .checked_add(amount)
+            .expect("laundered-volume accumulator overflowed");
         record.version = record
             .version
             .checked_add(1)
@@ -408,6 +435,7 @@ pub(crate) fn build_business_economy_record(
         next_cycle_at: Some(next_cycle_at),
         last_cycle_at: None,
         disrupted_through: None,
+        laundered_this_cycle: Money::ZERO,
         version: 1,
     }
 }

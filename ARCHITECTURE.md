@@ -40,7 +40,7 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `reports/` | Player-facing reports, briefs, financial reports | `report_system` |
 | `history/` | Durable entity-linked campaign events | `history_system` |
 | `finance/` | Typed accounts and balanced ledger; laundering transfers | `finance_system` (all financial mutations, including `validate_launder_funds`) |
-| `operations/` | Operation plans, execution records, participant reservations, surveillance/police/property integrations | `operation_system` (lifecycle) and `operation_execution` (deterministic resolution) |
+| `operations/` | Operation plans, execution records, participant reservations, surveillance/police/property integrations, take economics | `operation_system` (lifecycle), `operation_execution` (deterministic resolution), and `operation_economics` (proceeds and depletion) |
 | `opportunities/` | Provenance-backed opportunities with lifecycle | `opportunity_system` |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` |
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` |

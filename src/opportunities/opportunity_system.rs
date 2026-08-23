@@ -16,7 +16,7 @@ use crate::opportunities::{
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -31,8 +31,6 @@ pub enum OpportunityError {
     },
     #[error("opportunity organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("opportunity organization {0} is not active")]
-    InactiveOrganization(OrganizationId),
     #[error("opportunity organization {0} is not a criminal organization")]
     InvalidOrganizationKind(OrganizationId),
     #[error("operation opportunity must reference at least one target entity")]
@@ -80,8 +78,8 @@ pub enum OpportunityError {
     #[error("opportunity {0} has no validity deadline and cannot expire automatically")]
     MissingValidityDeadline(OpportunityId),
     #[error(
-        "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
-    )]
+    "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
+  )]
     OperationScheduledAfterWindow {
         operation: OperationId,
         valid_until: SimTime,
@@ -226,9 +224,6 @@ fn validate_discovery_state(
         .world
         .get_organization(draft.organization)
         .ok_or(OpportunityError::MissingOrganization(draft.organization))?;
-    if organization.lifecycle() != Lifecycle::Active {
-        return Err(OpportunityError::InactiveOrganization(draft.organization));
-    }
     if organization.kind() != OrganizationKind::Criminal {
         return Err(OpportunityError::InvalidOrganizationKind(
             draft.organization,
@@ -588,15 +583,22 @@ pub(crate) fn apply_opportunity_expiry(
 ) -> Vec<OpportunityId> {
     let due = state.opportunities.due_expiring_at_or_before(state.now());
     let mut expired = Vec::with_capacity(due.len());
+    let mut drifted = None;
     for opportunity in due {
-        // Like autonomous recruitment and staffing, expiry is an autonomous pass: one record
-        // that fails validation must not abort due work everywhere else in the same minute.
-        let Ok(transaction) = validate_expire_opportunity(registry, state, opportunity) else {
-            continue;
-        };
-        if transaction.commit(state).is_ok() {
-            expired.push(opportunity);
+        // Like autonomous recruitment and staffing, expiry is an autonomous pass: one
+        // drifted record must not abort due work everywhere else in the same minute.
+        let outcome = validate_expire_opportunity(registry, state, opportunity)
+            .and_then(|transaction| transaction.commit(state).map(|_| opportunity));
+        match outcome {
+            Ok(id) => expired.push(id),
+            // An overdue opportunity left Open would contradict the Open-opportunity
+            // invariant, so the drift surfaces here instead of hiding behind the lenient
+            // pass until a later structural check.
+            Err(error) => drifted = Some((opportunity, error)),
         }
+    }
+    if let Some((opportunity, error)) = drifted {
+        panic!("overdue opportunity {opportunity:?} could not expire: {error}");
     }
     expired
 }

@@ -241,9 +241,6 @@ mod tests {
                     },
                     institutions: NeighborhoodInstitutionProfile {
                         police_presence: rating(50),
-                        political_influence: rating(50),
-                        social_cohesion: rating(50),
-                        visible_violence_tolerance: rating(50),
                     },
                 },
             },

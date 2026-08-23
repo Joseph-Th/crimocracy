@@ -25,7 +25,7 @@ use crate::legal::{
 };
 use crate::operations::OperationStatus;
 use crate::reports::ReportKind;
-use crate::world::{CapabilityKind, Lifecycle, OrganizationKind};
+use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
 
 fn validate_legal_representations(state: &AppState) -> Result<(), StateValidationError> {
@@ -40,7 +40,7 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
             .legal
             .get_arrest(representation.arrest())
             .ok_or_else(invalid)?;
-        let defendant = state
+        let _ = state
             .world
             .get_character(representation.defendant())
             .ok_or_else(invalid)?;
@@ -181,11 +181,7 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
                     || representation.ended_information().is_some()
                     || representation.ended_report().is_some()
                     || contact.status() != ContactStatus::Active
-                    || defendant.lifecycle() != Lifecycle::Active
-                    || sponsor.lifecycle() != Lifecycle::Active
-                    || counsel.lifecycle() != Lifecycle::Active
                     || counsel.organization() != Some(representation.counsel_institution())
-                    || firm.lifecycle() != Lifecycle::Active
                     || state
                         .legal
                         .active_representation_for_arrest(representation.arrest())
@@ -322,9 +318,6 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
                 if case.resolved_at().is_some()
                     || case.resolution_information().is_some()
                     || case.resolution_report().is_some()
-                    || source_authority.lifecycle() != Lifecycle::Active
-                    || office.lifecycle() != Lifecycle::Active
-                    || lead.lifecycle() != Lifecycle::Active
                     || lead.organization() != Some(case.prosecutor_office())
                     || state
                         .legal
@@ -600,7 +593,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
             .ok_or(StateValidationError::InvalidPatrolDeployment {
                 deployment: deployment.id(),
             })?;
-        let neighborhood = state
+        let _ = state
             .world
             .get_neighborhood(deployment.neighborhood())
             .ok_or(StateValidationError::InvalidPatrolDeployment {
@@ -619,15 +612,12 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         match deployment.status() {
             PatrolDeploymentStatus::Active => {
                 let jurisdiction = state.legal.get_jurisdiction(deployment.organization());
-                if authority.lifecycle() != Lifecycle::Active
-                    || neighborhood.lifecycle() != Lifecycle::Active
-                    || jurisdiction.is_none_or(|record| {
-                        !record.neighborhoods().contains(&deployment.neighborhood())
-                    })
-                    || state
-                        .legal
-                        .active_patrol_for(deployment.organization(), deployment.neighborhood())
-                        .is_none_or(|record| record.id() != deployment.id())
+                if jurisdiction.is_none_or(|record| {
+                    !record.neighborhoods().contains(&deployment.neighborhood())
+                }) || state
+                    .legal
+                    .active_patrol_for(deployment.organization(), deployment.neighborhood())
+                    .is_none_or(|record| record.id() != deployment.id())
                 {
                     return Err(StateValidationError::InvalidPatrolDeployment {
                         deployment: deployment.id(),
@@ -639,7 +629,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
     }
 
     for arrest in state.legal.arrests() {
-        let character = state.world.get_character(arrest.character()).ok_or(
+        let _ = state.world.get_character(arrest.character()).ok_or(
             StateValidationError::InvalidArrest {
                 arrest: arrest.id(),
             },
@@ -701,8 +691,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                         // arrest, and custody outlives the institutional casework.
                         InvestigationStatus::Active | InvestigationStatus::Closed
                     )
-                    || character.lifecycle() != Lifecycle::Active
-                    || authority.lifecycle() != Lifecycle::Active
                     || state
                         .legal
                         .active_arrest_for_character(arrest.character())
@@ -808,7 +796,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                 });
             }
         }
-        // Exhaustiveness canary: a new InvestigationStatus must update the lifecycle checks above.
+        // Exhaustiveness canary: a new InvestigationStatus must update the status checks above.
         match investigation.status() {
             InvestigationStatus::Active
             | InvestigationStatus::Suspended
@@ -830,8 +818,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                 },
             )?;
             if investigation.status() == InvestigationStatus::Active
-                && (character.lifecycle() != Lifecycle::Active
-                    || character.organization() != Some(investigation.owner())
+                && (character.organization() != Some(investigation.owner())
                     || character
                         .capability(CapabilityKind::Investigation)
                         .is_none())
@@ -927,7 +914,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                     || investigation
                         .investigator_role(work.investigator())
                         .is_none()
-                    || investigator.lifecycle() != Lifecycle::Active
                     || investigator.organization() != Some(investigation.owner())
                     || investigator
                         .capability(CapabilityKind::Investigation)
@@ -1250,8 +1236,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         match informant.status() {
             InformantStatus::Active => {
                 if informant.terminated_at().is_some()
-                    || character.lifecycle() != Lifecycle::Active
-                    || handler.lifecycle() != Lifecycle::Active
                     || character.organization() == Some(informant.handler())
                 {
                     return Err(StateValidationError::InvalidInformant {

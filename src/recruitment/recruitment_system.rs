@@ -38,8 +38,8 @@ use crate::world::world_system::{
     validate_reassign_character, ValidatedCharacterReassignment, WorldError,
 };
 use crate::world::{
-    ApprovalPolicy, AutonomyLevel, DriveKind, Lifecycle, OrganizationKind, PolicyKind,
-    PolicySetting, TraitKind,
+    ApprovalPolicy, AutonomyLevel, DriveKind, OrganizationKind, PolicyKind, PolicySetting,
+    TraitKind,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -48,14 +48,10 @@ use thiserror::Error;
 pub enum RecruitmentError {
     #[error("target organization {0} does not exist")]
     MissingTargetOrganization(OrganizationId),
-    #[error("target organization {0} is not active")]
-    InactiveTargetOrganization(OrganizationId),
     #[error("target organization {0} is not a criminal organization")]
     InvalidTargetOrganizationKind(OrganizationId),
     #[error("recruiter {0} does not exist")]
     MissingRecruiter(CharacterId),
-    #[error("recruiter {0} is not active")]
-    InactiveRecruiter(CharacterId),
     #[error("recruiter {recruiter} is detained under arrest {arrest}")]
     DetainedRecruiter {
         recruiter: CharacterId,
@@ -75,8 +71,6 @@ pub enum RecruitmentError {
     PendingRecruitmentApproval { decision: DecisionRequestId },
     #[error("candidate {0} does not exist")]
     MissingCandidate(CharacterId),
-    #[error("candidate {0} is not active")]
-    InactiveCandidate(CharacterId),
     #[error("a character cannot recruit themselves")]
     SelfRecruitment,
     #[error("candidate {candidate} is already a member of target organization {organization}")]
@@ -255,8 +249,7 @@ pub fn find_recruitment_candidates(
         let Some(record) = state.world.get_character(candidate) else {
             continue;
         };
-        if record.lifecycle() != Lifecycle::Active
-            || record.organization() == Some(target_organization)
+        if record.organization() == Some(target_organization)
             || !candidate_organization_is_recruitable(state, record.organization())
             || recruitment_is_on_cooldown(
                 registry.recruitment(),
@@ -424,7 +417,7 @@ pub(crate) fn decide_recruitment_attempt(
     );
     // The candidate weighs the outfit's demonstrated underworld competence, resolved through
     // the canonical reputation surface; the frozen value rides inside the plan's factors.
-    let organization_competence = crate::reputation::reputation_system::resolved_score(
+    let organization_competence = crate::reputation::reputation_system::resolve_score(
         registry,
         state.reputation(),
         draft.target_organization,
@@ -767,32 +760,32 @@ fn validate_recruitment_plan_with_authority(
                 .get_organization(current_organization)
                 .expect("candidate membership must reference an existing organization");
             Some(validate_record_report(
-                state,
-                ReportDraft {
-                    recipient: current_organization,
-                    kind: ReportKind::AfterAction,
-                    title: "Personnel approach".to_owned(),
-                    entries: vec![ReportEntry {
-                        attention: AttentionClass::Notable,
-                        summary: format!(
-                            "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
-                            candidate.name(),
-                            current.name(),
-                            recruiter.name(),
-                            organization.name(),
-                            current.name()
-                        ),
-                        sources: Vec::new(),
-                        entities: BTreeSet::from([
-                            EntityRef::Character(plan.draft.candidate),
-                            EntityRef::Character(plan.draft.recruiter),
-                            EntityRef::Organization(plan.draft.target_organization),
-                            EntityRef::Organization(current_organization),
-                        ]),
-                        decision: None,
-                    }],
-                },
-            )?)
+        state,
+        ReportDraft {
+          recipient: current_organization,
+          kind: ReportKind::AfterAction,
+          title: "Personnel approach".to_owned(),
+          entries: vec![ReportEntry {
+            attention: AttentionClass::Notable,
+            summary: format!(
+              "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
+              candidate.name(),
+              current.name(),
+              recruiter.name(),
+              organization.name(),
+              current.name()
+            ),
+            sources: Vec::new(),
+            entities: BTreeSet::from([
+              EntityRef::Character(plan.draft.candidate),
+              EntityRef::Character(plan.draft.recruiter),
+              EntityRef::Organization(plan.draft.target_organization),
+              EntityRef::Organization(current_organization),
+            ]),
+            decision: None,
+          }],
+        },
+      )?)
         }
         (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, None) => None,
     };
@@ -913,11 +906,6 @@ fn validate_target_and_recruiter(
     let organization = state.world.get_organization(target_organization).ok_or(
         RecruitmentError::MissingTargetOrganization(target_organization),
     )?;
-    if organization.lifecycle() != Lifecycle::Active {
-        return Err(RecruitmentError::InactiveTargetOrganization(
-            target_organization,
-        ));
-    }
     if organization.kind() != OrganizationKind::Criminal {
         return Err(RecruitmentError::InvalidTargetOrganizationKind(
             target_organization,
@@ -927,9 +915,6 @@ fn validate_target_and_recruiter(
         .world
         .get_character(recruiter)
         .ok_or(RecruitmentError::MissingRecruiter(recruiter))?;
-    if recruiter_record.lifecycle() != Lifecycle::Active {
-        return Err(RecruitmentError::InactiveRecruiter(recruiter));
-    }
     if let Some(arrest) = state.legal.active_arrest_for_character(recruiter) {
         return Err(RecruitmentError::DetainedRecruiter {
             recruiter,
@@ -990,9 +975,6 @@ fn validate_recruitment_request_base(
         .world
         .get_character(draft.candidate)
         .ok_or(RecruitmentError::MissingCandidate(draft.candidate))?;
-    if candidate.lifecycle() != Lifecycle::Active {
-        return Err(RecruitmentError::InactiveCandidate(draft.candidate));
-    }
     if candidate.organization() == Some(draft.target_organization) {
         return Err(RecruitmentError::CandidateAlreadyMember {
             candidate: draft.candidate,
@@ -1447,17 +1429,7 @@ fn candidate_pressure_information_ids(
 }
 
 fn draw_candidate_index(rng: &mut impl rand_core::RngCore, choice_count: usize) -> Option<usize> {
-    if choice_count == 0 {
-        return None;
-    }
-    let bound = u64::try_from(choice_count).expect("candidate count must fit u64");
-    let rejection_zone = u64::MAX - (u64::MAX % bound);
-    loop {
-        let draw = rng.next_u64();
-        if draw < rejection_zone {
-            return Some((draw % bound) as usize);
-        }
-    }
+    crate::core::simulation::draw_index(rng, choice_count).ok()
 }
 
 fn validate_relationship_snapshot(

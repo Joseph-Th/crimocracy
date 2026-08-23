@@ -292,13 +292,17 @@ fn refresh_operation_financial_state(
         let Some(venue) = state.world().get_business(disposition.venue()) else {
             continue;
         };
-        let prior = crate::operations::operation_execution::unliquidated_property_clause(
+        // The clause pair is produced by one owner (`operation_economics`), so this refresh
+        // matches on exact text rather than parsing. The `contains` guard is also the drift
+        // alarm: if either clause's wording changes without the other, the unliquidated
+        // clause silently survives into every later brief.
+        let prior = crate::operations::operation_economics::unliquidated_property_clause(
             proceeds.estimated_value().cents(),
         );
         if !refreshed.summary.contains(&prior) {
             continue;
         }
-        let current = crate::operations::operation_execution::liquidated_property_clause(
+        let current = crate::operations::operation_economics::liquidated_property_clause(
             proceeds.estimated_value().cents(),
             venue.name(),
             disposition.realized_value().cents(),

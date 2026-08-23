@@ -3,7 +3,7 @@
 use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
 use crate::legal::{JurisdictionDraft, JurisdictionRecord};
-use crate::world::{Lifecycle, OrganizationKind};
+use crate::world::OrganizationKind;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -12,23 +12,21 @@ pub enum JurisdictionError {
     MissingOrganization(OrganizationId),
     #[error("organization {0} cannot hold law-enforcement jurisdiction")]
     InvalidAuthorityKind(OrganizationId),
-    #[error("organization {0} is not active")]
-    InactiveAuthority(OrganizationId),
     #[error("jurisdiction must contain at least one neighborhood")]
     EmptyJurisdiction,
     #[error("neighborhood {0} does not exist or is not active")]
     MissingNeighborhood(NeighborhoodId),
     #[error(
-        "organization {organization} cannot remove neighborhood {neighborhood} from jurisdiction while patrol deployment {deployment} is active"
-    )]
+    "organization {organization} cannot remove neighborhood {neighborhood} from jurisdiction while patrol deployment {deployment} is active"
+  )]
     ActivePatrolDeployment {
         organization: OrganizationId,
         neighborhood: NeighborhoodId,
         deployment: PatrolDeploymentId,
     },
     #[error(
-        "jurisdiction for organization {organization} changed after validation; expected version {expected:?}, found {found:?}"
-    )]
+    "jurisdiction for organization {organization} changed after validation; expected version {expected:?}, found {found:?}"
+  )]
     StaleJurisdiction {
         organization: OrganizationId,
         expected: Option<u32>,
@@ -101,10 +99,7 @@ fn resolve_jurisdiction_priority(
             state
                 .world
                 .get_organization(jurisdiction.organization())
-                .is_some_and(|organization| {
-                    organization.lifecycle() == Lifecycle::Active
-                        && kinds.contains(&organization.kind())
-                })
+                .is_some_and(|organization| kinds.contains(&organization.kind()))
         })
         .fold(None, |best, jurisdiction| match best {
             None => Some(jurisdiction),
@@ -163,18 +158,11 @@ fn validate_jurisdiction_dependencies(
             return Err(JurisdictionError::InvalidAuthorityKind(draft.organization));
         }
     }
-    if organization.lifecycle() != Lifecycle::Active {
-        return Err(JurisdictionError::InactiveAuthority(draft.organization));
-    }
     if draft.neighborhoods.is_empty() {
         return Err(JurisdictionError::EmptyJurisdiction);
     }
     for neighborhood in &draft.neighborhoods {
-        if !state
-            .world
-            .get_neighborhood(*neighborhood)
-            .is_some_and(|record| record.lifecycle() == Lifecycle::Active)
-        {
+        if state.world.get_neighborhood(*neighborhood).is_none() {
             return Err(JurisdictionError::MissingNeighborhood(*neighborhood));
         }
     }

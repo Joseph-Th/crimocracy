@@ -364,8 +364,6 @@ pub enum LaunderingError {
     },
     #[error("business {0} does not exist")]
     MissingBusiness(crate::core::id::BusinessId),
-    #[error("business {0} is not active")]
-    InactiveBusiness(crate::core::id::BusinessId),
     #[error("business {0} is not owned by the requesting organization")]
     ForeignBusiness(crate::core::id::BusinessId),
     #[error("business {0} lacks the cash-intensive function required to absorb illicit cash")]
@@ -373,8 +371,8 @@ pub enum LaunderingError {
     #[error("business {0} has no active operating economy to route laundered revenue through")]
     MissingBusinessEconomy(crate::core::id::BusinessId),
     #[error(
-        "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
-    )]
+    "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
+  )]
     CapacityExceeded {
         business: crate::core::id::BusinessId,
         requested_cents: i64,
@@ -391,11 +389,18 @@ pub enum LaunderingError {
 pub struct ValidatedLaundering {
     transaction: ValidatedLedgerTransaction,
     business: crate::core::id::BusinessId,
+    laundered_amount: Money,
 }
 
 impl ValidatedLaundering {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, LaunderingError> {
         let id = self.transaction.commit(state)?;
+        // The transfer committed, so the front's plausibility budget shrinks by the same
+        // volume. The economy record was validated to exist and business economies are never
+        // deleted, so the recording cannot fail after a successful transfer.
+        state
+            .economy
+            .record_laundered_volume(self.business, self.laundered_amount);
         Ok(id)
     }
 
@@ -449,9 +454,6 @@ pub fn validate_launder_funds(
         .world
         .get_business(draft.business)
         .ok_or(LaunderingError::MissingBusiness(draft.business))?;
-    if business_record.lifecycle() != crate::world::Lifecycle::Active {
-        return Err(LaunderingError::InactiveBusiness(draft.business));
-    }
     if business_record.owner() != BusinessOwner::Organization(draft.organization) {
         return Err(LaunderingError::ForeignBusiness(draft.business));
     }
@@ -468,8 +470,10 @@ pub fn validate_launder_funds(
     if economy.status() != crate::economy::BusinessOperatingStatus::Active {
         return Err(LaunderingError::MissingBusinessEconomy(draft.business));
     }
-    // Plausibility: one transfer may hide only inside the authored fraction of what the
-    // front can legitimately earn in a cycle.
+    // Plausibility: the front can hide only the authored fraction of what it legitimately
+    // earns per cycle, and the budget is cumulative — a front that already absorbed volume
+    // this cycle has less plausible room left, so volume requires larger or additional fronts
+    // rather than many small transfers.
     let gross_potential = resolve_business_gross_potential(registry, state, draft.business)?;
     let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
     let capacity_cents = i128::from(gross_potential.cents())
@@ -477,11 +481,13 @@ pub fn validate_launder_funds(
         .and_then(|value| value.checked_div(10_000))
         .and_then(|value| i64::try_from(value).ok())
         .ok_or(LaunderingError::ArithmeticOverflow)?;
-    if draft.amount.cents() > capacity_cents {
+    let already_laundered = economy.laundered_this_cycle().cents();
+    let remaining_cents = capacity_cents.saturating_sub(already_laundered);
+    if draft.amount.cents() > remaining_cents {
         return Err(LaunderingError::CapacityExceeded {
             business: draft.business,
             requested_cents: draft.amount.cents(),
-            capacity_cents,
+            capacity_cents: remaining_cents,
         });
     }
     // Fee split: the front keeps the authored cut as legitimate revenue.
@@ -528,6 +534,7 @@ pub fn validate_launder_funds(
     Ok(ValidatedLaundering {
         transaction,
         business: draft.business,
+        laundered_amount: draft.amount,
     })
 }
 

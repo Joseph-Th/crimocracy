@@ -28,15 +28,6 @@ pub enum AudienceKind {
     Press,
 }
 
-pub const ALL_AUDIENCE_KINDS: [AudienceKind; 6] = [
-    AudienceKind::Underworld,
-    AudienceKind::Businesses,
-    AudienceKind::Residents,
-    AudienceKind::Police,
-    AudienceKind::Political,
-    AudienceKind::Press,
-];
-
 /// Behavioral axes an audience judges, deliberately distinct from character relationships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ReputationDimension {
@@ -67,7 +58,6 @@ pub struct ReputationRecord {
     reliability: u8,
     competence: u8,
     treachery: u8,
-    version: u32,
 }
 
 impl ReputationRecord {
@@ -95,14 +85,6 @@ impl ReputationRecord {
             ReputationDimension::Competence => self.competence = value,
             ReputationDimension::Treachery => self.treachery = value,
         }
-        self.version = self
-            .version
-            .checked_add(1)
-            .expect("reputation record version counter exhausted");
-    }
-
-    pub fn version(&self) -> u32 {
-        self.version
     }
 }
 

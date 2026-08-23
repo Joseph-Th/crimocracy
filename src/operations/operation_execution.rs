@@ -8,8 +8,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_economy_system::{
-    resolve_business_gross_potential, validate_disrupt_business_economy, BusinessEconomyError,
-    ValidatedBusinessDisruption,
+    validate_disrupt_business_economy, BusinessEconomyError, ValidatedBusinessDisruption,
 };
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
@@ -32,6 +31,11 @@ use crate::legal::{
     Admissibility, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
     IncidentIntakeDraft, IncidentWitnessDraft, WitnessCooperation,
 };
+use crate::operations::operation_economics::{
+    resolve_cash_proceeds, resolve_property_proceeds, undeposited_cash_clause,
+    unliquidated_property_clause, CashProceedsPlan, PropertyProceedsPlan, DEPLETED_TAKE_CLAUSE,
+    SABOTAGE_DISRUPTION_CLAUSE,
+};
 use crate::operations::surveillance_integration::{
     decide_surveillance_intelligence, surveillance_after_action_clause,
     validate_surveillance_information, validate_surveillance_plan_snapshot, SurveillanceError,
@@ -39,8 +43,8 @@ use crate::operations::surveillance_integration::{
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
-    OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
-    OperationResolutionFactors, OperationResolutionRecord, OperationStatus,
+    OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
+    OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
@@ -100,16 +104,16 @@ pub(crate) enum OperationResolutionError {
     )]
     StalePoliceResponseContext { operation: OperationId },
     #[error(
-        "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
-    )]
+    "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
+  )]
     StaleIncidentRouting {
         neighborhood: NeighborhoodId,
         expected: Option<crate::core::id::OrganizationId>,
         found: Option<crate::core::id::OrganizationId>,
     },
     #[error(
-        "operation incident jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
-    )]
+    "operation incident jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
+  )]
     StaleIncidentJurisdictionVersion {
         neighborhood: NeighborhoodId,
         organization: crate::core::id::OrganizationId,
@@ -286,7 +290,7 @@ pub(crate) fn decide_operation_resolution(
         .expect("in-progress operation must have a start time");
     let police_snapshot = resolve_target_police_interval_snapshot(
         state,
-        record.objective().referenced_entities(),
+        resolve_operation_venue_entities(state, record),
         started_at,
         state.now(),
     );
@@ -841,10 +845,10 @@ pub(crate) fn build_legal_activity_summary(
         .expect("validated incident authority must exist")
         .name();
     format!(
-        "The exposure from {} produced a police investigation opened by {}. The organization does not know the case's evidence, lead, or detective work.",
-        operation.title(),
-        authority_name
-    )
+    "The exposure from {} produced a police investigation opened by {}. The organization does not know the case's evidence, lead, or detective work.",
+    operation.title(),
+    authority_name
+  )
 }
 
 fn resolve_incident_witness(
@@ -853,8 +857,6 @@ fn resolve_incident_witness(
     exposure: &OperationExposurePlan,
     target_police_presence: Option<Rating>,
 ) -> Option<IncidentWitnessDraft> {
-    use crate::world::Lifecycle;
-
     if !matches!(
         exposure.level,
         OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
@@ -878,9 +880,6 @@ fn resolve_incident_witness(
         return None;
     };
     let witness = state.world.get_character(character)?;
-    if witness.lifecycle() != Lifecycle::Active {
-        return None;
-    }
     // The identified participant cannot witness their own crime, and an organization's own
     // member is not treated as the case's named witness against it.
     if Some(character) == exposure.identified_character
@@ -1036,7 +1035,7 @@ fn validate_plan_snapshot(
     }
     let current_police_snapshot = resolve_target_police_interval_snapshot(
         state,
-        record.objective().referenced_entities(),
+        resolve_operation_venue_entities(state, record),
         record
             .started_at()
             .expect("in-progress operation must have a start time"),
@@ -1114,6 +1113,27 @@ fn resolve_target_police_snapshot(
     resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
         resolve_patrol_presence_snapshot(state, neighborhood, at)
     })
+}
+
+/// Venue entities for police-presence and exposure attribution. Extraction is the one
+/// objective whose referenced character stands for a place the crew acts while that person
+/// is elsewhere: custody. The venue proxies to the detaining authority's footprint instead
+/// of the detainee's organization assets, so an organization's own legitimate businesses
+/// never raise its own extraction difficulty or host its exposure incident.
+fn resolve_operation_venue_entities(state: &AppState, record: &OperationRecord) -> Vec<EntityRef> {
+    match record.objective() {
+        OperationObjective::FreeDetainee { target } => state
+            .legal
+            .active_arrest_for_character(*target)
+            .and_then(|arrest| state.legal.get_investigation(arrest.investigation()))
+            .map(|investigation| vec![EntityRef::Organization(investigation.owner())])
+            .unwrap_or_else(|| vec![EntityRef::Character(*target)]),
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::DisruptBusiness { .. } => record.objective().referenced_entities(),
+    }
 }
 
 fn resolve_target_police_interval_snapshot(
@@ -1282,7 +1302,7 @@ fn resolve_exposure_plan(
     let score = resolve_exposure_score(execution, factors);
     let level = resolve_exposure_level(execution, score);
     let identified_character = if level == OperationExposureLevel::Identifying {
-        most_exposed_participant(state, record)
+        find_most_exposed_participant(state, record)
     } else {
         None
     };
@@ -1371,7 +1391,7 @@ pub(crate) fn resolve_operation_police_alert_context(
         .expect("police alert planning must reference an existing operation");
     let execution = registry.get_operation(record.kind()).execution();
     let police_snapshot =
-        resolve_target_police_snapshot(state, record.objective().referenced_entities(), at);
+        resolve_target_police_snapshot(state, resolve_operation_venue_entities(state, record), at);
     let stealth_average = resolve_stealth_average(state, record);
     let (intelligence_quality, _, _, _) = resolve_intelligence_factors(registry, state, operation);
     let intelligence_mitigation = u16::from(intelligence_quality.value())
@@ -1406,7 +1426,7 @@ pub(crate) fn has_police_response_arrived_by(
         .is_some_and(|arrived_at| arrived_at <= at)
 }
 
-fn most_exposed_participant(
+fn find_most_exposed_participant(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Option<CharacterId> {
@@ -1592,296 +1612,6 @@ pub(crate) fn resolve_objective_outcome(
         OperationObjectiveOutcome::Failed
     }
 }
-
-/// A successful take from the same business inside this window finds only partially replaced
-/// stock, so repeat scores on one target decay instead of yielding an identical haul forever.
-const RECENT_HIT_WINDOW_MINUTES: i64 = 3 * 24 * 60;
-/// Each recent prior successful take leaves this share of the remaining loot value.
-const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PropertyProceedsPlan {
-    pub(crate) proceeds: Option<OperationPropertyProceedsRecord>,
-    /// True when a recent successful take on the same target reduced this haul.
-    pub(crate) depleted_by_recent_take: bool,
-}
-
-pub(crate) fn resolve_property_proceeds(
-    registry: &Registry,
-    state: &AppState,
-    operation: &crate::operations::OperationRecord,
-    outcome: OperationObjectiveOutcome,
-) -> Result<PropertyProceedsPlan, OperationResolutionError> {
-    let Some(definition) = registry
-        .get_operation(operation.kind())
-        .execution()
-        .property_proceeds()
-    else {
-        return Ok(PropertyProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    };
-    let OperationObjective::AcquireProperty {
-        target: EntityRef::Business(business),
-    } = operation.objective()
-    else {
-        return Ok(PropertyProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    };
-    if outcome == OperationObjectiveOutcome::Failed {
-        return Ok(PropertyProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    }
-
-    let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let recent_hits = recent_take_hits(state, operation, *business);
-    let cents = resolve_take_cents(
-        operation.id(),
-        gross.cents(),
-        definition.business_gross_basis_points(),
-        definition.partial_recovery_basis_points(),
-        outcome,
-        recent_hits,
-        |operation| OperationResolutionError::PropertyProceedsOverflow { operation },
-    )?;
-    if cents <= 0 {
-        return Ok(PropertyProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: recent_hits > 0,
-        });
-    }
-    Ok(PropertyProceedsPlan {
-        proceeds: Some(OperationPropertyProceedsRecord::new(
-            EntityRef::Business(*business),
-            crate::finance::Money::from_cents(cents),
-        )),
-        depleted_by_recent_take: recent_hits > 0,
-    })
-}
-
-/// Recent successful takes against the same target at this operation's own resolution instant —
-/// a committed operation must keep validating against exactly the take history it saw when it
-/// resolved.
-fn recent_take_hits(
-    state: &AppState,
-    operation: &crate::operations::OperationRecord,
-    business: crate::core::id::BusinessId,
-) -> u32 {
-    let reference_at = operation
-        .resolution()
-        .map(|resolution| resolution.resolved_at())
-        .unwrap_or_else(|| state.now());
-    count_recent_successful_takes(
-        state,
-        business,
-        reference_at,
-        RECENT_HIT_WINDOW_MINUTES,
-        Some(operation.id()),
-    )
-}
-
-/// Shared take economics: authored basis points of the target's gross potential, scaled down on a
-/// partial outcome and again by each recent successful hit against the same target.
-fn resolve_take_cents(
-    operation: crate::core::id::OperationId,
-    gross_cents: i64,
-    full_basis_points: u32,
-    partial_basis_points: u16,
-    outcome: OperationObjectiveOutcome,
-    recent_hits: u32,
-    overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
-) -> Result<i64, OperationResolutionError> {
-    let full_value = i128::from(gross_cents)
-        .checked_mul(i128::from(full_basis_points))
-        .ok_or(overflow(operation))?
-        / 10_000_i128;
-    let mut value = match outcome {
-        OperationObjectiveOutcome::Achieved => full_value,
-        OperationObjectiveOutcome::Partial => {
-            full_value
-                .checked_mul(i128::from(partial_basis_points))
-                .ok_or(overflow(operation))?
-                / 10_000_i128
-        }
-        OperationObjectiveOutcome::Failed => {
-            unreachable!("failed takes return early")
-        }
-    };
-    // Each prior hit inside the recency window multiplies the remaining take down so farming
-    // one target decays.
-    for _ in 0..recent_hits {
-        value = value
-            .checked_mul(RECENT_HIT_VALUE_BASIS_POINTS)
-            .ok_or(overflow(operation))?
-            / 10_000_i128;
-    }
-    i64::try_from(value).map_err(|_| overflow(operation))
-}
-
-/// Counts completed, property-bearing successes against `business` whose resolution happened
-/// within `window_minutes` before `at`. Ordered scans over authoritative records keep this
-/// deterministic; no separate depletion index is maintained.
-fn count_recent_successful_takes(
-    state: &AppState,
-    business: crate::core::id::BusinessId,
-    at: SimTime,
-    window_minutes: i64,
-    exclude: Option<crate::core::id::OperationId>,
-) -> u32 {
-    let at_minutes = i64::try_from(at.as_minutes()).unwrap_or(i64::MAX);
-    state
-        .operations
-        .operations_with_status(OperationStatus::Completed)
-        .filter(|record| Some(record.id()) != exclude)
-        .filter(|record| targets_business(record.objective(), business))
-        .filter_map(|record| record.resolution())
-        .filter(|resolution| {
-            matches!(
-                resolution.objective_outcome(),
-                OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
-            )
-        })
-        .filter(|resolution| {
-            let resolved_minutes = i64::try_from(resolution.resolved_at().as_minutes())
-                .expect("simulation minute counts must fit i64");
-            resolved_minutes <= at_minutes && at_minutes - resolved_minutes < window_minutes
-        })
-        .count()
-        .try_into()
-        .expect("operation counts must fit u32")
-}
-
-/// Whether the objective takes value out of `business`, whether property or cash. Both take
-/// kinds share the recency-depletion window: stock and ready cash alike need time to replace.
-fn targets_business(
-    objective: &crate::operations::OperationObjective,
-    business: crate::core::id::BusinessId,
-) -> bool {
-    let target = match objective {
-        OperationObjective::AcquireProperty { target }
-        | OperationObjective::ObtainCash { target } => target,
-        OperationObjective::Frighten { .. }
-        | OperationObjective::GatherInformation { .. }
-        | OperationObjective::FreeDetainee { .. }
-        | OperationObjective::DisruptBusiness { .. } => return false,
-    };
-    matches!(target, EntityRef::Business(id) if *id == business)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CashProceedsPlan {
-    proceeds: Option<crate::operations::OperationCashProceedsRecord>,
-    depleted_by_recent_take: bool,
-}
-
-/// Derives the cash a successful take carries home. Mirrors the property-proceeds economics:
-/// authored basis points of the target business's gross potential, scaled down on a partial
-/// outcome and by each recent successful hit against the same target.
-pub(crate) fn resolve_cash_proceeds(
-    registry: &Registry,
-    state: &AppState,
-    operation: &crate::operations::OperationRecord,
-    outcome: OperationObjectiveOutcome,
-) -> Result<CashProceedsPlan, OperationResolutionError> {
-    let Some(definition) = registry
-        .get_operation(operation.kind())
-        .execution()
-        .cash_proceeds()
-    else {
-        return Ok(CashProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    };
-    let OperationObjective::ObtainCash {
-        target: EntityRef::Business(business),
-    } = operation.objective()
-    else {
-        return Ok(CashProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    };
-    if outcome == OperationObjectiveOutcome::Failed {
-        return Ok(CashProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: false,
-        });
-    }
-
-    let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let recent_hits = recent_take_hits(state, operation, *business);
-    let cents = resolve_take_cents(
-        operation.id(),
-        gross.cents(),
-        definition.business_take_basis_points(),
-        definition.partial_take_basis_points(),
-        outcome,
-        recent_hits,
-        |operation| OperationResolutionError::CashProceedsOverflow { operation },
-    )?;
-    if cents <= 0 {
-        return Ok(CashProceedsPlan {
-            proceeds: None,
-            depleted_by_recent_take: recent_hits > 0,
-        });
-    }
-    Ok(CashProceedsPlan {
-        proceeds: Some(crate::operations::OperationCashProceedsRecord::new(
-            EntityRef::Business(*business),
-            crate::finance::Money::from_cents(cents),
-        )),
-        depleted_by_recent_take: recent_hits > 0,
-    })
-}
-
-/// The canonical after-action phrasing for a yet-unliquidated operation property hold. The
-/// executive brief refreshes this clause in-place when the property is later liquidated, so the
-/// phrasing must be shared here rather than duplicated and allowed to drift.
-pub(crate) fn unliquidated_property_clause(est_value_cents: i64) -> String {
-    format!(
-        "The crew secured property with an estimated held value of {}; it remains unliquidated.",
-        crate::finance::helpers::format_money_cents(est_value_cents)
-    )
-}
-
-/// After-action phrasing for cash the crew is carrying home; it stays held until the
-/// canonical deposit command moves it into an organization account.
-pub(crate) fn undeposited_cash_clause(cents: i64) -> String {
-    format!(
-        "The crew took {} in cash; it remains undeposited.",
-        crate::finance::helpers::format_money_cents(cents)
-    )
-}
-
-/// After-action phrasing when the same target was successfully hit recently: the haul came in
-/// light because the target had not fully replaced what an earlier score already took.
-const DEPLETED_TAKE_CLAUSE: &str =
-    "The take came in lighter than usual; this target has not fully replaced stock from a recent score.";
-
-/// The after-action phrasing used when held property has since been liquidated through a resale
-/// venue. Must stay coherent with `unliquidated_property_clause` for the brief's in-place refresh.
-pub(crate) fn liquidated_property_clause(
-    est_value_cents: i64,
-    venue_name: &str,
-    realized_cents: i64,
-) -> String {
-    format!(
-        "The crew secured property with an estimated held value of {}; it was later liquidated through {venue_name} for {}.",
-        crate::finance::helpers::format_money_cents(est_value_cents),
-        crate::finance::helpers::format_money_cents(realized_cents),
-    )
-}
-
-/// After-action phrasing for successful sabotage: the target's earning power is degraded for
-/// the authored disruption horizon.
-const SABOTAGE_DISRUPTION_CLAUSE: &str =
-    "The target's operations are disrupted and will earn well below normal until repairs catch up.";
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
 /// outcome and the factors that actually moved it. Neutral lines (normal execution window, no

@@ -137,9 +137,6 @@ pub fn build_scenario(
                         variation.neighborhood_police_presence(),
                         jitter_rating,
                     )),
-                    political_influence: rating(65),
-                    social_cohesion: rating(63),
-                    visible_violence_tolerance: rating(24),
                 },
             },
         },
@@ -484,9 +481,6 @@ pub fn build_scenario(
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(jitter_rating_u8(28, jitter_rating)),
-                    political_influence: rating(55),
-                    social_cohesion: rating(70),
-                    visible_violence_tolerance: rating(30),
                 },
             },
         },
@@ -819,15 +813,11 @@ pub fn observe_authority_case_sightline(
 /// Parses a player-visible case-activity summary into the sightline read: Some(true) means the
 /// authority is still visibly developing the known case, Some(false) that it appears shelved.
 /// Both counterintelligence channels (precinct surveillance and contact disclosure) phrase
-/// their summaries with these exact markers so the acting policy never needs hidden state.
+/// their summaries with the canonical markers from `legal::case_knowledge`, so the acting
+/// policy never needs hidden state.
 pub fn observe_authority_case_sightline_summary(summary: &str) -> Option<bool> {
-    if summary.contains("actively developing") {
-        Some(true)
-    } else if summary.contains("shelved") {
-        Some(false)
-    } else {
-        None
-    }
+    crimocracy::legal::case_knowledge::CaseActivityStatus::parse_summary_marker(summary)
+        .and_then(|status| status.is_hot())
 }
 
 /// Fixture-authored contact knowledge was deleted: the lead detective's case knowledge is now

@@ -59,9 +59,6 @@ fn make_business_economy_fixture() -> BusinessEconomyFixture {
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(55),
-                    political_influence: rating(50),
-                    social_cohesion: rating(60),
-                    visible_violence_tolerance: rating(20),
                 },
             },
         },

@@ -31,7 +31,7 @@ use crate::recruitment::recruitment_system::{
 };
 use crate::recruitment::RecruitmentDraft;
 use crate::registry::Registry;
-use crate::world::{ApprovalPolicy, Lifecycle, PolicyKind, PolicySetting};
+use crate::world::{ApprovalPolicy, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -47,8 +47,6 @@ pub enum DecisionError {
     MissingOperation(OperationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("character {0} is not active")]
-    InactiveRequester(CharacterId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("operation {operation} is not in progress")]
@@ -449,11 +447,11 @@ fn police_response_decision_id(
         .decisions_for_operation(operation)
         .find_map(|decision| {
             matches!(
-                decision.context(),
-                DecisionContext::OperationException {
-                    reason: OperationExceptionReason::PoliceArrival(decision_response),
-                    ..
-                } if decision_response == response
+              decision.context(),
+              DecisionContext::OperationException {
+                reason: OperationExceptionReason::PoliceArrival(decision_response),
+                ..
+              } if decision_response == response
             )
             .then_some(decision.id())
         })
@@ -531,8 +529,8 @@ fn validate_deferred_police_arrival_decision(
 
 fn police_arrival_decision_summary(operation_title: &str) -> String {
     format!(
-        "Police response reached the target during {operation_title}. Leadership direction is required."
-    )
+    "Police response reached the target during {operation_title}. Leadership direction is required."
+  )
 }
 
 fn validate_request_metadata(
@@ -550,13 +548,10 @@ fn validate_request_metadata(
             return Err(DecisionError::InvalidAttention);
         }
     }
-    let requester_record = state
+    let _ = state
         .world
         .get_character(requester)
         .ok_or(DecisionError::MissingCharacter(requester))?;
-    if requester_record.lifecycle() != Lifecycle::Active {
-        return Err(DecisionError::InactiveRequester(requester));
-    }
     Ok(())
 }
 
@@ -794,10 +789,10 @@ impl ValidatedDecisionResolution {
                         // Re-check at commit: the pause may have lengthened since validation,
                         // extending the post-resume window past a conflicting authorization.
                         crate::operations::operation_system::validate_operation_resume_participants(
-                            state,
-                            operation,
-                            state.now(),
-                        )?;
+              state,
+              operation,
+              state.now(),
+            )?;
                         state.decisions.resolve(
                             self.decision,
                             build_resolution(self.response, state.now(), self.resolver),
@@ -805,13 +800,13 @@ impl ValidatedDecisionResolution {
                         state.operations.resume(operation, state.now());
                         if let Some(follow_up) = follow_up {
                             debug_assert_eq!(
-                                state
-                                    .operations
-                                    .get_operation(operation)
-                                    .map(|record| record.version()),
-                                Some(follow_up.expected_operation_version),
-                                "validated follow-up decision must target the post-resume operation version"
-                            );
+                state
+                  .operations
+                  .get_operation(operation)
+                  .map(|record| record.version()),
+                Some(follow_up.expected_operation_version),
+                "validated follow-up decision must target the post-resume operation version"
+              );
                             debug_assert!(state
                                 .decisions
                                 .pending_for_operation(operation)
