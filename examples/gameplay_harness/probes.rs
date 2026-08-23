@@ -654,6 +654,7 @@ pub fn persist_run_artifact(
         "matched_enterprise_net_cents": metrics.matched_enterprise_net_cents,
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
+        "rival_home_enterprises": metrics.rival_home_enterprises,
         "player_poach_warnings": metrics.player_poach_warnings,
         "session_case_staffed": metrics.session_case_staffed,
         "raw": {

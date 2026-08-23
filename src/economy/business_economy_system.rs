@@ -241,6 +241,16 @@ pub fn decide_business_cycle(
     }
     let profile = neighborhood.profile();
     let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
+    // Sabotage damage degrades earning power for the authored horizon; costs keep running.
+    let gross_before_variance = if economy.is_disrupted(state.now()) {
+        resolve_disrupted_gross(
+            business,
+            gross_before_variance,
+            registry.business_disruption().gross_basis_points(),
+        )?
+    } else {
+        gross_before_variance
+    };
     let gross_revenue =
         resolve_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
     let police_cost = weighted_rating(
@@ -713,6 +723,22 @@ fn resolve_gross_before_variance(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
+/// Authored sabotage damage: disrupted cycles earn the authored fraction of normal gross.
+fn resolve_disrupted_gross(
+    business: BusinessId,
+    normal_gross: Money,
+    gross_basis_points: u32,
+) -> Result<Money, BusinessEconomyError> {
+    let discounted = i128::from(normal_gross.cents())
+        .checked_mul(i128::from(gross_basis_points))
+        .and_then(|value| value.checked_div(10_000))
+        .and_then(|value| i64::try_from(value).ok());
+    match discounted {
+        Some(cents) => Ok(Money::from_cents(cents)),
+        None => Err(BusinessEconomyError::ArithmeticOverflow(business)),
+    }
+}
+
 fn weighted_rating(
     business: BusinessId,
     per_point: Money,
@@ -729,6 +755,55 @@ fn resolve_basis_point_variance(
 ) -> Result<Money, BusinessEconomyError> {
     crate::finance::helpers::resolve_basis_point_variance(amount, basis_points)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
+}
+
+/// Canonical sabotage-damage mutation: extends the target's disruption horizon through an
+/// validated-then-committed plan so repeated attacks push the horizon later and staleness
+/// is re-checked at commit.
+pub struct ValidatedBusinessDisruption {
+    business: BusinessId,
+    expected_economy_version: u32,
+    disrupted_through: SimTime,
+}
+
+impl ValidatedBusinessDisruption {
+    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
+        let economy = state
+            .economy
+            .get_business_economy(self.business)
+            .ok_or(BusinessEconomyError::MissingBusinessEconomy(self.business))?;
+        if economy.version() != self.expected_economy_version {
+            return Err(BusinessEconomyError::StaleEconomy {
+                business: self.business,
+                expected: self.expected_economy_version,
+                found: economy.version(),
+            });
+        }
+        state
+            .economy
+            .apply_disruption(self.business, self.disrupted_through);
+        Ok(())
+    }
+}
+
+pub fn validate_disrupt_business_economy(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<ValidatedBusinessDisruption, BusinessEconomyError> {
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    if economy.status() != BusinessOperatingStatus::Active {
+        return Err(BusinessEconomyError::EconomyNotActive(business));
+    }
+    let disrupted_through = state.now() + registry.business_disruption().duration();
+    Ok(ValidatedBusinessDisruption {
+        business,
+        expected_economy_version: economy.version(),
+        disrupted_through,
+    })
 }
 
 #[cfg(test)]

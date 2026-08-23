@@ -8,7 +8,8 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_economy_system::{
-    resolve_business_gross_potential, BusinessEconomyError,
+    resolve_business_gross_potential, validate_disrupt_business_economy, BusinessEconomyError,
+    ValidatedBusinessDisruption,
 };
 use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
@@ -37,9 +38,9 @@ use crate::operations::surveillance_integration::{
     SurveillanceIntelligencePlan,
 };
 use crate::operations::{
-    OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationObjective,
-    OperationObjectiveOutcome, OperationPropertyProceedsRecord, OperationResolutionFactors,
-    OperationResolutionRecord, OperationStatus,
+    OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
+    OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
+    OperationResolutionFactors, OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
@@ -367,6 +368,20 @@ pub(crate) fn decide_operation_resolution(
         summary.push(' ');
         summary.push_str(&clause);
     }
+    if objective_outcome != OperationObjectiveOutcome::Failed
+        && matches!(
+            (record.kind(), record.objective()),
+            (
+                OperationKind::Sabotage,
+                OperationObjective::DisruptBusiness {
+                    target: EntityRef::Business(_)
+                }
+            )
+        )
+    {
+        summary.push(' ');
+        summary.push_str(SABOTAGE_DISRUPTION_CLAUSE);
+    }
     let mut history_entities = BTreeSet::from([
         EntityRef::Operation(operation),
         EntityRef::Organization(record.responsible_organization()),
@@ -419,6 +434,7 @@ pub(crate) struct ValidatedOperationResolution {
     report: ValidatedReport,
     detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
     witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
+    business_disruption: Option<ValidatedBusinessDisruption>,
     participant_information: Vec<ValidatedInformation>,
 }
 
@@ -551,6 +567,13 @@ impl ValidatedOperationResolution {
             intimidation
                 .commit(state)
                 .expect("validated witness intimidation must commit atomically");
+        }
+        // Sabotage damage runs last so the target's economy degrades only after the
+        // operation itself has reached its terminal record.
+        if let Some(disruption) = self.business_disruption {
+            disruption
+                .commit(state)
+                .expect("validated business disruption must commit atomically");
         }
         // Personal after-action knowledge for each participant: the crew knows what went
         // down even though the organization's own record is the org-held after-action.
@@ -748,6 +771,22 @@ pub(crate) fn validate_operation_resolution_plan(
             }
         }
     }
+    // Sabotage damage lands through the canonical economy disruption path; the disruption is
+    // validated here so commit re-checks only staleness.
+    let mut business_disruption = None;
+    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
+        if let (
+            crate::operations::OperationKind::Sabotage,
+            crate::operations::OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(business),
+            },
+        ) = (record.kind(), record.objective())
+        {
+            business_disruption = Some(validate_disrupt_business_economy(
+                registry, state, *business,
+            )?);
+        }
+    }
     // Personal after-action knowledge for each participant: the crew knows what went down
     // even though the organization's own record is the org-held after-action. Validating
     // here keeps commit free of fallible content checks after terminal mutation.
@@ -786,6 +825,7 @@ pub(crate) fn validate_operation_resolution_plan(
         report,
         detainee_release,
         witness_intimidation,
+        business_disruption,
         participant_information,
     })
 }
@@ -824,7 +864,8 @@ fn resolve_incident_witness(
     // Only business targets have an identifiable on-scene witness today: the owner.
     let target = match operation.objective() {
         OperationObjective::AcquireProperty { target }
-        | OperationObjective::ObtainCash { target } => Some(*target),
+        | OperationObjective::ObtainCash { target }
+        | OperationObjective::DisruptBusiness { target } => Some(*target),
         OperationObjective::Frighten { .. }
         | OperationObjective::GatherInformation { .. }
         | OperationObjective::FreeDetainee { .. } => None,
@@ -1726,7 +1767,8 @@ fn targets_business(
         | OperationObjective::ObtainCash { target } => target,
         OperationObjective::Frighten { .. }
         | OperationObjective::GatherInformation { .. }
-        | OperationObjective::FreeDetainee { .. } => return false,
+        | OperationObjective::FreeDetainee { .. }
+        | OperationObjective::DisruptBusiness { .. } => return false,
     };
     matches!(target, EntityRef::Business(id) if *id == business)
 }
@@ -1835,6 +1877,11 @@ pub(crate) fn liquidated_property_clause(
         crate::finance::helpers::format_money_cents(realized_cents),
     )
 }
+
+/// After-action phrasing for successful sabotage: the target's earning power is degraded for
+/// the authored disruption horizon.
+const SABOTAGE_DISRUPTION_CLAUSE: &str =
+    "The target's operations are disrupted and will earn well below normal until repairs catch up.";
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
 /// outcome and the factors that actually moved it. Neutral lines (normal execution window, no

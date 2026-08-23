@@ -59,6 +59,7 @@ pub struct TickOutcome {
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
+    pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
     pub cold_case_closures: Vec<InvestigationId>,
@@ -253,6 +254,52 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
     let recruitment_attempts = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve due autonomous recruitment");
+    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
+    // minute governs with its current roster. Selection consumes no randomness, so matched
+    // branches observe identical rival growth unless their own actions touched rival state.
+    let autonomous_enterprises =
+        crate::enterprises::enterprise_execution::apply_due_autonomous_enterprises(registry, state);
+    // Reputation consequences run right after the day's operational work so an audience's
+    // impression moves in the same tick that produced it, and before the daily decay pass so
+    // fresh adjustments are never immediately eroded. The player organization additionally
+    // receives a Standing report per shifting operation — its own street standing is
+    // legitimate self-knowledge, surfaced through the canonical report path.
+    let player_organization = state.player_organization();
+    for operation in &resolved_operations {
+        let (organization, approach, objective_outcome, exposure_level) = {
+            let record = state
+                .operations()
+                .get_operation(*operation)
+                .expect("resolved operation must exist for reputation consequences");
+            let resolution = record
+                .resolution()
+                .expect("resolved operation carries its resolution");
+            (
+                record.responsible_organization(),
+                record.approach(),
+                resolution.objective_outcome(),
+                resolution.exposure().level(),
+            )
+        };
+        let shifts = crate::reputation::reputation_system::apply_operation_reputation_consequences(
+            registry,
+            state,
+            organization,
+            approach,
+            objective_outcome,
+            exposure_level,
+        )
+        .expect("valid state should apply operation reputation consequences");
+        if Some(organization) == player_organization {
+            crate::reputation::reputation_system::record_standing_feedback(
+                state,
+                organization,
+                &shifts,
+            )
+            .expect("player standing feedback must record through the canonical report path");
+        }
+    }
+    crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
     // same simulation minute.
@@ -285,6 +332,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         enterprise_cycles,
         payrolls,
         recruitment_attempts,
+        autonomous_enterprises,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay.suspended,
         cold_case_closures: cold_case_decay.closed,

@@ -246,6 +246,14 @@ impl FixtureVariation {
         }
     }
 
+    pub fn rival_venue_name(self) -> &'static str {
+        match self {
+            Self::Clockwork => "Grotto Card Room",
+            Self::Crowded => "Vera's Back Room",
+            Self::Quiet => "Sable Social Club",
+        }
+    }
+
     pub fn opportunity_summary(self) -> &'static str {
         match self {
             Self::Clockwork => {
@@ -480,6 +488,11 @@ pub struct Scenario<'registry> {
     pub expansion_front: BusinessId,
     pub expansion_cash: FinancialAccountId,
     pub expansion_settlement: FinancialAccountId,
+    /// Rival-held fixture assets the delegated rival-expansion pass governs: a home-district
+    /// venue plus the Rosetti treasury accounts it draws cash and settlement from.
+    pub rival_venue: BusinessId,
+    pub rival_cash: FinancialAccountId,
+    pub rival_settlement: FinancialAccountId,
     pub lieutenant_mandate: MandateId,
     pub investigation: Option<crimocracy::core::id::InvestigationId>,
     pub variation: FixtureVariation,
@@ -541,6 +554,10 @@ pub struct RunMetrics {
     pub player_legal_activity_information: usize,
     pub player_report_count: usize,
     pub executive_brief_count: usize,
+    /// Raw audit evidence of delegated rival growth: total active rackets non-player
+    /// organizations operate in the home district at session end, derived through the
+    /// canonical territory-influence surface. Never read by acting policy.
+    pub rival_home_enterprises: u32,
     pub autonomous_recruitment_attempts: u32,
     pub player_personnel_departures: u32,
     /// Refused autonomous poaching approaches against this organization's members. Each one

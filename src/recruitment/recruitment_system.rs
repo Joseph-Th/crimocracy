@@ -422,6 +422,15 @@ pub(crate) fn decide_recruitment_attempt(
         draft.candidate,
         state.now(),
     );
+    // The candidate weighs the outfit's demonstrated underworld competence, resolved through
+    // the canonical reputation surface; the frozen value rides inside the plan's factors.
+    let organization_competence = crate::reputation::reputation_system::resolved_score(
+        registry,
+        state.reputation(),
+        draft.target_organization,
+        crate::reputation::AudienceKind::Underworld,
+        crate::reputation::ReputationDimension::Competence,
+    );
     let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
         definition: registry.recruitment(),
         candidate,
@@ -430,6 +439,7 @@ pub(crate) fn decide_recruitment_attempt(
         recruiter_relationship,
         incumbent_relationship,
         perceived_legal_pressure,
+        organization_competence,
         had_previous_organization: candidate.organization().is_some(),
     })
     .expect("validated recruitment must retain a candidate-to-recruiter relationship snapshot");
@@ -1071,6 +1081,11 @@ pub(crate) struct RecruitmentFactorContext<'a> {
     pub recruiter_relationship: RecruitmentRelationshipSnapshot,
     pub incumbent_relationship: Option<RecruitmentRelationshipSnapshot>,
     pub perceived_legal_pressure: u8,
+    /// The recruiting organization's underworld competence reputation as resolved when the
+    /// decision was made. Callers snapshot this from the canonical reputation surface; the
+    /// invariant pass re-derives with each attempt's own frozen value, because impressions
+    /// legitimately move after an attempt and must not retroactively invalidate it.
+    pub organization_competence: u8,
     pub had_previous_organization: bool,
 }
 
@@ -1085,6 +1100,7 @@ pub(crate) fn resolve_recruitment_factors_from_context(
         recruiter_relationship,
         incumbent_relationship,
         perceived_legal_pressure,
+        organization_competence,
         had_previous_organization,
     } = context;
     let relationship = recruiter_relationship.dimensions()?;
@@ -1132,6 +1148,7 @@ pub(crate) fn resolve_recruitment_factors_from_context(
         incumbent_resentment,
         perceived_legal_pressure,
         membership_resistance,
+        organization_competence,
         trait_adjustment,
     }))
 }
@@ -1236,6 +1253,10 @@ pub(crate) fn resolve_recruitment_margin(
             i16::from(weights.incumbent_resentment),
         )
         + weighted(factors.perceived_legal_pressure(), legal_weight)
+        + weighted(
+            factors.organization_competence(),
+            i16::from(weights.organization_competence),
+        )
         - weighted(
             factors.incumbent_attachment(),
             i16::from(weights.incumbent_attachment),
@@ -1346,6 +1367,7 @@ fn validate_plan_definition(
         recruiter_relationship: plan.dependencies.recruiter_relationship,
         incumbent_relationship: plan.dependencies.incumbent_relationship,
         perceived_legal_pressure,
+        organization_competence: plan.context.factors.organization_competence(),
         had_previous_organization: plan.context.previous_organization.is_some(),
     })
     .expect("validated recruitment plan must preserve its recruiter relationship");

@@ -17,6 +17,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
+use crate::intelligence::InformationTopic;
 use crate::world::Rating;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +34,7 @@ pub enum OperationKind {
     DocumentTheft,
     GamblingEvent,
     Extraction,
+    Sabotage,
 }
 
 impl OperationKind {
@@ -52,7 +54,7 @@ impl OperationKind {
     }
 }
 
-pub const ALL_OPERATION_KINDS: [OperationKind; 10] = [
+pub const ALL_OPERATION_KINDS: [OperationKind; 11] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
     OperationKind::Hijacking,
@@ -63,6 +65,7 @@ pub const ALL_OPERATION_KINDS: [OperationKind; 10] = [
     OperationKind::DocumentTheft,
     OperationKind::GamblingEvent,
     OperationKind::Extraction,
+    OperationKind::Sabotage,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -116,6 +119,11 @@ pub enum OperationObjective {
     FreeDetainee {
         target: CharacterId,
     },
+    /// Damage a business's operating capacity. Success disrupts the target's economy
+    /// through the canonical business-economy disruption path for an authored duration.
+    DisruptBusiness {
+        target: EntityRef,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,6 +133,7 @@ pub enum OperationObjectiveKind {
     Frighten,
     GatherInformation,
     FreeDetainee,
+    DisruptBusiness,
 }
 
 impl OperationObjective {
@@ -135,6 +144,7 @@ impl OperationObjective {
             Self::Frighten { .. } => OperationObjectiveKind::Frighten,
             Self::GatherInformation { .. } => OperationObjectiveKind::GatherInformation,
             Self::FreeDetainee { .. } => OperationObjectiveKind::FreeDetainee,
+            Self::DisruptBusiness { .. } => OperationObjectiveKind::DisruptBusiness,
         }
     }
 
@@ -143,7 +153,8 @@ impl OperationObjective {
             Self::AcquireProperty { target }
             | Self::ObtainCash { target }
             | Self::Frighten { target }
-            | Self::GatherInformation { target } => vec![*target],
+            | Self::GatherInformation { target }
+            | Self::DisruptBusiness { target } => vec![*target],
             Self::FreeDetainee { target } => vec![EntityRef::Character(*target)],
         }
     }
@@ -151,10 +162,14 @@ impl OperationObjective {
 
 /// Authorable execution boundaries that have a real mechanical effect. No-casualty or
 /// violence-avoidance style wording was removed because the execution model has no casualty,
-/// injury, or collateral-damage axis to act on; only timing boundaries are modeled.
+/// injury, or collateral-damage axis to act on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationConstraint {
     CompleteBefore(SimTime),
+    /// Authorization gate: the plan must carry organization-held intelligence of the given
+    /// topic relevant to the objective before it may be authorized. Consumed by operation
+    /// validation; reconnaissance is therefore a planning prerequisite, not flavor.
+    RequireIntelligenceTopic(InformationTopic),
 }
 
 /// Standing reactions tied to police-response and leadership-follow-up mechanics. Force,

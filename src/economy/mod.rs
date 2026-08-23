@@ -30,6 +30,8 @@ pub struct BusinessEconomyRecord {
     established_at: SimTime,
     next_cycle_at: Option<SimTime>,
     last_cycle_at: Option<SimTime>,
+    /// Sabotage damage horizon: while set and not yet passed, cycles earn degraded gross.
+    disrupted_through: Option<SimTime>,
     version: u32,
 }
 
@@ -54,6 +56,12 @@ impl BusinessEconomyRecord {
     }
     pub fn last_cycle_at(&self) -> Option<SimTime> {
         self.last_cycle_at
+    }
+    pub fn disrupted_through(&self) -> Option<SimTime> {
+        self.disrupted_through
+    }
+    pub fn is_disrupted(&self, now: SimTime) -> bool {
+        self.disrupted_through.is_some_and(|through| now <= through)
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -283,6 +291,23 @@ impl EconomyState {
             .expect("business economy version counter exhausted");
     }
 
+    /// Extends the sabotage damage horizon for a business economy. The horizon is monotone:
+    /// a new disruption only ever pushes the horizon later, never restores it early.
+    pub(crate) fn apply_disruption(&mut self, business: BusinessId, disrupted_through: SimTime) {
+        let record = self
+            .businesses
+            .get_mut(&business)
+            .expect("validated business economy disappeared before disruption commit");
+        record.disrupted_through = Some(match record.disrupted_through {
+            Some(current) if current > disrupted_through => current,
+            _ => disrupted_through,
+        });
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("business economy version counter exhausted");
+    }
+
     fn remove_schedule_index(
         index: &mut BTreeMap<SimTime, BTreeSet<BusinessId>>,
         time: SimTime,
@@ -382,6 +407,7 @@ pub(crate) fn build_business_economy_record(
         established_at,
         next_cycle_at: Some(next_cycle_at),
         last_cycle_at: None,
+        disrupted_through: None,
         version: 1,
     }
 }

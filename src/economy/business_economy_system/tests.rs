@@ -637,3 +637,139 @@ fn save_round_trip_preserves_business_schedule_and_deterministic_tick_resolution
     validate_invariants(&fixture.state);
     validate_invariants(&restored);
 }
+
+#[test]
+fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+
+    let disruption = validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("disruption should validate against an active economy");
+    let horizon = fixture.state.now() + registry.business_disruption().duration();
+    disruption
+        .commit(&mut fixture.state)
+        .expect("disruption should commit");
+    let economy = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("disrupted economy should exist");
+    assert_eq!(economy.disrupted_through(), Some(horizon));
+    assert!(economy.is_disrupted(fixture.state.now()));
+
+    // The undisrupted gross for this neighborhood profile, computed through the same
+    // production math so content tuning cannot break the contract spuriously.
+    let business = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .expect("fixture business should exist");
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_neighborhood(business.neighborhood())
+        .expect("business neighborhood should exist");
+    let normal_gross = resolve_gross_before_variance(
+        fixture.business,
+        registry.get_business(business.kind()).economics(),
+        neighborhood.profile(),
+    )
+    .expect("normal gross should resolve");
+    let disrupted_basis_points = registry.business_disruption().gross_basis_points();
+    let expected_disrupted_gross = Money::from_cents(
+        (i128::from(normal_gross.cents()) * i128::from(disrupted_basis_points) / 10_000)
+            .try_into()
+            .expect("disrupted gross should fit money"),
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let disrupted_plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("due cycle inside the disruption horizon should settle degraded");
+    assert_eq!(disrupted_plan.gross_revenue(), expected_disrupted_gross);
+    validate_business_cycle_plan(&fixture.state, disrupted_plan)
+        .expect("disrupted cycle plan should validate")
+        .commit(&mut fixture.state)
+        .expect("disrupted cycle should commit");
+
+    // After the horizon passes the same business earns normal gross again.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_441));
+    let recovered_plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("due cycle after the horizon should recover");
+    assert_eq!(
+        recovered_plan.gross_revenue(),
+        normal_gross,
+        "cycle after the horizon must earn undisrupted gross"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn repeated_sabotage_extends_but_never_shortens_the_disruption_horizon() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+
+    let first_horizon = fixture.state.now() + registry.business_disruption().duration();
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("first disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("first disruption should commit");
+
+    // A second hit inside the first horizon pushes the horizon later from the new instant.
+    fixture.state.advance_clock(SimDuration::from_minutes(600));
+    let second_horizon = fixture.state.now() + registry.business_disruption().duration();
+    assert!(second_horizon > first_horizon);
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("second disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("second disruption should commit");
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("disrupted economy should exist")
+            .disrupted_through(),
+        Some(second_horizon),
+        "a later hit must extend the horizon"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn stale_economy_version_rejects_sabotage_disruption_atomically() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+
+    let disruption = validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("disruption should validate");
+    // Mutate the economy record between validation and commit (status flip-flop bumps version).
+    let business = fixture.business;
+    let next_cycle_at = fixture
+        .state
+        .economy()
+        .get_business_economy(business)
+        .expect("economy should exist")
+        .next_cycle_at();
+    fixture
+        .state
+        .economy
+        .set_status(business, BusinessOperatingStatus::Suspended, None);
+    if let Some(next_cycle_at) = next_cycle_at {
+        fixture.state.economy.set_status(
+            business,
+            BusinessOperatingStatus::Active,
+            Some(next_cycle_at),
+        );
+    }
+    let error = disruption
+        .commit(&mut fixture.state)
+        .expect_err("stale validated disruption must be rejected");
+    assert!(matches!(error, BusinessEconomyError::StaleEconomy { .. }));
+}

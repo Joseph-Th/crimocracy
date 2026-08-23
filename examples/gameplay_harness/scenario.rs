@@ -374,9 +374,12 @@ pub fn build_scenario(
         MandateDraft {
             organization: rival,
             manager: rival_recruiter,
-            scopes: BTreeSet::from([ResponsibilityScope::Function(
-                ResponsibilityFunction::Personnel,
-            )]),
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+                // Governed territory: with a district scope and a Broad-autonomy manager,
+                // the rival's delegated expansion pass has real authority to act on.
+                ResponsibilityScope::Neighborhood(neighborhood),
+            ]),
             standing_orders: BTreeMap::from([(
                 PolicyKind::IndependentRecruitment,
                 PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
@@ -443,6 +446,25 @@ pub fn build_scenario(
             ]),
             neighborhood,
             owner: BusinessOwner::Organization(player),
+        },
+    )?;
+
+    // Rival-held venue in the home district: the Rosetti organization's delegated expansion
+    // pass can host venue rackets here once its daily cadence comes due. The D'Amato Crew has
+    // no governed territory, so it stays inert by contrast.
+    let rival_venue = insert_business(
+        registry,
+        &mut state,
+        BusinessDraft {
+            name: variation.rival_venue_name().to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(rival),
         },
     )?;
 
@@ -581,6 +603,22 @@ pub fn build_scenario(
             kind: AccountKind::Settlement,
         },
     )?;
+    // Rival treasury accounts: the expansion pass draws its operating cash and a free
+    // settlement account from these through the same ownership checks a player command faces.
+    let rival_cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::StreetCash,
+        },
+    )?;
+    let rival_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::Settlement,
+        },
+    )?;
     // Seed operating capital: the organization opens with a small general treasury so the
     // daily payroll pass is a live carrying cost from the first campaign day. The offsetting
     // posting sits in a settlement account the financial view deliberately ignores.
@@ -707,6 +745,9 @@ pub fn build_scenario(
         expansion_front,
         expansion_cash,
         expansion_settlement,
+        rival_venue,
+        rival_cash,
+        rival_settlement,
         lieutenant_mandate: mandate,
         investigation: None,
         variation,

@@ -32,6 +32,9 @@ pub struct Registry {
     executive_brief: ExecutiveBriefDefinition,
     legal: LegalConfigDefinition,
     upkeep: UpkeepConfigDefinition,
+    business_disruption: BusinessDisruptionDefinition,
+    laundering: LaunderingConfigDefinition,
+    reputation: ReputationConfigDefinition,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +93,15 @@ impl Registry {
     }
     pub fn upkeep(&self) -> UpkeepConfigDefinition {
         self.upkeep
+    }
+    pub fn business_disruption(&self) -> BusinessDisruptionDefinition {
+        self.business_disruption
+    }
+    pub fn laundering(&self) -> LaunderingConfigDefinition {
+        self.laundering
+    }
+    pub fn reputation(&self) -> ReputationConfigDefinition {
+        self.reputation
     }
     pub(crate) fn default_policies(&self) -> BTreeMap<PolicyKind, PolicySetting> {
         self.policies
@@ -163,6 +175,7 @@ mod tests {
                     incumbent_resentment: 10,
                     perceived_legal_pressure: 10,
                     incumbent_attachment: 25,
+                    organization_competence: 10,
                 },
             },
             recruiter_capabilities: BTreeSet::from([CapabilityKind::Negotiation]),

@@ -16,13 +16,14 @@ use crate::operations::OperationState;
 use crate::opportunities::OpportunityState;
 use crate::recruitment::RecruitmentState;
 use crate::reports::ReportState;
+use crate::reputation::ReputationState;
 use crate::social::SocialState;
 use crate::world::WorldState;
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 51;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 54;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -63,6 +64,7 @@ pub struct AppState {
     pub(crate) operations: OperationState,
     pub(crate) opportunities: OpportunityState,
     pub(crate) recruitment: RecruitmentState,
+    pub(crate) reputation: ReputationState,
     pub(crate) legal: LegalState,
     pub(crate) reports: ReportState,
     pub(crate) history: HistoryState,
@@ -96,6 +98,7 @@ impl AppState {
             operations: OperationState::new(),
             opportunities: OpportunityState::new(),
             recruitment: RecruitmentState::new(),
+            reputation: ReputationState::new(),
             legal: LegalState::new(),
             reports: ReportState::new(),
             history: HistoryState::new(),
@@ -156,6 +159,10 @@ impl AppState {
 
     pub fn recruitment(&self) -> &RecruitmentState {
         &self.recruitment
+    }
+
+    pub fn reputation(&self) -> &ReputationState {
+        &self.reputation
     }
 
     pub fn legal(&self) -> &LegalState {

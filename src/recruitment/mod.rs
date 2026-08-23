@@ -126,6 +126,7 @@ pub struct RecruitmentFactors {
     incumbent_resentment: u8,
     perceived_legal_pressure: u8,
     membership_resistance: u8,
+    organization_competence: u8,
     trait_adjustment: i16,
 }
 
@@ -156,6 +157,10 @@ impl RecruitmentFactors {
 
     pub fn membership_resistance(self) -> u8 {
         self.membership_resistance
+    }
+
+    pub fn organization_competence(self) -> u8 {
+        self.organization_competence
     }
 
     pub fn trait_adjustment(self) -> i16 {
@@ -548,6 +553,9 @@ pub(crate) struct RecruitmentFactorComponents {
     pub incumbent_resentment: u8,
     pub perceived_legal_pressure: u8,
     pub membership_resistance: u8,
+    /// The recruiting organization's underworld competence reputation, resolved through the
+    /// canonical reputation surface (authored baseline when untouched).
+    pub organization_competence: u8,
     pub trait_adjustment: i16,
 }
 
@@ -562,6 +570,7 @@ pub(crate) fn build_recruitment_factors(
         incumbent_resentment,
         perceived_legal_pressure,
         membership_resistance,
+        organization_competence,
         trait_adjustment,
     } = components;
     RecruitmentFactors {
@@ -572,6 +581,7 @@ pub(crate) fn build_recruitment_factors(
         incumbent_resentment,
         perceived_legal_pressure,
         membership_resistance,
+        organization_competence,
         trait_adjustment,
     }
 }

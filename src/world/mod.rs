@@ -1,6 +1,7 @@
 //! Persistent city and organization records; `world_system` owns their canonical mutation paths.
 
 pub mod payroll_execution;
+pub mod territory_influence;
 pub mod world_system;
 
 use crate::core::id::{

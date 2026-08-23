@@ -20,6 +20,7 @@ use crimocracy::opportunities::opportunity_system::{
 use crimocracy::opportunities::OperationOpportunityDraft;
 use crimocracy::registry::Registry;
 use crimocracy::reports::ReportKind;
+use crimocracy::world::territory_influence::resolve_neighborhood_influence;
 use std::collections::BTreeSet;
 use std::error::Error;
 
@@ -703,6 +704,17 @@ pub fn play_session(
         financials.payroll_short_cents = metrics.payroll_short_cents;
         metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
         metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
+        // Raw audit evidence of delegated rival growth: active rackets each non-player
+        // organization operates in the home district, derived through the canonical
+        // territory-influence surface (acting policy never reads this).
+        metrics.rival_home_enterprises =
+            resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)
+                .expect("home-district influence should resolve")
+                .standings
+                .into_iter()
+                .filter(|standing| standing.organization != scenario.player)
+                .map(|standing| standing.active_enterprises)
+                .sum();
         if let Some(expansion) = metrics.expansion_enterprise {
             metrics.expansion_net_cents = Some(
                 scenario

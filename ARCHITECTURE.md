@@ -34,21 +34,22 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `core/` | `SimTime`/`SimDuration`, typed persistent IDs, entity refs, attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state |
 | `registry/` | Immutable authored definitions and validated lookups | Read-only after `content::build_registry` |
 | `content/` | Code-owned authored definitions for the registry | `build_registry` |
-| `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, designation, daily payroll | `world_system` (insertion, designation); active-record requirements for assignments and ownership; `payroll_execution` (autonomous wage pass: ledger charges via `finance_system`, shortfall resentment via `relationship_system`, shortfall reports via `report_system`) |
+| `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, designation, daily payroll; read-only territory-influence aggregation | `world_system` (insertion, designation); active-record requirements for assignments and ownership; `payroll_execution` (autonomous wage pass: ledger charges via `finance_system`, shortfall resentment via `relationship_system`, shortfall reports via `report_system`); `territory_influence` (read-only district summaries for simulation-side consumers, never a player omniscience feed) |
 | `social/` | Directional character relationships with source/target indexes | `relationship_system` only; requires active endpoints |
 | `intelligence/` | Provenance-bearing information, holder/topic indexes, lineage | `intelligence_system` (record, transfer) |
 | `reports/` | Player-facing reports, briefs, financial reports | `report_system` |
 | `history/` | Durable entity-linked campaign events | `history_system` |
-| `finance/` | Typed accounts and balanced ledger | `finance_system` (all financial mutations) |
+| `finance/` | Typed accounts and balanced ledger; laundering transfers | `finance_system` (all financial mutations, including `validate_launder_funds`) |
 | `operations/` | Operation plans, execution records, participant reservations, surveillance/police/property integrations | `operation_system` (lifecycle) and `operation_execution` (deterministic resolution) |
 | `opportunities/` | Provenance-backed opportunities with lifecycle | `opportunity_system` |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` |
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` |
-| `enterprises/` | Routine criminal enterprises and cycle history | `enterprise_execution` (lifecycle/settlement), `enterprise_reporting` (read-only) |
-| `economy/` | Legitimate business economies and cycle history | `business_economy_system` (establishment/settlement), `business_reporting` (read-only) |
+| `enterprises/` | Routine criminal enterprises and cycle history; delegated daily expansion for non-player organizations through canonical establishment | `enterprise_execution` (lifecycle/settlement/`apply_due_autonomous_enterprises`), `enterprise_reporting` (read-only) |
+| `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons | `business_economy_system` (establishment/settlement/disruption), `business_reporting` (read-only) |
 | `legal/` | Jurisdictions, patrols, investigations/evidence, arrests/custody, representation, prosecution, witnesses, informants, police response, investigator-held case knowledge | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, …) via `legal_state`; `case_knowledge` records lead-investigator activity knowledge through `intelligence_system` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `pending_disclosure_sources` read-only offer surface) |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` |
+| `reputation/` | Contextual per-audience organizational standing with baseline decay; operation consequences feed it, recruitment scoring and expansion posture consume it, player shifts surface as Standing reports | `reputation_system` (`apply_reputation_delta` is the single mutation path; consequences, feedback, and decay are tick passes) |
 
 Adapters, the harness at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
 

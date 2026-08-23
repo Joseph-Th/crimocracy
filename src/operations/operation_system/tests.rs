@@ -996,3 +996,113 @@ fn operation_intelligence_must_be_owned_and_relevant() {
     );
     validate_invariants(&state);
 }
+
+#[test]
+fn require_intelligence_topic_constraint_gates_authorization() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let specialist = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Entry Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("specialist fixture should validate");
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.kind = OperationKind::Sabotage;
+    draft.title = "Test sabotage".to_owned();
+    draft.objective = OperationObjective::DisruptBusiness { target };
+    draft.approach = OperationApproach::Covert;
+    draft.roles.insert(RoleKind::EntrySpecialist, specialist);
+    draft.constraints.push(
+        crate::operations::OperationConstraint::RequireIntelligenceTopic(
+            InformationTopic::TargetSecurity,
+        ),
+    );
+
+    // Without any intelligence the recon-prerequisite gate must reject authorization.
+    let error = validate_authorize_operation(&registry, &state, draft.clone())
+        .expect_err("authorization without required intelligence must be rejected");
+    assert!(
+        matches!(
+            error,
+            OperationError::MissingRequiredIntelligenceTopic(InformationTopic::TargetSecurity)
+        ),
+        "unexpected error: {error}"
+    );
+
+    // Irrelevant-topic intelligence does not satisfy the gate.
+    let wrong_topic = validate_record_information(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::Surveillance,
+            topic: InformationTopic::Route,
+            source_entity: None,
+            subject: target,
+            observed_at: state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "Delivery route observed.".to_owned(),
+        },
+    )
+    .expect("route information should record")
+    .commit(&mut state)
+    .expect("route information should commit");
+    let mut wrong_draft = draft.clone();
+    wrong_draft.intelligence.insert(wrong_topic);
+    let error = validate_authorize_operation(&registry, &state, wrong_draft)
+        .expect_err("authorization with only irrelevant intelligence must be rejected");
+    assert!(
+        matches!(error, OperationError::IrrelevantInformation(_))
+            || matches!(
+                error,
+                OperationError::MissingRequiredIntelligenceTopic(InformationTopic::TargetSecurity)
+            ),
+        "unexpected error: {error}"
+    );
+
+    // With the required topic covered the same plan authorizes.
+    let covering = validate_record_information(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::Surveillance,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: target,
+            observed_at: state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "Rear door has no alarm sensor.".to_owned(),
+        },
+    )
+    .expect("target-security information should record")
+    .commit(&mut state)
+    .expect("target-security information should commit");
+    draft.intelligence.insert(covering);
+    let validated = validate_authorize_operation(&registry, &state, draft)
+        .expect("covered plan should authorize");
+    validated
+        .commit(&mut state)
+        .expect("covered plan should commit");
+    validate_invariants(&state);
+}
+
+#[test]
+fn sabotage_objective_is_rejected_for_non_sabotage_kinds() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.objective = OperationObjective::DisruptBusiness { target };
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("intimidation cannot carry a sabotage objective");
+    assert!(matches!(
+        error,
+        OperationError::InvalidObjectiveTarget { .. }
+    ));
+}

@@ -10,15 +10,16 @@ use crate::operations::{
 };
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
-    BusinessEconomicsDefinition, EnterpriseEconomicsDefinition, ExecutiveBriefDefinitionSpec,
-    InvestigationWorkDefinitionSpec, OperationCashProceedsDefinition,
-    OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
-    OperationIntelligenceDefinition, OperationPoliceResponseDefinition,
-    OperationPropertyProceedsDefinition, RecruitmentDefinitionSpec,
-    RecruitmentIncumbentRelationshipDefinition, RecruitmentInformationQualityDefinition,
-    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
-    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
-    RecruitmentWeightsDefinition, Registry, RegistryBuilder, UpkeepConfigSpec,
+    BusinessDisruptionSpec, BusinessEconomicsDefinition, EnterpriseEconomicsDefinition,
+    ExecutiveBriefDefinitionSpec, InvestigationWorkDefinitionSpec, LaunderingConfigSpec,
+    OperationCashProceedsDefinition, OperationDifficultyDefinition, OperationExecutionDefinition,
+    OperationExposureDefinition, OperationIntelligenceDefinition,
+    OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
+    RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
+    RecruitmentInformationQualityDefinition, RecruitmentRelationshipDefinition,
+    RecruitmentRelationshipSupportDefinition, RecruitmentScoringDefinition,
+    RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition, RecruitmentWeightsDefinition,
+    Registry, RegistryBuilder, ReputationConfigSpec, UpkeepConfigSpec,
 };
 use crate::world::{
     ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, DriveKind, LegalSupportPolicy,
@@ -26,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 24;
+pub const CURRENT_CONTENT_REVISION: u32 = 27;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -70,11 +71,58 @@ pub fn build_registry() -> Registry {
     register_investigation_work(&mut builder);
     register_enterprises(&mut builder);
     register_businesses(&mut builder);
+    register_business_disruption(&mut builder);
+    register_laundering(&mut builder);
+    register_reputation(&mut builder);
     register_executive_brief(&mut builder);
     register_upkeep(&mut builder);
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
+}
+
+fn register_business_disruption(builder: &mut RegistryBuilder) {
+    builder
+        .register_business_disruption(BusinessDisruptionSpec {
+            // Sabotage degrades a target's earning power for roughly two operating cycles:
+            // long enough to matter strategically, short enough that repeated attacks,
+            // not one attack, strangle a business.
+            duration: SimDuration::from_minutes(2_880),
+            gross_basis_points: 4_000,
+        })
+        .unwrap_or_else(|error| panic!("invalid business disruption registry: {error}"));
+}
+
+fn register_laundering(builder: &mut RegistryBuilder) {
+    builder
+        .register_laundering(LaunderingConfigSpec {
+            // The front keeps a meaningful cut: laundering is a service the legitimate
+            // business charges for, not a free conversion button.
+            fee_basis_points: 1_500,
+            // A single transfer may plausibly hide inside half of one legitimate cycle's
+            // gross; larger volumes require larger or additional fronts.
+            plausibility_gross_basis_points: 5_000,
+        })
+        .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
+}
+
+fn register_reputation(builder: &mut RegistryBuilder) {
+    builder
+        .register_reputation(ReputationConfigSpec {
+            baseline: 40,
+            // One point per day: a witnessed job stays in an audience's memory for weeks,
+            // not forever, and never manufactures impressions that were never touched.
+            daily_decay_step: 1,
+            // A governed outfit whose police fear runs this hot suspends delegated
+            // expansion for the day; visible heat outranks growth.
+            expansion_police_fear_ceiling: 60,
+            witnessed_exposure_police_fear: 4,
+            identifying_exposure_police_fear: 7,
+            achieved_underworld_competence: 3,
+            partial_underworld_competence: 1,
+            violent_businesses_fear: 3,
+        })
+        .unwrap_or_else(|error| panic!("invalid reputation registry: {error}"));
 }
 
 fn register_executive_brief(builder: &mut RegistryBuilder) {
@@ -118,6 +166,7 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
                     incumbent_resentment: 15,
                     perceived_legal_pressure: 15,
                     incumbent_attachment: 25,
+                    organization_competence: 15,
                 },
             },
             recruiter_capabilities: BTreeSet::from([
@@ -461,6 +510,79 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 BusinessFunction::CustomerAccess,
             ]),
         ),
+        (
+            // Off-track style wagering on outside events: cash book with customer-facing
+            // settlement. Lower ceiling than venue gambling but scales harder with illicit
+            // demand and is less dependent on a specific social venue.
+            EnterpriseKind::Bookmaking,
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(6_500),
+                base_operating_cost: Money::from_cents(4_000),
+                demand_revenue_per_point: Money::from_cents(190),
+                commerce_revenue_per_point: Money::from_cents(30),
+                wealth_revenue_per_point: Money::from_cents(70),
+                management_revenue_per_point: Money::from_cents(60),
+                police_cost_per_point: Money::from_cents(40),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
+                gross_variance_basis_points: 2_200,
+                notable_variance_basis_points: 1_400,
+            },
+            None,
+            BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            BTreeSet::new(),
+        ),
+        (
+            // Collection-driven lending: revenue follows district wealth rather than
+            // commerce foot traffic, with the lowest police cost of the cash rackets.
+            EnterpriseKind::LoanSharking,
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(7_000),
+                base_operating_cost: Money::from_cents(3_500),
+                demand_revenue_per_point: Money::from_cents(80),
+                commerce_revenue_per_point: Money::from_cents(20),
+                wealth_revenue_per_point: Money::from_cents(180),
+                management_revenue_per_point: Money::from_cents(65),
+                police_cost_per_point: Money::from_cents(25),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
+                gross_variance_basis_points: 700,
+                notable_variance_basis_points: 550,
+            },
+            None,
+            BTreeSet::from([BusinessFunction::CashIntensive]),
+            BTreeSet::new(),
+        ),
+        (
+            // Resale channel for stolen property: depends on legitimate commercial churn
+            // to move goods, not on district demand for vice.
+            EnterpriseKind::Fencing,
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(5_500),
+                base_operating_cost: Money::from_cents(3_000),
+                demand_revenue_per_point: Money::from_cents(40),
+                commerce_revenue_per_point: Money::from_cents(160),
+                wealth_revenue_per_point: Money::from_cents(50),
+                management_revenue_per_point: Money::from_cents(50),
+                police_cost_per_point: Money::from_cents(30),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
+                gross_variance_basis_points: 1_000,
+                notable_variance_basis_points: 750,
+            },
+            None,
+            BTreeSet::from([
+                BusinessFunction::ResaleMarket,
+                BusinessFunction::Warehousing,
+            ]),
+            BTreeSet::new(),
+        ),
     ];
     for (kind, economics, policy, required_business_functions, required_network_functions) in
         definitions
@@ -507,6 +629,7 @@ fn operation_name(kind: OperationKind) -> &'static str {
         OperationKind::DocumentTheft => "Document theft",
         OperationKind::GamblingEvent => "Gambling event",
         OperationKind::Extraction => "Extraction",
+        OperationKind::Sabotage => "Sabotage",
     }
 }
 fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
@@ -521,6 +644,7 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::DocumentTheft => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
         OperationKind::GamblingEvent => &[RoleKind::Coordinator],
         OperationKind::Extraction => &[RoleKind::Coordinator, RoleKind::Driver],
+        OperationKind::Sabotage => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
     };
     roles.iter().copied().collect()
 }
@@ -537,6 +661,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::DocumentTheft => (30, 50, 40, 36),
         OperationKind::GamblingEvent => (180, 38, 30, 45),
         OperationKind::Extraction => (60, 58, 50, 52),
+        // Sabotage is deliberate property damage: quieter than robbery, slower than
+        // intimidation, and heavily dependent on knowing the target's layout.
+        OperationKind::Sabotage => (55, 48, 30, 40),
     };
     let role_capabilities = BTreeMap::from([
         (
@@ -586,7 +713,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         | OperationKind::Intimidation
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
-        | OperationKind::Extraction => CapabilityKind::Management,
+        | OperationKind::Extraction
+        | OperationKind::Sabotage => CapabilityKind::Management,
     };
     let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
         .into_iter()
@@ -633,6 +761,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::DocumentTheft => (20, 12, Some(8), 14, 18),
         OperationKind::GamblingEvent => (35, 15, None, 10, 16),
         OperationKind::Extraction => (18, 10, Some(8), 18, 24),
+        OperationKind::Sabotage => (24, 12, Some(8), 14, 20),
     };
     OperationExecutionDefinition {
         difficulty: OperationDifficultyDefinition {
@@ -699,7 +828,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::Surveillance
             | OperationKind::WitnessPressure
             | OperationKind::GamblingEvent
-            | OperationKind::Extraction => None,
+            | OperationKind::Extraction
+            | OperationKind::Sabotage => None,
         },
         cash_proceeds: match kind {
             // Robbery takes the till directly; intimidation collects protection money;
@@ -725,7 +855,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::Surveillance
             | OperationKind::WitnessPressure
             | OperationKind::DocumentTheft
-            | OperationKind::Extraction => None,
+            | OperationKind::Extraction
+            | OperationKind::Sabotage => None,
         },
     }
 }
@@ -742,6 +873,7 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
         }
         OperationKind::Surveillance => EvidenceKind::Surveillance,
         OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
+        OperationKind::Sabotage => EvidenceKind::ForensicAnalysis,
     }
 }
 
@@ -789,6 +921,12 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::PoliceActivity,
             InformationTopic::Personnel,
             InformationTopic::MarketAccess,
+        ],
+        OperationKind::Sabotage => &[
+            InformationTopic::TargetSecurity,
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
         ],
     };
     topics.iter().copied().collect()

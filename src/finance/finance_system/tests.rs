@@ -803,3 +803,281 @@ fn delegated_spend_rejects_scope_outside_mandate() {
     );
     validate_invariants(&state);
 }
+
+struct LaunderingFixture {
+    state: AppState,
+    organization: crate::core::id::OrganizationId,
+    street: FinancialAccountId,
+    accounted: FinancialAccountId,
+    business: crate::core::id::BusinessId,
+}
+
+fn make_laundering_fixture() -> LaunderingFixture {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC0FFEE);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Laundering Test Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let street = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("street account should validate");
+    let accounted = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted account should validate");
+    let neighborhood = crate::world::world_system::insert_neighborhood(
+        &mut state,
+        crate::world::NeighborhoodDraft {
+            name: "Laundering Ward".to_owned(),
+            profile: crate::world::NeighborhoodProfile {
+                economy: crate::world::NeighborhoodEconomyProfile {
+                    wealth: crate::world::Rating::try_new(60)
+                        .expect("fixture rating should validate"),
+                    commercial_activity: crate::world::Rating::try_new(70)
+                        .expect("fixture rating should validate"),
+                    illicit_demand: crate::world::Rating::try_new(30)
+                        .expect("fixture rating should validate"),
+                },
+                institutions: crate::world::NeighborhoodInstitutionProfile {
+                    police_presence: crate::world::Rating::try_new(40)
+                        .expect("fixture rating should validate"),
+                    political_influence: crate::world::Rating::try_new(50)
+                        .expect("fixture rating should validate"),
+                    social_cohesion: crate::world::Rating::try_new(50)
+                        .expect("fixture rating should validate"),
+                    visible_violence_tolerance: crate::world::Rating::try_new(20)
+                        .expect("fixture rating should validate"),
+                },
+            },
+        },
+    )
+    .expect("neighborhood fixture should validate");
+    let business = crate::world::world_system::insert_business(
+        &registry,
+        &mut state,
+        crate::world::BusinessDraft {
+            name: "Clean Laundromat".to_owned(),
+            kind: crate::world::BusinessKind::Retail,
+            functions: BTreeSet::from([crate::world::BusinessFunction::CashIntensive]),
+            neighborhood,
+            owner: crate::world::BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("business fixture should validate");
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("operating account should validate");
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("settlement account should validate");
+    crate::economy::business_economy_system::validate_establish_business_economy(
+        &registry,
+        &state,
+        crate::economy::BusinessEconomyDraft {
+            business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("business economy fixture should validate")
+    .commit(&mut state)
+    .expect("business economy fixture should commit");
+    LaunderingFixture {
+        state,
+        organization,
+        street,
+        accounted,
+        business,
+    }
+}
+
+#[test]
+fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+
+    // Seed the street account from an off-book concealed reserve through a balanced transfer.
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Move take to street".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-10_000_00),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(10_000_00),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seed transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("seed transfer should commit");
+
+    // Capacity is the authored fraction of the front's legitimate gross potential; stay inside it.
+    let gross_potential =
+        resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
+            .expect("gross potential should resolve");
+    let capacity = Money::from_cents(
+        (i128::from(gross_potential.cents())
+            * i128::from(registry.laundering().plausibility_gross_basis_points())
+            / 10_000)
+            .try_into()
+            .expect("capacity should fit money"),
+    );
+    assert!(
+        capacity.cents() < 10_000_00,
+        "fixture expects a capacity below the seeded cash"
+    );
+
+    let validated = validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: capacity,
+        },
+    )
+    .expect("in-capacity laundering should validate")
+    .commit(&mut fixture.state)
+    .expect("in-capacity laundering should commit");
+
+    let fee = Money::from_cents(
+        (i128::from(capacity.cents()) * i128::from(registry.laundering().fee_basis_points())
+            / 10_000)
+            .try_into()
+            .expect("fee should fit money"),
+    );
+    let transaction = fixture
+        .state
+        .finance()
+        .get_transaction(validated)
+        .expect("laundering transaction should persist");
+    let street_delta: i64 = transaction
+        .postings()
+        .iter()
+        .filter(|posting| posting.account == fixture.street)
+        .map(|posting| posting.amount.cents())
+        .sum();
+    let accounted_delta: i64 = transaction
+        .postings()
+        .iter()
+        .filter(|posting| posting.account == fixture.accounted)
+        .map(|posting| posting.amount.cents())
+        .sum();
+    assert_eq!(street_delta, -capacity.cents());
+    assert_eq!(accounted_delta, capacity.cents() - fee.cents());
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
+    let registry = build_registry();
+    let fixture = make_laundering_fixture();
+    let gross_potential =
+        resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
+            .expect("gross potential should resolve");
+    let capacity = Money::from_cents(
+        (i128::from(gross_potential.cents())
+            * i128::from(registry.laundering().plausibility_gross_basis_points())
+            / 10_000)
+            .try_into()
+            .expect("capacity should fit money"),
+    );
+    let before_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    let error = match validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(capacity.cents() + 1),
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("over-capacity laundering must be rejected"),
+    };
+    assert!(matches!(error, LaunderingError::CapacityExceeded { .. }));
+    let after_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    assert_eq!(before_balances, after_balances);
+}
+
+#[test]
+fn laundering_requires_a_street_cash_source_account() {
+    let registry = build_registry();
+    let fixture = make_laundering_fixture();
+
+    // An AccountedFunds source fails the street-cash kind check.
+    let error = match validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.accounted, // wrong kind: AccountedFunds as source
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(1_000),
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("non-street-cash source must be rejected"),
+    };
+    assert!(matches!(
+        error,
+        LaunderingError::AccountOwnerMismatch { .. }
+    ));
+}

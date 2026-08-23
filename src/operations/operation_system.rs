@@ -146,6 +146,8 @@ pub enum OperationError {
     ScheduledInPast,
     #[error("operation completion deadline is earlier than its scheduled start")]
     DeadlineBeforeStart,
+    #[error("plan lacks required {0:?} intelligence")]
+    MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
     #[error("operation {0} cannot begin before its scheduled time")]
@@ -495,16 +497,33 @@ pub fn validate_authorize_operation<'registry>(
         }
     }
     for constraint in &draft.constraints {
-        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;
-        // The deadline must leave room for the crew to reach the entry milestone; a deadline at
-        // or before entry would resolve the operation before its modeled approach begins.
-        let earliest_resolution = draft.scheduled_for
-            + definition
-                .execution()
-                .operation_entry_offset()
-                .unwrap_or(SimDuration::from_minutes(0));
-        if *deadline <= earliest_resolution {
-            return Err(OperationError::DeadlineBeforeStart);
+        match constraint {
+            crate::operations::OperationConstraint::CompleteBefore(deadline) => {
+                // The deadline must leave room for the crew to reach the entry milestone; a
+                // deadline at or before entry would resolve the operation before its modeled
+                // approach begins.
+                let earliest_resolution = draft.scheduled_for
+                    + definition
+                        .execution()
+                        .operation_entry_offset()
+                        .unwrap_or(SimDuration::from_minutes(0));
+                if *deadline <= earliest_resolution {
+                    return Err(OperationError::DeadlineBeforeStart);
+                }
+            }
+            crate::operations::OperationConstraint::RequireIntelligenceTopic(topic) => {
+                // Reconnaissance prerequisite: organization-held intelligence of exactly this
+                // topic, already validated for objective relevance below, must back the plan.
+                let covered = draft.intelligence.iter().any(|information| {
+                    state
+                        .intelligence
+                        .get_information(*information)
+                        .is_some_and(|record| record.topic() == *topic)
+                });
+                if !covered {
+                    return Err(OperationError::MissingRequiredIntelligenceTopic(*topic));
+                }
+            }
         }
     }
     for contingency in &draft.contingencies {
@@ -722,6 +741,9 @@ pub(crate) fn is_valid_operation_objective(
             kind == OperationKind::WitnessPressure && matches!(target, EntityRef::Character(_))
         }
         OperationObjective::FreeDetainee { .. } => kind == OperationKind::Extraction,
+        OperationObjective::DisruptBusiness { target } => {
+            kind == OperationKind::Sabotage && matches!(target, EntityRef::Business(_))
+        }
     }
 }
 
@@ -768,6 +790,11 @@ fn validate_active_field_objective_targets(
         }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::GatherInformation { .. } => Ok(()),
+        // Sabotage targets a business whose premises the crew must physically reach, so
+        // the usual active-field-target check applies.
+        OperationObjective::DisruptBusiness { target } => {
+            validate_active_field_objective_target(state, *target)
+        }
         // Extraction targets a person who may legitimately be in custody, so the usual
         // active-field-target check does not apply; custody state is validated separately.
         OperationObjective::FreeDetainee { target } => {
@@ -936,6 +963,7 @@ fn validate_operation_objective(
             OperationObjective::ObtainCash { target } | OperationObjective::Frighten { target } => {
                 Some(*target)
             }
+            OperationObjective::DisruptBusiness { target } => Some(*target),
             OperationObjective::AcquireProperty { .. }
             | OperationObjective::GatherInformation { .. }
             | OperationObjective::FreeDetainee { .. } => None,
@@ -1009,8 +1037,9 @@ fn earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
     record
         .constraints()
         .iter()
-        .map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBefore(deadline) => *deadline,
+        .filter_map(|constraint| match constraint {
+            crate::operations::OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            crate::operations::OperationConstraint::RequireIntelligenceTopic(_) => None,
         })
         .min()
 }
@@ -1118,7 +1147,9 @@ pub(crate) fn validate_begin_operation(
     // without resolution — a decision-paused operation — is hard-aborted afterwards.
     let mut resolution_due_at = state.now() + duration;
     for constraint in record.constraints() {
-        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint;
+        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
+            continue;
+        };
         if *deadline < resolution_due_at {
             resolution_due_at = *deadline;
         }

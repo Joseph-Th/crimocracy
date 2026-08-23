@@ -442,6 +442,9 @@ pub(super) fn validate_recruitment_against_registry(
             recruiter_relationship: attempt.recruiter_relationship(),
             incumbent_relationship: attempt.incumbent_relationship(),
             perceived_legal_pressure: expected_legal_pressure,
+            // The attempt's own frozen reputation read: impressions legitimately move after
+            // an attempt, so re-deriving with current standing would falsify history.
+            organization_competence: attempt.factors().organization_competence(),
             had_previous_organization: attempt.previous_organization().is_some(),
         });
         if expected_factors != Some(attempt.factors())

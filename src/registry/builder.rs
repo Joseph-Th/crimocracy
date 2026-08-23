@@ -168,6 +168,32 @@ pub(crate) enum RegistryBuildError {
     InvalidUpkeepWage,
     #[error("upkeep shortfall resentment increment must be positive")]
     InvalidUpkeepResentment,
+    #[error("duplicate business disruption definition")]
+    DuplicateBusinessDisruption,
+    #[error("missing business disruption definition")]
+    MissingBusinessDisruption,
+    #[error("business disruption duration must be positive")]
+    InvalidBusinessDisruptionDuration,
+    #[error("business disruption gross basis points must be in 1..=10000")]
+    InvalidBusinessDisruptionGrossBasisPoints,
+    #[error("duplicate laundering configuration definition")]
+    DuplicateLaunderingConfig,
+    #[error("missing laundering configuration definition")]
+    MissingLaunderingConfig,
+    #[error("laundering fee basis points must be in 1..=10000")]
+    InvalidLaunderingFee,
+    #[error("laundering plausibility basis points must be in 1..=10000")]
+    InvalidLaunderingPlausibility,
+    #[error("duplicate reputation configuration definition")]
+    DuplicateReputationConfig,
+    #[error("missing reputation configuration definition")]
+    MissingReputationConfig,
+    #[error("reputation baseline must be in 0..=100")]
+    InvalidReputationBaseline,
+    #[error("reputation expansion fear ceiling must be in 0..=100")]
+    InvalidReputationCeiling,
+    #[error("authored reputation consequence deltas must stay in -25..=25")]
+    InvalidReputationDelta,
     #[error("executive brief cadence must be positive")]
     InvalidExecutiveBriefCadence,
     #[error("executive brief must suppress routine source entries")]
@@ -206,6 +232,9 @@ pub(crate) struct RegistryBuilder {
     executive_brief: Option<ExecutiveBriefDefinition>,
     legal: Option<LegalConfigDefinition>,
     upkeep: Option<UpkeepConfigDefinition>,
+    business_disruption: Option<BusinessDisruptionDefinition>,
+    laundering: Option<LaunderingConfigDefinition>,
+    reputation: Option<ReputationConfigDefinition>,
 }
 
 impl RegistryBuilder {
@@ -250,6 +279,84 @@ impl RegistryBuilder {
         self.upkeep = Some(UpkeepConfigDefinition {
             per_member_daily: spec.per_member_daily,
             shortfall_resentment: spec.shortfall_resentment,
+        });
+        Ok(())
+    }
+    pub(crate) fn register_business_disruption(
+        &mut self,
+        spec: BusinessDisruptionSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.business_disruption.is_some() {
+            return Err(RegistryBuildError::DuplicateBusinessDisruption);
+        }
+        if spec.duration.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidBusinessDisruptionDuration);
+        }
+        if spec.gross_basis_points == 0 || spec.gross_basis_points > 10_000 {
+            return Err(RegistryBuildError::InvalidBusinessDisruptionGrossBasisPoints);
+        }
+        self.business_disruption = Some(BusinessDisruptionDefinition {
+            duration: spec.duration,
+            gross_basis_points: spec.gross_basis_points,
+        });
+        Ok(())
+    }
+    pub(crate) fn register_laundering(
+        &mut self,
+        spec: LaunderingConfigSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.laundering.is_some() {
+            return Err(RegistryBuildError::DuplicateLaunderingConfig);
+        }
+        if spec.fee_basis_points == 0 || spec.fee_basis_points > 10_000 {
+            return Err(RegistryBuildError::InvalidLaunderingFee);
+        }
+        if spec.plausibility_gross_basis_points == 0
+            || spec.plausibility_gross_basis_points > 10_000
+        {
+            return Err(RegistryBuildError::InvalidLaunderingPlausibility);
+        }
+        self.laundering = Some(LaunderingConfigDefinition {
+            fee_basis_points: spec.fee_basis_points,
+            plausibility_gross_basis_points: spec.plausibility_gross_basis_points,
+        });
+        Ok(())
+    }
+    pub(crate) fn register_reputation(
+        &mut self,
+        spec: ReputationConfigSpec,
+    ) -> Result<(), RegistryBuildError> {
+        if self.reputation.is_some() {
+            return Err(RegistryBuildError::DuplicateReputationConfig);
+        }
+        if spec.baseline > 100 {
+            return Err(RegistryBuildError::InvalidReputationBaseline);
+        }
+        if spec.expansion_police_fear_ceiling > 100 {
+            return Err(RegistryBuildError::InvalidReputationCeiling);
+        }
+        for delta in [
+            spec.witnessed_exposure_police_fear,
+            spec.identifying_exposure_police_fear,
+            spec.achieved_underworld_competence,
+            spec.partial_underworld_competence,
+            spec.violent_businesses_fear,
+        ] {
+            // A single authored consequence must move an impression by a bounded step so no
+            // one event flips an audience's standing outright.
+            if !(-25..=25).contains(&delta) {
+                return Err(RegistryBuildError::InvalidReputationDelta);
+            }
+        }
+        self.reputation = Some(ReputationConfigDefinition {
+            baseline: spec.baseline,
+            daily_decay_step: spec.daily_decay_step,
+            expansion_police_fear_ceiling: spec.expansion_police_fear_ceiling,
+            witnessed_exposure_police_fear: spec.witnessed_exposure_police_fear,
+            identifying_exposure_police_fear: spec.identifying_exposure_police_fear,
+            achieved_underworld_competence: spec.achieved_underworld_competence,
+            partial_underworld_competence: spec.partial_underworld_competence,
+            violent_businesses_fear: spec.violent_businesses_fear,
         });
         Ok(())
     }
@@ -337,6 +444,7 @@ impl RegistryBuilder {
             weights.incumbent_resentment,
             weights.perceived_legal_pressure,
             weights.incumbent_attachment,
+            weights.organization_competence,
             existing_membership_resistance,
             charismatic_recruiter_bonus,
         ]
@@ -821,6 +929,15 @@ impl RegistryBuilder {
             .ok_or(RegistryBuildError::MissingExecutiveBrief)?;
         let legal = self.legal.ok_or(RegistryBuildError::MissingLegalConfig)?;
         let upkeep = self.upkeep.ok_or(RegistryBuildError::MissingUpkeepConfig)?;
+        let business_disruption = self
+            .business_disruption
+            .ok_or(RegistryBuildError::MissingBusinessDisruption)?;
+        let laundering = self
+            .laundering
+            .ok_or(RegistryBuildError::MissingLaunderingConfig)?;
+        let reputation = self
+            .reputation
+            .ok_or(RegistryBuildError::MissingReputationConfig)?;
         Ok(Registry {
             content_revision,
             recruitment,
@@ -832,6 +949,9 @@ impl RegistryBuilder {
             executive_brief,
             legal,
             upkeep,
+            business_disruption,
+            laundering,
+            reputation,
         })
     }
 }

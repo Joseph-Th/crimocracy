@@ -16,6 +16,7 @@ pub mod opportunities;
 pub mod recruitment;
 pub mod registry;
 pub mod reports;
+pub mod reputation;
 pub mod social;
 pub mod world;
 

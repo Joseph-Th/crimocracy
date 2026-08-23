@@ -22,6 +22,8 @@ pub enum ReportKind {
     Legal,
     AfterAction,
     Opportunity,
+    /// The organization's own street standing shifting after its own operations.
+    Standing,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -7,10 +7,14 @@ use crate::delegation::delegation_system::{
     ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
+use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::finance::{
-    build_budget_usage, BudgetUsageRecord, FinancialAccountDraft, FinancialAccountRecord,
-    LedgerTransactionDraft, LedgerTransactionRecord, Money,
+    build_budget_usage, AccountKind, BudgetUsageRecord, FinancialAccountDraft,
+    FinancialAccountRecord, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    LedgerTransactionRecord, Money,
 };
+use crate::registry::Registry;
+use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -329,6 +333,201 @@ fn resolve_transaction_budget(
             requested,
         )),
         authority_snapshot: Some(authority_snapshot),
+    })
+}
+
+/// A dirty-to-accounted funds conversion routed through an owned cash-intensive front.
+///
+/// The canonical laundering path: street cash leaves a StreetCash account, arrives in the
+/// organization's AccountedFunds minus the authored front fee, and the fee lands in the
+/// front's legitimate operating account as revenue. Plausibility is enforced against the
+/// front's legitimate gross potential, so volume requires larger or additional fronts.
+#[derive(Clone, Debug)]
+pub struct LaunderingDraft {
+    pub organization: crate::core::id::OrganizationId,
+    pub street_account: FinancialAccountId,
+    pub business: crate::core::id::BusinessId,
+    pub accounted_account: FinancialAccountId,
+    pub amount: Money,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum LaunderingError {
+    #[error("laundering amount must be positive")]
+    NonPositiveAmount,
+    #[error("financial account {0} does not exist")]
+    MissingAccount(FinancialAccountId),
+    #[error("account {account} is not owned by organization {organization}")]
+    AccountOwnerMismatch {
+        account: FinancialAccountId,
+        organization: crate::core::id::OrganizationId,
+    },
+    #[error("business {0} does not exist")]
+    MissingBusiness(crate::core::id::BusinessId),
+    #[error("business {0} is not active")]
+    InactiveBusiness(crate::core::id::BusinessId),
+    #[error("business {0} is not owned by the requesting organization")]
+    ForeignBusiness(crate::core::id::BusinessId),
+    #[error("business {0} lacks the cash-intensive function required to absorb illicit cash")]
+    NotCashIntensive(crate::core::id::BusinessId),
+    #[error("business {0} has no active operating economy to route laundered revenue through")]
+    MissingBusinessEconomy(crate::core::id::BusinessId),
+    #[error(
+        "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
+    )]
+    CapacityExceeded {
+        business: crate::core::id::BusinessId,
+        requested_cents: i64,
+        capacity_cents: i64,
+    },
+    #[error("laundering arithmetic overflowed")]
+    ArithmeticOverflow,
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
+    #[error(transparent)]
+    BusinessEconomy(#[from] crate::economy::business_economy_system::BusinessEconomyError),
+}
+
+pub struct ValidatedLaundering {
+    transaction: ValidatedLedgerTransaction,
+    business: crate::core::id::BusinessId,
+}
+
+impl ValidatedLaundering {
+    pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, LaunderingError> {
+        let id = self.transaction.commit(state)?;
+        Ok(id)
+    }
+
+    /// The front business that absorbed the transfer; callers use this for reporting.
+    pub fn business(&self) -> crate::core::id::BusinessId {
+        self.business
+    }
+}
+
+pub fn validate_launder_funds(
+    registry: &Registry,
+    state: &AppState,
+    draft: LaunderingDraft,
+) -> Result<ValidatedLaundering, LaunderingError> {
+    if draft.amount.cents() <= 0 {
+        return Err(LaunderingError::NonPositiveAmount);
+    }
+    let street = state
+        .finance
+        .get_account(draft.street_account)
+        .ok_or(LaunderingError::MissingAccount(draft.street_account))?;
+    if street.owner() != FinancialOwner::Organization(draft.organization) {
+        return Err(LaunderingError::AccountOwnerMismatch {
+            account: draft.street_account,
+            organization: draft.organization,
+        });
+    }
+    if street.kind() != AccountKind::StreetCash {
+        return Err(LaunderingError::AccountOwnerMismatch {
+            account: draft.street_account,
+            organization: draft.organization,
+        });
+    }
+    let accounted = state
+        .finance
+        .get_account(draft.accounted_account)
+        .ok_or(LaunderingError::MissingAccount(draft.accounted_account))?;
+    if accounted.owner() != FinancialOwner::Organization(draft.organization) {
+        return Err(LaunderingError::AccountOwnerMismatch {
+            account: draft.accounted_account,
+            organization: draft.organization,
+        });
+    }
+    if accounted.kind() != AccountKind::AccountedFunds {
+        return Err(LaunderingError::AccountOwnerMismatch {
+            account: draft.accounted_account,
+            organization: draft.organization,
+        });
+    }
+    let business_record = state
+        .world
+        .get_business(draft.business)
+        .ok_or(LaunderingError::MissingBusiness(draft.business))?;
+    if business_record.lifecycle() != crate::world::Lifecycle::Active {
+        return Err(LaunderingError::InactiveBusiness(draft.business));
+    }
+    if business_record.owner() != BusinessOwner::Organization(draft.organization) {
+        return Err(LaunderingError::ForeignBusiness(draft.business));
+    }
+    if !business_record
+        .functions()
+        .contains(&crate::world::BusinessFunction::CashIntensive)
+    {
+        return Err(LaunderingError::NotCashIntensive(draft.business));
+    }
+    let economy = state
+        .economy
+        .get_business_economy(draft.business)
+        .ok_or(LaunderingError::MissingBusinessEconomy(draft.business))?;
+    if economy.status() != crate::economy::BusinessOperatingStatus::Active {
+        return Err(LaunderingError::MissingBusinessEconomy(draft.business));
+    }
+    // Plausibility: one transfer may hide only inside the authored fraction of what the
+    // front can legitimately earn in a cycle.
+    let gross_potential = resolve_business_gross_potential(registry, state, draft.business)?;
+    let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
+    let capacity_cents = i128::from(gross_potential.cents())
+        .checked_mul(i128::from(capacity_basis_points))
+        .and_then(|value| value.checked_div(10_000))
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    if draft.amount.cents() > capacity_cents {
+        return Err(LaunderingError::CapacityExceeded {
+            business: draft.business,
+            requested_cents: draft.amount.cents(),
+            capacity_cents,
+        });
+    }
+    // Fee split: the front keeps the authored cut as legitimate revenue.
+    let fee_cents = i128::from(draft.amount.cents())
+        .checked_mul(i128::from(registry.laundering().fee_basis_points()))
+        .and_then(|value| value.checked_div(10_000))
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    let credited = draft
+        .amount
+        .checked_sub(Money::from_cents(fee_cents))
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    let mut postings = vec![
+        LedgerPosting {
+            account: draft.street_account,
+            amount: Money::ZERO
+                .checked_sub(draft.amount)
+                .ok_or(LaunderingError::ArithmeticOverflow)?,
+        },
+        LedgerPosting {
+            account: draft.accounted_account,
+            amount: credited,
+        },
+    ];
+    if fee_cents > 0 {
+        postings.push(LedgerPosting {
+            account: economy.operating_account(),
+            amount: Money::from_cents(fee_cents),
+        });
+    }
+    let business_name = business_record.name().to_owned();
+    let transaction = validate_record_transaction(
+        state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: format!(
+                "Laundered {} through {business_name}",
+                crate::finance::helpers::format_money_cents(draft.amount.cents())
+            ),
+            postings,
+            authorization: None,
+        },
+    )?;
+    Ok(ValidatedLaundering {
+        transaction,
+        business: draft.business,
     })
 }
 

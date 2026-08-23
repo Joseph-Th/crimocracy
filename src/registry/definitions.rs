@@ -75,6 +75,9 @@ pub struct RecruitmentWeightsDefinition {
     pub incumbent_resentment: u8,
     pub perceived_legal_pressure: u8,
     pub incumbent_attachment: u8,
+    /// How much the recruiting organization's underworld competence reputation sways the
+    /// candidate: people join outfits that visibly get things done.
+    pub organization_competence: u8,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RecruitmentTimingDefinition {
@@ -595,5 +598,100 @@ impl UpkeepConfigDefinition {
     }
     pub fn shortfall_resentment(self) -> u8 {
         self.shortfall_resentment
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct BusinessDisruptionSpec {
+    /// How long a successful sabotage keeps the target's economy degraded.
+    pub duration: SimDuration,
+    /// Basis points of normal gross revenue a disrupted business earns per cycle
+    /// (for example 4_000 = 40 percent of normal).
+    pub gross_basis_points: u32,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct BusinessDisruptionDefinition {
+    pub(super) duration: SimDuration,
+    pub(super) gross_basis_points: u32,
+}
+impl BusinessDisruptionDefinition {
+    pub fn duration(self) -> SimDuration {
+        self.duration
+    }
+    pub fn gross_basis_points(self) -> u32 {
+        self.gross_basis_points
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct LaunderingConfigSpec {
+    /// Basis points of each laundered transfer kept by the front business as revenue
+    /// (for example 1_500 = a 15 percent laundering cut).
+    pub fee_basis_points: u32,
+    /// Maximum single-transfer size as basis points of the front's legitimate gross
+    /// potential (for example 5_000 = half of one cycle's legitimate gross).
+    pub plausibility_gross_basis_points: u32,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct LaunderingConfigDefinition {
+    pub(super) fee_basis_points: u32,
+    pub(super) plausibility_gross_basis_points: u32,
+}
+impl LaunderingConfigDefinition {
+    pub fn fee_basis_points(self) -> u32 {
+        self.fee_basis_points
+    }
+    pub fn plausibility_gross_basis_points(self) -> u32 {
+        self.plausibility_gross_basis_points
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct ReputationConfigSpec {
+    /// The unremarkable standing every untouched impression sits at.
+    pub baseline: u8,
+    /// Points a touched impression drifts toward the baseline per campaign day.
+    pub daily_decay_step: u8,
+    /// Police fear at or above which a governed organization suspends delegated
+    /// expansion for the day: outfits keep their head down while visibly hot.
+    pub expansion_police_fear_ceiling: u8,
+    pub witnessed_exposure_police_fear: i8,
+    pub identifying_exposure_police_fear: i8,
+    pub achieved_underworld_competence: i8,
+    pub partial_underworld_competence: i8,
+    pub violent_businesses_fear: i8,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct ReputationConfigDefinition {
+    pub(super) baseline: u8,
+    pub(super) daily_decay_step: u8,
+    pub(super) expansion_police_fear_ceiling: u8,
+    pub(super) witnessed_exposure_police_fear: i8,
+    pub(super) identifying_exposure_police_fear: i8,
+    pub(super) achieved_underworld_competence: i8,
+    pub(super) partial_underworld_competence: i8,
+    pub(super) violent_businesses_fear: i8,
+}
+impl ReputationConfigDefinition {
+    pub fn baseline(self) -> u8 {
+        self.baseline
+    }
+    pub fn daily_decay_step(self) -> u8 {
+        self.daily_decay_step
+    }
+    pub fn expansion_police_fear_ceiling(self) -> u8 {
+        self.expansion_police_fear_ceiling
+    }
+    pub fn witnessed_exposure_police_fear(self) -> i8 {
+        self.witnessed_exposure_police_fear
+    }
+    pub fn identifying_exposure_police_fear(self) -> i8 {
+        self.identifying_exposure_police_fear
+    }
+    pub fn achieved_underworld_competence(self) -> i8 {
+        self.achieved_underworld_competence
+    }
+    pub fn partial_underworld_competence(self) -> i8 {
+        self.partial_underworld_competence
+    }
+    pub fn violent_businesses_fear(self) -> i8 {
+        self.violent_businesses_fear
     }
 }

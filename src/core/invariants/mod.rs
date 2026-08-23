@@ -53,6 +53,11 @@ pub enum StateValidationError {
         context: &'static str,
         entity: EntityRef,
     },
+    #[error("organization {organization:?} stores an out-of-range {audience:?} reputation score")]
+    InvalidReputationScore {
+        organization: OrganizationId,
+        audience: crate::reputation::AudienceKind,
+    },
     #[error("player organization {organization} is not a criminal organization")]
     InvalidPlayerOrganization { organization: OrganizationId },
     #[error("organization {organization} is missing policy {policy:?}")]
@@ -339,7 +344,36 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_delegation(state)?;
     validate_business_economies(state)?;
     validate_enterprises(state)?;
+    validate_reputations(state)?;
     validate_legal_subsystems(state)?;
+    Ok(())
+}
+
+/// Reputation records are sparse and clamped at every mutation; the structural checks here
+/// guard the persisted surface against drift the clamp path cannot produce.
+fn validate_reputations(state: &AppState) -> Result<(), StateValidationError> {
+    if !state.reputation.has_consistent_indexes() {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "reputation",
+        });
+    }
+    for record in state.reputation.records() {
+        let entity = crate::core::entity::EntityRef::Organization(record.organization());
+        if !is_entity_present(state, entity) {
+            return Err(StateValidationError::MissingEntity {
+                context: "reputation record",
+                entity,
+            });
+        }
+        for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
+            if record.score(dimension) > 100 {
+                return Err(StateValidationError::InvalidReputationScore {
+                    organization: record.organization(),
+                    audience: record.audience(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1096,6 +1130,7 @@ pub fn validate_invariants(state: &AppState) {
     state.delegation.debug_validate_indexes();
     state.economy.debug_validate_indexes();
     state.enterprises.debug_validate_indexes();
+    state.reputation.debug_validate_indexes();
     state.legal.debug_validate_indexes();
     state.reports.debug_validate_indexes();
 

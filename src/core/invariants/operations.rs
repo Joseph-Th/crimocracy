@@ -119,6 +119,21 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                         });
                     }
                 }
+                OperationConstraint::RequireIntelligenceTopic(topic) => {
+                    // The authorization gate must remain satisfiable by the persisted plan:
+                    // organization-held intelligence of the required topic must back it.
+                    let covered = operation.intelligence().iter().any(|information| {
+                        state
+                            .intelligence
+                            .get_information(*information)
+                            .is_some_and(|record| record.topic() == *topic)
+                    });
+                    if !covered {
+                        return Err(StateValidationError::InvalidOperationRuntime {
+                            operation: operation.id(),
+                        });
+                    }
+                }
             }
         }
         // Exhaustiveness canary: a new OperationContingency must be classified in the
@@ -799,7 +814,8 @@ fn validate_operation_discoveries(
         | OperationKind::WitnessPressure
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
-        | OperationKind::Extraction => {
+        | OperationKind::Extraction
+        | OperationKind::Sabotage => {
             if !resolution.discovered_information().is_empty() {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),
@@ -871,8 +887,9 @@ fn validate_operation_abort_links(
             let deadline = operation
                 .constraints()
                 .iter()
-                .map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => *deadline,
+                .filter_map(|constraint| match constraint {
+                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+                    OperationConstraint::RequireIntelligenceTopic(_) => None,
                 })
                 .min();
             // Deadline-miss fires at `now >= deadline`, so an abort on the exact deadline
@@ -906,8 +923,9 @@ fn validate_operation_abort_links(
             let deadline = operation
                 .constraints()
                 .iter()
-                .map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => *deadline,
+                .filter_map(|constraint| match constraint {
+                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+                    OperationConstraint::RequireIntelligenceTopic(_) => None,
                 })
                 .min();
             if started_at > due_at
@@ -1012,8 +1030,9 @@ fn validate_operation_abort_links(
             let deadline = operation
                 .constraints()
                 .iter()
-                .map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => *deadline,
+                .filter_map(|constraint| match constraint {
+                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+                    OperationConstraint::RequireIntelligenceTopic(_) => None,
                 })
                 .min();
             if started_at > due_at

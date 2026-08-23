@@ -1,0 +1,204 @@
+//! Contextual organizational reputation: per-audience standing across behavioral dimensions.
+//!
+//! Audiences hold separate impressions ([`GAME_DESIGN.md`] §26): the same event raises fear
+//! among businesses while raising underworld respect. Records exist only where an audience's
+//! impression has actually moved away from the authored baseline; absent entries mean
+//! "unremarkable", so decay simply erases records rather than pinning every combination.
+//!
+//! One canonical mutation path lives in [`reputation_system`]; every producer — operation
+//! consequences today, later negotiation, corruption, press behavior — applies typed deltas
+//! through it. Consumers read resolved scores through [`resolve_organization_reputation`].
+
+pub mod reputation_system;
+
+use crate::core::id::OrganizationId;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AudienceKind {
+    /// Other criminals: rivals, independent operators, potential recruits' circles.
+    Underworld,
+    /// Shopkeepers, venue owners, legitimate employers.
+    Businesses,
+    /// Neighborhood residents: witnesses, customers, community pressure.
+    Residents,
+    Police,
+    Political,
+    Press,
+}
+
+pub const ALL_AUDIENCE_KINDS: [AudienceKind; 6] = [
+    AudienceKind::Underworld,
+    AudienceKind::Businesses,
+    AudienceKind::Residents,
+    AudienceKind::Police,
+    AudienceKind::Political,
+    AudienceKind::Press,
+];
+
+/// Behavioral axes an audience judges, deliberately distinct from character relationships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ReputationDimension {
+    /// Coercive weight: compliance extracted through anticipated consequences.
+    Fear,
+    /// Kept promises, predictable treatment of associates and payers.
+    Reliability,
+    /// Demonstrated effectiveness: jobs pulled off, rackets kept running.
+    Competence,
+    /// Suspected betrayal, broken deals, informants flipped.
+    Treachery,
+}
+
+pub const ALL_REPUTATION_DIMENSIONS: [ReputationDimension; 4] = [
+    ReputationDimension::Fear,
+    ReputationDimension::Reliability,
+    ReputationDimension::Competence,
+    ReputationDimension::Treachery,
+];
+
+/// One audience's current impression of one organization. Absent from the map means every
+/// dimension sits at the authored baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReputationRecord {
+    organization: OrganizationId,
+    audience: AudienceKind,
+    fear: u8,
+    reliability: u8,
+    competence: u8,
+    treachery: u8,
+    version: u32,
+}
+
+impl ReputationRecord {
+    pub fn organization(&self) -> OrganizationId {
+        self.organization
+    }
+
+    pub fn audience(&self) -> AudienceKind {
+        self.audience
+    }
+
+    pub fn score(&self, dimension: ReputationDimension) -> u8 {
+        match dimension {
+            ReputationDimension::Fear => self.fear,
+            ReputationDimension::Reliability => self.reliability,
+            ReputationDimension::Competence => self.competence,
+            ReputationDimension::Treachery => self.treachery,
+        }
+    }
+
+    pub(crate) fn set_score(&mut self, dimension: ReputationDimension, value: u8) {
+        match dimension {
+            ReputationDimension::Fear => self.fear = value,
+            ReputationDimension::Reliability => self.reliability = value,
+            ReputationDimension::Competence => self.competence = value,
+            ReputationDimension::Treachery => self.treachery = value,
+        }
+        self.version = self
+            .version
+            .checked_add(1)
+            .expect("reputation record version counter exhausted");
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReputationState {
+    /// Keyed by (organization, audience); sparse — untouched impressions stay absent.
+    records: BTreeMap<(OrganizationId, AudienceKind), ReputationRecord>,
+    by_organization: BTreeMap<OrganizationId, Vec<AudienceKind>>,
+}
+
+impl ReputationState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_record(
+        &self,
+        organization: OrganizationId,
+        audience: AudienceKind,
+    ) -> Option<&ReputationRecord> {
+        self.records.get(&(organization, audience))
+    }
+
+    pub fn records_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &ReputationRecord> {
+        let audiences = self
+            .by_organization
+            .get(&organization)
+            .cloned()
+            .unwrap_or_default();
+        audiences
+            .into_iter()
+            .filter_map(move |audience| self.records.get(&(organization, audience)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub(crate) fn records(&self) -> impl Iterator<Item = &ReputationRecord> {
+        self.records.values()
+    }
+
+    pub(crate) fn upsert(&mut self, record: ReputationRecord) {
+        let key = (record.organization(), record.audience());
+        self.by_organization
+            .entry(record.organization())
+            .or_default();
+        if !self.by_organization[&record.organization()].contains(&record.audience()) {
+            self.by_organization
+                .get_mut(&record.organization())
+                .expect("just-inserted organization bucket")
+                .push(record.audience());
+        }
+        let previous = self.records.insert(key, record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate reputation record inserted"
+        );
+    }
+
+    pub(crate) fn has_consistent_indexes(&self) -> bool {
+        for ((organization, audience), record) in &self.records {
+            if *organization != record.organization()
+                || *audience != record.audience()
+                || !self
+                    .by_organization
+                    .get(organization)
+                    .is_some_and(|bucket| bucket.contains(audience))
+            {
+                return false;
+            }
+        }
+        for (organization, audiences) in &self.by_organization {
+            for audience in audiences {
+                if !self.records.contains_key(&(*organization, *audience)) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_validate_indexes(&self) {
+        debug_assert!(
+            self.has_consistent_indexes(),
+            "Derived Data Consistency: reputation indexes disagree with source records"
+        );
+    }
+}
