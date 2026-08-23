@@ -212,12 +212,12 @@ pub fn validate_establish_contact(
         .social
         .get_relationship(draft.handler, draft.contact)
         .filter(|relationship| has_relationship_basis(relationship.dimensions()))
-        .map(snapshot_relationship);
+        .map(build_contact_relationship_snapshot);
     let contact_to_handler = state
         .social
         .get_relationship(draft.contact, draft.handler)
         .filter(|relationship| has_relationship_basis(relationship.dimensions()))
-        .map(snapshot_relationship);
+        .map(build_contact_relationship_snapshot);
     if handler_to_contact.is_none() && contact_to_handler.is_none() {
         return Err(ContactError::NoRelationship {
             handler: draft.handler,
@@ -463,22 +463,47 @@ fn resolve_contact_kind(
         .ok_or(ContactError::CriminalInstitution(institution))
 }
 
+/// Whether both human endpoints of the channel are out of custody. The pending-disclosure
+/// offer surface and the disclosure commit gate share this rule so their answers can never
+/// disagree.
+fn channel_endpoints_available(state: &AppState, contact: &InstitutionalContactRecord) -> bool {
+    state
+        .legal
+        .active_arrest_for_character(contact.handler())
+        .is_none()
+        && state
+            .legal
+            .active_arrest_for_character(contact.contact())
+            .is_none()
+}
+
+fn detention_error(state: &AppState, contact: &InstitutionalContactRecord) -> ContactError {
+    if let Some(arrest) = state.legal.active_arrest_for_character(contact.handler()) {
+        return ContactError::DetainedHandler {
+            handler: contact.handler(),
+            arrest: arrest.id(),
+        };
+    }
+    match state.legal.active_arrest_for_character(contact.contact()) {
+        Some(arrest) => ContactError::DetainedContact {
+            contact: contact.contact(),
+            arrest: arrest.id(),
+        },
+        // Unreachable through the shared predicate (it verified both endpoints), but the
+        // handler-side error is the honest fallback if the two checks ever disagree.
+        None => ContactError::MissingContact(contact.contact()),
+    }
+}
+
 fn validate_disclosure_source(
     state: &AppState,
     contact: &InstitutionalContactRecord,
     source: InformationId,
 ) -> Result<(), ContactError> {
-    if let Some(arrest) = state.legal.active_arrest_for_character(contact.handler()) {
-        return Err(ContactError::DetainedHandler {
-            handler: contact.handler(),
-            arrest: arrest.id(),
-        });
-    }
-    if let Some(arrest) = state.legal.active_arrest_for_character(contact.contact()) {
-        return Err(ContactError::DetainedContact {
-            contact: contact.contact(),
-            arrest: arrest.id(),
-        });
+    // One shared availability rule backs both the offer surface and this commit gate, so a
+    // detained handler or contact can never appear actionable and then fail here.
+    if !channel_endpoints_available(state, contact) {
+        return Err(detention_error(state, contact));
     }
     let information = state
         .intelligence
@@ -506,14 +531,14 @@ fn validate_disclosure_source(
 /// personally holds, inside the channel's institutional domain, that this sponsor has not
 /// already been told. Returning identities and nothing more keeps content behind the canonical
 /// disclosure path; the caller chooses which topics to actually hear about.
-pub fn pending_disclosure_sources(
+pub fn find_pending_disclosure_sources(
     state: &crate::core::state::AppState,
     contact: ContactId,
 ) -> Vec<InformationId> {
     let Some(record) = state.contacts().get_contact(contact) else {
         return Vec::new();
     };
-    if record.status() != ContactStatus::Active {
+    if record.status() != ContactStatus::Active || !channel_endpoints_available(state, record) {
         return Vec::new();
     }
     let topics = disclosable_topics(record.kind());
@@ -593,7 +618,7 @@ fn ensure_disclosure_not_duplicate(
     Ok(())
 }
 
-fn snapshot_relationship(record: &RelationshipRecord) -> ContactRelationshipSnapshot {
+fn build_contact_relationship_snapshot(record: &RelationshipRecord) -> ContactRelationshipSnapshot {
     ContactRelationshipSnapshot {
         from: record.from(),
         to: record.to(),

@@ -247,6 +247,7 @@ impl ValidatedLegalRepresentation {
                     ended_at: None,
                     end_reason: None,
                     status: LegalRepresentationStatus::Active,
+                    origin: self.draft.origin,
                 },
                 artifacts: super::LegalRepresentationArtifacts {
                     information,
@@ -760,14 +761,17 @@ pub fn apply_automatic_legal_support(
     use crate::finance::{AccountKind, FinancialOwner};
     use crate::world::{OrganizationKind as OrgKind, PolicyKind, PolicySetting};
 
-    // Automatic support concludes when the matter it covers does: a representation held for
-    // a detainee who has left custody ends with `MatterConcluded`, freeing the Legal contact
-    // for the next matter instead of locking it for the rest of the campaign.
+    // Automatic support concludes when the matter it covers does: a representation this pass
+    // retained for a detainee who has left custody ends with `MatterConcluded`, freeing the
+    // Legal contact for the next matter instead of locking it for the rest of the campaign.
+    // Explicitly commanded retentions are never swept here — their matter is leadership's
+    // to end, not governance's.
     let concluded: Vec<LegalRepresentationId> = state
         .legal
         .legal_representations()
         .filter(|record| {
-            record.status() == LegalRepresentationStatus::Active
+            record.origin() == crate::legal::LegalRepresentationOrigin::AutomaticPolicy
+                && record.status() == LegalRepresentationStatus::Active
                 && state
                     .legal
                     .get_arrest(record.arrest())
@@ -876,14 +880,20 @@ pub fn apply_automatic_legal_support(
             payer_account: payer_account.id(),
             provider_account: provider_account.id(),
             authorization: None,
+            origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
         };
         if validate_representation_dependencies(state, &draft).is_err() {
             // Prerequisites drifted since the snapshot (contact inactive, custody released);
             // the policy stage simply waits rather than forcing a partial transaction.
             continue;
         }
-        let representation = validate_retain_legal_representation(state, draft)?.commit(state)?;
-        retained.push(representation);
+        // A candidate whose prerequisites changed between the dependency check and commit is
+        // skipped, not fatal: an autonomous pass must never abort the tick.
+        if let Ok(representation) = validate_retain_legal_representation(state, draft)
+            .and_then(|validated| validated.commit(state))
+        {
+            retained.push(representation);
+        }
     }
     Ok(retained)
 }

@@ -63,14 +63,6 @@ pub struct ExecutiveBriefPlan {
 }
 
 impl ExecutiveBriefPlan {
-    pub fn recipient(&self) -> OrganizationId {
-        self.recipient
-    }
-
-    pub fn generated_at(&self) -> SimTime {
-        self.generated_at
-    }
-
     pub fn entries(&self) -> &[ReportEntry] {
         &self.entries
     }

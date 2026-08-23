@@ -773,17 +773,6 @@ impl LegalState {
                 }
             }
         }
-        for (origin, ids) in &self.indexes.evidence.evidence_by_origin {
-            for id in ids {
-                if !self
-                    .evidence
-                    .get(id)
-                    .is_some_and(|record| record.origin() == Some(*origin))
-                {
-                    return false;
-                }
-            }
-        }
         for (investigator, ids) in &self.indexes.investigations.investigations_by_investigator {
             for id in ids {
                 if !self

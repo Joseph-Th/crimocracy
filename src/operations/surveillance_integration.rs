@@ -47,6 +47,15 @@ impl SurveillanceIntelligencePlan {
         self.observations.len()
     }
 
+    /// The (topic, subject) pairs this plan will persist — the frozen signature set recorded
+    /// on the operation's resolution.
+    pub(crate) fn surveillance_signatures(&self) -> BTreeSet<(InformationTopic, EntityRef)> {
+        self.observations
+            .iter()
+            .map(|observation| (observation.topic, observation.subject))
+            .collect()
+    }
+
     /// Compact phrases naming what each observation covers, in stable observation order.
     pub(crate) fn observation_findings(&self) -> impl Iterator<Item = &str> {
         self.observations
@@ -287,7 +296,6 @@ pub(crate) fn surveillance_after_action_clause(
 }
 
 pub(crate) fn is_valid_persisted_surveillance_information(
-    state: &AppState,
     operation: &OperationRecord,
     information: &InformationRecord,
 ) -> bool {
@@ -312,91 +320,14 @@ pub(crate) fn is_valid_persisted_surveillance_information(
     {
         return false;
     }
-    // One source of truth for the target→(topic, subject) table: persisted surveillance
-    // intelligence is valid exactly when its signature is in the expected set.
-    expected_persisted_surveillance_signatures(state, operation)
-        .is_some_and(|expected| expected.contains(&(information.topic(), information.subject())))
-}
-
-pub(crate) fn expected_persisted_surveillance_signatures(
-    state: &AppState,
-    operation: &OperationRecord,
-) -> Option<BTreeSet<(InformationTopic, EntityRef)>> {
-    if operation.kind() != OperationKind::Surveillance {
-        return None;
-    }
-    let resolution = operation.resolution()?;
-    if resolution.objective_outcome() == OperationObjectiveOutcome::Failed {
-        return Some(BTreeSet::new());
-    }
-    let OperationObjective::GatherInformation { target } = operation.objective() else {
-        return None;
-    };
-    let mut expected = BTreeSet::new();
-    match *target {
-        EntityRef::Neighborhood(neighborhood) => {
-            expected.insert((
-                InformationTopic::PoliceActivity,
-                EntityRef::Neighborhood(neighborhood),
-            ));
-        }
-        EntityRef::Business(business) => {
-            let record = state.world.get_business(business)?;
-            expected.insert((
-                InformationTopic::PoliceActivity,
-                EntityRef::Neighborhood(record.neighborhood()),
-            ));
-            if resolution.objective_outcome() == OperationObjectiveOutcome::Achieved {
-                expected.insert((
-                    InformationTopic::MarketAccess,
-                    EntityRef::Business(business),
-                ));
-            }
-        }
-        EntityRef::Character(character) => {
-            expected.insert((InformationTopic::Personnel, EntityRef::Character(character)));
-        }
-        EntityRef::Organization(organization) => {
-            let is_law_enforcement = state
-                .world
-                .get_organization(organization)
-                .is_some_and(|record| is_law_enforcement_authority(record.kind()));
-            if is_law_enforcement {
-                expected.insert((
-                    InformationTopic::LegalActivity,
-                    EntityRef::Organization(organization),
-                ));
-            } else {
-                expected.insert((
-                    InformationTopic::Personnel,
-                    EntityRef::Organization(organization),
-                ));
-            }
-        }
-        EntityRef::Investigation(investigation) => {
-            expected.insert((
-                InformationTopic::LegalActivity,
-                EntityRef::Investigation(investigation),
-            ));
-        }
-        EntityRef::Enterprise(enterprise) => {
-            expected.insert((
-                InformationTopic::Personnel,
-                EntityRef::Enterprise(enterprise),
-            ));
-        }
-        EntityRef::Operation(target_operation) => {
-            expected.insert((
-                InformationTopic::OperationalOutcome,
-                EntityRef::Operation(target_operation),
-            ));
-        }
-        EntityRef::Evidence(_)
-        | EntityRef::FinancialAccount(_)
-        | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_) => return None,
-    }
-    Some(expected)
+    // One source of truth for the target→(topic, subject) table: the resolution record froze
+    // the signatures this operation produced, so persisted surveillance intelligence is valid
+    // exactly when its signature is in that set. Re-deriving the expectation from current state
+    // would let later changes (for example a case notified to the surveiller after resolution)
+    // silently invalidate honestly-produced intelligence.
+    resolution
+        .surveillance_signatures()
+        .contains(&(information.topic(), information.subject()))
 }
 
 fn resolve_target_snapshot(

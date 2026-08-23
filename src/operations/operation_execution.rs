@@ -182,11 +182,11 @@ impl OperationResolutionRandomness {
         }
     }
 
-    pub fn execution_variance(self) -> i8 {
+    pub(crate) fn execution_variance(self) -> i8 {
         self.execution_variance
     }
 
-    pub fn exposure_variance(self) -> i8 {
+    pub(crate) fn exposure_variance(self) -> i8 {
         self.exposure_variance
     }
 }
@@ -539,6 +539,16 @@ impl ValidatedOperationResolution {
             .into_iter()
             .map(|information| information.commit(state))
             .collect::<Result<BTreeSet<_>, _>>()?;
+        // The signature set is frozen from the validated plan's observations: what this
+        // operation actually saw is authoritative for later validation, not a re-derivation
+        // that later notification changes could silently contradict.
+        let surveillance_signatures = self
+            .plan
+            .outcome
+            .surveillance
+            .as_ref()
+            .map(SurveillanceIntelligencePlan::surveillance_signatures)
+            .unwrap_or_default();
         let after_action_information = self.information.commit(state)?;
         let history_event = self.history.commit(state)?;
         let after_action_report = self.report.commit(state)?;
@@ -553,6 +563,7 @@ impl ValidatedOperationResolution {
                 property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
                 cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
                 discovered_information,
+                surveillance_signatures,
                 legal_activity_information,
                 after_action_information,
                 after_action_report,
@@ -776,7 +787,10 @@ pub(crate) fn validate_operation_resolution_plan(
         }
     }
     // Sabotage damage lands through the canonical economy disruption path; the disruption is
-    // validated here so commit re-checks only staleness.
+    // validated here so commit re-checks only staleness. A target whose economy went
+    // suspended (or disappeared) between authorization and resolution has nothing operating
+    // to disrupt: the resolution proceeds without a damage effect rather than failing the
+    // whole validated settlement — a modeled degenerate outcome, never an aborted tick.
     let mut business_disruption = None;
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
         if let (
@@ -786,9 +800,17 @@ pub(crate) fn validate_operation_resolution_plan(
             },
         ) = (record.kind(), record.objective())
         {
-            business_disruption = Some(validate_disrupt_business_economy(
-                registry, state, *business,
-            )?);
+            let economy_active = state
+                .economy
+                .get_business_economy(*business)
+                .is_some_and(|economy| {
+                    economy.status() == crate::economy::BusinessOperatingStatus::Active
+                });
+            if economy_active {
+                business_disruption = Some(validate_disrupt_business_economy(
+                    registry, state, *business,
+                )?);
+            }
         }
     }
     // Personal after-action knowledge for each participant: the crew knows what went down

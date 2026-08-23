@@ -1,4 +1,4 @@
-//! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
+﻿//! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
 
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{CharacterId, IdExhaustionError, InformationId, OrganizationId};
@@ -298,8 +298,8 @@ fn validate_transfer_relationship(
     source: KnowledgeHolder,
     recipient: KnowledgeHolder,
 ) -> Result<BTreeMap<CharacterId, u32>, IntelligenceError> {
-    validate_holder_active(state, source)?;
-    validate_holder_active(state, recipient)?;
+    validate_holder_exists(state, source)?;
+    validate_holder_exists(state, recipient)?;
     let permitted = match (source, recipient) {
         (KnowledgeHolder::Character(character), KnowledgeHolder::Organization(organization))
         | (KnowledgeHolder::Organization(organization), KnowledgeHolder::Character(character)) => {
@@ -342,7 +342,7 @@ fn validate_transfer_relationship(
     Ok(versions)
 }
 
-fn validate_holder_active(
+fn validate_holder_exists(
     state: &AppState,
     holder: KnowledgeHolder,
 ) -> Result<(), IntelligenceError> {

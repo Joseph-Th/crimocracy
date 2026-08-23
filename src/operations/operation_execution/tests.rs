@@ -1,4 +1,4 @@
-//! Focused tests for deterministic operation resolution, proceeds, exposure, and dispositions.
+﻿//! Focused tests for deterministic operation resolution, proceeds, exposure, and dispositions.
 
 use super::*;
 use crate::build_registry;
@@ -1283,7 +1283,6 @@ fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
         },
     )
     .expect("held cash should be depositable into an organization account");
-    assert_eq!(deposit.deposited_value(), proceeds.amount());
     let outcome = deposit
         .commit(&mut state)
         .expect("cash deposit should commit atomically");

@@ -208,6 +208,8 @@ pub(crate) enum RegistryBuildError {
     BusinessVarianceOutOfRange(BusinessKind),
     #[error("business {0:?} notable variance threshold exceeds its variance range")]
     BusinessNotableVarianceOutOfRange(BusinessKind),
+    #[error("business {0:?} losing-cycle suspension threshold must be at least one cycle")]
+    BusinessSuspensionThresholdOutOfRange(BusinessKind),
     #[error("enterprise {0:?} must have a positive cycle duration")]
     InvalidEnterpriseCycle(EnterpriseKind),
     #[error("enterprise {0:?} contains a negative authored economic value")]
@@ -216,6 +218,8 @@ pub(crate) enum RegistryBuildError {
     EnterpriseVarianceOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} notable variance threshold exceeds its variance range")]
     EnterpriseNotableVarianceOutOfRange(EnterpriseKind),
+    #[error("enterprise {0:?} losing-cycle suspension threshold must be at least one cycle")]
+    EnterpriseSuspensionThresholdOutOfRange(EnterpriseKind),
 }
 
 #[derive(Default)]
@@ -594,7 +598,6 @@ impl RegistryBuilder {
             .insert(
                 kind,
                 InvestigationWorkDefinition {
-                    kind,
                     duration: spec.duration,
                     base_difficulty: spec.base_difficulty,
                     additional_source_difficulty: spec.additional_source_difficulty,
@@ -625,7 +628,7 @@ impl RegistryBuilder {
         }
         if self
             .policies
-            .insert(kind, PolicyDefinition { kind, default })
+            .insert(kind, PolicyDefinition { default })
             .is_some()
         {
             return Err(RegistryBuildError::DuplicatePolicy(kind));
@@ -781,7 +784,6 @@ impl RegistryBuilder {
             .insert(
                 kind,
                 OperationDefinition {
-                    kind,
                     display_name,
                     supported_approaches,
                     required_roles,
@@ -829,12 +831,16 @@ impl RegistryBuilder {
                 kind,
             ));
         }
+        if economics.losing_cycles_before_suspension == 0 {
+            return Err(RegistryBuildError::EnterpriseSuspensionThresholdOutOfRange(
+                kind,
+            ));
+        }
         if self
             .enterprises
             .insert(
                 kind,
                 EnterpriseDefinition {
-                    kind,
                     economics,
                     policy,
                     required_business_functions,
@@ -871,9 +877,14 @@ impl RegistryBuilder {
         if economics.notable_variance_basis_points > economics.gross_variance_basis_points {
             return Err(RegistryBuildError::BusinessNotableVarianceOutOfRange(kind));
         }
+        if economics.losing_cycles_before_suspension == 0 {
+            return Err(RegistryBuildError::BusinessSuspensionThresholdOutOfRange(
+                kind,
+            ));
+        }
         if self
             .businesses
-            .insert(kind, BusinessDefinition { kind, economics })
+            .insert(kind, BusinessDefinition { economics })
             .is_some()
         {
             return Err(RegistryBuildError::DuplicateBusiness(kind));

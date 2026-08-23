@@ -265,6 +265,7 @@ fn representation_draft(
         payer_account: fixture.payer,
         provider_account: fixture.provider,
         authorization,
+        origin: crate::legal::LegalRepresentationOrigin::DirectRetention,
     }
 }
 
@@ -503,6 +504,7 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
             payer_account: fixture.payer,
             provider_account: fixture.provider,
             authorization: None,
+            origin: crate::legal::LegalRepresentationOrigin::DirectRetention,
         },
     )
     .expect("ended representation should permit later counsel retention")
@@ -587,7 +589,13 @@ fn active_representation_survives_defendant_departure_after_release() {
 #[test]
 fn automatic_policy_concludes_representation_after_release_and_frees_the_contact() {
     let mut fixture = fixture();
-    let representation = retain(&mut fixture, 7_500, None);
+    let mut draft = representation_draft(&fixture, 7_500, None);
+    // The sweep may only conclude matters its own governance retained.
+    draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
+    let representation = validate_retain_legal_representation(&fixture.state, draft)
+        .expect("automatic retention should validate")
+        .commit(&mut fixture.state)
+        .expect("automatic retention should commit");
     validate_release_arrest(&fixture.state, fixture.arrest)
         .expect("defendant detention should release")
         .commit(&mut fixture.state)
@@ -613,6 +621,29 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
         .commit(&mut fixture.state)
         .expect("contact termination should commit");
     validate_state(&fixture.state).expect("concluded representation state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn custody_sweep_never_ends_an_explicitly_retained_representation() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 7_500, None);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("defendant detention should release")
+        .commit(&mut fixture.state)
+        .expect("defendant release should commit");
+
+    apply_automatic_legal_support(&mut fixture.state)
+        .expect("automatic legal support should resolve");
+    // A directly commanded retention outlives custody: only leadership ends it.
+    let record = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("explicitly retained representation should persist");
+    assert_eq!(record.status(), LegalRepresentationStatus::Active);
+    assert_eq!(record.end_reason(), None);
+    validate_state(&fixture.state).expect("swept-custody state should validate");
     validate_invariants(&fixture.state);
 }
 

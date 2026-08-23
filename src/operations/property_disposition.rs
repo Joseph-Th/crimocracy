@@ -547,10 +547,6 @@ pub struct ValidatedCashDisposition {
 }
 
 impl ValidatedCashDisposition {
-    pub fn deposited_value(&self) -> Money {
-        self.deposited_value
-    }
-
     pub fn commit(
         self,
         state: &mut AppState,

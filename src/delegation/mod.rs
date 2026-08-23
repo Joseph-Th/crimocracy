@@ -209,7 +209,11 @@ impl DelegationState {
 
     pub(crate) fn insert(&mut self, record: MandateRecord) {
         let id = record.id();
-        self.active_by_manager.insert(record.manager(), id);
+        let previous_manager = self.active_by_manager.insert(record.manager(), id);
+        debug_assert!(
+            previous_manager.is_none(),
+            "Index Uniqueness: manager already holds an active mandate"
+        );
         for scope in record.scopes() {
             self.active_by_scope.entry(*scope).or_default().insert(id);
         }

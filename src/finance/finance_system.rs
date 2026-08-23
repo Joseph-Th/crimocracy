@@ -380,6 +380,12 @@ pub enum LaunderingError {
     },
     #[error("laundering arithmetic overflowed")]
     ArithmeticOverflow,
+    #[error("business {business}'s operating economy changed after laundering validation")]
+    StaleEconomy {
+        business: crate::core::id::BusinessId,
+        expected: u32,
+        found: u32,
+    },
     #[error(transparent)]
     Finance(#[from] FinanceError),
     #[error(transparent)]
@@ -390,14 +396,28 @@ pub struct ValidatedLaundering {
     transaction: ValidatedLedgerTransaction,
     business: crate::core::id::BusinessId,
     laundered_amount: Money,
+    expected_economy_version: u32,
 }
 
 impl ValidatedLaundering {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, LaunderingError> {
+        // The capacity decision rested on the front's economy at validation time. A cycle
+        // settling in between resets the plausibility budget (and a chronic-loss suspension
+        // deactivates the front), so the version pin must be re-checked before anything mutates.
+        let economy = state
+            .economy
+            .get_business_economy(self.business)
+            .ok_or(LaunderingError::MissingBusinessEconomy(self.business))?;
+        if economy.version() != self.expected_economy_version {
+            return Err(LaunderingError::StaleEconomy {
+                business: self.business,
+                expected: self.expected_economy_version,
+                found: economy.version(),
+            });
+        }
         let id = self.transaction.commit(state)?;
         // The transfer committed, so the front's plausibility budget shrinks by the same
-        // volume. The economy record was validated to exist and business economies are never
-        // deleted, so the recording cannot fail after a successful transfer.
+        // volume. The version check above guarantees the budget window is unchanged.
         state
             .economy
             .record_laundered_volume(self.business, self.laundered_amount);
@@ -535,6 +555,7 @@ pub fn validate_launder_funds(
         transaction,
         business: draft.business,
         laundered_amount: draft.amount,
+        expected_economy_version: economy.version(),
     })
 }
 

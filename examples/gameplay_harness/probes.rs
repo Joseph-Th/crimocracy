@@ -400,6 +400,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
             payer_account: payer,
             provider_account: provider,
             authorization: None,
+            origin: crimocracy::legal::LegalRepresentationOrigin::DirectRetention,
         },
     )?
     .commit(&mut state)?;

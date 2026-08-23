@@ -7,7 +7,7 @@
 //!
 //! One canonical mutation path lives in [`reputation_system`]; every producer — operation
 //! consequences today, later negotiation, corruption, press behavior — applies typed deltas
-//! through it. Consumers read resolved scores through [`resolve_organization_reputation`].
+//! through it. Consumers read resolved scores through [`reputation_system::resolve_score`].
 
 pub mod reputation_system;
 
@@ -136,7 +136,9 @@ impl ReputationState {
         self.records.values()
     }
 
-    pub(crate) fn upsert(&mut self, record: ReputationRecord) {
+    /// Inserts a first-touch reputation record. Records are created exactly once per
+    /// (organization, audience) pair; later movement goes through `apply_delta`.
+    pub(crate) fn insert_record(&mut self, record: ReputationRecord) {
         let key = (record.organization(), record.audience());
         self.by_organization
             .entry(record.organization())
@@ -152,6 +154,32 @@ impl ReputationState {
             previous.is_none(),
             "Index Uniqueness: duplicate reputation record inserted"
         );
+    }
+
+    /// Removes every record whose dimensions all sit at `baseline`. Decay erases fully faded
+    /// impressions instead of pinning them at baseline forever, keeping "absent means
+    /// unremarkable" literally true and bounding state growth.
+    pub(crate) fn remove_at_baseline(&mut self, baseline: u8) {
+        let faded: Vec<(OrganizationId, AudienceKind)> = self
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                crate::reputation::ALL_REPUTATION_DIMENSIONS
+                    .iter()
+                    .all(|dimension| record.score(*dimension) == baseline)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in faded {
+            let (organization, audience) = key;
+            self.records.remove(&key);
+            if let Some(bucket) = self.by_organization.get_mut(&organization) {
+                bucket.retain(|entry| *entry != audience);
+                if bucket.is_empty() {
+                    self.by_organization.remove(&organization);
+                }
+            }
+        }
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {

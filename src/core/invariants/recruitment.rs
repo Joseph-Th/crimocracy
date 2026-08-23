@@ -10,8 +10,8 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::recruitment::recruitment_system::{
-    classify_recruitment_outcome, resolve_recruitment_factors_from_context,
-    resolve_recruitment_margin, select_perceived_legal_pressure_at, RecruitmentFactorContext,
+    resolve_perceived_legal_pressure_at, resolve_recruitment_factors_from_context,
+    resolve_recruitment_margin, resolve_recruitment_outcome, RecruitmentFactorContext,
 };
 use crate::recruitment::{RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource};
 use crate::registry::Registry;
@@ -309,7 +309,7 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
             || factors.incumbent_attachment() > 100
             || factors.incumbent_resentment() > 100
             || factors.perceived_legal_pressure() > 100
-            || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
+            || attempt.outcome() != resolve_recruitment_outcome(attempt.margin())
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {
                 attempt: attempt.id(),
@@ -428,7 +428,7 @@ pub(super) fn validate_recruitment_against_registry(
             },
         )?;
         let (expected_pressure_information, expected_legal_pressure) =
-            select_perceived_legal_pressure_at(
+            resolve_perceived_legal_pressure_at(
                 definition,
                 state,
                 attempt.candidate(),
@@ -451,7 +451,7 @@ pub(super) fn validate_recruitment_against_registry(
             || attempt.pressure_information() != expected_pressure_information
             || attempt.margin()
                 != resolve_recruitment_margin(definition, attempt.factors(), attempt.approach())
-            || attempt.outcome() != classify_recruitment_outcome(attempt.margin())
+            || attempt.outcome() != resolve_recruitment_outcome(attempt.margin())
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {
                 attempt: attempt.id(),

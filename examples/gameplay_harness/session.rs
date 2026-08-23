@@ -1,7 +1,7 @@
-//! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
+﻿//! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
 
 use crimocracy::contacts::contact_system::{
-    pending_disclosure_sources, validate_contact_disclosure,
+    find_pending_disclosure_sources, validate_contact_disclosure,
 };
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{OperationId, OrganizationId};
@@ -31,14 +31,14 @@ use crate::*;
 /// The standing police-contact channel, used the way a player uses it: ask the handler what the
 /// contact can tell us, then hear one fresh item through the canonical disclosure path. Returns
 /// the parsed case-activity sightline when the disclosure carried one. The acting policy never
-/// enumerates hidden knowledge — `pending_disclosure_sources` exposes only what the channel
+/// enumerates hidden knowledge â€” `find_pending_disclosure_sources` exposes only what the channel
 /// itself offers, and everything the organization learns arrives as a derived information record.
 pub fn read_police_contact(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<Option<bool>, Box<dyn Error>> {
-    let sources = pending_disclosure_sources(&scenario.state, scenario.police_contact);
+    let sources = find_pending_disclosure_sources(&scenario.state, scenario.police_contact);
     let Some(source) = sources.into_iter().find(|source| {
         scenario
             .state
@@ -512,7 +512,7 @@ pub fn play_session(
         let cold_window_for_heat_check =
             scenario.registry.legal().cold_case_window().as_minutes() as u64;
         // Heat check lands well inside the authored cold window: ~1/36th of the window
-        // (≈60m for the current 2160m window) bounded to [30,90] so it never drifts outside
+        // (â‰ˆ60m for the current 2160m window) bounded to [30,90] so it never drifts outside
         // if authors tune the window.
         let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
         let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay);
@@ -560,8 +560,8 @@ pub fn play_session(
         }
         // The narrative session stands down but does not go deaf: once per campaign day the
         // organization asks its precinct contact what the institution knows. The lead
-        // detective's own knowledge is production state — recorded when he took the case and
-        // refreshed when the authority shelves it — so each new development arrives as a fresh,
+        // detective's own knowledge is production state â€” recorded when he took the case and
+        // refreshed when the authority shelves it â€” so each new development arrives as a fresh,
         // disclosable record through the canonical channel. Batch sessions observe one day and
         // stop while the case is still hot, keeping the matched financial window intact.
         if narrative {
@@ -616,7 +616,7 @@ pub fn play_session(
             establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
             if narrative {
                 println!(
-                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only — has anything moved on the case?"
+                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only â€” has anything moved on the case?"
                 );
             }
             // Bounded polling loop: the authored cold-case decay guarantees a deterministic shelf,
@@ -946,8 +946,8 @@ pub fn run_second_act(
             // Close the self-inflicted-heat loop through the contact channel: the after-action
             // on the casing reported an opened case, so leadership asks its precinct channel
             // what detectives are doing rather than surveilling the precinct again. The
-            // detective's knowledge of his own case is production state — recorded when he took
-            // the case as lead — and the acting decision, disclosure, and everything the
+            // detective's knowledge of his own case is production state â€” recorded when he took
+            // the case as lead â€” and the acting decision, disclosure, and everything the
             // organization learns flow through the canonical contact and information paths.
             if let Some(_investigation) = self_heat_investigation {
                 let neighborhood_name = scenario
@@ -1329,7 +1329,7 @@ pub fn run_defector_trail(
 }
 
 /// The player's answer to a confirmed defector: one personal re-approach through the canonical
-/// executive recruitment path. Nothing here reads hidden state — the pitch resolves through the
+/// executive recruitment path. Nothing here reads hidden state â€” the pitch resolves through the
 /// same production scoring the rival's poaching used (recruiter bond versus fresh attachment to
 /// the new organization, plus membership resistance). A refusal carries a real intelligence cost:
 /// production rules deliver a loyalty report to the rival naming our recruiter, so reaching out
@@ -1427,14 +1427,14 @@ pub fn run_win_back_attempt(
         );
         if narrative {
             println!(
-                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again — and both organizations now know exactly how much his loyalty is worth."
+                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again â€” and both organizations now know exactly how much his loyalty is worth."
             );
         }
         return Ok(());
     }
     // Refusal cost: the production loyalty-report path tells the candidate's current
-    // organization who tried to recruit them. Audit-only here — the acting policy never reads
-    // rival reports — but the narration may explain the mechanism because it follows from the
+    // organization who tried to recruit them. Audit-only here â€” the acting policy never reads
+    // rival reports â€” but the narration may explain the mechanism because it follows from the
     // player-visible refusal itself.
     let leaked = scenario
         .state
@@ -1455,7 +1455,7 @@ pub fn run_win_back_attempt(
             );
         }
         println!(
-            "[WIN BACK]  {defector_name} stayed with {rival_name}. The door closed politely — and {player_name} paid for the knock with a piece of its own cover."
+            "[WIN BACK]  {defector_name} stayed with {rival_name}. The door closed politely â€” and {player_name} paid for the knock with a piece of its own cover."
         );
     }
     Ok(())

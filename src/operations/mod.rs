@@ -115,8 +115,9 @@ pub enum OperationObjective {
     GatherInformation {
         target: EntityRef,
     },
-    /// Extract a detained organization member from custody. Success releases the active
-    /// arrest through the canonical arrest-release path.
+    /// Extract any detained character from custody — an organization member, or a third
+    /// party whose release serves the sponsor. Success releases the active arrest through
+    /// the canonical arrest-release path.
     FreeDetainee {
         target: CharacterId,
     },
@@ -587,6 +588,10 @@ pub struct OperationResolutionRecord {
     property_proceeds: Option<OperationPropertyProceedsRecord>,
     cash_proceeds: Option<OperationCashProceedsRecord>,
     discovered_information: BTreeSet<InformationId>,
+    /// Topic/subject pairs actually produced by a surveillance resolution. Persisted because
+    /// the sightline conditions behind them (for example, whether any case had been notified to
+    /// the surveiller by the observed minute) are not re-derivable after later state changes.
+    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef)>,
     legal_activity_information: Option<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
@@ -624,6 +629,10 @@ impl OperationResolutionRecord {
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
         &self.discovered_information
+    }
+
+    pub fn surveillance_signatures(&self) -> &BTreeSet<(InformationTopic, EntityRef)> {
+        &self.surveillance_signatures
     }
 
     pub fn legal_activity_information(&self) -> Option<InformationId> {

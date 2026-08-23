@@ -19,8 +19,7 @@ use crate::operations::operation_system::{
 };
 use crate::operations::property_disposition::build_disposition_summary;
 use crate::operations::surveillance_integration::{
-    expected_persisted_surveillance_signatures, is_supported_surveillance_target,
-    is_valid_persisted_surveillance_information,
+    is_supported_surveillance_target, is_valid_persisted_surveillance_information,
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
@@ -801,7 +800,6 @@ fn validate_operation_discoveries(
         }
     }
 
-    let expected_signatures = expected_persisted_surveillance_signatures(state, operation);
     let mut actual_signatures = BTreeSet::new();
     for information_id in resolution.discovered_information() {
         let information = state.intelligence.get_information(*information_id).ok_or(
@@ -816,15 +814,17 @@ fn validate_operation_discoveries(
                 .operation_for_discovered_information(*information_id)
                 .is_none_or(|source| source.id() != operation.id())
             || information.recorded_at() != resolution.resolved_at()
-            || !is_valid_persisted_surveillance_information(state, operation, information)
+            || !is_valid_persisted_surveillance_information(operation, information)
         {
             return Err(StateValidationError::InvalidOperationDiscovery {
                 operation: operation.id(),
             });
         }
     }
+    // The resolution record froze the signatures this surveillance actually produced; the
+    // discovered intelligence records must match that set exactly.
     if operation.kind() == OperationKind::Surveillance
-        && expected_signatures.as_ref() != Some(&actual_signatures)
+        && resolution.surveillance_signatures() != &actual_signatures
     {
         return Err(StateValidationError::InvalidOperationDiscovery {
             operation: operation.id(),

@@ -23,7 +23,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 55;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 57;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -228,12 +228,6 @@ fn domain_seed(seed: u64, domain: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new(0)
-    }
 }
 
 #[cfg(test)]

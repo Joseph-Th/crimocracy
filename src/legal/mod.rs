@@ -2,8 +2,8 @@
 //!
 //! `records.rs` owns the record, draft, enum, and index definitions; `legal_state.rs` owns
 //! [`LegalState`], the single owner of every legal record and derived index, with
-//! `legal_state_validation.rs` holding its projection checks. The eleven
-//! subsystem files (`*_system.rs`, `case_graph.rs`, `investigation_work_execution.rs`)
+//! `legal_state_validation.rs` holding its projection checks. The twelve subsystem files
+//! (`*_system.rs`, `case_graph.rs`, `case_knowledge.rs`, `investigation_work_execution.rs`)
 //! implement validation, decision, and commit paths against those records. This facade
 //! re-exports the exact public surface used by `crate::legal::*` consumers.
 
@@ -36,10 +36,10 @@ pub use records::{
     InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkRecord,
     InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionDraft,
     JurisdictionRecord, LegalRepresentationDraft, LegalRepresentationEndReason,
-    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentDraft,
-    PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow, PatrolWindowError,
-    PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseDraft,
-    ProsecutionCaseRecord, ProsecutionCaseStatus, ProsecutionReferralDraft,
+    LegalRepresentationOrigin, LegalRepresentationRecord, LegalRepresentationStatus,
+    PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
+    PatrolWindowError, PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus,
+    ProsecutionCaseDraft, ProsecutionCaseRecord, ProsecutionCaseStatus, ProsecutionReferralDraft,
     ProsecutionReferralRecord, WitnessCooperation, WitnessStatementDraft, WitnessStatementRecord,
     ALL_INVESTIGATION_WORK_KINDS,
 };

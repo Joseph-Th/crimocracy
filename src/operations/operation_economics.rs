@@ -3,10 +3,14 @@
 //! Sibling `operation_execution` composes these into resolution plans; the executive brief
 //! references the clause builders when refreshing liquidated property. All amounts flow through
 //! the canonical ledger at commit time; this module derives plans only.
+//!
+//! Take sizing is deliberately static: authored basis points of the target's registry-derived
+//! gross potential model the venue's *typical contents*, not its live register or operating
+//! status. A suspended storefront still holds goods worth taking; only the recent-take
+//! depletion index (persisted at completion commit) decays a repeated target.
 use super::operation_execution::OperationResolutionError;
 use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::operations::{
     OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
@@ -95,8 +99,8 @@ pub(crate) fn recent_take_hits(
         .resolution()
         .map(|resolution| resolution.resolved_at())
         .unwrap_or_else(|| state.now());
-    count_recent_successful_takes(
-        state,
+    // Served from the depletion index maintained at completion commit time.
+    state.operations.recent_successful_takes(
         business,
         reference_at,
         RECENT_HIT_WINDOW_MINUTES,
@@ -140,21 +144,6 @@ pub(crate) fn resolve_take_cents(
             / 10_000_i128;
     }
     i64::try_from(value).map_err(|_| overflow(operation))
-}
-
-/// Counts completed, property-bearing successes against `business` whose resolution happened
-/// within `window_minutes` before `at`, served from the depletion index maintained at
-/// completion commit time.
-pub(crate) fn count_recent_successful_takes(
-    state: &AppState,
-    business: crate::core::id::BusinessId,
-    at: SimTime,
-    window_minutes: i64,
-    exclude: Option<crate::core::id::OperationId>,
-) -> u32 {
-    state
-        .operations
-        .recent_successful_takes(business, at, window_minutes, exclude)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

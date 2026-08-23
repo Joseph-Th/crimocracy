@@ -223,6 +223,12 @@ impl ValidatedInvestigationTransition {
         state
             .legal
             .set_investigation_status(self.investigation, status, state.now());
+        // The lead investigator personally knows their own case was shelved, resumed, or
+        // closed — the same refresh the cold-decay pass performs for its own transitions.
+        crate::legal::case_knowledge::record_lead_case_activity_knowledge(
+            state,
+            self.investigation,
+        );
         Ok(())
     }
 }
@@ -402,10 +408,6 @@ pub(crate) fn apply_cold_case_decay(
                 transition
                     .commit(state)
                     .expect("validated cold-case closure must commit atomically");
-                crate::legal::case_knowledge::record_lead_case_activity_knowledge(
-                    state,
-                    investigation,
-                );
                 closed.push(investigation);
             }
             continue;
@@ -422,9 +424,7 @@ pub(crate) fn apply_cold_case_decay(
         transition
             .commit(state)
             .expect("validated cold-case suspension must commit atomically");
-        // The lead's knowledge must track the institution: shelving refreshes what the
-        // investigator personally knows so contact channels can carry the news outward.
-        crate::legal::case_knowledge::record_lead_case_activity_knowledge(state, investigation);
+        // The transition commit refreshes the lead's personal knowledge to "shelved".
         suspended.push(investigation);
     }
     Ok(ColdCaseDecayOutcome { suspended, closed })
@@ -480,6 +480,12 @@ impl ValidatedInvestigatorAssignment {
         state
             .legal
             .set_investigator_role(self.investigation, self.investigator, self.role);
+        // A promoted (or demoted) lead's personal case knowledge must track the new
+        // responsibility, exactly as autonomous staffing refreshes it.
+        crate::legal::case_knowledge::record_lead_case_activity_knowledge(
+            state,
+            self.investigation,
+        );
         Ok(())
     }
 }
@@ -582,10 +588,8 @@ pub(crate) fn apply_autonomous_investigator_staffing(
         if assignment.commit(state).is_err() {
             continue;
         }
-        // The new lead personally knows the case's activity; record that knowledge so contact
-        // channels can disclose it without any case-graph read. A failure to record must not
-        // abort the staffing pass.
-        crate::legal::case_knowledge::record_lead_case_activity_knowledge(state, investigation_id);
+        // The assignment commit records the new lead's personal case-activity knowledge, so
+        // contact channels can disclose it without any case-graph read.
         staffed.push((investigation_id, investigator));
     }
     Ok(staffed)

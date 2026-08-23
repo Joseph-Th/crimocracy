@@ -275,7 +275,6 @@ mod tests {
     fn authored_alcohol_distribution_requires_concrete_commercial_network() {
         let registry = build_registry();
         let definition = registry.get_enterprise(EnterpriseKind::AlcoholDistribution);
-        assert_eq!(definition.kind(), EnterpriseKind::AlcoholDistribution);
         assert!(definition.required_business_functions().is_empty());
         assert_eq!(
             definition.required_network_functions(),

@@ -491,6 +491,9 @@ struct EnterpriseCycleSnapshot {
     authority: ResolvedMandateAuthority,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
+    /// Set when this losing settlement reaches the authored consecutive-loss threshold:
+    /// commit suspends the enterprise instead of leaving the next cycle scheduled.
+    suspends_after_settlement: bool,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     host_business_version: Option<(BusinessId, u32)>,
     /// Manager capability feeds gross revenue, so a manager mutation between decide and
@@ -624,13 +627,25 @@ pub fn decide_enterprise_cycle(
     }
     let variance_notable = i32::from(variance_basis_points).unsigned_abs()
         >= u32::from(economics.notable_variance_basis_points());
-    // A hot district taxes the racket even on a normal-variance night; the manager reports that
-    // cost pressure rather than letting the racket quietly underperform its expectations.
-    let attention = if variance_notable || cost.investigation_heat > Money::ZERO {
-        AttentionClass::Notable
-    } else {
-        AttentionClass::Routine
-    };
+    // A hot district taxes the racket even on a normal-variance night, and a losing night is
+    // always manager-report-worthy: chronic silent losses are exactly what the authority must
+    // see before the authored suspension threshold stops the bleeding.
+    let attention =
+        if variance_notable || cost.investigation_heat > Money::ZERO || net_cash < Money::ZERO {
+            AttentionClass::Notable
+        } else {
+            AttentionClass::Routine
+        };
+    let trailing_losing_cycles = count_trailing_losing_cycles(
+        state,
+        enterprise,
+        economics.losing_cycles_before_suspension(),
+    );
+    // A losing settlement that reaches the authored consecutive-loss threshold suspends the
+    // racket: the domain owner acts on the negative result instead of scheduling another
+    // identical loss. Resumption is a manual canonical decision.
+    let suspends_after_settlement = net_cash < Money::ZERO
+        && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, record.supporting_businesses())?;
     let host_business_version = match record.location() {
@@ -653,6 +668,7 @@ pub fn decide_enterprise_cycle(
             // retroactively paid out in a burst after release. Re-anchor the next cycle to the
             // actual settlement instant so routine work resumes at its authored cadence.
             next_cycle_at: state.now() + economics.cycle(),
+            suspends_after_settlement,
             supporting_business_versions,
             host_business_version,
             manager_version,
@@ -671,6 +687,21 @@ pub fn decide_enterprise_cycle(
             settlement_account: record.settlement_account(),
         },
     })
+}
+
+/// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
+/// the scan stays bounded regardless of how much history a long-lived racket accumulates.
+fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limit: u8) -> u32 {
+    let mut losing = 0u32;
+    let mut cycles = state.enterprises.cycles_for(enterprise).collect::<Vec<_>>();
+    cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
+    for cycle in cycles.iter().rev() {
+        if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
+            break;
+        }
+        losing += 1;
+    }
+    losing
 }
 
 pub struct ValidatedEnterpriseCycle {
@@ -806,6 +837,15 @@ impl ValidatedEnterpriseCycle {
             },
             self.plan.snapshot.next_cycle_at,
         );
+        if self.plan.snapshot.suspends_after_settlement {
+            // Domain-owner consequence for chronic losses: suspend the racket instead of
+            // scheduling another identical loss. Resumption is a manual canonical decision.
+            state.enterprises.set_status(
+                self.plan.snapshot.enterprise,
+                EnterpriseStatus::Suspended,
+                None,
+            );
+        }
         Ok(cycle_id)
     }
 }
@@ -904,7 +944,12 @@ pub fn validate_enterprise_cycle_plan(
                 observed_at: plan.snapshot.occurred_at,
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
-                summary: build_cycle_report_summary(state, record, &plan.economics),
+                summary: build_cycle_report_summary(
+                    state,
+                    record,
+                    &plan.economics,
+                    plan.snapshot.suspends_after_settlement,
+                ),
             },
         )?),
         AttentionClass::Routine => None,
@@ -1467,6 +1512,7 @@ fn build_cycle_report_summary(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,
     economics: &EnterpriseCycleEconomics,
+    plan_suspends: bool,
 ) -> String {
     let base = format!(
         "Enterprise cycle reported gross {}, operating cost {}",
@@ -1483,9 +1529,14 @@ fn build_cycle_report_summary(
         String::new()
     };
     format!(
-        "{base}{heat}, net cash {}, and {}.",
+        "{base}{heat}, net cash {}, and {}.{}",
         crate::finance::helpers::format_money_cents(economics.net_cash.cents()),
         crate::finance::helpers::describe_gross_variance(economics.variance_basis_points),
+        if plan_suspends {
+            " Repeated losses have suspended the racket pending a manual resumption.".to_owned()
+        } else {
+            String::new()
+        },
     )
 }
 

@@ -438,15 +438,20 @@ pub fn apply_autonomous_evidence_arrests(
             continue;
         }
 
-        let arrest = validate_arrest(
+        // A candidate whose prerequisites drifted between the pre-filter and validation (a
+        // version bump from earlier same-pass work, a newly scheduled obligation) is skipped,
+        // not fatal: an autonomous pass must never abort the tick.
+        let Ok(arrest) = validate_arrest(
             state,
             ArrestDraft {
                 character,
                 investigation: investigation_id,
                 evidence: qualifying.into_iter().collect(),
             },
-        )?
-        .commit(state)?;
+        )
+        .and_then(|validated| validated.commit(state)) else {
+            continue;
+        };
         arrests.push(arrest);
     }
     Ok(arrests)

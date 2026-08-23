@@ -1593,3 +1593,162 @@ fn expansion_consolidates_led_districts_before_contested_ones() {
     );
     validate_invariants(&fixture.state);
 }
+
+#[test]
+fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_threshold() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xBEEF_5105);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Bleeding Outfit".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Dead Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(5),
+                    commercial_activity: rating(5),
+                    illicit_demand: rating(5),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(95),
+                },
+            },
+        },
+    )
+    .expect("neighborhood fixture should validate");
+    // A manager with no Management capability earns no management revenue premium.
+    let manager = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Unskilled Manager".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("manager fixture should validate");
+    let mandate = validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization,
+            manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(neighborhood)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("mandate fixture should validate")
+    .commit(&mut state)
+    .expect("mandate fixture should commit");
+    let cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("cash account should validate");
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("settlement account should validate");
+    let enterprise = crate::enterprises::enterprise_execution::validate_establish_enterprise(
+        &registry,
+        &state,
+        crate::enterprises::EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization,
+            authority: MandateAuthority {
+                mandate,
+                manager,
+                scope: ResponsibilityScope::Neighborhood(neighborhood),
+            },
+            location: EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: settlement,
+        },
+    )
+    .expect("enterprise should establish")
+    .commit(&mut state)
+    .expect("enterprise should commit");
+
+    let threshold = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .losing_cycles_before_suspension() as usize;
+    let mut last_information = None;
+    for cycle_index in 0..threshold {
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_enterprise_cycle(&registry, &state, enterprise, 0)
+            .expect("losing enterprise cycle should decide");
+        assert!(
+            plan.net_cash().cents() < 0,
+            "fixture must produce a losing settlement"
+        );
+        assert_eq!(plan.attention(), AttentionClass::Notable);
+        let cycle = validate_enterprise_cycle_plan(&state, plan)
+            .expect("losing cycle plan should validate")
+            .commit(&mut state)
+            .expect("losing cycle should commit");
+        let record = state
+            .enterprises()
+            .get_cycle(cycle)
+            .expect("cycle record should persist");
+        last_information = record.information();
+        if cycle_index + 1 < threshold {
+            assert_eq!(
+                state
+                    .enterprises()
+                    .get_enterprise(enterprise)
+                    .map(|record| record.status()),
+                Some(crate::enterprises::EnterpriseStatus::Active),
+                "racket stays active below the suspension threshold"
+            );
+        }
+    }
+    let record = state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("enterprise should persist");
+    assert_eq!(
+        record.status(),
+        crate::enterprises::EnterpriseStatus::Suspended
+    );
+    assert_eq!(record.next_cycle_at(), None);
+    let information = state
+        .intelligence()
+        .get_information(last_information.expect("notable losing cycle should report"))
+        .expect("manager report should persist");
+    assert!(information.summary().contains("suspended"));
+
+    crate::enterprises::enterprise_execution::validate_resume_enterprise(
+        &registry, &state, enterprise,
+    )
+    .expect("suspended racket should resume")
+    .commit(&mut state)
+    .expect("resumed racket should commit");
+    assert_eq!(
+        state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .map(|record| record.status()),
+        Some(crate::enterprises::EnterpriseStatus::Active)
+    );
+    crate::core::invariants::validate_invariants(&state);
+}

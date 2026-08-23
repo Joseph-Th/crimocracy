@@ -779,7 +779,11 @@ pub fn validate_state_against_registry(
                 opportunity: opportunity.id(),
             },
         )?;
-        if report.title() != format!("{} opportunity", definition.display_name()) {
+        if report.title()
+            != crate::opportunities::opportunity_system::discovery_report_title(
+                definition.display_name(),
+            )
+        {
             return Err(StateValidationError::InvalidOpportunity {
                 opportunity: opportunity.id(),
             });
@@ -794,7 +798,11 @@ pub fn validate_state_against_registry(
                     opportunity: opportunity.id(),
                 },
             )?;
-            if report.title() != format!("{} opportunity expired", definition.display_name()) {
+            if report.title()
+                != crate::opportunities::opportunity_system::expiry_report_title(
+                    definition.display_name(),
+                )
+            {
                 return Err(StateValidationError::InvalidOpportunity {
                     opportunity: opportunity.id(),
                 });
@@ -905,8 +913,11 @@ pub fn validate_state_against_registry(
             .get_business(cycle.business())
             .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
         let economics = registry.get_business(business.kind()).economics();
+        // Notability must agree with the production rule in `business_economy_system`: a
+        // notable variance or a net-losing settlement is accountant-worthy.
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
+            || cycle.net_cash() < crate::finance::Money::ZERO
         {
             AttentionClass::Notable
         } else {
@@ -968,10 +979,11 @@ pub fn validate_state_against_registry(
         let economics = registry.get_enterprise(enterprise.kind()).economics();
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
         // Notability must agree with the production rule in `enterprise_execution`: a notable
-        // variance or persisted street heat from active investigations at settlement makes the
-        // manager's cycle report player-visible. Heat is read from the committed cycle rather
-        // than recomputed, because the investigations that produced it may since have closed;
-        // it must still be a whole number of the authored per-case surcharge.
+        // variance, persisted street heat from active investigations at settlement, or a
+        // net-losing settlement makes the manager's cycle report player-visible. Heat is read
+        // from the committed cycle rather than recomputed, because the investigations that
+        // produced it may since have closed; it must still be a whole number of the authored
+        // per-case surcharge.
         let per_case = economics.heat_surcharge_per_active_case().cents();
         if cycle.investigation_heat().cents() < 0
             || (per_case == 0 && cycle.investigation_heat().cents() != 0)
@@ -981,6 +993,7 @@ pub fn validate_state_against_registry(
         }
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
             || cycle.investigation_heat() > crate::finance::Money::ZERO
+            || cycle.net_cash() < crate::finance::Money::ZERO
         {
             AttentionClass::Notable
         } else {

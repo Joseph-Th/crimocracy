@@ -464,6 +464,10 @@ pub fn apply_detainee_informant_recruitment(
             let minutes_in_custody = now
                 .as_minutes()
                 .saturating_sub(arrest.arrested_at().as_minutes());
+            // Exact equality is safe because the canonical pipeline advances exactly one
+            // minute per tick and this pass runs every tick: each detention reaches its
+            // decision minute under observation exactly once. A batched or skipped pass
+            // would need a persisted decided-marker instead.
             (minutes_in_custody == RECRUITMENT_DECISION_OFFSET_MINUTES)
                 .then_some((character, handler))
         })
@@ -478,6 +482,13 @@ pub fn apply_detainee_informant_recruitment(
             .map(|rating| u32::from(rating.value()))
             .unwrap_or(0);
         let chance = BASE_FLIP_CHANCE_PERCENT + safety / 2;
+        // Validation precedes the draw so a drifted candidate never consumes randomness:
+        // the investigation stream advances only when a real decision is made.
+        let Ok(validated) =
+            validate_establish_informant(state, InformantDraft { character, handler })
+        else {
+            continue;
+        };
         let roll = {
             let rng = state.investigation_rng_mut();
             crate::core::simulation::draw_index(rng, 100)
@@ -486,9 +497,11 @@ pub fn apply_detainee_informant_recruitment(
         if roll as u32 >= chance {
             continue;
         }
-        let informant = validate_establish_informant(state, InformantDraft { character, handler })?
-            .commit(state)?;
-        recruited.push(informant);
+        // A candidate whose prerequisites changed between validation and commit is skipped,
+        // not fatal: an autonomous pass must never abort the tick.
+        if let Ok(informant) = validated.commit(state) {
+            recruited.push(informant);
+        }
     }
     Ok(recruited)
 }
@@ -555,16 +568,20 @@ pub fn apply_informant_disclosures(
 
     let mut disclosures = Vec::new();
     for (informant, information, investigation) in candidates {
-        let disclosure = validate_record_informant_disclosure(
+        // A disclosure whose prerequisites drifted between the pre-filter and validation is
+        // skipped, not fatal: an autonomous pass must never abort the tick.
+        if let Ok(disclosure) = validate_record_informant_disclosure(
             state,
             InformantDisclosureDraft {
                 informant,
                 investigation,
                 source_information: information,
             },
-        )?
-        .commit(state)?;
-        disclosures.push(disclosure);
+        )
+        .and_then(|validated| validated.commit(state))
+        {
+            disclosures.push(disclosure);
+        }
     }
     Ok(disclosures)
 }

@@ -770,3 +770,144 @@ fn stale_economy_version_rejects_sabotage_disruption_atomically() {
         .expect_err("stale validated disruption must be rejected");
     assert!(matches!(error, BusinessEconomyError::StaleEconomy { .. }));
 }
+
+#[test]
+fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_threshold() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x5EED_5105);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Losing Holdings".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("organization fixture should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Depressed Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(5),
+                    commercial_activity: rating(5),
+                    illicit_demand: rating(5),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(95),
+                },
+            },
+        },
+    )
+    .expect("neighborhood fixture should validate");
+    let business = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Bleeding Warehouse".to_owned(),
+            kind: BusinessKind::Warehouse,
+            functions: BTreeSet::from([BusinessFunction::Warehousing]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("business fixture should validate");
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("operating account should validate");
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("settlement account should validate");
+    crate::economy::business_economy_system::validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("business economy should establish")
+    .commit(&mut state)
+    .expect("business economy should commit");
+
+    let threshold = registry
+        .get_business(BusinessKind::Warehouse)
+        .economics()
+        .losing_cycles_before_suspension() as usize;
+    let mut last_information = None;
+    for cycle_index in 0..threshold {
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        // Maximum authored downside variance keeps every settlement net-negative.
+        let plan = decide_business_cycle(&registry, &state, business, -500)
+            .expect("losing business cycle should decide");
+        assert!(
+            plan.net_cash().cents() < 0,
+            "fixture must produce a losing settlement"
+        );
+        assert_eq!(plan.attention(), AttentionClass::Notable);
+        let cycle = validate_business_cycle_plan(&state, plan)
+            .expect("losing cycle plan should validate")
+            .commit(&mut state)
+            .expect("losing cycle should commit");
+        let record = state
+            .economy()
+            .get_cycle(cycle)
+            .expect("cycle record should persist");
+        last_information = record.information();
+        if cycle_index + 1 < threshold {
+            assert_eq!(
+                state
+                    .economy()
+                    .get_business_economy(business)
+                    .map(|economy| economy.status()),
+                Some(crate::economy::BusinessOperatingStatus::Active),
+                "economy stays active below the suspension threshold"
+            );
+        }
+    }
+    let economy = state
+        .economy()
+        .get_business_economy(business)
+        .expect("economy should persist");
+    assert_eq!(
+        economy.status(),
+        crate::economy::BusinessOperatingStatus::Suspended
+    );
+    assert_eq!(economy.next_cycle_at(), None);
+    // The accountant report names the consequence so leadership can act on it.
+    let information = state
+        .intelligence()
+        .get_information(last_information.expect("notable losing cycle should report"))
+        .expect("accountant information should persist");
+    assert!(information.summary().contains("suspended"));
+
+    // No further cycles fire while suspended; resumption is the manual canonical path.
+    state.advance_clock(SimDuration::from_minutes(1_440));
+    assert!(state.economy().due_at_or_before(state.now()).is_empty());
+    crate::economy::business_economy_system::validate_resume_business_economy(
+        &registry, &state, business,
+    )
+    .expect("suspended economy should resume")
+    .commit(&mut state)
+    .expect("resumed economy should commit");
+    assert_eq!(
+        state
+            .economy()
+            .get_business_economy(business)
+            .map(|economy| economy.status()),
+        Some(crate::economy::BusinessOperatingStatus::Active)
+    );
+    crate::core::invariants::validate_invariants(&state);
+}

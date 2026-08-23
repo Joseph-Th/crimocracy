@@ -1,15 +1,14 @@
-//! Authored definition types for the immutable registry; `mod.rs` owns the lookup surface and `builder.rs` the validated assembly.
+﻿//! Authored definition types for the immutable registry; `mod.rs` owns the lookup surface and `builder.rs` the validated assembly.
 
 use crate::core::attention::AttentionClass;
 use crate::core::time::SimDuration;
-use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
 use crate::intelligence::{InformationTopic, Reliability, Specificity};
-use crate::legal::{EvidenceKind, InvestigationWorkKind};
-use crate::operations::{OperationApproach, OperationKind, RoleKind};
+use crate::legal::EvidenceKind;
+use crate::operations::{OperationApproach, RoleKind};
 use crate::recruitment::RecruitmentApproach;
 use crate::world::{
-    BusinessFunction, BusinessKind, CapabilityKind, DriveKind, PolicyKind, PolicySetting, TraitKind,
+    BusinessFunction, CapabilityKind, DriveKind, PolicyKind, PolicySetting, TraitKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -165,7 +164,6 @@ impl RecruitmentDefinition {
 }
 #[derive(Clone, Debug)]
 pub struct InvestigationWorkDefinition {
-    pub(super) kind: InvestigationWorkKind,
     pub(crate) duration: SimDuration,
     pub(crate) base_difficulty: u8,
     pub(crate) additional_source_difficulty: u8,
@@ -183,9 +181,6 @@ pub struct InvestigationWorkDefinitionSpec {
     pub connected_margin: i16,
 }
 impl InvestigationWorkDefinition {
-    pub fn kind(&self) -> InvestigationWorkKind {
-        self.kind
-    }
     pub fn duration(&self) -> SimDuration {
         self.duration
     }
@@ -207,20 +202,15 @@ impl InvestigationWorkDefinition {
 }
 #[derive(Clone, Debug)]
 pub struct PolicyDefinition {
-    pub(super) kind: PolicyKind,
     pub(super) default: PolicySetting,
 }
 impl PolicyDefinition {
-    pub fn kind(&self) -> PolicyKind {
-        self.kind
-    }
     pub fn default(&self) -> PolicySetting {
         self.default
     }
 }
 #[derive(Clone, Debug)]
 pub struct OperationDefinition {
-    pub(super) kind: OperationKind,
     pub(super) display_name: &'static str,
     pub(super) supported_approaches: BTreeSet<OperationApproach>,
     pub(super) required_roles: BTreeSet<RoleKind>,
@@ -410,9 +400,6 @@ impl OperationCashProceedsDefinition {
     }
 }
 impl OperationDefinition {
-    pub fn kind(&self) -> OperationKind {
-        self.kind
-    }
     pub fn display_name(&self) -> &'static str {
         self.display_name
     }
@@ -442,6 +429,8 @@ pub struct EnterpriseEconomicsDefinition {
     pub(crate) heat_surcharge_per_active_case: Money,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
+    /// Consecutive net-losing cycles after which the enterprise's own governance suspends it.
+    pub(crate) losing_cycles_before_suspension: u8,
 }
 impl EnterpriseEconomicsDefinition {
     pub fn cycle(&self) -> SimDuration {
@@ -480,19 +469,18 @@ impl EnterpriseEconomicsDefinition {
     pub fn notable_variance_basis_points(&self) -> u16 {
         self.notable_variance_basis_points
     }
+    pub fn losing_cycles_before_suspension(&self) -> u8 {
+        self.losing_cycles_before_suspension
+    }
 }
 #[derive(Clone, Debug)]
 pub struct EnterpriseDefinition {
-    pub(super) kind: EnterpriseKind,
     pub(super) economics: EnterpriseEconomicsDefinition,
     pub(super) policy: Option<PolicyKind>,
     pub(super) required_business_functions: BTreeSet<BusinessFunction>,
     pub(super) required_network_functions: BTreeSet<BusinessFunction>,
 }
 impl EnterpriseDefinition {
-    pub fn kind(&self) -> EnterpriseKind {
-        self.kind
-    }
     pub fn economics(&self) -> &EnterpriseEconomicsDefinition {
         &self.economics
     }
@@ -516,6 +504,8 @@ pub struct BusinessEconomicsDefinition {
     pub(crate) police_cost_per_point: Money,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
+    /// Consecutive net-losing cycles after which the operating economy suspends.
+    pub(crate) losing_cycles_before_suspension: u8,
 }
 impl BusinessEconomicsDefinition {
     pub fn cycle(&self) -> SimDuration {
@@ -542,16 +532,15 @@ impl BusinessEconomicsDefinition {
     pub fn notable_variance_basis_points(&self) -> u16 {
         self.notable_variance_basis_points
     }
+    pub fn losing_cycles_before_suspension(&self) -> u8 {
+        self.losing_cycles_before_suspension
+    }
 }
 #[derive(Clone, Debug)]
 pub struct BusinessDefinition {
-    pub(super) kind: BusinessKind,
     pub(super) economics: BusinessEconomicsDefinition,
 }
 impl BusinessDefinition {
-    pub fn kind(&self) -> BusinessKind {
-        self.kind
-    }
     pub fn economics(&self) -> &BusinessEconomicsDefinition {
         &self.economics
     }

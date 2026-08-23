@@ -155,6 +155,9 @@ struct BusinessCycleSnapshot {
     expected_economy_version: u32,
     occurred_at: SimTime,
     next_cycle_at: SimTime,
+    /// Set when this losing settlement reaches the authored consecutive-loss threshold:
+    /// commit suspends the economy instead of leaving the next cycle scheduled.
+    suspends_after_settlement: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,13 +263,23 @@ pub fn decide_business_cycle(
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
-    let attention = if i32::from(variance_basis_points).unsigned_abs()
-        >= u32::from(economics.notable_variance_basis_points())
+    // A losing cycle is always accountant-worthy: chronic silent losses are exactly what the
+    // owner must see before the authored suspension threshold stops the bleeding.
+    let attention = if net_cash < Money::ZERO
+        || i32::from(variance_basis_points).unsigned_abs()
+            >= u32::from(economics.notable_variance_basis_points())
     {
         AttentionClass::Notable
     } else {
         AttentionClass::Routine
     };
+    let trailing_losing_cycles =
+        count_trailing_losing_cycles(state, business, economics.losing_cycles_before_suspension());
+    // A losing settlement that reaches the authored consecutive-loss threshold suspends the
+    // economy: the domain owner acts on the negative result instead of scheduling another
+    // identical loss. Resume stays a manual canonical decision.
+    let suspends_after_settlement = net_cash < Money::ZERO
+        && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
     Ok(BusinessCyclePlan {
         snapshot: BusinessCycleSnapshot {
             business,
@@ -279,6 +292,7 @@ pub fn decide_business_cycle(
             // from now rather than from the stale due time, so missed cycles do not resolve as a
             // rapid one-per-minute backlog when work resumes.
             next_cycle_at: state.now() + economics.cycle(),
+            suspends_after_settlement,
         },
         economics: BusinessCycleEconomics {
             gross_revenue,
@@ -292,6 +306,21 @@ pub fn decide_business_cycle(
             settlement_account: economy.settlement_account(),
         },
     })
+}
+
+/// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
+/// the scan stays bounded regardless of how much history a long-lived business accumulates.
+fn count_trailing_losing_cycles(state: &AppState, business: BusinessId, limit: u8) -> u32 {
+    let mut losing = 0u32;
+    let mut cycles = state.economy.cycles_for(business).collect::<Vec<_>>();
+    cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
+    for cycle in cycles.iter().rev() {
+        if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
+            break;
+        }
+        losing += 1;
+    }
+    losing
 }
 
 pub struct ValidatedBusinessCycle {
@@ -382,6 +411,15 @@ impl ValidatedBusinessCycle {
             },
             self.plan.snapshot.next_cycle_at,
         );
+        if self.plan.snapshot.suspends_after_settlement {
+            // Domain-owner consequence for chronic losses: suspend instead of scheduling
+            // another identical loss. Resumption is a manual canonical decision.
+            state.economy.set_status(
+                self.plan.snapshot.business,
+                BusinessOperatingStatus::Suspended,
+                None,
+            );
+        }
         Ok(cycle)
     }
 }
@@ -472,7 +510,7 @@ pub fn validate_business_cycle_plan(
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
                 summary: format!(
-                    "Business cycle reported gross {}, operating cost {}, net cash {}, and {}.",
+                    "Business cycle reported gross {}, operating cost {}, net cash {}, and {}.{}",
                     crate::finance::helpers::format_money_cents(
                         plan.economics.gross_revenue.cents()
                     ),
@@ -483,6 +521,12 @@ pub fn validate_business_cycle_plan(
                     crate::finance::helpers::describe_gross_variance(
                         plan.economics.variance_basis_points
                     ),
+                    if plan.snapshot.suspends_after_settlement {
+                        " Repeated losses have suspended operations pending a manual resumption."
+                            .to_owned()
+                    } else {
+                        String::new()
+                    }
                 ),
             },
         )?),

@@ -133,7 +133,9 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                     || !expiry_report.entries().first().is_some_and(|entry| {
                         entry.attention == AttentionClass::Notable
                             && entry.summary
-                                == format!("Opportunity expired: {}", opportunity.summary())
+                                == crate::opportunities::opportunity_system::expiry_report_summary(
+                                    opportunity.summary(),
+                                )
                             && entry.sources == expected_sources
                             && entry.entities == expected_entities
                             && entry.decision.is_none()

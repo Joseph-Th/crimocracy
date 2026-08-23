@@ -132,6 +132,7 @@ pub(crate) struct LegalRepresentationLifecycle {
     pub(super) ended_at: Option<SimTime>,
     pub(super) end_reason: Option<LegalRepresentationEndReason>,
     pub(super) status: LegalRepresentationStatus,
+    pub(super) origin: super::LegalRepresentationOrigin,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -217,6 +218,10 @@ impl LegalRepresentationRecord {
         self.lifecycle.status
     }
 
+    pub fn origin(&self) -> super::LegalRepresentationOrigin {
+        self.lifecycle.origin
+    }
+
     pub fn information(&self) -> InformationId {
         self.artifacts.information
     }
@@ -238,6 +243,15 @@ impl LegalRepresentationRecord {
     }
 }
 
+/// Who initiated a legal representation. The automatic-support governance pass may only end
+/// representations it retained itself; an explicitly commanded retention ends through player
+/// or delegated decisions, never the custody sweep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegalRepresentationOrigin {
+    AutomaticPolicy,
+    DirectRetention,
+}
+
 #[derive(Clone, Debug)]
 pub struct LegalRepresentationDraft {
     pub arrest: ArrestId,
@@ -247,6 +261,7 @@ pub struct LegalRepresentationDraft {
     pub payer_account: FinancialAccountId,
     pub provider_account: FinancialAccountId,
     pub authorization: Option<MandateAuthority>,
+    pub origin: LegalRepresentationOrigin,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

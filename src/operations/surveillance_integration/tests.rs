@@ -761,3 +761,62 @@ fn surveillance_authorization_rejects_semantically_invalid_objectives_and_target
     );
     validate_invariants(&fixture.state);
 }
+
+#[test]
+fn police_org_surveillance_without_notified_case_produces_personnel_and_survives_later_notification(
+) {
+    let mut fixture = fixture(90, false);
+    let police = fixture.police;
+
+    // No investigation has ever been notified to the crew, so there is no sightline to
+    // re-read: the observation must fall back to ordinary personnel intelligence.
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(police));
+    resolve_with_zero_variance(&mut fixture, operation);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("police-org surveillance should resolve");
+    assert_eq!(resolution.discovered_information().len(), 1);
+    let observation = fixture
+        .state
+        .intelligence()
+        .get_information(*resolution.discovered_information().iter().next().unwrap())
+        .expect("personnel observation should persist");
+    assert_eq!(observation.topic(), InformationTopic::Personnel);
+    assert_eq!(observation.subject(), EntityRef::Organization(police));
+    validate_state(&fixture.state)
+        .expect("no-sightline police-org surveillance state should validate");
+    validate_invariants(&fixture.state);
+
+    // A case notified to the crew only after the resolution must not retroactively invalidate
+    // the honestly-produced observation: the signature set was frozen on the resolution.
+    let intake = crate::legal::investigation_system::validate_incident_intake(
+        &fixture.state,
+        crate::legal::IncidentIntakeDraft {
+            owner: police,
+            title: "Later Notified Case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(operation)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(operation),
+                origin: Some(EntityRef::Operation(operation)),
+                kind: crate::legal::EvidenceKind::Surveillance,
+                strength: crate::legal::EvidenceStrength::Weak,
+                reliability: crate::legal::EvidenceReliability::Questionable,
+                admissibility: crate::legal::Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin_operation: Some(operation),
+            notified_organizations: BTreeSet::from([fixture.crew]),
+            witness: None,
+        },
+    )
+    .expect("later incident intake should validate")
+    .commit(&mut fixture.state)
+    .expect("later incident intake should commit");
+    let _ = intake.investigation;
+    validate_state(&fixture.state)
+        .expect("notification after surveillance must not invalidate persisted signatures");
+    validate_invariants(&fixture.state);
+}

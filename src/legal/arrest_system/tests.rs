@@ -431,3 +431,103 @@ fn detention_preserves_formal_supervision_but_blocks_new_supervisory_work() {
     validate_state(&fixture.state).expect("rejected supervisory work must preserve valid state");
     validate_invariants(&fixture.state);
 }
+
+#[test]
+fn active_operation_responsibility_blocks_custody() {
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
+    use crate::world::world_system::{insert_business, insert_neighborhood};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile, Rating,
+    };
+
+    let mut fixture = fixture();
+    let neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Arrest Guard Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(50).expect("fixture rating should validate"),
+                    commercial_activity: Rating::try_new(50)
+                        .expect("fixture rating should validate"),
+                    illicit_demand: Rating::try_new(50).expect("fixture rating should validate"),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(50).expect("fixture rating should validate"),
+                },
+            },
+        },
+    )
+    .expect("neighborhood should validate");
+    let business = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Arrest Guard Front".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("business should validate");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Guarded score".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: fixture
+                .state
+                .world()
+                .get_character(fixture.suspect)
+                .and_then(|record| record.organization())
+                .expect("suspect should hold membership"),
+            leader: fixture.suspect,
+            objective: OperationObjective::ObtainCash {
+                target: crate::core::entity::EntityRef::Business(business),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Coordinator, fixture.suspect)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: crate::core::time::SimTime::ZERO,
+        },
+    )
+    .expect("authorized operation should validate")
+    .commit(&mut fixture.state)
+    .expect("authorized operation should commit");
+
+    let error = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence]),
+        },
+    )
+    .expect_err("an operation participant must not enter custody");
+    assert_eq!(
+        error,
+        ArrestError::ActiveOperationResponsibility {
+            character: fixture.suspect,
+            operation,
+        }
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none(),
+        "rejected arrest must leave authoritative state unchanged"
+    );
+    validate_state(&fixture.state).expect("state after rejected arrest should validate");
+    validate_invariants(&fixture.state);
+}

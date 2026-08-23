@@ -194,7 +194,7 @@ pub fn validate_discover_operation_opportunity(
         ReportDraft {
             recipient: draft.organization,
             kind: ReportKind::Opportunity,
-            title: format!("{} opportunity", definition.display_name()),
+            title: discovery_report_title(definition.display_name()),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
                 summary: draft.summary.clone(),
@@ -210,6 +210,21 @@ pub fn validate_discover_operation_opportunity(
         discovered_at,
         report,
     })
+}
+
+/// Shared report-title and summary formats. The invariant validators re-derive these exact
+/// strings to check persisted reports, so the producers and the validators must call the same
+/// helpers rather than duplicating format strings.
+pub(crate) fn discovery_report_title(display_name: &str) -> String {
+    format!("{display_name} opportunity")
+}
+
+pub(crate) fn expiry_report_title(display_name: &str) -> String {
+    format!("{display_name} opportunity expired")
+}
+
+pub(crate) fn expiry_report_summary(summary: &str) -> String {
+    format!("Opportunity expired: {summary}")
 }
 
 fn validate_discovery_state(
@@ -541,10 +556,10 @@ fn validate_expire_opportunity(
         ReportDraft {
             recipient: record.organization(),
             kind: ReportKind::Opportunity,
-            title: format!("{} opportunity expired", definition.display_name()),
+            title: expiry_report_title(definition.display_name()),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
-                summary: format!("Opportunity expired: {}", record.summary()),
+                summary: expiry_report_summary(record.summary()),
                 sources: record.source_information().iter().copied().collect(),
                 entities,
                 decision: None,

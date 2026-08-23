@@ -1,4 +1,4 @@
-//! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
+﻿//! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
 use crate::core::id::{
     ArrestId, BusinessId, CharacterId, EnterpriseId, IdExhaustionError, MandateId, NeighborhoodId,
@@ -427,7 +427,7 @@ pub fn resolve_policy_for_manager(
     validate_manager(state, manager, organization)?;
     if let Some(mandate) = state.delegation.active_for_manager(manager) {
         if let Some(setting) = mandate.standing_order(kind) {
-            return build_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
+            return resolve_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
         }
     }
     let organization_record = state
@@ -441,10 +441,10 @@ pub fn resolve_policy_for_manager(
                 organization,
                 policy: kind,
             })?;
-    build_resolved_policy(kind, setting, PolicySource::Organization(organization))
+    resolve_resolved_policy(kind, setting, PolicySource::Organization(organization))
 }
 
-fn build_resolved_policy(
+fn resolve_resolved_policy(
     expected: PolicyKind,
     setting: PolicySetting,
     source: PolicySource,
@@ -458,7 +458,7 @@ fn build_resolved_policy(
 
 impl ResolvedPolicy {
     /// Destructures a policy resolved for [`PolicyKind::IndependentRecruitment`]; the kind
-    /// match is already guaranteed by `build_resolved_policy`.
+    /// match is already guaranteed by `resolve_resolved_policy`.
     pub fn independent_recruitment_approval(&self) -> crate::world::ApprovalPolicy {
         match self.setting {
             PolicySetting::IndependentRecruitment(approval) => approval,

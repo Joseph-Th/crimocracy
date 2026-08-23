@@ -1,4 +1,4 @@
-//! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
+﻿//! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -409,7 +409,7 @@ pub(crate) fn decide_recruitment_attempt(
     );
     let pressure_information_snapshot =
         candidate_pressure_information_ids(state, draft.candidate, state.now());
-    let (pressure_information, perceived_legal_pressure) = select_perceived_legal_pressure_at(
+    let (pressure_information, perceived_legal_pressure) = resolve_perceived_legal_pressure_at(
         registry.recruitment(),
         state,
         draft.candidate,
@@ -437,7 +437,7 @@ pub(crate) fn decide_recruitment_attempt(
     })
     .expect("validated recruitment must retain a candidate-to-recruiter relationship snapshot");
     let margin = resolve_recruitment_margin(registry.recruitment(), factors, draft.approach);
-    let outcome = classify_recruitment_outcome(margin);
+    let outcome = resolve_recruitment_outcome(margin);
     Ok(RecruitmentPlan {
         draft,
         context: RecruitmentPlanContext {
@@ -647,7 +647,7 @@ fn validate_recruitment_plan_with_authority(
         // leak the hidden recruiting organization: the defector's former organization is told
         // only that the member left, and the player discovers the destination through
         // surveillance, not a global history read. So a defection event omits the destination
-        // organization entity and its name — and also the recruiter, whose membership would
+        // organization entity and its name â€” and also the recruiter, whose membership would
         // resolve straight back to that organization.
         if plan.context.previous_organization.is_some() {
             Some(validate_record_event(
@@ -1252,7 +1252,7 @@ fn weighted(value: u8, weight: i16) -> i16 {
     i16::from(value) * weight / 100
 }
 
-pub(crate) fn classify_recruitment_outcome(margin: i16) -> RecruitmentOutcome {
+pub(crate) fn resolve_recruitment_outcome(margin: i16) -> RecruitmentOutcome {
     if margin >= 0 {
         RecruitmentOutcome::Accepted
     } else {
@@ -1330,7 +1330,7 @@ fn validate_plan_definition(
         .world
         .get_character(plan.draft.recruiter)
         .ok_or(RecruitmentError::MissingRecruiter(plan.draft.recruiter))?;
-    let (pressure_information, perceived_legal_pressure) = select_perceived_legal_pressure_at(
+    let (pressure_information, perceived_legal_pressure) = resolve_perceived_legal_pressure_at(
         definition,
         state,
         plan.draft.candidate,
@@ -1359,13 +1359,13 @@ fn validate_plan_definition(
         plan.context.margin
     );
     debug_assert_eq!(
-        classify_recruitment_outcome(plan.context.margin),
+        resolve_recruitment_outcome(plan.context.margin),
         plan.context.outcome
     );
     Ok(())
 }
 
-pub(crate) fn select_perceived_legal_pressure_at(
+pub(crate) fn resolve_perceived_legal_pressure_at(
     definition: &RecruitmentDefinition,
     state: &AppState,
     candidate: CharacterId,

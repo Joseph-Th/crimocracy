@@ -62,7 +62,7 @@ fn apply_delta(
         let baseline = registry.reputation().baseline();
         let mut record = ReputationRecord::at_baseline(organization, audience, baseline);
         record.set_score(dimension, next);
-        state.reputation.upsert(record);
+        state.reputation.insert_record(record);
     } else {
         let record = state
             .reputation
@@ -271,7 +271,7 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
         .collect();
     let step = i8::try_from(i64::from(registry.reputation().daily_decay_step()))
         .expect("authored decay step fits i8");
-    let baseline = i64::from(registry.reputation().baseline());
+    let baseline = registry.reputation().baseline();
     let mut adjusted = 0_usize;
     for (organization, audience) in touched {
         for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
@@ -283,10 +283,10 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
                 dimension,
             );
             let current_i = i64::from(current);
-            let drifted = if current_i > baseline {
-                (current_i - i64::from(step)).max(baseline)
-            } else if current_i < baseline {
-                (current_i + i64::from(step)).min(baseline)
+            let drifted = if current_i > i64::from(baseline) {
+                (current_i - i64::from(step)).max(i64::from(baseline))
+            } else if current_i < i64::from(baseline) {
+                (current_i + i64::from(step)).min(i64::from(baseline))
             } else {
                 current_i
             };
@@ -299,38 +299,10 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
             }
         }
     }
+    // A fully faded impression is indistinguishable from an absent one by design: erase it
+    // so the sparse-record contract stays literal and state does not grow monotonically.
+    state.reputation.remove_at_baseline(baseline);
     adjusted
-}
-
-/// Read-only standing summary for adapters and future consumers.
-pub struct OrganizationReputationSummary {
-    pub organization: OrganizationId,
-    /// Ascending audience order; only audiences whose impression has moved from baseline
-    /// appear — decayed-back-to-baseline impressions are indistinguishable from forgotten.
-    pub entries: Vec<(AudienceKind, [(ReputationDimension, u8); 4])>,
-}
-
-pub fn resolve_organization_reputation(
-    registry: &Registry,
-    state: &AppState,
-    organization: OrganizationId,
-) -> OrganizationReputationSummary {
-    let baseline = registry.reputation().baseline();
-    let mut entries = Vec::new();
-    for record in state.reputation.records_for_organization(organization) {
-        let dimensions = crate::reputation::ALL_REPUTATION_DIMENSIONS.map(|dimension| {
-            let score = record.score(dimension);
-            (dimension, score)
-        });
-        if dimensions.iter().any(|(_, score)| *score != baseline) {
-            entries.push((record.audience(), dimensions));
-        }
-    }
-    entries.sort_by_key(|(audience, _)| *audience);
-    OrganizationReputationSummary {
-        organization,
-        entries,
-    }
 }
 
 impl ReputationRecord {
@@ -483,46 +455,38 @@ mod tests {
             OperationExposureLevel::Identifying,
         )
         .expect("consequences should apply");
-        let summary = resolve_organization_reputation(&registry, &state, organization);
-        assert_eq!(summary.entries.len(), 3);
-        for (audience, dimensions) in &summary.entries {
+        let touched: Vec<AudienceKind> = state
+            .reputation
+            .records_for_organization(organization)
+            .filter(|record| {
+                crate::reputation::ALL_REPUTATION_DIMENSIONS
+                    .iter()
+                    .any(|dimension| record.score(*dimension) != registry.reputation().baseline())
+            })
+            .map(|record| record.audience())
+            .collect();
+        assert_eq!(touched.len(), 3);
+        for audience in &touched {
+            let record = state
+                .reputation
+                .get_record(organization, *audience)
+                .expect("touched audience should hold a record");
             match audience {
-                AudienceKind::Underworld => {
-                    let competence = dimensions
-                        .iter()
-                        .find(|(dimension, _)| *dimension == ReputationDimension::Competence)
-                        .map(|(_, score)| *score)
-                        .expect("competence dimension should be present");
-                    assert_eq!(
-                        competence,
-                        registry.reputation().baseline()
-                            + registry.reputation().achieved_underworld_competence() as u8
-                    );
-                }
-                AudienceKind::Police => {
-                    let fear = dimensions
-                        .iter()
-                        .find(|(dimension, _)| *dimension == ReputationDimension::Fear)
-                        .map(|(_, score)| *score)
-                        .expect("fear dimension should be present");
-                    assert_eq!(
-                        fear,
-                        registry.reputation().baseline()
-                            + registry.reputation().identifying_exposure_police_fear() as u8
-                    );
-                }
-                AudienceKind::Businesses => {
-                    let fear = dimensions
-                        .iter()
-                        .find(|(dimension, _)| *dimension == ReputationDimension::Fear)
-                        .map(|(_, score)| *score)
-                        .expect("fear dimension should be present");
-                    assert_eq!(
-                        fear,
-                        registry.reputation().baseline()
-                            + registry.reputation().violent_businesses_fear() as u8
-                    );
-                }
+                AudienceKind::Underworld => assert_eq!(
+                    record.score(ReputationDimension::Competence),
+                    registry.reputation().baseline()
+                        + registry.reputation().achieved_underworld_competence() as u8
+                ),
+                AudienceKind::Police => assert_eq!(
+                    record.score(ReputationDimension::Fear),
+                    registry.reputation().baseline()
+                        + registry.reputation().identifying_exposure_police_fear() as u8
+                ),
+                AudienceKind::Businesses => assert_eq!(
+                    record.score(ReputationDimension::Fear),
+                    registry.reputation().baseline()
+                        + registry.reputation().violent_businesses_fear() as u8
+                ),
                 other => panic!("violent success must not touch {other:?}"),
             }
         }
@@ -565,6 +529,14 @@ mod tests {
         assert_eq!(
             last, baseline,
             "impressions fully decay back to the baseline"
+        );
+        // The faded impression is erased, not pinned at baseline: absent means unremarkable.
+        assert!(
+            state
+                .reputation
+                .get_record(organization, AudienceKind::Underworld)
+                .is_none(),
+            "fully decayed record must be removed"
         );
     }
 

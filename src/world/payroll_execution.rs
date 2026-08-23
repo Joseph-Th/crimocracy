@@ -118,8 +118,8 @@ fn apply_organization_payroll(
         .expect("payroll total must not overflow money");
 
     // Wages are paid in full or not at all: a boss either meets payroll or the whole crew goes
-    // unpaid and resentful. Funding drains the organization's general cash accounts only —
-    // enterprise floats are delegated working capital under mandate authority — ordered by
+    // unpaid and resentful. Funding drains the organization's general cash accounts only â€”
+    // enterprise floats are delegated working capital under mandate authority â€” ordered by
     // balance then ID so the debit split is deterministic.
     let available: i64 = funding
         .iter()
@@ -156,7 +156,7 @@ fn apply_organization_payroll(
     if paid.cents() > 0 {
         for member in members
             .iter()
-            .map(|(member, _)| get_or_insert_member_wage_account(state, *member))
+            .map(|(member, _)| member_wage_account(state, *member))
         {
             postings.push(LedgerPosting {
                 account: member,
@@ -206,10 +206,7 @@ fn apply_organization_payroll(
 
 /// The member's personal street-cash pocket, created once on first pay and reused after;
 /// wages land where later financial-satisfaction and bribery systems can find them.
-fn get_or_insert_member_wage_account(
-    state: &mut AppState,
-    member: CharacterId,
-) -> FinancialAccountId {
+fn member_wage_account(state: &mut AppState, member: CharacterId) -> FinancialAccountId {
     let owner = FinancialOwner::Character(member);
     if let Some(existing) = state
         .finance()
@@ -301,26 +298,26 @@ fn report_payroll_shortfall(
         .collect::<std::collections::BTreeSet<_>>();
     entities.insert(EntityRef::Organization(organization));
     let report = validate_record_report(
-    state,
-    ReportDraft {
-      recipient: organization,
-      kind: ReportKind::Financial,
-      title: "Payroll ran short".to_owned(),
-      entries: vec![ReportEntry {
-        attention: AttentionClass::Notable,
-        summary: format!(
-          "Payroll owed {} but only {} could be paid; {} went uncovered and the crew knows who went unpaid.",
-          format_money_cents(outcome.owed().cents()),
-          format_money_cents(outcome.paid().cents()),
-          format_money_cents(outcome.short().cents()),
-        ),
-        sources: Vec::new(),
-        entities,
-        decision: None,
-      }],
-    },
-  )
-  .expect("a payroll shortfall report about live entities must validate");
+        state,
+        ReportDraft {
+            recipient: organization,
+            kind: ReportKind::Financial,
+            title: "Payroll ran short".to_owned(),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: format!(
+                    "Payroll owed {} but only {} could be paid; {} went uncovered and the crew knows who went unpaid.",
+                    format_money_cents(outcome.owed().cents()),
+                    format_money_cents(outcome.paid().cents()),
+                    format_money_cents(outcome.short().cents()),
+                ),
+                sources: Vec::new(),
+                entities,
+                decision: None,
+            }],
+        },
+    )
+    .expect("a payroll shortfall report about live entities must validate");
     report
         .commit(state)
         .expect("validated payroll shortfall report must commit");

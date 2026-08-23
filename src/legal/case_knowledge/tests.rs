@@ -1,10 +1,10 @@
-//! Focused tests for investigator-held case-activity knowledge: emission on staffing and
+﻿//! Focused tests for investigator-held case-activity knowledge: emission on staffing and
 //! cold-case shelving, sightline parsing, and canonical contact-channel disclosure.
 
 use super::*;
 use crate::build_registry;
 use crate::contacts::contact_system::{
-    pending_disclosure_sources, validate_contact_disclosure, validate_establish_contact,
+    find_pending_disclosure_sources, validate_contact_disclosure, validate_establish_contact,
     InstitutionalContactDraft,
 };
 use crate::core::entity::EntityRef;
@@ -299,7 +299,7 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
     .expect("validated contact establishment commits");
 
     // First ask: the channel offers the active-development read.
-    let first = pending_disclosure_sources(&fixture.state, contact);
+    let first = find_pending_disclosure_sources(&fixture.state, contact);
     assert_eq!(first.len(), 1);
     let disclosure = validate_contact_disclosure(&fixture.state, contact, first[0])
         .expect("pending source must disclose")
@@ -323,7 +323,7 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
     );
 
     // The same development cannot be sold twice; nothing new is pending yet.
-    assert!(pending_disclosure_sources(&fixture.state, contact).is_empty());
+    assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
 
     // Shelving the case produces a fresh disclosable development.
     let window = registry.legal().cold_case_window();
@@ -331,7 +331,7 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
         .state
         .advance_clock(SimDuration::from_minutes(window.as_minutes() + 120));
     apply_cold_case_decay(&mut fixture.state, window).expect("decay must succeed");
-    let second = pending_disclosure_sources(&fixture.state, contact);
+    let second = find_pending_disclosure_sources(&fixture.state, contact);
     assert_eq!(second.len(), 1, "the shelf is a fresh, disclosable fact");
     let disclosure = validate_contact_disclosure(&fixture.state, contact, second[0])
         .expect("refreshed knowledge must disclose")
@@ -352,6 +352,6 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
         CaseActivityStatus::parse_summary_marker(record.summary()),
         Some(CaseActivityStatus::Shelved)
     );
-    assert!(pending_disclosure_sources(&fixture.state, contact).is_empty());
+    assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
     validate_invariants(&fixture.state);
 }

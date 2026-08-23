@@ -45,9 +45,9 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` |
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` |
 | `enterprises/` | Routine criminal enterprises and cycle history; delegated daily expansion for non-player organizations through canonical establishment | `enterprise_execution` (lifecycle/settlement/`apply_due_autonomous_enterprises`), `enterprise_reporting` (read-only) |
-| `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons | `business_economy_system` (establishment/settlement/disruption), `business_reporting` (read-only) |
+| `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension | `business_economy_system` (establishment/settlement/disruption/suspension), `business_reporting` (read-only) |
 | `legal/` | Jurisdictions, patrols, investigations/evidence, arrests/custody, representation, prosecution, witnesses, informants, police response, investigator-held case knowledge | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, …) via `legal_state`; `case_knowledge` records lead-investigator activity knowledge through `intelligence_system` |
-| `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `pending_disclosure_sources` read-only offer surface) |
+| `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` |
 | `reputation/` | Contextual per-audience organizational standing with baseline decay; operation consequences feed it, recruitment scoring and expansion posture consume it, player shifts surface as Standing reports | `reputation_system` (`apply_reputation_delta` is the single mutation path; consequences, feedback, and decay are tick passes) |
 
@@ -149,6 +149,7 @@ Single vocabulary across subsystems:
 | aggregate assembly | `build_*` |
 | authored definition registration | `register_*` |
 | runtime insertion/removal | `insert_*`, `remove_*` |
+| in-place record update | `set_*` (field/status writes on an owned record) |
 | read-only decision | `decide_*` |
 | checked command | `validate_*` → `Validated*` |
 | resolved mutation | `apply_*` or consuming `commit` |
