@@ -1,4 +1,4 @@
-//! Release-safe structural validation for the operations subsystem.
+﻿//! Release-safe structural validation for the operations subsystem.
 
 use super::opportunities::validate_operation_exposure_links;
 use crate::core::attention::AttentionClass;
@@ -127,7 +127,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
         for contingency in operation.contingencies() {
             match contingency {
                 OperationContingency::AbortOnPoliceArrivalBeforeEntry
-                | OperationContingency::RequestDecisionOnUnexpectedCondition => {}
+                | OperationContingency::RequestDecisionOnPoliceArrival => {}
             }
         }
         if operation.entry_at().is_some_and(|entry_at| {
@@ -1073,9 +1073,9 @@ fn validate_operation_abort_links(
                 .filter(|decision| {
                     matches!(
                       decision.context(),
-                      DecisionContext::OperationException {
+                      DecisionContext::OperationPoliceArrival {
                         operation: decision_operation,
-                        reason: _,
+                        ..
                       } if decision_operation == operation.id()
                     ) && decision.resolution().is_some_and(|resolution| {
                         resolution.response() == DecisionResponse::Continue
@@ -1128,9 +1128,9 @@ fn validate_operation_abort_links(
             )?;
             let decision_matches = matches!(
               decision.context(),
-              DecisionContext::OperationException {
+              DecisionContext::OperationPoliceArrival {
                 operation: decision_operation,
-                reason: _,
+                ..
               } if decision_operation == operation.id()
             );
             let resolution =

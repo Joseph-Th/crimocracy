@@ -1,7 +1,7 @@
 //! Read-only financial aggregation over enterprise cycle history; ledger-backed cycle records remain the source of truth.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{CharacterId, EnterpriseId, NeighborhoodId, OrganizationId};
+use crate::core::id::{EnterpriseId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 #[cfg(test)]
@@ -41,8 +41,6 @@ pub enum EnterpriseReportingError {
     MissingEnterprise(EnterpriseId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("manager {0} does not exist")]
-    MissingManager(CharacterId),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
     #[error("enterprise financial aggregation overflowed")]
@@ -80,26 +78,6 @@ pub fn resolve_organization_enterprise_financial_summary(
         state
             .enterprises()
             .enterprises_for_organization(organization),
-        period_start,
-        period_end,
-    )
-}
-
-/// Test-only drill-down: production reporting aggregates at the organization level.
-#[cfg(test)]
-pub fn resolve_manager_enterprise_financial_summary(
-    state: &AppState,
-    manager: CharacterId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<EnterpriseFinancialSummary, EnterpriseReportingError> {
-    validate_window(state, period_start, period_end)?;
-    if state.world().get_character(manager).is_none() {
-        return Err(EnterpriseReportingError::MissingManager(manager));
-    }
-    resolve_summary(
-        state,
-        state.enterprises().enterprises_for_manager(manager),
         period_start,
         period_end,
     )

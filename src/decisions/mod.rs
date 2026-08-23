@@ -13,12 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OperationExceptionReason {
-    UnexpectedCondition,
-    PoliceArrival(PoliceResponseId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecruitmentApprovalAuthoritySnapshot {
     authority: MandateAuthority,
     mandate_version: u32,
@@ -77,9 +71,11 @@ impl RecruitmentApprovalContext {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionContext {
-    OperationException {
+    /// A post-entry police arrival paused an in-progress operation and leadership must
+    /// choose whether the crew continues or stands down.
+    OperationPoliceArrival {
         operation: OperationId,
-        reason: OperationExceptionReason,
+        response: PoliceResponseId,
     },
     RecruitmentApproval(RecruitmentApprovalContext),
 }
@@ -87,20 +83,16 @@ pub enum DecisionContext {
 impl DecisionContext {
     pub fn operation(self) -> Option<OperationId> {
         match self {
-            Self::OperationException {
-                operation,
-                reason: _,
-            } => Some(operation),
+            Self::OperationPoliceArrival { operation, .. } => Some(operation),
             Self::RecruitmentApproval(_) => None,
         }
     }
 
     fn pending_key(self) -> DecisionPendingKey {
         match self {
-            Self::OperationException {
-                operation,
-                reason: _,
-            } => DecisionPendingKey::Operation(operation),
+            Self::OperationPoliceArrival { operation, .. } => {
+                DecisionPendingKey::Operation(operation)
+            }
             Self::RecruitmentApproval(context) => DecisionPendingKey::RecruitmentApproval {
                 target_organization: context.target_organization(),
                 recruiter: context.recruiter(),

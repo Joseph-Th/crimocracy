@@ -1,4 +1,4 @@
-//! Scheduled detective pattern analysis; this sibling system derives new case evidence only from evidence already owned by the investigation.
+//! Scheduled detective work; this sibling system derives new case evidence only from evidence already owned by the investigation.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::CaseWitnessId;
@@ -7,7 +7,6 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::legal::case_graph::resolve_evidence_path;
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
@@ -41,22 +40,8 @@ pub enum InvestigationWorkError {
     },
     #[error("investigator {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
-    #[error("investigation work focus must connect two distinct entities")]
+    #[error("investigation work focus must match the work kind")]
     InvalidFocus,
-    #[error("investigation {investigation} has no evidence path between {from:?} and {to:?}")]
-    NoEvidencePath {
-        investigation: InvestigationId,
-        from: EntityRef,
-        to: EntityRef,
-    },
-    #[error(
-        "investigation {investigation} already has direct evidence between {from:?} and {to:?}"
-    )]
-    DirectEvidenceAlreadyExists {
-        investigation: InvestigationId,
-        from: EntityRef,
-        to: EntityRef,
-    },
     #[error("evidence {evidence} has already been reviewed as evidence {derived}")]
     EvidenceAlreadyReviewed {
         evidence: EvidenceId,
@@ -64,7 +49,7 @@ pub enum InvestigationWorkError {
     },
     #[error("scheduled investigation work {work} already covers this case focus")]
     DuplicateScheduledWork { work: InvestigationWorkId },
-    #[error("investigation evidence path is too large to persist as one work item")]
+    #[error("investigation evidence set is too large to persist as one work item")]
     SourceEvidenceCountOverflow,
     #[error("investigation {investigation} changed after work validation; expected version {expected}, found {found}")]
     StaleInvestigation {
@@ -102,7 +87,7 @@ pub enum InvestigationWorkError {
     #[error("witness interview for work {work} could not record a statement: {error}")]
     InterviewStatementFailed {
         work: InvestigationWorkId,
-        error: String,
+        error: crate::legal::witness_system::WitnessError,
     },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
@@ -210,16 +195,6 @@ fn resolve_work_sources(
     draft: InvestigationWorkDraft,
 ) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
     match draft.kind {
-        InvestigationWorkKind::PatternAnalysis => {
-            if !matches!(
-                draft.focus,
-                crate::legal::InvestigationWorkFocus::EntityConnection { .. }
-            ) || draft.focus.from() == draft.focus.to()
-            {
-                return Err(InvestigationWorkError::InvalidFocus);
-            }
-            resolve_pattern_sources(state, draft)
-        }
         InvestigationWorkKind::EvidenceReview => resolve_review_source(state, draft),
         InvestigationWorkKind::WitnessInterview => resolve_interview_focus(state, draft),
     }
@@ -336,35 +311,6 @@ fn validate_no_duplicate_work(
     Ok(())
 }
 
-fn resolve_pattern_sources(
-    state: &AppState,
-    draft: InvestigationWorkDraft,
-) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
-    let path = resolve_evidence_path(
-        state,
-        draft.investigation,
-        draft.focus.from(),
-        draft.focus.to(),
-    )
-    .map_err(|_| InvestigationWorkError::MissingInvestigation(draft.investigation))?
-    .ok_or(InvestigationWorkError::NoEvidencePath {
-        investigation: draft.investigation,
-        from: draft.focus.from(),
-        to: draft.focus.to(),
-    })?;
-    if path.links.len() == 1 {
-        return Err(InvestigationWorkError::DirectEvidenceAlreadyExists {
-            investigation: draft.investigation,
-            from: draft.focus.from(),
-            to: draft.focus.to(),
-        });
-    }
-    if path.links.len() > usize::from(u8::MAX) {
-        return Err(InvestigationWorkError::SourceEvidenceCountOverflow);
-    }
-    Ok(path.links.into_iter().map(|link| link.evidence).collect())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvestigationWorkRandomness {
     variance: i8,
@@ -390,7 +336,6 @@ pub struct InvestigationWorkResolutionPlan {
     outcome: InvestigationWorkOutcome,
     factors: InvestigationWorkFactors,
     margin: i16,
-    superseded_by: Option<EvidenceId>,
 }
 
 impl InvestigationWorkResolutionPlan {
@@ -435,12 +380,8 @@ pub fn decide_investigation_work_resolution(
         .expect("validated scheduled work must have an investigation");
     let (factors, margin) =
         resolve_work_factors_and_margin(definition, state, work, randomness.variance())?;
-    let superseded_by = find_superseding_evidence(state, work);
-    let outcome = if superseded_by.is_some() {
-        InvestigationWorkOutcome::Superseded
-    } else if margin >= definition.connected_margin() {
+    let outcome = if margin >= definition.connected_margin() {
         match work.kind() {
-            InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
             InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
             InvestigationWorkKind::WitnessInterview => InvestigationWorkOutcome::Connected,
         }
@@ -456,7 +397,6 @@ pub fn decide_investigation_work_resolution(
         outcome,
         factors,
         margin,
-        superseded_by,
     })
 }
 
@@ -619,108 +559,6 @@ fn admissibility_score(admissibility: Admissibility) -> u8 {
     }
 }
 
-pub(crate) fn find_superseding_evidence(
-    state: &AppState,
-    work: &InvestigationWorkRecord,
-) -> Option<EvidenceId> {
-    let own_derived = work
-        .resolution()
-        .and_then(|resolution| resolution.derived_evidence());
-    if work.kind() == InvestigationWorkKind::EvidenceReview {
-        let source = work.focus().evidence_id()?;
-        return state
-            .legal
-            .derived_evidence_from(source)
-            .find(|evidence| {
-                Some(evidence.id()) != own_derived
-                    && evidence.kind() == EvidenceKind::ForensicAnalysis
-            })
-            .map(|evidence| evidence.id());
-    }
-    if work.kind() == InvestigationWorkKind::WitnessInterview {
-        // Testimony cannot be superseded by later forensics; only the witness's own
-        // cooperation changes what their account is worth.
-        return None;
-    }
-    let from = work.focus().from();
-    let to = work.focus().to();
-    state
-        .legal
-        .get_investigation(work.investigation())
-        .into_iter()
-        .flat_map(|investigation| investigation.evidence().iter())
-        .filter_map(|id| state.legal.get_evidence(*id))
-        .find(|evidence| {
-            Some(evidence.id()) != own_derived
-                && evidence.origin().is_some_and(|origin| {
-                    (origin == from && evidence.subject() == to)
-                        || (origin == to && evidence.subject() == from)
-                })
-        })
-        .map(|evidence| evidence.id())
-}
-
-pub(crate) fn source_evidence_forms_simple_path(
-    state: &AppState,
-    work: &InvestigationWorkRecord,
-) -> bool {
-    if work.source_evidence().len() < 2 {
-        return false;
-    }
-    let mut adjacency: std::collections::BTreeMap<EntityRef, BTreeSet<EntityRef>> =
-        std::collections::BTreeMap::new();
-    for evidence_id in work.source_evidence() {
-        let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
-            return false;
-        };
-        if evidence.investigation() != work.investigation() {
-            return false;
-        }
-        let Some(origin) = evidence.origin() else {
-            return false;
-        };
-        if origin == evidence.subject() {
-            return false;
-        }
-        adjacency
-            .entry(origin)
-            .or_default()
-            .insert(evidence.subject());
-        adjacency
-            .entry(evidence.subject())
-            .or_default()
-            .insert(origin);
-    }
-    if adjacency.len() != work.source_evidence().len().saturating_add(1)
-        || adjacency
-            .get(&work.focus().from())
-            .is_none_or(|neighbors| neighbors.len() != 1)
-        || adjacency
-            .get(&work.focus().to())
-            .is_none_or(|neighbors| neighbors.len() != 1)
-    {
-        return false;
-    }
-    if adjacency.iter().any(|(entity, neighbors)| {
-        *entity != work.focus().from() && *entity != work.focus().to() && neighbors.len() != 2
-    }) {
-        return false;
-    }
-    let mut visited = BTreeSet::from([work.focus().from()]);
-    let mut frontier = std::collections::VecDeque::from([work.focus().from()]);
-    while let Some(current) = frontier.pop_front() {
-        let Some(neighbors) = adjacency.get(&current) else {
-            return false;
-        };
-        for neighbor in neighbors {
-            if visited.insert(*neighbor) {
-                frontier.push_back(*neighbor);
-            }
-        }
-    }
-    visited.len() == adjacency.len() && visited.contains(&work.focus().to())
-}
-
 pub struct ValidatedInvestigationWorkResolution {
     plan: InvestigationWorkResolutionPlan,
     interview_statement: Option<crate::legal::witness_system::ValidatedWitnessStatement>,
@@ -738,48 +576,6 @@ struct DerivedEvidenceDraft {
     derived_from: BTreeSet<EvidenceId>,
 }
 
-pub(crate) fn resolve_pattern_strength(source_support: Rating) -> EvidenceStrength {
-    if source_support.value() >= 75 {
-        EvidenceStrength::Strong
-    } else {
-        EvidenceStrength::Corroborating
-    }
-}
-
-pub(crate) fn resolve_pattern_admissibility(
-    state: &AppState,
-    work: &InvestigationWorkRecord,
-) -> Admissibility {
-    let source_admissibilities: Vec<Option<Admissibility>> = work
-        .source_evidence()
-        .iter()
-        .map(|id| {
-            state
-                .legal
-                .get_evidence(*id)
-                .map(|evidence| evidence.admissibility())
-        })
-        .collect();
-    // Derived evidence whose entire provenance is inadmissible is itself inadmissible;
-    // calling it merely "disputed" would let it pass autonomous-arrest evidence gates.
-    if !source_admissibilities.is_empty()
-        && source_admissibilities
-            .iter()
-            .all(|admissibility| *admissibility == Some(Admissibility::Inadmissible))
-    {
-        return Admissibility::Inadmissible;
-    }
-    if !source_admissibilities.is_empty()
-        && source_admissibilities
-            .iter()
-            .all(|admissibility| *admissibility == Some(Admissibility::Admissible))
-    {
-        Admissibility::Admissible
-    } else {
-        Admissibility::Disputed
-    }
-}
-
 impl ValidatedInvestigationWorkResolution {
     pub fn commit(
         self,
@@ -788,39 +584,18 @@ impl ValidatedInvestigationWorkResolution {
         validate_resolution_snapshot(state, &self.plan)?;
         let derived_evidence_draft = match self.plan.outcome {
             InvestigationWorkOutcome::Connected => {
-                let work = state
-                    .legal
-                    .get_investigation_work(self.plan.work)
-                    .expect("validated investigation work must exist");
-                match work.kind() {
-                    InvestigationWorkKind::PatternAnalysis => {
-                        let strength = resolve_pattern_strength(self.plan.factors.source_support());
-                        let reliability = minimum_source_reliability(state, work)?;
-                        let admissibility = resolve_pattern_admissibility(state, work);
-                        Some(DerivedEvidenceDraft {
-                            investigation: work.investigation(),
-                            custodian: state
-                                .legal
-                                .get_investigation(work.investigation())
-                                .expect("validated investigation must exist")
-                                .owner(),
-                            subject: work.focus().to(),
-                            origin: Some(work.focus().from()),
-                            kind: EvidenceKind::PatternLink,
-                            strength,
-                            reliability,
-                            admissibility,
-                            derived_from: work.source_evidence().clone(),
-                        })
-                    }
-                    // A connected interview is committed through the canonical witness-
-                    // statement path below; it produces testimony evidence plus the named
-                    // statement record rather than a derived evidence draft.
-                    InvestigationWorkKind::WitnessInterview => None,
-                    InvestigationWorkKind::EvidenceReview => {
-                        unreachable!("evidence review cannot resolve into a connected outcome")
-                    }
-                }
+                // A connected interview is committed through the canonical witness-
+                // statement path below; it produces testimony evidence plus the named
+                // statement record rather than a derived evidence draft.
+                debug_assert_eq!(
+                    state
+                        .legal
+                        .get_investigation_work(self.plan.work)
+                        .expect("validated investigation work must exist")
+                        .kind(),
+                    InvestigationWorkKind::WitnessInterview
+                );
+                None
             }
             InvestigationWorkOutcome::Developed => {
                 let work = state
@@ -852,7 +627,7 @@ impl ValidatedInvestigationWorkResolution {
                     derived_from: BTreeSet::from([source_id]),
                 })
             }
-            InvestigationWorkOutcome::Inconclusive | InvestigationWorkOutcome::Superseded => None,
+            InvestigationWorkOutcome::Inconclusive => None,
         };
         // Successful witness interviews record the testimony through the canonical
         // witness-statement path validated during plan validation.
@@ -860,7 +635,7 @@ impl ValidatedInvestigationWorkResolution {
             Some(statement) => Some(statement.commit(state).map_err(|error| {
                 InvestigationWorkError::InterviewStatementFailed {
                     work: self.plan.work,
-                    error: error.to_string(),
+                    error,
                 }
             })?),
             None => None,
@@ -901,7 +676,6 @@ impl ValidatedInvestigationWorkResolution {
                 outcome: self.plan.outcome,
                 factors: self.plan.factors,
                 margin: self.plan.margin,
-                superseded_by: self.plan.superseded_by,
                 // For interviews this is the testimony evidence produced by the recorded
                 // statement; for other kinds it is the work's own derived evidence.
                 derived_evidence: derived_evidence
@@ -1106,23 +880,6 @@ pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {
     )
 }
 
-pub(crate) fn minimum_source_reliability(
-    state: &AppState,
-    work: &InvestigationWorkRecord,
-) -> Result<EvidenceReliability, InvestigationWorkError> {
-    let mut minimum = EvidenceReliability::HighlyReliable;
-    for evidence_id in work.source_evidence() {
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
-        if reliability_score(evidence.reliability()) < reliability_score(minimum) {
-            minimum = evidence.reliability();
-        }
-    }
-    Ok(minimum)
-}
-
 pub fn validate_investigation_work_resolution_plan(
     registry: &Registry,
     state: &AppState,
@@ -1136,12 +893,8 @@ pub fn validate_investigation_work_resolution_plan(
     let definition = registry.get_investigation_work(work.kind());
     let (expected_factors, expected_margin) =
         resolve_work_factors_and_margin(definition, state, work, plan.factors.variance())?;
-    let expected_superseded_by = find_superseding_evidence(state, work);
-    let expected_outcome = if expected_superseded_by.is_some() {
-        InvestigationWorkOutcome::Superseded
-    } else if expected_margin >= definition.connected_margin() {
+    let expected_outcome = if expected_margin >= definition.connected_margin() {
         match work.kind() {
-            InvestigationWorkKind::PatternAnalysis => InvestigationWorkOutcome::Connected,
             InvestigationWorkKind::EvidenceReview => InvestigationWorkOutcome::Developed,
             InvestigationWorkKind::WitnessInterview => InvestigationWorkOutcome::Connected,
         }
@@ -1152,7 +905,6 @@ pub fn validate_investigation_work_resolution_plan(
         || plan.factors.variance().unsigned_abs() > definition.variance_limit()
         || plan.margin != expected_margin
         || plan.outcome != expected_outcome
-        || plan.superseded_by != expected_superseded_by
     {
         return Err(InvestigationWorkError::StaleWork {
             work: plan.work,
@@ -1176,7 +928,7 @@ pub fn validate_investigation_work_resolution_plan(
             )
             .map_err(|error| InvestigationWorkError::InterviewStatementFailed {
                 work: plan.work,
-                error: error.to_string(),
+                error,
             })?,
         )
     } else {

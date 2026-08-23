@@ -730,7 +730,7 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::InvalidOperationPropertyLiquidationRecovery(kind));
             }
         }
-        if execution.property_proceeds.is_some() != kind.supports_property_acquisition() {
+        if execution.property_proceeds.is_some() != kind.can_acquire_property() {
             return Err(RegistryBuildError::OperationPropertyObjectiveContractMismatch(kind));
         }
         if let Some(cash) = execution.cash_proceeds {
@@ -742,7 +742,7 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::InvalidOperationPartialCashTake(kind));
             }
         }
-        if execution.cash_proceeds.is_some() != kind.supports_cash_acquisition() {
+        if execution.cash_proceeds.is_some() != kind.can_take_cash() {
             return Err(RegistryBuildError::OperationCashObjectiveContractMismatch(
                 kind,
             ));
@@ -800,7 +800,6 @@ impl RegistryBuilder {
         &mut self,
         kind: EnterpriseKind,
         economics: EnterpriseEconomicsDefinition,
-        policy: Option<PolicyKind>,
         required_business_functions: BTreeSet<BusinessFunction>,
         required_network_functions: BTreeSet<BusinessFunction>,
     ) -> Result<(), RegistryBuildError> {
@@ -842,7 +841,6 @@ impl RegistryBuilder {
                 kind,
                 EnterpriseDefinition {
                     economics,
-                    policy,
                     required_business_functions,
                     required_network_functions,
                 },

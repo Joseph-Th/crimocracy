@@ -472,33 +472,22 @@ pub(super) struct ArrestIndexes {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InvestigationWorkKind {
-    PatternAnalysis,
     EvidenceReview,
     WitnessInterview,
 }
 
-pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 3] = [
-    InvestigationWorkKind::PatternAnalysis,
+pub const ALL_INVESTIGATION_WORK_KINDS: [InvestigationWorkKind; 2] = [
     InvestigationWorkKind::EvidenceReview,
     InvestigationWorkKind::WitnessInterview,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InvestigationWorkFocus {
-    EntityConnection { from: EntityRef, to: EntityRef },
     Evidence(EvidenceId),
     Witness(CaseWitnessId),
 }
 
 impl InvestigationWorkFocus {
-    pub fn new(from: EntityRef, to: EntityRef) -> Self {
-        if from <= to {
-            Self::EntityConnection { from, to }
-        } else {
-            Self::EntityConnection { from: to, to: from }
-        }
-    }
-
     pub fn evidence(evidence: EvidenceId) -> Self {
         Self::Evidence(evidence)
     }
@@ -507,35 +496,17 @@ impl InvestigationWorkFocus {
         Self::Witness(case_witness)
     }
 
-    pub fn from(self) -> EntityRef {
-        match self {
-            Self::EntityConnection { from, .. } => from,
-            Self::Evidence(evidence) => EntityRef::Evidence(evidence),
-            // Connection endpoints are meaningless for an interview focus; every caller
-            // guards on work kind before touching them.
-            Self::Witness(_) => unreachable!("witness focus has no connection endpoints"),
-        }
-    }
-
-    pub fn to(self) -> EntityRef {
-        match self {
-            Self::EntityConnection { to, .. } => to,
-            Self::Evidence(evidence) => EntityRef::Evidence(evidence),
-            Self::Witness(_) => unreachable!("witness focus has no connection endpoints"),
-        }
-    }
-
     pub fn evidence_id(self) -> Option<EvidenceId> {
         match self {
             Self::Evidence(evidence) => Some(evidence),
-            Self::EntityConnection { .. } | Self::Witness(_) => None,
+            Self::Witness(_) => None,
         }
     }
 
     pub fn witness_id(self) -> Option<CaseWitnessId> {
         match self {
             Self::Witness(case_witness) => Some(case_witness),
-            Self::EntityConnection { .. } | Self::Evidence(_) => None,
+            Self::Evidence(_) => None,
         }
     }
 }
@@ -551,7 +522,6 @@ pub enum InvestigationWorkOutcome {
     Connected,
     Developed,
     Inconclusive,
-    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,7 +561,6 @@ pub struct InvestigationWorkResolution {
     pub(super) outcome: InvestigationWorkOutcome,
     pub(super) factors: InvestigationWorkFactors,
     pub(super) margin: i16,
-    pub(super) superseded_by: Option<EvidenceId>,
     pub(super) derived_evidence: Option<EvidenceId>,
 }
 
@@ -610,10 +579,6 @@ impl InvestigationWorkResolution {
 
     pub fn margin(&self) -> i16 {
         self.margin
-    }
-
-    pub fn superseded_by(&self) -> Option<EvidenceId> {
-        self.superseded_by
     }
 
     pub fn derived_evidence(&self) -> Option<EvidenceId> {
@@ -713,7 +678,6 @@ pub enum EvidenceKind {
     KnownAssociation,
     Document,
     Ballistics,
-    PatternLink,
     ForensicAnalysis,
 }
 

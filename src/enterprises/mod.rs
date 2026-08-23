@@ -43,7 +43,6 @@ pub enum EnterpriseLocation {
 pub enum EnterpriseStatus {
     Active,
     Suspended,
-    Closed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +67,10 @@ struct EnterpriseRuntime {
     established_at: SimTime,
     next_cycle_at: Option<SimTime>,
     last_cycle_at: Option<SimTime>,
+    /// Trailing-loss counting starts at this instant. Set when the racket resumes after any
+    /// suspension so the authored losing-cycle threshold applies to losses suffered since the
+    /// restart instead of resurrecting pre-suspension history on the first losing cycle.
+    loss_streak_anchor: Option<SimTime>,
     version: u32,
 }
 
@@ -129,6 +132,10 @@ impl EnterpriseRecord {
 
     pub fn last_cycle_at(&self) -> Option<SimTime> {
         self.runtime.last_cycle_at
+    }
+
+    pub(crate) fn loss_streak_anchor(&self) -> Option<SimTime> {
+        self.runtime.loss_streak_anchor
     }
 
     pub fn version(&self) -> u32 {
@@ -224,7 +231,6 @@ pub struct EnterpriseState {
     records: BTreeMap<EnterpriseId, EnterpriseRecord>,
     cycles: BTreeMap<EnterpriseCycleId, EnterpriseCycleRecord>,
     by_organization: BTreeMap<OrganizationId, BTreeSet<EnterpriseId>>,
-    by_manager: BTreeMap<crate::core::id::CharacterId, BTreeSet<EnterpriseId>>,
     by_location: BTreeMap<EnterpriseLocation, BTreeSet<EnterpriseId>>,
     by_supporting_business: BTreeMap<BusinessId, BTreeSet<EnterpriseId>>,
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
@@ -252,17 +258,6 @@ impl EnterpriseState {
     ) -> impl Iterator<Item = &EnterpriseRecord> {
         self.by_organization
             .get(&organization)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
-    }
-
-    pub fn enterprises_for_manager(
-        &self,
-        manager: crate::core::id::CharacterId,
-    ) -> impl Iterator<Item = &EnterpriseRecord> {
-        self.by_manager
-            .get(&manager)
             .into_iter()
             .flatten()
             .filter_map(|id| self.records.get(id))
@@ -340,10 +335,6 @@ impl EnterpriseState {
         let id = record.id();
         self.by_organization
             .entry(record.organization())
-            .or_default()
-            .insert(id);
-        self.by_manager
-            .entry(record.manager())
             .or_default()
             .insert(id);
         self.by_location
@@ -425,6 +416,9 @@ impl EnterpriseState {
         id: EnterpriseId,
         status: EnterpriseStatus,
         next_cycle_at: Option<SimTime>,
+        // Installed only when the enterprise returns to Active: restarts the chronic-loss
+        // grace window so pre-suspension losses cannot instantly re-suspend a resumed racket.
+        loss_streak_anchor: Option<SimTime>,
     ) {
         let (was_active, mandate, old_next_cycle_at) = {
             let record = self
@@ -465,6 +459,9 @@ impl EnterpriseState {
             .expect("validated enterprise disappeared before status commit");
         record.runtime.status = status;
         record.runtime.next_cycle_at = next_cycle_at;
+        if let Some(anchor) = loss_streak_anchor {
+            record.runtime.loss_streak_anchor = Some(anchor);
+        }
         record.runtime.version = record
             .runtime
             .version
@@ -505,10 +502,6 @@ impl EnterpriseState {
                 .get(&record.organization())
                 .is_some_and(|ids| ids.contains(&record.id()))
                 || !self
-                    .by_manager
-                    .get(&record.manager())
-                    .is_some_and(|ids| ids.contains(&record.id()))
-                || !self
                     .by_location
                     .get(&record.location())
                     .is_some_and(|ids| ids.contains(&record.id()))
@@ -545,17 +538,6 @@ impl EnterpriseState {
                     .records
                     .get(id)
                     .is_some_and(|record| record.organization() == *organization)
-                {
-                    return false;
-                }
-            }
-        }
-        for (manager, ids) in &self.by_manager {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.manager() == *manager)
                 {
                     return false;
                 }
@@ -685,6 +667,7 @@ pub(crate) fn build_enterprise_record(
             established_at,
             next_cycle_at: Some(next_cycle_at),
             last_cycle_at: None,
+            loss_streak_anchor: None,
             version: 1,
         },
     }

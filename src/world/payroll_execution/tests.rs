@@ -228,7 +228,11 @@ fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
 fn shortfall_reports_once_to_the_player_organization_only() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
-    fixture.state.set_player_organization(fixture.organization);
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("criminal organization should be eligible as the player organization");
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));

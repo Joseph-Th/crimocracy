@@ -353,7 +353,7 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                     });
                 }
             }
-            EnterpriseStatus::Suspended | EnterpriseStatus::Closed => {
+            EnterpriseStatus::Suspended => {
                 if enterprise.next_cycle_at().is_some() {
                     return Err(StateValidationError::InvalidEnterpriseSchedule {
                         enterprise: enterprise.id(),

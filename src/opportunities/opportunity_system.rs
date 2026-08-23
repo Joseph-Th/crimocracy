@@ -126,8 +126,6 @@ pub enum OpportunityError {
     },
     #[error("operation {operation} targets do not exactly match opportunity targets")]
     OperationTargetsMismatch { operation: OperationId },
-    #[error("operation {operation} does not use the property-acquisition objective required by its opportunity")]
-    OperationObjectiveMismatch { operation: OperationId },
     #[error("operation {operation} is already linked to opportunity {opportunity}")]
     OperationAlreadyLinked {
         operation: OperationId,

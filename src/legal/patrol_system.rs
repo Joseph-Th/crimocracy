@@ -358,7 +358,7 @@ pub(crate) fn resolve_patrol_presence_snapshot(
             .windows()
             .iter()
             .copied()
-            .filter(|window| window_contains_minute(*window, minute))
+            .filter(|window| is_minute_within_patrol_window(*window, minute))
             .map(|window| window.presence())
             .max_by_key(|rating| rating.value())
             .unwrap_or_else(zero_rating);
@@ -461,7 +461,7 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
         .windows()
         .iter()
         .copied()
-        .filter(|window| window_contains_minute(*window, minute))
+        .filter(|window| is_minute_within_patrol_window(*window, minute))
         .map(PatrolWindow::presence)
         .max_by_key(|rating| rating.value())
         .unwrap_or_else(zero_rating);
@@ -597,7 +597,7 @@ fn first_overlapping_minute(windows: &[PatrolWindow]) -> Option<DayMinute> {
     None
 }
 
-fn window_contains_minute(window: PatrolWindow, minute: u16) -> bool {
+fn is_minute_within_patrol_window(window: PatrolWindow, minute: u16) -> bool {
     let elapsed = (u32::from(minute) + u32::from(MINUTES_PER_DAY)
         - u32::from(window.start().value()))
         % u32::from(MINUTES_PER_DAY);

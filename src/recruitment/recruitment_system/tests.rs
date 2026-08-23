@@ -609,7 +609,7 @@ fn save_round_trip_preserves_pending_recruitment_approval() {
             assert_eq!(context.candidate(), fixture.candidate);
             assert_eq!(context.recruiter(), fixture.recruiter);
         }
-        DecisionContext::OperationException { .. } => {
+        DecisionContext::OperationPoliceArrival { .. } => {
             panic!("restored personnel approval changed context")
         }
     }

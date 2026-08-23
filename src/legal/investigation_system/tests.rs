@@ -426,7 +426,12 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
                 custodian: police,
                 subject,
                 origin: Some(origin),
-                kind: EvidenceKind::KnownAssociation,
+                kind: if subject == EntityRef::Character(middle) {
+                    // Reviewable so the scheduled evidence review below can focus it.
+                    EvidenceKind::Fingerprint
+                } else {
+                    EvidenceKind::KnownAssociation
+                },
                 strength: EvidenceStrength::Strong,
                 reliability: EvidenceReliability::Credible,
                 admissibility: Admissibility::Admissible,
@@ -437,20 +442,23 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
         .commit(&mut state)
         .expect("path evidence should commit");
     }
+    let reviewable = state
+        .legal
+        .evidence_of_kind(EvidenceKind::Fingerprint)
+        .next()
+        .expect("fingerprint evidence should exist")
+        .id();
     let work = validate_schedule_investigation_work(
         &registry,
         &state,
         InvestigationWorkDraft {
             investigation,
             investigator: detective,
-            kind: InvestigationWorkKind::PatternAnalysis,
-            focus: InvestigationWorkFocus::new(
-                EntityRef::Character(first),
-                EntityRef::Character(target),
-            ),
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(reviewable),
         },
     )
-    .expect("pattern analysis should validate")
+    .expect("evidence review should validate")
     .commit(&mut state)
     .expect("pattern analysis should schedule");
 

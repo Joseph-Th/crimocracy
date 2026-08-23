@@ -74,7 +74,6 @@ pub(crate) fn validate_contact_information_derivation(
         | InformationSourceKind::Accountant
         | InformationSourceKind::Surveillance
         | InformationSourceKind::StreetRumor
-        | InformationSourceKind::Intercept
         | InformationSourceKind::AfterAction
         | InformationSourceKind::InternalReport => {
             return Err(IntelligenceError::InvalidContactSourceKind(source_kind));

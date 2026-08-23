@@ -2,13 +2,12 @@
 //!
 //! `records.rs` owns the record, draft, enum, and index definitions; `legal_state.rs` owns
 //! [`LegalState`], the single owner of every legal record and derived index, with
-//! `legal_state_validation.rs` holding its projection checks. The twelve subsystem files
-//! (`*_system.rs`, `case_graph.rs`, `case_knowledge.rs`, `investigation_work_execution.rs`)
+//! `legal_state_validation.rs` holding its projection checks. The eleven subsystem files
+//! (`*_system.rs`, `case_knowledge.rs`, `investigation_work_execution.rs`)
 //! implement validation, decision, and commit paths against those records. This facade
 //! re-exports the exact public surface used by `crate::legal::*` consumers.
 
 pub mod arrest_system;
-pub mod case_graph;
 pub mod case_knowledge;
 pub mod informant_system;
 pub mod investigation_system;

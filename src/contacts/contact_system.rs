@@ -466,7 +466,7 @@ fn resolve_contact_kind(
 /// Whether both human endpoints of the channel are out of custody. The pending-disclosure
 /// offer surface and the disclosure commit gate share this rule so their answers can never
 /// disagree.
-fn channel_endpoints_available(state: &AppState, contact: &InstitutionalContactRecord) -> bool {
+fn are_channel_endpoints_available(state: &AppState, contact: &InstitutionalContactRecord) -> bool {
     state
         .legal
         .active_arrest_for_character(contact.handler())
@@ -502,7 +502,7 @@ fn validate_disclosure_source(
 ) -> Result<(), ContactError> {
     // One shared availability rule backs both the offer surface and this commit gate, so a
     // detained handler or contact can never appear actionable and then fail here.
-    if !channel_endpoints_available(state, contact) {
+    if !are_channel_endpoints_available(state, contact) {
         return Err(detention_error(state, contact));
     }
     let information = state
@@ -538,7 +538,7 @@ pub fn find_pending_disclosure_sources(
     let Some(record) = state.contacts().get_contact(contact) else {
         return Vec::new();
     };
-    if record.status() != ContactStatus::Active || !channel_endpoints_available(state, record) {
+    if record.status() != ContactStatus::Active || !are_channel_endpoints_available(state, record) {
         return Vec::new();
     }
     let topics = disclosable_topics(record.kind());

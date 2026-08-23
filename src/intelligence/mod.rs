@@ -35,7 +35,6 @@ pub enum InformationSourceKind {
     Accountant,
     Surveillance,
     StreetRumor,
-    Intercept,
     AfterAction,
     InternalReport,
 }

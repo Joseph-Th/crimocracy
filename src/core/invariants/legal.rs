@@ -11,10 +11,7 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::informant_system::{informant_reliability, informant_strength};
-use crate::legal::investigation_work_execution::{
-    is_reviewable_evidence_kind, resolve_improved_evidence_reliability,
-    source_evidence_forms_simple_path,
-};
+use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
 use crate::legal::witness_system::{resolve_witness_reliability, resolve_witness_strength};
 use crate::legal::{
@@ -485,6 +482,49 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
     Ok(())
 }
 
+/// Shared evidence contract for a completed evidence review: the derived forensic record must
+/// re-derive exactly from its source through the canonical improvement rule. Used by both
+/// release-safe validators so the contract has one owner and cannot drift between them.
+pub(crate) fn validate_developed_review_evidence(
+    state: &AppState,
+    work: &crate::legal::InvestigationWorkRecord,
+    derived_evidence_from_work: &mut BTreeSet<crate::core::id::EvidenceId>,
+) -> Result<(), StateValidationError> {
+    let invalid = || StateValidationError::InvalidInvestigationWork { work: work.id() };
+    let Some(resolution) = work.resolution() else {
+        return Err(invalid());
+    };
+    let investigation = state
+        .legal
+        .get_investigation(work.investigation())
+        .ok_or_else(invalid)?;
+    let source_id = work.focus().evidence_id().ok_or_else(invalid)?;
+    let source = state.legal.get_evidence(source_id).ok_or_else(invalid)?;
+    let derived_id = resolution.derived_evidence().ok_or_else(invalid)?;
+    if !derived_evidence_from_work.insert(derived_id) {
+        return Err(invalid());
+    }
+    let derived = state.legal.get_evidence(derived_id).ok_or_else(invalid)?;
+    if derived.investigation() != work.investigation()
+        || derived.custodian() != investigation.owner()
+        || derived.kind() != EvidenceKind::ForensicAnalysis
+        || derived.subject() != source.subject()
+        || derived.origin() != source.origin()
+        || derived.strength() != source.strength()
+        || derived.reliability()
+            != crate::legal::investigation_work_execution::resolve_improved_evidence_reliability(
+                source.reliability(),
+            )
+        || derived.admissibility() != source.admissibility()
+        || derived.discovered_at() != resolution.resolved_at()
+        || derived.derived_from() != &BTreeSet::from([source_id])
+        || source_id >= derived_id
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateValidationError> {
     for jurisdiction in state.legal.jurisdictions() {
         let organization = state
@@ -849,15 +889,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
             .get_character(work.investigator())
             .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
         let focus_is_valid = match (work.kind(), work.focus()) {
-            (
-                InvestigationWorkKind::PatternAnalysis,
-                InvestigationWorkFocus::EntityConnection { from, to },
-            ) => {
-                from < to
-                    && is_entity_present(state, from)
-                    && is_entity_present(state, to)
-                    && source_evidence_forms_simple_path(state, work)
-            }
             (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Evidence(source)) => {
                 work.source_evidence() == &BTreeSet::from([source])
                     && state.legal.get_evidence(source).is_some_and(|evidence| {
@@ -879,17 +910,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                                 && witness.registered_at() <= work.scheduled_at()
                         })
             }
-            (InvestigationWorkKind::PatternAnalysis, InvestigationWorkFocus::Evidence(_))
-            | (
-                InvestigationWorkKind::EvidenceReview,
-                InvestigationWorkFocus::EntityConnection { from: _, to: _ },
-            )
-            | (InvestigationWorkKind::PatternAnalysis, InvestigationWorkFocus::Witness(_))
-            | (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Witness(_))
-            | (
-                InvestigationWorkKind::WitnessInterview,
-                InvestigationWorkFocus::EntityConnection { .. },
-            )
+            (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Witness(_))
             | (InvestigationWorkKind::WitnessInterview, InvestigationWorkFocus::Evidence(_)) => {
                 false
             }
@@ -943,38 +964,8 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                             });
                         }
                         match work.kind() {
-                            InvestigationWorkKind::PatternAnalysis => {
-                                if resolution.superseded_by().is_some() {
-                                    return Err(StateValidationError::InvalidInvestigationWork {
-                                        work: work.id(),
-                                    });
-                                }
-                                let derived = state.legal.get_evidence(derived_id).ok_or(
-                                    StateValidationError::InvalidInvestigationWork {
-                                        work: work.id(),
-                                    },
-                                )?;
-                                if derived.investigation() != work.investigation()
-                                    || derived.custodian() != investigation.owner()
-                                    || derived.kind() != EvidenceKind::PatternLink
-                                    || derived.origin() != Some(work.focus().from())
-                                    || derived.subject() != work.focus().to()
-                                    || derived.discovered_at() != resolution.resolved_at()
-                                    || derived.derived_from() != work.source_evidence()
-                                    || work
-                                        .source_evidence()
-                                        .iter()
-                                        .any(|source| *source >= derived_id)
-                                {
-                                    return Err(StateValidationError::InvalidInvestigationWork {
-                                        work: work.id(),
-                                    });
-                                }
-                            }
                             InvestigationWorkKind::WitnessInterview => {
-                                if resolution.superseded_by().is_some()
-                                    || !work.source_evidence().is_empty()
-                                {
+                                if !work.source_evidence().is_empty() {
                                     return Err(StateValidationError::InvalidInvestigationWork {
                                         work: work.id(),
                                     });
@@ -1025,106 +1016,19 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                         }
                     }
                     InvestigationWorkOutcome::Developed => {
-                        if work.kind() != InvestigationWorkKind::EvidenceReview
-                            || resolution.superseded_by().is_some()
-                        {
+                        if work.kind() != InvestigationWorkKind::EvidenceReview {
                             return Err(StateValidationError::InvalidInvestigationWork {
                                 work: work.id(),
                             });
                         }
-                        let source_id = work.focus().evidence_id().ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
+                        validate_developed_review_evidence(
+                            state,
+                            work,
+                            &mut derived_evidence_from_work,
                         )?;
-                        let source = state.legal.get_evidence(source_id).ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        let derived_id = resolution.derived_evidence().ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        if !derived_evidence_from_work.insert(derived_id) {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
-                        }
-                        let derived = state.legal.get_evidence(derived_id).ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        if derived.investigation() != work.investigation()
-                            || derived.custodian() != investigation.owner()
-                            || derived.kind() != EvidenceKind::ForensicAnalysis
-                            || derived.subject() != source.subject()
-                            || derived.origin() != source.origin()
-                            || derived.strength() != source.strength()
-                            || derived.reliability()
-                                != resolve_improved_evidence_reliability(source.reliability())
-                            || derived.admissibility() != source.admissibility()
-                            || derived.discovered_at() != resolution.resolved_at()
-                            || derived.derived_from() != &BTreeSet::from([source_id])
-                            || source_id >= derived_id
-                        {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
-                        }
                     }
                     InvestigationWorkOutcome::Inconclusive => {
-                        if resolution.superseded_by().is_some()
-                            || resolution.derived_evidence().is_some()
-                        {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
-                        }
-                    }
-                    InvestigationWorkOutcome::Superseded => {
                         if resolution.derived_evidence().is_some() {
-                            return Err(StateValidationError::InvalidInvestigationWork {
-                                work: work.id(),
-                            });
-                        }
-                        let superseding_id = resolution.superseded_by().ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        let superseding = state.legal.get_evidence(superseding_id).ok_or(
-                            StateValidationError::InvalidInvestigationWork { work: work.id() },
-                        )?;
-                        let valid_superseding = match (work.kind(), work.focus()) {
-                            (
-                                InvestigationWorkKind::PatternAnalysis,
-                                InvestigationWorkFocus::EntityConnection { from, to },
-                            ) => superseding.origin().is_some_and(|origin| {
-                                (origin == from && superseding.subject() == to)
-                                    || (origin == to && superseding.subject() == from)
-                            }),
-                            (
-                                InvestigationWorkKind::EvidenceReview,
-                                InvestigationWorkFocus::Evidence(source),
-                            ) => {
-                                superseding.kind() == EvidenceKind::ForensicAnalysis
-                                    && superseding.derived_from() == &BTreeSet::from([source])
-                            }
-                            (
-                                InvestigationWorkKind::PatternAnalysis,
-                                InvestigationWorkFocus::Evidence(_),
-                            )
-                            | (
-                                InvestigationWorkKind::EvidenceReview,
-                                InvestigationWorkFocus::EntityConnection { from: _, to: _ },
-                            )
-                            | (
-                                InvestigationWorkKind::PatternAnalysis,
-                                InvestigationWorkFocus::Witness(_),
-                            )
-                            | (
-                                InvestigationWorkKind::EvidenceReview,
-                                InvestigationWorkFocus::Witness(_),
-                            )
-                            | (InvestigationWorkKind::WitnessInterview, _) => false,
-                        };
-                        if superseding.investigation() != work.investigation()
-                            || superseding.discovered_at() > resolution.resolved_at()
-                            || !valid_superseding
-                        {
                             return Err(StateValidationError::InvalidInvestigationWork {
                                 work: work.id(),
                             });
@@ -1368,7 +1272,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                     | EvidenceKind::KnownAssociation
                     | EvidenceKind::Document
                     | EvidenceKind::Ballistics
-                    | EvidenceKind::PatternLink
                     | EvidenceKind::ForensicAnalysis => false,
                 };
             if !valid_source {
@@ -1389,16 +1292,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
             });
         }
         match evidence.kind() {
-            EvidenceKind::PatternLink => {
-                if evidence.source().is_some()
-                    || evidence.derived_from().len() < 2
-                    || !derived_evidence_from_work.contains(&evidence.id())
-                {
-                    return Err(StateValidationError::InvalidEvidenceProvenance {
-                        evidence: evidence.id(),
-                    });
-                }
-            }
             EvidenceKind::ForensicAnalysis => {
                 if evidence.source().is_some()
                     || evidence.derived_from().len() != 1

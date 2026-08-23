@@ -757,12 +757,13 @@ fn stale_economy_version_rejects_sabotage_disruption_atomically() {
     fixture
         .state
         .economy
-        .set_status(business, BusinessOperatingStatus::Suspended, None);
+        .set_status(business, BusinessOperatingStatus::Suspended, None, None);
     if let Some(next_cycle_at) = next_cycle_at {
         fixture.state.economy.set_status(
             business,
             BusinessOperatingStatus::Active,
             Some(next_cycle_at),
+            None,
         );
     }
     let error = disruption
@@ -909,5 +910,35 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
             .map(|economy| economy.status()),
         Some(crate::economy::BusinessOperatingStatus::Active)
     );
+
+    // Resumption restarts the losing-cycle grace window: pre-suspension losses must not
+    // re-suspend the economy on its first post-resume losing settlement.
+    for cycle_index in 0..threshold {
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_business_cycle(&registry, &state, business, -500)
+            .expect("post-resume losing cycle should decide");
+        assert!(plan.net_cash().cents() < 0);
+        validate_business_cycle_plan(&state, plan)
+            .expect("post-resume losing plan should validate")
+            .commit(&mut state)
+            .expect("post-resume losing cycle should commit");
+        let status = state
+            .economy()
+            .get_business_economy(business)
+            .map(|economy| economy.status());
+        if cycle_index + 1 < threshold {
+            assert_eq!(
+                status,
+                Some(crate::economy::BusinessOperatingStatus::Active),
+                "a resumed economy gets a fresh grace window"
+            );
+        } else {
+            assert_eq!(
+                status,
+                Some(crate::economy::BusinessOperatingStatus::Suspended),
+                "threshold consecutive post-resume losses suspend again"
+            );
+        }
+    }
     crate::core::invariants::validate_invariants(&state);
 }

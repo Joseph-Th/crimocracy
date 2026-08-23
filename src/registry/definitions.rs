@@ -1,4 +1,4 @@
-﻿//! Authored definition types for the immutable registry; `mod.rs` owns the lookup surface and `builder.rs` the validated assembly.
+//! Authored definition types for the immutable registry; `mod.rs` owns the lookup surface and `builder.rs` the validated assembly.
 
 use crate::core::attention::AttentionClass;
 use crate::core::time::SimDuration;
@@ -7,9 +7,7 @@ use crate::intelligence::{InformationTopic, Reliability, Specificity};
 use crate::legal::EvidenceKind;
 use crate::operations::{OperationApproach, RoleKind};
 use crate::recruitment::RecruitmentApproach;
-use crate::world::{
-    BusinessFunction, CapabilityKind, DriveKind, PolicyKind, PolicySetting, TraitKind,
-};
+use crate::world::{BusinessFunction, CapabilityKind, DriveKind, PolicySetting, TraitKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug)]
@@ -476,16 +474,12 @@ impl EnterpriseEconomicsDefinition {
 #[derive(Clone, Debug)]
 pub struct EnterpriseDefinition {
     pub(super) economics: EnterpriseEconomicsDefinition,
-    pub(super) policy: Option<PolicyKind>,
     pub(super) required_business_functions: BTreeSet<BusinessFunction>,
     pub(super) required_network_functions: BTreeSet<BusinessFunction>,
 }
 impl EnterpriseDefinition {
     pub fn economics(&self) -> &EnterpriseEconomicsDefinition {
         &self.economics
-    }
-    pub fn policy(&self) -> Option<PolicyKind> {
-        self.policy
     }
     pub fn required_business_functions(&self) -> &BTreeSet<BusinessFunction> {
         &self.required_business_functions

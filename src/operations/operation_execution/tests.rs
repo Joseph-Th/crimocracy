@@ -1,4 +1,4 @@
-﻿//! Focused tests for deterministic operation resolution, proceeds, exposure, and dispositions.
+//! Focused tests for deterministic operation resolution, proceeds, exposure, and dispositions.
 
 use super::*;
 use crate::build_registry;
@@ -11,11 +11,9 @@ use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
-    validate_request_decision, validate_resolve_decision, DecisionError,
+    validate_request_police_arrival_decision_on_arrival, validate_resolve_decision, DecisionError,
 };
-use crate::decisions::{
-    DecisionContext, DecisionRequestDraft, DecisionResponse, OperationExceptionReason,
-};
+use crate::decisions::{DecisionContext, DecisionResponse};
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::intelligence::intelligence_system::validate_record_information;
@@ -182,7 +180,7 @@ fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId)
             roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
-            contingencies: vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+            contingencies: vec![OperationContingency::RequestDecisionOnPoliceArrival],
             scheduled_for: SimTime::from_minutes(1),
         },
     )
@@ -302,6 +300,22 @@ fn make_exposed_business_operation_fixture_with_contingencies(
     NeighborhoodId,
     OperationId,
 ) {
+    make_exposed_operation_fixture(OperationKind::Burglary, assign_jurisdiction, contingencies)
+}
+
+/// Builds an observable operation of `kind` against an independent retail business, optionally
+/// inside an assigned police jurisdiction so trace exposure can open a case through intake.
+fn make_exposed_operation_fixture(
+    kind: OperationKind,
+    assign_jurisdiction: bool,
+    contingencies: Vec<OperationContingency>,
+) -> (
+    Registry,
+    AppState,
+    OrganizationId,
+    NeighborhoodId,
+    OperationId,
+) {
     let registry = build_registry();
     let mut state = AppState::new(0xE710_1933);
     let organization = insert_organization(
@@ -370,6 +384,37 @@ fn make_exposed_business_operation_fixture_with_contingencies(
         },
     )
     .expect("exposure business should validate");
+    if kind == OperationKind::Sabotage {
+        // DisruptBusiness authorization requires an operating economy on the target.
+        let operating = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::LegitimateOperating,
+            },
+        )
+        .expect("sabotage operating account should validate");
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .expect("sabotage settlement account should validate");
+        crate::economy::business_economy_system::validate_establish_business_economy(
+            &registry,
+            &state,
+            crate::economy::BusinessEconomyDraft {
+                business,
+                operating_account: operating,
+                settlement_account: settlement,
+            },
+        )
+        .expect("sabotage target economy should establish")
+        .commit(&mut state)
+        .expect("sabotage target economy should commit");
+    }
     let leader = insert_character(
         &mut state,
         CharacterDraft {
@@ -418,12 +463,22 @@ fn make_exposed_business_operation_fixture_with_contingencies(
         &registry,
         &state,
         OperationDraft {
-            title: "Observed burglary".to_owned(),
-            kind: OperationKind::Burglary,
+            title: match kind {
+                OperationKind::Burglary => "Observed burglary".to_owned(),
+                OperationKind::Sabotage => "Observed sabotage".to_owned(),
+                _ => unreachable!("exposure fixture supports only scene-trace operation kinds"),
+            },
+            kind,
             responsible_organization: organization,
             leader,
-            objective: OperationObjective::AcquireProperty {
-                target: EntityRef::Business(business),
+            objective: match kind {
+                OperationKind::Burglary => OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(business),
+                },
+                OperationKind::Sabotage => OperationObjective::DisruptBusiness {
+                    target: EntityRef::Business(business),
+                },
+                _ => unreachable!("exposure fixture supports only scene-trace operation kinds"),
             },
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([
@@ -440,6 +495,33 @@ fn make_exposed_business_operation_fixture_with_contingencies(
     .commit(&mut state)
     .expect("exposure operation should commit");
     (registry, state, police, neighborhood, operation)
+}
+
+#[test]
+fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() {
+    // Regression: authored sabotage exposure once carried the ForensicAnalysis evidence kind,
+    // which the legal intake gate rejects, so any trace-exposing sabotage panicked the tick
+    // at plan validation. Sabotage now leaves physical-trace evidence like other scene work.
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Sabotage, true, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let resolution_outcome = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.resolved_operations.is_empty() {
+            break outcome;
+        }
+    };
+    assert!(!resolution_outcome.resolved_operations.is_empty());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("resolved sabotage should persist");
+    assert_eq!(record.status(), OperationStatus::Completed);
+    validate_state(&state).expect("sabotage resolution state should validate");
+    validate_state_against_registry(&registry, &state)
+        .expect("sabotage intake evidence should match the authored exposure kind");
+    validate_invariants(&state);
 }
 
 #[test]
@@ -641,45 +723,45 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
 }
 
 #[test]
-fn authority_exception_pauses_and_shifts_operation_resolution_schedule() {
-    let (registry, mut state, organization, operation) = make_operation_fixture();
-    for _ in 0..5 {
-        run_tick(&registry, &mut state);
-    }
+fn police_arrival_decision_pauses_and_shifts_operation_resolution_schedule() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should exist")
+        .responsible_organization();
     let due_before_pause = state
         .operations()
         .get_operation(operation)
         .expect("operation should exist")
         .resolution_due_at()
         .expect("in-progress operation should be scheduled for resolution");
-    assert_eq!(due_before_pause, SimTime::from_minutes(21));
-    let leader = state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should exist")
-        .leader();
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "Execution encountered a condition outside standing authority.".to_owned(),
-        },
-    )
-    .expect("operation exception should validate")
-    .commit(&mut state)
-    .expect("validated operation exception should commit");
+
+    // The response arrives post-entry and raises the leadership decision automatically.
+    let paused_at = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.decision_requests.is_empty() {
+            break outcome.now;
+        }
+        assert!(outcome.resolved_operations.is_empty());
+    };
+    let decision_id = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("arrival decision should be pending");
     assert_eq!(
         state
             .operations()
             .get_operation(operation)
             .expect("operation should exist")
             .awaiting_decision_since(),
-        Some(SimTime::from_minutes(5))
+        Some(paused_at)
     );
 
     for _ in 0..10 {
@@ -689,7 +771,7 @@ fn authority_exception_pauses_and_shifts_operation_resolution_schedule() {
     validate_resolve_decision(
         &registry,
         &state,
-        decision.decision,
+        decision_id,
         organization,
         DecisionResponse::Continue,
     )
@@ -702,25 +784,44 @@ fn authority_exception_pauses_and_shifts_operation_resolution_schedule() {
         .expect("operation should exist after resume");
     assert_eq!(resumed.status(), OperationStatus::InProgress);
     assert_eq!(resumed.awaiting_decision_since(), None);
-    assert_eq!(resumed.resolution_due_at(), Some(SimTime::from_minutes(31)));
+    // The pause shifts the resolution deadline by exactly its duration.
+    assert_eq!(
+        resumed.resolution_due_at(),
+        Some(SimTime::from_minutes(due_before_pause.as_minutes() + 10))
+    );
 
-    for _ in 0..15 {
+    let shifted_due = resumed.resolution_due_at().expect("shifted deadline");
+    loop {
         let outcome = run_tick(&registry, &mut state);
-        assert!(outcome.resolved_operations.is_empty());
+        if !outcome.resolved_operations.is_empty() {
+            assert_eq!(outcome.now, shifted_due);
+            assert_eq!(outcome.resolved_operations, vec![operation]);
+            break;
+        }
     }
-    let outcome = run_tick(&registry, &mut state);
-    assert_eq!(outcome.now, SimTime::from_minutes(31));
-    assert_eq!(outcome.resolved_operations, vec![operation]);
     validate_state(&state).expect("resumed operation state should validate");
     validate_invariants(&state);
 }
 
 #[test]
 fn resume_rejects_participant_booked_into_the_pause_extension_window() {
-    let (registry, mut state, organization, operation) = make_operation_fixture();
-    for _ in 0..5 {
-        run_tick(&registry, &mut state);
-    }
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    run_tick(&registry, &mut state);
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should exist")
+        .responsible_organization();
+    let original_due = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should exist")
+        .resolution_due_at()
+        .expect("in-progress operation should be scheduled for resolution");
     let leader = state
         .operations()
         .get_operation(operation)
@@ -739,8 +840,20 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
         })
         .expect("fixture objective should reference its target business");
 
-    // Authorized before the pause: this window sits past the first operation's original
-    // resolution deadline, so authorization sees no conflict.
+    // The response arrives post-entry and pauses the operation pending leadership.
+    let paused_at = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.decision_requests.is_empty() {
+            break outcome.now;
+        }
+    };
+    let decision_id = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("arrival decision should be pending");
+    // Scheduled past the un-shifted deadline: authorization sees no conflict against the
+    // paused operation's stale window.
+    let follow_up_start = SimTime::from_minutes(original_due.as_minutes() + 3);
     let follow_up = validate_authorize_operation(
         &registry,
         &state,
@@ -757,38 +870,23 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
-            scheduled_for: SimTime::from_minutes(25),
+            scheduled_for: follow_up_start,
         },
     )
     .expect("follow-up operation should validate")
     .commit(&mut state)
     .expect("follow-up operation should commit");
 
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "Execution encountered a condition outside standing authority.".to_owned(),
-        },
-    )
-    .expect("operation exception should validate")
-    .commit(&mut state)
-    .expect("validated operation exception should commit");
-
-    // Ten paused minutes shift the first operation's deadline from 21 to 31, past the
-    // follow-up's scheduled start at 25.
-    for _ in 0..10 {
+    // Pause long enough that the shifted deadline moves past the follow-up's start; the
+    // extension then double-books the shared leader and the continue must be rejected.
+    let pause_minutes_needed = follow_up_start.as_minutes() - original_due.as_minutes() + 2;
+    while state.now().as_minutes() - paused_at.as_minutes() < pause_minutes_needed {
         run_tick(&registry, &mut state);
     }
     let error = match validate_resolve_decision(
         &registry,
         &state,
-        decision.decision,
+        decision_id,
         organization,
         DecisionResponse::Continue,
     ) {
@@ -815,157 +913,42 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
 }
 
 #[test]
-fn police_response_arrives_during_decision_pause_and_continue_honors_standing_abort() {
+fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(
             true,
-            vec![
-                OperationContingency::AbortOnPoliceArrivalBeforeEntry,
-                OperationContingency::RequestDecisionOnUnexpectedCondition,
-            ],
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
-    let start = run_tick(&registry, &mut state);
-    assert_eq!(start.started_operations, vec![operation]);
-    let operation_record = state
-        .operations()
-        .get_operation(operation)
-        .expect("started operation should persist");
-    let response_id = operation_record
-        .police_response()
-        .expect("observable burglary should dispatch police response");
-    let organization = operation_record.responsible_organization();
-    let leader = operation_record.leader();
-
-    let second_tick = run_tick(&registry, &mut state);
-    assert!(second_tick.arrived_police_responses.is_empty());
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "Entry team encountered an unexpected security condition.".to_owned(),
-        },
-    )
-    .expect("operation exception should validate")
-    .commit(&mut state)
-    .expect("operation exception should commit");
-    let paused_at = state.now();
-    assert_eq!(paused_at, SimTime::from_minutes(2));
-
-    let response_due = state
-        .legal()
-        .get_police_response(response_id)
-        .expect("response should persist")
-        .arrival_due_at();
-    while state.now() < response_due {
-        let outcome = run_tick(&registry, &mut state);
-        assert_eq!(
-            state
-                .operations()
-                .get_operation(operation)
-                .expect("decision-blocked operation should persist")
-                .status(),
-            OperationStatus::AwaitingDecision
-        );
-        if outcome.now < response_due {
-            assert!(outcome.arrived_police_responses.is_empty());
-        }
-    }
-    assert_eq!(
-        state
-            .legal()
-            .get_police_response(response_id)
-            .and_then(|response| response.arrived_at()),
-        Some(response_due)
-    );
-    assert!(state
-        .decisions()
-        .get_decision(decision.decision)
-        .expect("pending decision should persist")
-        .resolution()
-        .is_none());
-
-    for _ in 0..2 {
-        let outcome = run_tick(&registry, &mut state);
-        assert!(outcome.resolved_operations.is_empty());
-    }
-    let resolved_at = state.now();
-    validate_resolve_decision(
-        &registry,
-        &state,
-        decision.decision,
-        organization,
-        DecisionResponse::Continue,
-    )
-    .expect("continue should validate while preserving standing contingencies")
-    .commit(&mut state)
-    .expect("continue resolution should atomically honor the police contingency");
-
-    let operation_record = state
-        .operations()
-        .get_operation(operation)
-        .expect("aborted operation should persist");
-    assert_eq!(operation_record.status(), OperationStatus::Aborted);
-    assert_eq!(operation_record.awaiting_decision_since(), Some(paused_at));
-    let abort = operation_record
-        .abort_record()
-        .expect("standing contingency should persist abort history");
-    assert_eq!(abort.phase(), OperationAbortPhase::AwaitingDecision);
-    assert_eq!(
-        abort.cause(),
-        OperationAbortCause::PoliceArrival(response_id)
-    );
-    assert_eq!(abort.aborted_at(), resolved_at);
-    let decision_resolution = state
-        .decisions()
-        .get_decision(decision.decision)
-        .and_then(|decision| decision.resolution())
-        .expect("continue decision should remain historical");
-    assert_eq!(decision_resolution.response(), DecisionResponse::Continue);
-    assert_eq!(decision_resolution.resolved_at(), resolved_at);
-    validate_state(&state).expect("continuous-time police response state should validate");
-    validate_state_against_registry(&registry, &state)
-        .expect("continuous-time response state should match authored content");
-    validate_invariants(&state);
-}
-
-#[test]
-fn authority_exception_abort_persists_decision_provenance_and_after_action_artifacts() {
-    let (registry, mut state, organization, operation) = make_operation_fixture();
-    for _ in 0..5 {
-        run_tick(&registry, &mut state);
-    }
-    let leader = state
+    run_tick(&registry, &mut state);
+    let organization = state
         .operations()
         .get_operation(operation)
         .expect("operation should exist")
-        .leader();
-    let decision_summary =
-        "Alarm hardware differs from the intelligence and exceeds standing authority.";
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: decision_summary.to_owned(),
-        },
-    )
-    .expect("operation exception should validate")
-    .commit(&mut state)
-    .expect("operation exception should commit");
+        .responsible_organization();
+    // The post-entry arrival pauses the operation pending leadership direction.
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        assert!(outcome.resolved_operations.is_empty());
+        if !outcome.decision_requests.is_empty() {
+            break;
+        }
+    }
+    let decision_id = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("arrival decision should be pending");
+    let decision_summary = state
+        .decisions()
+        .get_decision(decision_id)
+        .expect("decision should persist")
+        .summary()
+        .to_owned();
+    assert!(decision_summary.contains("Leadership direction is required"));
 
     let outcome = validate_resolve_decision(
         &registry,
         &state,
-        decision.decision,
+        decision_id,
         organization,
         DecisionResponse::Abort,
     )
@@ -974,6 +957,7 @@ fn authority_exception_abort_persists_decision_provenance_and_after_action_artif
     .expect("abort response should atomically terminate the operation");
     assert!(outcome.recruitment_attempt.is_none());
 
+    let aborted_at = state.now();
     let record = state
         .operations()
         .get_operation(operation)
@@ -983,15 +967,12 @@ fn authority_exception_abort_persists_decision_provenance_and_after_action_artif
     let abort = record
         .abort_record()
         .expect("decision abort should persist abort provenance");
-    assert_eq!(abort.aborted_at(), SimTime::from_minutes(5));
+    assert_eq!(abort.aborted_at(), aborted_at);
     assert_eq!(abort.phase(), OperationAbortPhase::AwaitingDecision);
-    assert_eq!(
-        abort.cause(),
-        OperationAbortCause::Decision(decision.decision)
-    );
+    assert_eq!(abort.cause(), OperationAbortCause::Decision(decision_id));
     let decision_record = state
         .decisions()
-        .get_decision(decision.decision)
+        .get_decision(decision_id)
         .expect("resolved decision should persist");
     let resolution = decision_record
         .resolution()
@@ -1006,7 +987,7 @@ fn authority_exception_abort_persists_decision_provenance_and_after_action_artif
         .intelligence()
         .get_information(artifacts.information())
         .expect("abort information should persist");
-    assert!(information.summary().contains(decision_summary));
+    assert!(information.summary().contains(decision_summary.as_str()));
     let report = state
         .reports()
         .get_report(artifacts.report())
@@ -1014,7 +995,7 @@ fn authority_exception_abort_persists_decision_provenance_and_after_action_artif
     assert_eq!(report.entries()[0].summary, information.summary());
     assert!(report.entries()[0]
         .entities
-        .contains(&EntityRef::DecisionRequest(decision.decision)));
+        .contains(&EntityRef::DecisionRequest(decision_id)));
     let history = state
         .history()
         .get_event(artifacts.history_event())
@@ -1022,7 +1003,7 @@ fn authority_exception_abort_persists_decision_provenance_and_after_action_artif
     assert_eq!(history.summary(), information.summary());
     assert!(history
         .entities()
-        .contains(&EntityRef::DecisionRequest(decision.decision)));
+        .contains(&EntityRef::DecisionRequest(decision_id)));
 
     for _ in 0..30 {
         let tick = run_tick(&registry, &mut state);
@@ -2129,7 +2110,7 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(
             true,
-            vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
     validate_establish_patrol_deployment(
         &state,
@@ -2186,9 +2167,9 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
     assert_eq!(decision.requested_at(), response_due);
     assert!(matches!(
       decision.context(),
-      DecisionContext::OperationException {
+      DecisionContext::OperationPoliceArrival {
         operation: decision_operation,
-        reason: OperationExceptionReason::PoliceArrival(decision_response),
+        response: decision_response,
       } if decision_operation == operation && decision_response == response_id
     ));
     assert!(decision.summary().contains("response reached"));
@@ -2242,188 +2223,22 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
             .and_then(|response| response.arrived_at()),
         Some(response_due)
     );
-    let duplicate = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: resumed.leader(),
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::PoliceArrival(response_id),
-            },
-            attention: AttentionClass::Exception,
-            summary: "Police arrival should not be raised twice.".to_owned(),
-        },
-    )
-    .expect_err("one police response must not create duplicate leadership decisions");
+    // One police response must never produce two leadership decisions.
+    // One police response must never produce two leadership decisions: once its arrival
+    // decision exists the operation is decision-blocked, and after resolution the response
+    // is no longer a freshly-due dispatch.
+    let duplicate = validate_request_police_arrival_decision_on_arrival(&state, response_id)
+        .expect_err("one police response must not create duplicate leadership decisions");
     assert_eq!(
         duplicate,
-        DecisionError::DuplicatePoliceResponseDecision {
+        DecisionError::InvalidPoliceResponseDecision {
+            operation,
             response: response_id,
-            decision: decision_id,
         }
     );
     validate_state(&state).expect("post-entry response decision state should validate");
     validate_state_against_registry(&registry, &state)
         .expect("post-entry response decision should match authored content");
-    validate_invariants(&state);
-}
-
-#[test]
-fn police_arrival_during_another_decision_becomes_deferred_follow_up() {
-    let (registry, mut state, police, neighborhood, operation) =
-        make_exposed_business_operation_fixture_with_contingencies(
-            true,
-            vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
-        );
-    let organization = state
-        .operations()
-        .get_operation(operation)
-        .expect("authorized operation should persist")
-        .responsible_organization();
-    designate_player_organization(&mut state, organization)
-        .expect("operation organization should be eligible as the player organization");
-    validate_establish_patrol_deployment(
-        &state,
-        PatrolDeploymentDraft {
-            organization: police,
-            neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(0).expect("zero patrol presence should validate"),
-            )
-            .expect("fixture patrol window should validate")],
-        },
-    )
-    .expect("zero-presence patrol should validate")
-    .commit(&mut state)
-    .expect("zero-presence patrol should commit");
-
-    let start = run_tick(&registry, &mut state);
-    assert_eq!(start.started_operations, vec![operation]);
-    let response_id = state
-        .operations()
-        .get_operation(operation)
-        .and_then(|record| record.police_response())
-        .expect("observable burglary should dispatch response");
-    let response_due = state
-        .legal()
-        .get_police_response(response_id)
-        .expect("response should persist")
-        .arrival_due_at();
-    while state.now() < SimTime::from_minutes(5) {
-        run_tick(&registry, &mut state);
-    }
-
-    let leader = state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should persist")
-        .leader();
-    let first = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "A separate execution exception requires leadership direction.".to_owned(),
-        },
-    )
-    .expect("initial exception decision should validate")
-    .commit(&mut state)
-    .expect("initial exception decision should commit");
-
-    let arrival_outcome = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if outcome.arrived_police_responses.contains(&response_id) {
-            break outcome;
-        }
-    };
-    assert_eq!(arrival_outcome.now, response_due);
-    assert!(arrival_outcome.decision_requests.is_empty());
-    assert_eq!(
-        state.decisions().pending_for_operation(operation),
-        Some(first.decision)
-    );
-
-    let organization = state
-        .operations()
-        .get_operation(operation)
-        .expect("decision-blocked operation should persist")
-        .responsible_organization();
-    let resolution = validate_resolve_decision(
-        &registry,
-        &state,
-        first.decision,
-        organization,
-        DecisionResponse::Continue,
-    )
-    .expect("continuing the first exception should validate")
-    .commit(&mut state)
-    .expect("continuing the first exception should atomically create any deferred work");
-    let follow_up = resolution
-        .decision_request
-        .expect("arrived police response should become the next leadership decision");
-    assert!(follow_up.requests_pause);
-    let follow_up_record = state
-        .decisions()
-        .get_decision(follow_up.decision)
-        .expect("deferred response decision should persist");
-    assert!(matches!(
-      follow_up_record.context(),
-      DecisionContext::OperationException {
-        operation: decision_operation,
-        reason: OperationExceptionReason::PoliceArrival(decision_response),
-      } if decision_operation == operation && decision_response == response_id
-    ));
-    assert_eq!(
-        state
-            .operations()
-            .get_operation(operation)
-            .expect("follow-up blocked operation should persist")
-            .status(),
-        OperationStatus::AwaitingDecision
-    );
-
-    let final_resolution = validate_resolve_decision(
-        &registry,
-        &state,
-        follow_up.decision,
-        organization,
-        DecisionResponse::Continue,
-    )
-    .expect("deferred response decision should be resolvable")
-    .commit(&mut state)
-    .expect("deferred response continue should resume operation");
-    assert!(final_resolution.decision_request.is_none());
-    assert_eq!(
-        state
-            .operations()
-            .get_operation(operation)
-            .expect("resumed operation should persist")
-            .status(),
-        OperationStatus::InProgress
-    );
-    assert_eq!(
-        state
-            .decisions()
-            .decisions_for_operation(operation)
-            .filter(|decision| matches!(
-              decision.context(),
-              DecisionContext::OperationException {
-                reason: OperationExceptionReason::PoliceArrival(candidate),
-                ..
-              } if candidate == response_id
-            ))
-            .count(),
-        1
-    );
-    validate_state(&state).expect("deferred response-decision state should validate");
-    validate_state_against_registry(&registry, &state)
-        .expect("deferred response decision should match authored content");
     validate_invariants(&state);
 }
 

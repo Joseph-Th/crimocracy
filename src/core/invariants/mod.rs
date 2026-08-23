@@ -10,16 +10,14 @@ use crate::core::id::{
     OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
     RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
+use crate::core::invariants::legal as legal_invariants;
 use crate::core::state::AppState;
 #[cfg(debug_assertions)]
 use crate::core::state::CURRENT_STATE_SCHEMA_VERSION;
 use crate::decisions::DecisionResponse;
 use crate::enterprises::EnterpriseLocation;
-use crate::legal::investigation_work_execution::{
-    find_superseding_evidence, minimum_source_reliability, resolve_improved_evidence_reliability,
-    resolve_pattern_admissibility, resolve_pattern_strength, resolve_work_factors_and_margin,
-};
-use crate::legal::{EvidenceKind, InvestigationWorkKind, InvestigationWorkOutcome};
+use crate::legal::investigation_work_execution::resolve_work_factors_and_margin;
+use crate::legal::{InvestigationWorkKind, InvestigationWorkOutcome};
 use crate::operations::operation_economics::resolve_property_proceeds;
 use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
@@ -827,29 +825,13 @@ pub fn validate_state_against_registry(
         {
             return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
         }
-        let expected_superseded_by = find_superseding_evidence(state, work);
         match resolution.outcome() {
             InvestigationWorkOutcome::Connected => {
-                if work.kind() != InvestigationWorkKind::PatternAnalysis
+                // Only a witness interview resolves as Connected; its economics were
+                // re-derived above and its testimony provenance is checked in
+                // `invariants::legal`.
+                if work.kind() != InvestigationWorkKind::WitnessInterview
                     || expected_margin < definition.connected_margin()
-                    || expected_superseded_by.is_some()
-                    || resolution.superseded_by().is_some()
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
-                let evidence = state
-                    .legal
-                    .get_evidence(resolution.derived_evidence().ok_or(
-                        StateValidationError::InvalidInvestigationWork { work: work.id() },
-                    )?)
-                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-                let expected_reliability =
-                    minimum_source_reliability(state, work).map_err(|_| {
-                        StateValidationError::InvalidInvestigationWork { work: work.id() }
-                    })?;
-                if evidence.strength() != resolve_pattern_strength(factors.source_support())
-                    || evidence.reliability() != expected_reliability
-                    || evidence.admissibility() != resolve_pattern_admissibility(state, work)
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
@@ -857,49 +839,17 @@ pub fn validate_state_against_registry(
             InvestigationWorkOutcome::Developed => {
                 if work.kind() != InvestigationWorkKind::EvidenceReview
                     || expected_margin < definition.connected_margin()
-                    || expected_superseded_by.is_some()
-                    || resolution.superseded_by().is_some()
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
-                let source_id = work
-                    .focus()
-                    .evidence_id()
-                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-                let source = state
-                    .legal
-                    .get_evidence(source_id)
-                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-                let evidence = state
-                    .legal
-                    .get_evidence(resolution.derived_evidence().ok_or(
-                        StateValidationError::InvalidInvestigationWork { work: work.id() },
-                    )?)
-                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-                if evidence.kind() != EvidenceKind::ForensicAnalysis
-                    || evidence.subject() != source.subject()
-                    || evidence.origin() != source.origin()
-                    || evidence.strength() != source.strength()
-                    || evidence.reliability()
-                        != resolve_improved_evidence_reliability(source.reliability())
-                    || evidence.admissibility() != source.admissibility()
-                    || evidence.derived_from() != &BTreeSet::from([source_id])
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
+                legal_invariants::validate_developed_review_evidence(
+                    state,
+                    work,
+                    &mut BTreeSet::new(),
+                )?;
             }
             InvestigationWorkOutcome::Inconclusive => {
                 if expected_margin >= definition.connected_margin()
-                    || expected_superseded_by.is_some()
-                    || resolution.superseded_by().is_some()
-                    || resolution.derived_evidence().is_some()
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
-            }
-            InvestigationWorkOutcome::Superseded => {
-                if expected_superseded_by.is_none()
-                    || resolution.superseded_by() != expected_superseded_by
                     || resolution.derived_evidence().is_some()
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });

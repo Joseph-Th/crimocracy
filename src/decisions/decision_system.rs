@@ -2,7 +2,7 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
+    CharacterId, DecisionRequestId, IdExhaustionError, OperationId, OrganizationId,
     PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
@@ -10,8 +10,8 @@ use crate::core::time::SimTime;
 use crate::decisions::{
     build_recruitment_approval_authority_snapshot, build_recruitment_approval_context,
     build_resolution, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
-    DecisionRequestRecord, DecisionResponse, DecisionStatus, OperationExceptionReason,
-    RecruitmentApprovalContext, RecruitmentApprovalRequestDraft,
+    DecisionRequestRecord, DecisionResponse, DecisionStatus, RecruitmentApprovalContext,
+    RecruitmentApprovalRequestDraft,
 };
 use crate::delegation::delegation_system::{
     resolve_mandate_authority, resolve_policy_for_manager, DelegationError,
@@ -75,11 +75,6 @@ pub enum DecisionError {
     InvalidPoliceResponseDecision {
         operation: OperationId,
         response: PoliceResponseId,
-    },
-    #[error("police response {response} already produced operation decision {decision}")]
-    DuplicatePoliceResponseDecision {
-        response: PoliceResponseId,
-        decision: DecisionRequestId,
     },
     #[error("police response {response} changed after validation; expected version {expected}, found {found}")]
     StalePoliceResponse {
@@ -165,7 +160,7 @@ pub struct ValidatedDecisionRequest {
     draft: DecisionRequestDraft,
     recipient: OrganizationId,
     expected_operation_version: u32,
-    police_response: Option<PoliceResponseDecisionDependency>,
+    police_response: PoliceResponseDecisionDependency,
     options: BTreeSet<DecisionResponse>,
 }
 
@@ -195,7 +190,30 @@ impl ValidatedDecisionRequest {
             });
         }
         self.revalidate_police_response(state)?;
-        self.commit_prevalidated(state)
+        // Auto-pause only applies to decisions the player is responsible for resolving: a decision
+        // addressed to some other organization should not pause the simulation based on the
+        // player's own attention preferences.
+        let requests_pause = state.player_organization() == Some(self.recipient)
+            && state
+                .attention_settings()
+                .is_auto_pause_enabled(self.draft.attention);
+        let id = state.ids.next_decision_request()?;
+        state
+            .decisions
+            .insert(DecisionRequestRecord::from(DecisionRecordParts {
+                id,
+                recipient: self.recipient,
+                requested_at: state.now(),
+                options: self.options,
+                draft: self.draft,
+            }));
+        state
+            .operations
+            .set_awaiting_decision(operation_id, state.now());
+        Ok(DecisionRequestOutcome {
+            decision: id,
+            requests_pause,
+        })
     }
 
     fn operation(&self) -> OperationId {
@@ -206,9 +224,7 @@ impl ValidatedDecisionRequest {
     }
 
     fn revalidate_police_response(&self, state: &AppState) -> Result<(), DecisionError> {
-        let Some(dependency) = self.police_response else {
-            return Ok(());
-        };
+        let dependency = &self.police_response;
         let operation = self.operation();
         let response = state
             .legal
@@ -235,99 +251,6 @@ impl ValidatedDecisionRequest {
         }
         Ok(())
     }
-
-    fn commit_prevalidated(
-        self,
-        state: &mut AppState,
-    ) -> Result<DecisionRequestOutcome, DecisionError> {
-        let operation_id = self.operation();
-        // Auto-pause only applies to decisions the player is responsible for resolving: a decision
-        // addressed to some other organization should not pause the simulation based on the
-        // player's own attention preferences.
-        let requests_pause = state.player_organization() == Some(self.recipient)
-            && state
-                .attention_settings()
-                .is_auto_pause_enabled(self.draft.attention);
-        let id = state.ids.next_decision_request()?;
-        state
-            .decisions
-            .insert(DecisionRequestRecord::from(DecisionRecordParts {
-                id,
-                recipient: self.recipient,
-                requested_at: state.now(),
-                options: self.options,
-                draft: self.draft,
-            }));
-        state
-            .operations
-            .set_awaiting_decision(operation_id, state.now());
-        Ok(DecisionRequestOutcome {
-            decision: id,
-            requests_pause,
-        })
-    }
-}
-
-pub fn validate_request_decision(
-    state: &AppState,
-    draft: DecisionRequestDraft,
-) -> Result<ValidatedDecisionRequest, DecisionError> {
-    validate_request_metadata(state, draft.requester, draft.attention, &draft.summary)?;
-
-    let operation_id = draft
-        .context
-        .operation()
-        .ok_or(DecisionError::InvalidOperationDecisionContext)?;
-    let operation = state
-        .operations
-        .get_operation(operation_id)
-        .ok_or(DecisionError::MissingOperation(operation_id))?;
-    if operation.status() != OperationStatus::InProgress {
-        return Err(DecisionError::OperationNotInProgress {
-            operation: operation_id,
-        });
-    }
-    if operation.leader() != draft.requester {
-        return Err(DecisionError::InvalidRequester {
-            requester: draft.requester,
-            operation: operation_id,
-        });
-    }
-    if let Some(decision) = state.decisions.pending_for_operation(operation_id) {
-        return Err(DecisionError::ExistingPendingDecision {
-            operation: operation_id,
-            decision,
-        });
-    }
-
-    let (options, police_response) = match draft.context {
-        DecisionContext::OperationException { operation, reason } => {
-            if !has_matching_contingency(state, operation)? {
-                return Err(DecisionError::MissingContingency { operation });
-            }
-            let police_response = match reason {
-                OperationExceptionReason::UnexpectedCondition => None,
-                OperationExceptionReason::PoliceArrival(response) => Some(
-                    validate_arrived_police_response_decision(state, operation, response)?,
-                ),
-            };
-            (
-                BTreeSet::from([DecisionResponse::Continue, DecisionResponse::Abort]),
-                police_response,
-            )
-        }
-        DecisionContext::RecruitmentApproval(_) => {
-            return Err(DecisionError::InvalidOperationDecisionContext);
-        }
-    };
-
-    Ok(ValidatedDecisionRequest {
-        recipient: operation.responsible_organization(),
-        expected_operation_version: operation.version(),
-        police_response,
-        draft,
-        options,
-    })
 }
 
 pub(crate) fn validate_request_police_arrival_decision_on_arrival(
@@ -368,7 +291,6 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
             response: response_id,
         });
     }
-    reject_duplicate_police_response_decision(state, operation_id, response_id)?;
     if validate_police_arrival_abort_if_applicable(state, operation_id)?.is_some() {
         return Err(DecisionError::InvalidPoliceResponseDecision {
             operation: operation_id,
@@ -381,9 +303,9 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
         .expect("police response version counter exhausted");
     let draft = DecisionRequestDraft {
         requester: operation.leader(),
-        context: DecisionContext::OperationException {
+        context: DecisionContext::OperationPoliceArrival {
             operation: operation_id,
-            reason: OperationExceptionReason::PoliceArrival(response_id),
+            response: response_id,
         },
         attention: AttentionClass::Exception,
         summary: police_arrival_decision_summary(operation.title()),
@@ -393,138 +315,12 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
         draft,
         recipient: operation.responsible_organization(),
         expected_operation_version: operation.version(),
-        police_response: Some(PoliceResponseDecisionDependency {
+        police_response: PoliceResponseDecisionDependency {
             response: response_id,
             expected_version,
-        }),
-        options: BTreeSet::from([DecisionResponse::Continue, DecisionResponse::Abort]),
-    })
-}
-
-fn validate_arrived_police_response_decision(
-    state: &AppState,
-    operation_id: OperationId,
-    response_id: PoliceResponseId,
-) -> Result<PoliceResponseDecisionDependency, DecisionError> {
-    let operation = state
-        .operations
-        .get_operation(operation_id)
-        .ok_or(DecisionError::MissingOperation(operation_id))?;
-    let response = state
-        .legal
-        .get_police_response(response_id)
-        .ok_or(DecisionError::MissingPoliceResponse(response_id))?;
-    if operation.police_response() != Some(response_id)
-        || response.source_operation() != operation_id
-        || response.status() != PoliceResponseStatus::Arrived
-        || response.arrived_at().is_none()
-    {
-        return Err(DecisionError::InvalidPoliceResponseDecision {
-            operation: operation_id,
-            response: response_id,
-        });
-    }
-    reject_duplicate_police_response_decision(state, operation_id, response_id)?;
-    if validate_police_arrival_abort_if_applicable(state, operation_id)?.is_some() {
-        return Err(DecisionError::InvalidPoliceResponseDecision {
-            operation: operation_id,
-            response: response_id,
-        });
-    }
-    Ok(PoliceResponseDecisionDependency {
-        response: response_id,
-        expected_version: response.version(),
-    })
-}
-
-fn police_response_decision_id(
-    state: &AppState,
-    operation: OperationId,
-    response: PoliceResponseId,
-) -> Option<DecisionRequestId> {
-    state
-        .decisions
-        .decisions_for_operation(operation)
-        .find_map(|decision| {
-            matches!(
-              decision.context(),
-              DecisionContext::OperationException {
-                reason: OperationExceptionReason::PoliceArrival(decision_response),
-                ..
-              } if decision_response == response
-            )
-            .then_some(decision.id())
-        })
-}
-
-fn reject_duplicate_police_response_decision(
-    state: &AppState,
-    operation: OperationId,
-    response: PoliceResponseId,
-) -> Result<(), DecisionError> {
-    if let Some(decision) = police_response_decision_id(state, operation, response) {
-        return Err(DecisionError::DuplicatePoliceResponseDecision { response, decision });
-    }
-    Ok(())
-}
-
-fn validate_deferred_police_arrival_decision(
-    state: &AppState,
-    operation_id: OperationId,
-    current_reason: OperationExceptionReason,
-    current_requested_at: crate::core::time::SimTime,
-) -> Result<Option<ValidatedDecisionRequest>, DecisionError> {
-    if matches!(current_reason, OperationExceptionReason::PoliceArrival(_)) {
-        return Ok(None);
-    }
-    let operation = state
-        .operations
-        .get_operation(operation_id)
-        .ok_or(DecisionError::MissingOperation(operation_id))?;
-    let Some(response_id) = operation.police_response() else {
-        return Ok(None);
-    };
-    let response = state
-        .legal
-        .get_police_response(response_id)
-        .ok_or(DecisionError::MissingPoliceResponse(response_id))?;
-    let Some(arrived_at) = response.arrived_at() else {
-        return Ok(None);
-    };
-    if response.status() != PoliceResponseStatus::Arrived
-        || response.source_operation() != operation_id
-        || arrived_at < current_requested_at
-        || police_response_decision_id(state, operation_id, response_id).is_some()
-    {
-        return Ok(None);
-    }
-    if !has_matching_contingency(state, operation_id)? {
-        return Ok(None);
-    }
-    let expected_operation_version = operation
-        .version()
-        .checked_add(1)
-        .expect("operation version counter exhausted");
-    let draft = DecisionRequestDraft {
-        requester: operation.leader(),
-        context: DecisionContext::OperationException {
-            operation: operation_id,
-            reason: OperationExceptionReason::PoliceArrival(response_id),
         },
-        attention: AttentionClass::Exception,
-        summary: police_arrival_decision_summary(operation.title()),
-    };
-    validate_request_metadata(state, draft.requester, draft.attention, &draft.summary)?;
-    Ok(Some(ValidatedDecisionRequest {
-        draft,
-        recipient: operation.responsible_organization(),
-        expected_operation_version,
-        police_response: Some(PoliceResponseDecisionDependency {
-            response: response_id,
-            expected_version: response.version(),
-        }),
         options: BTreeSet::from([DecisionResponse::Continue, DecisionResponse::Abort]),
-    }))
+    })
 }
 
 fn police_arrival_decision_summary(operation_title: &str) -> String {
@@ -567,7 +363,7 @@ impl ValidatedRecruitmentApprovalRequest {
     pub fn commit(self, state: &mut AppState) -> Result<DecisionRequestOutcome, DecisionError> {
         let context = match self.draft.context {
             DecisionContext::RecruitmentApproval(context) => context,
-            DecisionContext::OperationException { .. } => {
+            DecisionContext::OperationPoliceArrival { .. } => {
                 unreachable!("validated recruitment approval must retain recruitment context")
             }
         };
@@ -687,7 +483,7 @@ fn has_matching_contingency(
     Ok(record.contingencies().iter().any(|contingency| {
         matches!(
             contingency,
-            OperationContingency::RequestDecisionOnUnexpectedCondition
+            OperationContingency::RequestDecisionOnPoliceArrival
         )
     }))
 }
@@ -698,7 +494,6 @@ enum DecisionResolutionAction {
         expected_operation_version: u32,
         next_status: OperationStatus,
         abort: Option<Box<ValidatedOperationAbort>>,
-        follow_up: Option<Box<ValidatedDecisionRequest>>,
     },
     RecruitmentApproval {
         context: RecruitmentApprovalContext,
@@ -718,21 +513,10 @@ pub struct ValidatedDecisionResolution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecisionResolutionOutcome {
     pub recruitment_attempt: Option<RecruitmentAttemptId>,
-    pub decision_request: Option<DecisionRequestOutcome>,
 }
 
 impl ValidatedDecisionResolution {
     pub fn commit(self, state: &mut AppState) -> Result<DecisionResolutionOutcome, DecisionError> {
-        let creates_follow_up = matches!(
-            &self.action,
-            DecisionResolutionAction::Operation {
-                follow_up: Some(_),
-                ..
-            }
-        );
-        if creates_follow_up {
-            state.ids.reserve(IdKind::DecisionRequest, 1)?;
-        }
         let decision = state
             .decisions
             .get_decision(self.decision)
@@ -756,14 +540,12 @@ impl ValidatedDecisionResolution {
             });
         }
 
-        let mut decision_request = None;
         let recruitment_attempt = match self.action {
             DecisionResolutionAction::Operation {
                 operation,
                 expected_operation_version,
                 next_status,
                 abort,
-                follow_up,
             } => {
                 let record = state
                     .operations
@@ -778,9 +560,6 @@ impl ValidatedDecisionResolution {
                 }
                 if record.status() != OperationStatus::AwaitingDecision {
                     return Err(DecisionError::OperationNotAwaitingDecision { operation });
-                }
-                if let Some(follow_up) = follow_up.as_ref() {
-                    follow_up.revalidate_police_response(state)?;
                 }
 
                 match next_status {
@@ -798,24 +577,8 @@ impl ValidatedDecisionResolution {
                             build_resolution(self.response, state.now(), self.resolver),
                         );
                         state.operations.resume(operation, state.now());
-                        if let Some(follow_up) = follow_up {
-                            debug_assert_eq!(
-                state
-                  .operations
-                  .get_operation(operation)
-                  .map(|record| record.version()),
-                Some(follow_up.expected_operation_version),
-                "validated follow-up decision must target the post-resume operation version"
-              );
-                            debug_assert!(state
-                                .decisions
-                                .pending_for_operation(operation)
-                                .is_none());
-                            decision_request = Some(follow_up.commit_prevalidated(state)?);
-                        }
                     }
                     OperationStatus::Aborted => {
-                        debug_assert!(follow_up.is_none());
                         (*abort.expect("abort decision must carry an operation abort token"))
                             .commit(state)?;
                         state.decisions.resolve(
@@ -855,7 +618,6 @@ impl ValidatedDecisionResolution {
         };
         Ok(DecisionResolutionOutcome {
             recruitment_attempt,
-            decision_request,
         })
     }
 }
@@ -889,7 +651,7 @@ pub fn validate_resolve_decision(
     }
 
     let action = match record.context() {
-        DecisionContext::OperationException { operation, reason } => {
+        DecisionContext::OperationPoliceArrival { operation, .. } => {
             let operation_record = state
                 .operations
                 .get_operation(operation)
@@ -897,16 +659,9 @@ pub fn validate_resolve_decision(
             if operation_record.status() != OperationStatus::AwaitingDecision {
                 return Err(DecisionError::OperationNotAwaitingDecision { operation });
             }
-            let police_abort = match response {
-                DecisionResponse::Continue => {
-                    validate_police_arrival_abort_if_applicable(state, operation)?
-                }
-                DecisionResponse::Abort | DecisionResponse::Approve | DecisionResponse::Reject => {
-                    None
-                }
-            };
+            // Arrival processing already applied any standing pre-entry abort before raising
+            // the decision, so a Continue here always resumes and an Abort stands down.
             let next_status = match response {
-                DecisionResponse::Continue if police_abort.is_some() => OperationStatus::Aborted,
                 DecisionResponse::Continue => OperationStatus::InProgress,
                 DecisionResponse::Abort => OperationStatus::Aborted,
                 DecisionResponse::Approve | DecisionResponse::Reject => {
@@ -930,28 +685,16 @@ pub fn validate_resolve_decision(
                         validate_decision_abort_operation(state, operation, decision)?
                     },
                 )),
-                DecisionResponse::Continue => police_abort.map(Box::new),
+                DecisionResponse::Continue => None,
                 DecisionResponse::Approve | DecisionResponse::Reject => {
                     unreachable!("operation responses were validated above")
                 }
-            };
-            let follow_up = if response == DecisionResponse::Continue && abort.is_none() {
-                validate_deferred_police_arrival_decision(
-                    state,
-                    operation,
-                    reason,
-                    record.requested_at(),
-                )?
-                .map(Box::new)
-            } else {
-                None
             };
             DecisionResolutionAction::Operation {
                 operation,
                 expected_operation_version: operation_record.version(),
                 next_status,
                 abort,
-                follow_up,
             }
         }
         DecisionContext::RecruitmentApproval(context) => {

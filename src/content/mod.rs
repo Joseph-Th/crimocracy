@@ -1,4 +1,4 @@
-﻿//! Code-owned authored definitions assembled into the immutable startup registry.
+//! Code-owned authored definitions assembled into the immutable startup registry.
 
 use crate::core::time::SimDuration;
 use crate::enterprises::EnterpriseKind;
@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 28;
+pub const CURRENT_CONTENT_REVISION: u32 = 29;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -307,19 +307,6 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
 fn register_investigation_work(builder: &mut RegistryBuilder) {
     builder
         .register_investigation_work(
-            InvestigationWorkKind::PatternAnalysis,
-            InvestigationWorkDefinitionSpec {
-                duration: SimDuration::from_minutes(360),
-                base_difficulty: 55,
-                additional_source_difficulty: 8,
-                source_support_weight: 30,
-                variance_limit: 12,
-                connected_margin: 0,
-            },
-        )
-        .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
-    builder
-        .register_investigation_work(
             InvestigationWorkKind::EvidenceReview,
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(180),
@@ -461,10 +448,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 600,
                 losing_cycles_before_suspension: 3,
             },
-            // No special standing-order authority is required to manage a protection
-            // racket; the former collection-force axis had no execution effect and was
-            // removed with the rest of the inert policy vocabulary.
-            None,
+            // No special standing-order authority is required to manage a protection racket.
             BTreeSet::new(),
             BTreeSet::new(),
         ),
@@ -485,7 +469,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
             },
-            None,
             BTreeSet::from([
                 BusinessFunction::CashIntensive,
                 BusinessFunction::MeetingSpace,
@@ -510,7 +493,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 1_200,
                 losing_cycles_before_suspension: 3,
             },
-            None,
             BTreeSet::new(),
             BTreeSet::from([
                 BusinessFunction::VehicleFleet,
@@ -539,7 +521,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 1_400,
                 losing_cycles_before_suspension: 3,
             },
-            None,
             BTreeSet::from([
                 BusinessFunction::CashIntensive,
                 BusinessFunction::CustomerAccess,
@@ -565,7 +546,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 550,
                 losing_cycles_before_suspension: 3,
             },
-            None,
             BTreeSet::from([BusinessFunction::CashIntensive]),
             BTreeSet::new(),
         ),
@@ -588,7 +568,6 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 750,
                 losing_cycles_before_suspension: 3,
             },
-            None,
             BTreeSet::from([
                 BusinessFunction::ResaleMarket,
                 BusinessFunction::Warehousing,
@@ -596,14 +575,11 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
             BTreeSet::new(),
         ),
     ];
-    for (kind, economics, policy, required_business_functions, required_network_functions) in
-        definitions
-    {
+    for (kind, economics, required_business_functions, required_network_functions) in definitions {
         builder
             .register_enterprise(
                 kind,
                 economics,
-                policy,
                 required_business_functions,
                 required_network_functions,
             )
@@ -885,7 +861,11 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
         }
         OperationKind::Surveillance => EvidenceKind::Surveillance,
         OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
-        OperationKind::Sabotage => EvidenceKind::ForensicAnalysis,
+        // Sabotage leaves physical traces at the scene like any other hands-on crime. Intake
+        // evidence cannot be ForensicAnalysis: the legal model derives that kind only from
+        // investigator lab work on an already-open case, and a ForensicAnalysis intake draft
+        // would be rejected by the evidence-intake gate.
+        OperationKind::Sabotage => EvidenceKind::Fingerprint,
     }
 }
 

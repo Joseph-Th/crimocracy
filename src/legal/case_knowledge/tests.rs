@@ -274,7 +274,8 @@ fn cold_shelving_refreshes_the_leads_knowledge_to_shelved() {
 fn contact_channel_discloses_each_new_development_exactly_once() {
     let registry = build_registry();
     let mut fixture = make_test_knowledge_fixture();
-    fixture.state.set_player_organization(fixture.criminal);
+    crate::world::world_system::designate_player_organization(&mut fixture.state, fixture.criminal)
+        .expect("criminal organization should be eligible as the player organization");
     let _investigation = open_operation_case(&mut fixture.state);
     apply_autonomous_investigator_staffing(&mut fixture.state).expect("staffing pass must succeed");
 

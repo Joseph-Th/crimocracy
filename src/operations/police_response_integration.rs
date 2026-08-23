@@ -1,4 +1,4 @@
-//! Operation-facing police dispatch planning and deterministic response-arrival processing.
+﻿//! Operation-facing police dispatch planning and deterministic response-arrival processing.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{OperationId, PoliceResponseId};
@@ -69,7 +69,7 @@ impl OperationPoliceResponseStartPlan {
 }
 
 /// Deterministic arrival delay for a dispatched response: authored base delay reduced by
-/// patrol presence (basis points of the authored reduction window) and clamped to the
+/// patrol presence (percent of the authored reduction window) and clamped to the
 /// authored minimum. Shared with the invariant validator so timing math cannot drift.
 pub(crate) fn resolve_police_arrival_delay(
     execution: &OperationExecutionDefinition,
@@ -162,7 +162,7 @@ pub(crate) fn apply_due_police_response_arrivals(
                 && operation.status() == OperationStatus::InProgress
                 && operation
                     .contingencies()
-                    .contains(&OperationContingency::RequestDecisionOnUnexpectedCondition)
+                    .contains(&OperationContingency::RequestDecisionOnPoliceArrival)
             {
                 Some(validate_request_police_arrival_decision_on_arrival(
                     state,

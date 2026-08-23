@@ -18,7 +18,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum ReportKind {
     ExecutiveBrief,
     Financial,
-    PoliceIntelligence,
     Legal,
     AfterAction,
     Opportunity,

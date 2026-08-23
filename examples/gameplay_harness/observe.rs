@@ -4,7 +4,7 @@ use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::simulation::TickOutcome;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::decisions::decision_system::validate_resolve_decision;
-use crimocracy::decisions::{DecisionContext, DecisionResponse, OperationExceptionReason};
+use crimocracy::decisions::{DecisionContext, DecisionResponse};
 use crimocracy::intelligence::intelligence_system::validate_information_transfer;
 use crimocracy::intelligence::{InformationTopic, InformationTransferDraft, KnowledgeHolder};
 use std::error::Error;
@@ -147,21 +147,18 @@ pub fn observe_tick(
             );
         }
         let response = match decision.context() {
-            DecisionContext::OperationException {
-                reason: OperationExceptionReason::PoliceArrival(_),
-                ..
-            } if metrics.strategy == Some(Strategy::Press) => DecisionResponse::Continue,
-            DecisionContext::OperationException {
-                reason: OperationExceptionReason::PoliceArrival(_),
-                ..
-            } => DecisionResponse::Abort,
-            DecisionContext::OperationException { .. } => DecisionResponse::Continue,
+            DecisionContext::OperationPoliceArrival { .. }
+                if metrics.strategy == Some(Strategy::Press) =>
+            {
+                DecisionResponse::Continue
+            }
+            DecisionContext::OperationPoliceArrival { .. } => DecisionResponse::Abort,
             DecisionContext::RecruitmentApproval(_) => DecisionResponse::Reject,
         };
         if narrative {
             println!("[DECIDE]  Leadership response: {response:?}.");
         }
-        let resolution = validate_resolve_decision(
+        validate_resolve_decision(
             scenario.registry,
             &scenario.state,
             request.decision,
@@ -169,43 +166,6 @@ pub fn observe_tick(
             response,
         )?
         .commit(&mut scenario.state)?;
-        if let Some(follow_up) = resolution.decision_request {
-            let follow_up_record = scenario
-                .state
-                .decisions()
-                .get_decision(follow_up.decision)
-                .expect("follow-up decision must persist");
-            // The deferred follow-up is itself a police-arrival decision, so it honors the same
-            // branch policy as the decision it was queued behind: PRESS presses on, the other
-            // strategies abort.
-            let follow_up_response = match follow_up_record.context() {
-                DecisionContext::OperationException {
-                    reason: OperationExceptionReason::PoliceArrival(_),
-                    ..
-                } if metrics.strategy == Some(Strategy::Press) => DecisionResponse::Continue,
-                // Every other deferred follow-up context (non-arrival exception, or any approval
-                // context) is not produced on this path; abort defensively.
-                DecisionContext::OperationException {
-                    reason: OperationExceptionReason::PoliceArrival(_),
-                    ..
-                } => DecisionResponse::Abort,
-                DecisionContext::OperationException { .. } => DecisionResponse::Abort,
-                DecisionContext::RecruitmentApproval(_) => DecisionResponse::Abort,
-            };
-            metrics.decision_requests += 1;
-            if narrative {
-                println!("[EXCEPTION] Deferred: {}", follow_up_record.summary());
-                println!("[DECIDE]  Leadership response: {follow_up_response:?}.");
-            }
-            validate_resolve_decision(
-                scenario.registry,
-                &scenario.state,
-                follow_up.decision,
-                follow_up_record.recipient(),
-                follow_up_response,
-            )?
-            .commit(&mut scenario.state)?;
-        }
     }
 
     // Press is the branch where the leader chooses to continue after police arrival. The

@@ -1,13 +1,11 @@
-//! Release-safe structural validation for the decisions and delegation subsystems.
+﻿//! Release-safe structural validation for the decisions and delegation subsystems.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::OperationId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
-use crate::decisions::{
-    DecisionContext, DecisionResponse, DecisionStatus, OperationExceptionReason,
-};
+use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::FinancialOwner;
 use crate::legal::PoliceResponseStatus;
@@ -84,9 +82,10 @@ pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidation
         }
 
         match decision.context() {
-            DecisionContext::OperationException { operation, reason } => {
-                validate_operation_decision(state, decision, operation, reason)?
-            }
+            DecisionContext::OperationPoliceArrival {
+                operation,
+                response,
+            } => validate_operation_decision(state, decision, operation, response)?,
             DecisionContext::RecruitmentApproval(context) => {
                 validate_recruitment_approval_decision(state, decision, context)?
             }
@@ -114,7 +113,7 @@ fn validate_operation_decision(
     state: &AppState,
     decision: &crate::decisions::DecisionRequestRecord,
     operation_id: OperationId,
-    reason: OperationExceptionReason,
+    response_id: crate::core::id::PoliceResponseId,
 ) -> Result<(), StateValidationError> {
     let operation = state.operations.get_operation(operation_id).ok_or(
         StateValidationError::MissingEntity {
@@ -146,56 +145,51 @@ fn validate_operation_decision(
     }
     if !operation
         .contingencies()
-        .contains(&OperationContingency::RequestDecisionOnUnexpectedCondition)
+        .contains(&OperationContingency::RequestDecisionOnPoliceArrival)
     {
         return Err(StateValidationError::InvalidDecisionContext {
             decision: decision.id(),
         });
     }
-    match reason {
-        OperationExceptionReason::UnexpectedCondition => {}
-        OperationExceptionReason::PoliceArrival(response_id) => {
-            let response = state.legal.get_police_response(response_id).ok_or(
-                StateValidationError::InvalidDecisionContext {
-                    decision: decision.id(),
-                },
-            )?;
-            let Some(arrived_at) = response.arrived_at() else {
-                return Err(StateValidationError::InvalidDecisionContext {
-                    decision: decision.id(),
-                });
-            };
-            let matching_decisions = state
-                .decisions
-                .decisions_for_operation(operation_id)
-                .filter(|candidate| {
-                    matches!(
-                      candidate.context(),
-                      DecisionContext::OperationException {
-                        reason: OperationExceptionReason::PoliceArrival(candidate_response),
-                        ..
-                      } if candidate_response == response_id
-                    )
-                })
-                .count();
-            let standing_abort_should_have_applied = operation
-                .contingencies()
-                .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
-                && operation
-                    .entry_at()
-                    .is_some_and(|entry_at| arrived_at < entry_at);
-            if operation.police_response() != Some(response_id)
-                || response.source_operation() != operation_id
-                || response.status() != PoliceResponseStatus::Arrived
-                || arrived_at > decision.requested_at()
-                || matching_decisions != 1
-                || standing_abort_should_have_applied
-            {
-                return Err(StateValidationError::InvalidDecisionContext {
-                    decision: decision.id(),
-                });
-            }
-        }
+    let response = state.legal.get_police_response(response_id).ok_or(
+        StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        },
+    )?;
+    let Some(arrived_at) = response.arrived_at() else {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
+    };
+    let matching_decisions = state
+        .decisions
+        .decisions_for_operation(operation_id)
+        .filter(|candidate| {
+            matches!(
+              candidate.context(),
+              DecisionContext::OperationPoliceArrival {
+                response: candidate_response,
+                ..
+              } if candidate_response == response_id
+            )
+        })
+        .count();
+    let standing_abort_should_have_applied = operation
+        .contingencies()
+        .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
+        && operation
+            .entry_at()
+            .is_some_and(|entry_at| arrived_at < entry_at);
+    if operation.police_response() != Some(response_id)
+        || response.source_operation() != operation_id
+        || response.status() != PoliceResponseStatus::Arrived
+        || arrived_at > decision.requested_at()
+        || matching_decisions != 1
+        || standing_abort_should_have_applied
+    {
+        return Err(StateValidationError::InvalidDecisionContext {
+            decision: decision.id(),
+        });
     }
 
     match decision.status() {

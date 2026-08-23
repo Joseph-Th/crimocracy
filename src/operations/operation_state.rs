@@ -120,6 +120,12 @@ impl OperationState {
 
     pub(crate) fn insert(&mut self, record: OperationRecord) {
         let id = record.id();
+        // Guard before any index mutation so a duplicate ID cannot pollute derived state in
+        // a debug build; release builds rely on the monotonic ID allocator for uniqueness.
+        debug_assert!(
+            !self.records.contains_key(&id),
+            "Index Uniqueness: duplicate operation ID inserted"
+        );
         debug_assert_eq!(
             record.status(),
             OperationStatus::Authorized,
@@ -144,7 +150,7 @@ impl OperationState {
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
-            "Index Uniqueness: duplicate operation ID inserted"
+            "unreachable after the contains_key guard"
         );
     }
 

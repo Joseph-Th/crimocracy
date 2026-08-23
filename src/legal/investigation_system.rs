@@ -85,8 +85,6 @@ pub enum InvestigationError {
     InactiveInvestigation,
     #[error("incident intake must contain at least one evidence record")]
     NoIncidentEvidence,
-    #[error("pattern-link evidence must be produced by canonical investigation work")]
-    PatternLinkRequiresInvestigationWork,
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]
     ForensicAnalysisRequiresInvestigationWork,
     #[error(
@@ -480,12 +478,15 @@ impl ValidatedInvestigatorAssignment {
         state
             .legal
             .set_investigator_role(self.investigation, self.investigator, self.role);
-        // A promoted (or demoted) lead's personal case knowledge must track the new
-        // responsibility, exactly as autonomous staffing refreshes it.
-        crate::legal::case_knowledge::record_lead_case_activity_knowledge(
-            state,
-            self.investigation,
-        );
+        // Only a change of the lead seat is a material case-activity fact: promoting a new
+        // lead refreshes their personal knowledge, while a plain investigator assignment
+        // leaves the existing lead's record exactly as current as it was.
+        if self.role == InvestigatorRole::Lead {
+            crate::legal::case_knowledge::record_lead_case_activity_knowledge(
+                state,
+                self.investigation,
+            );
+        }
         Ok(())
     }
 }
@@ -794,9 +795,6 @@ fn validate_evidence_kind_allowed(
     kind: crate::legal::EvidenceKind,
 ) -> Result<(), InvestigationError> {
     match kind {
-        crate::legal::EvidenceKind::PatternLink => {
-            Err(InvestigationError::PatternLinkRequiresInvestigationWork)
-        }
         crate::legal::EvidenceKind::ForensicAnalysis => {
             Err(InvestigationError::ForensicAnalysisRequiresInvestigationWork)
         }

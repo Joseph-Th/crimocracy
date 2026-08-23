@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryEventKind {
     Operation,
-    Investigation,
     Recruitment,
 }
 

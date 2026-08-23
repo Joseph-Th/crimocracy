@@ -1,8 +1,8 @@
-//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
+﻿//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
 
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
-pub mod operation_state;
+pub(crate) mod operation_state;
 pub mod operation_system;
 pub(crate) mod police_response_integration;
 pub mod property_disposition;
@@ -41,13 +41,13 @@ pub enum OperationKind {
 impl OperationKind {
     /// Whether this kind has an authored property-proceeds effect and therefore may
     /// authorize a property-acquisition objective.
-    pub(crate) const fn supports_property_acquisition(self) -> bool {
+    pub(crate) const fn can_acquire_property(self) -> bool {
         matches!(self, Self::Burglary | Self::Hijacking | Self::DocumentTheft)
     }
 
     /// Whether this kind has an authored cash-proceeds effect and therefore may
     /// authorize a cash-acquisition objective.
-    pub(crate) const fn supports_cash_acquisition(self) -> bool {
+    pub(crate) const fn can_take_cash(self) -> bool {
         matches!(
             self,
             Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent
@@ -205,7 +205,7 @@ pub enum OperationConstraint {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationContingency {
     AbortOnPoliceArrivalBeforeEntry,
-    RequestDecisionOnUnexpectedCondition,
+    RequestDecisionOnPoliceArrival,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

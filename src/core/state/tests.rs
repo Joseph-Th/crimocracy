@@ -1,4 +1,4 @@
-//! Soak-fixture and persistence/continuation tests for `core::state`.
+﻿//! Soak-fixture and persistence/continuation tests for `core::state`.
 
 use super::*;
 use crate::build_registry;
@@ -9,11 +9,9 @@ use crate::core::invariants::{validate_state, StateValidationError};
 use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
 use crate::core::simulation::run_tick;
 use crate::decisions::decision_system::{
-    validate_request_decision, validate_resolve_decision, DecisionError,
+    validate_request_recruitment_approval, validate_resolve_decision, DecisionError,
 };
-use crate::decisions::{
-    DecisionContext, DecisionRequestDraft, DecisionResponse, OperationExceptionReason,
-};
+use crate::decisions::{DecisionResponse, RecruitmentApprovalRequestDraft};
 use crate::delegation::delegation_system::{
     resolve_policy_for_manager, validate_assign_mandate, validate_revise_mandate,
     validate_revoke_mandate, DelegationError, MandateRevisionDraft, PolicySource,
@@ -413,7 +411,7 @@ fn make_test_scenario() -> TestScenario {
             ]),
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
-            contingencies: vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+            contingencies: vec![OperationContingency::RequestDecisionOnPoliceArrival],
             scheduled_for: SimTime::from_minutes(10),
         },
     )
@@ -449,7 +447,7 @@ fn make_test_scenario() -> TestScenario {
         &state,
         ReportDraft {
             recipient: player,
-            kind: ReportKind::PoliceIntelligence,
+            kind: ReportKind::Legal,
             title: "Police intelligence".to_owned(),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
@@ -472,7 +470,7 @@ fn make_test_scenario() -> TestScenario {
         &state,
         HistoryEventDraft {
             occurred_at: state.now(),
-            kind: HistoryEventKind::Investigation,
+            kind: HistoryEventKind::Operation,
             summary: "Central Precinct opened an investigation touching Frank Dello.".to_owned(),
             entities: BTreeSet::from([
                 EntityRef::Character(associate),
@@ -578,80 +576,12 @@ fn test_mixed_scenario_soak_preserves_invariants() {
     .commit(&mut state)
     .expect("delegated routine enterprise should commit");
 
-    let mut pending_decision = None;
     let mut rival_recruitment = None;
     for minute in 1..=5_000_u64 {
         let outcome = run_tick(&registry, &mut state);
         assert_eq!(outcome.now.as_minutes(), minute);
         match minute {
             10 => assert_eq!(outcome.started_operations, vec![operation]),
-            11 => {
-                let leader = state
-                    .operations()
-                    .get_operation(operation)
-                    .expect("operation should exist")
-                    .leader();
-                let request = validate_request_decision(
-          &state,
-          DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-              operation,
-              reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "Execution encountered an unexpected condition outside delegated authority."
-              .to_owned(),
-          },
-        )
-        .expect("delegated exception should validate")
-        .commit(&mut state)
-        .expect("validated exception should remain current");
-                assert!(request.requests_pause);
-                let recipient = state
-                    .player_organization()
-                    .expect("fixture should have player organization");
-                validate_record_report(
-                    &state,
-                    ReportDraft {
-                        recipient,
-                        kind: ReportKind::PoliceIntelligence,
-                        title: "Decision required".to_owned(),
-                        entries: vec![ReportEntry {
-                            attention: AttentionClass::Exception,
-                            summary: "A delegated operation requires guidance.".to_owned(),
-                            sources: Vec::new(),
-                            entities: BTreeSet::from([
-                                EntityRef::Operation(operation),
-                                EntityRef::DecisionRequest(request.decision),
-                            ]),
-                            decision: Some(request.decision),
-                        }],
-                    },
-                )
-                .expect("decision-linked report should validate")
-                .commit(&mut state)
-                .expect("decision-linked report should commit");
-                pending_decision = Some(request.decision);
-            }
-            12 => {
-                let decision = pending_decision
-                    .take()
-                    .expect("previous tick should have created a decision");
-                let recipient = state
-                    .player_organization()
-                    .expect("fixture should have player organization");
-                validate_resolve_decision(
-                    &registry,
-                    &state,
-                    decision,
-                    recipient,
-                    DecisionResponse::Continue,
-                )
-                .expect("decision resolution should validate")
-                .commit(&mut state)
-                .expect("validated resolution should remain current");
-            }
             20 => {
                 validate_record_transaction(
                     &state,
@@ -733,11 +663,34 @@ fn test_mixed_scenario_soak_preserves_invariants() {
                 request.requests_pause,
                 "automatic operation decisions must surface the existing auto-pause contract"
             );
+            // Leadership sees the surfaced exception through a canonical player-visible
+            // report linked to the decision before resolving it.
             let recipient = state
                 .decisions()
                 .get_decision(request.decision)
                 .expect("tick-generated decision should persist before resolution")
                 .recipient();
+            validate_record_report(
+                &state,
+                ReportDraft {
+                    recipient,
+                    kind: ReportKind::Legal,
+                    title: "Decision required".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Exception,
+                        summary: "A delegated operation requires guidance.".to_owned(),
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([
+                            EntityRef::Operation(operation),
+                            EntityRef::DecisionRequest(request.decision),
+                        ]),
+                        decision: Some(request.decision),
+                    }],
+                },
+            )
+            .expect("decision-linked report should validate")
+            .commit(&mut state)
+            .expect("decision-linked report should commit");
             validate_resolve_decision(
                 &registry,
                 &state,
@@ -914,7 +867,7 @@ fn decision_request_rejects_non_interrupting_attention_without_mutation() {
     let TestScenario {
         mut state,
         operation,
-        mandate: _,
+        mandate,
     } = make_test_scenario();
     for _ in 0..10 {
         run_tick(&registry, &mut state);
@@ -926,16 +879,23 @@ fn decision_request_rejects_non_interrupting_attention_without_mutation() {
     let leader = record.leader();
     let version = record.version();
 
-    let error = validate_request_decision(
+    // Attention metadata is validated before any recruitment-specific precondition, so a
+    // non-interrupting class is rejected without touching authoritative state.
+    let error = validate_request_recruitment_approval(
+        &registry,
         &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
+        RecruitmentApprovalRequestDraft {
+            authority: MandateAuthority {
+                mandate,
+                manager: leader,
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
             },
+            target_organization: record.responsible_organization(),
+            recruiter: leader,
+            candidate: leader,
+            approach: RecruitmentApproach::Protection,
             attention: AttentionClass::Notable,
-            summary: "A delegated operation encountered an unexpected condition.".to_owned(),
+            summary: "A delegated operation requires guidance.".to_owned(),
         },
     )
     .expect_err("non-interrupting attention must not create a decision request");
@@ -959,33 +919,17 @@ fn stale_decision_resolution_cannot_commit_twice() {
     let registry = build_registry();
     let TestScenario {
         mut state,
-        operation,
+        operation: _,
         mandate: _,
     } = make_test_scenario();
-    for _ in 0..10 {
-        run_tick(&registry, &mut state);
-    }
-    let leader = state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should exist")
-        .leader();
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "A delegated operation requires guidance.".to_owned(),
-        },
-    )
-    .expect("decision request should validate")
-    .commit(&mut state)
-    .expect("validated request should remain current")
-    .decision;
+    // The operation's police response arrives and pauses it with a pending decision.
+    run_tick(&registry, &mut state);
+    let decision = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if let Some(request) = outcome.decision_requests.first() {
+            break request.decision;
+        }
+    };
     let recipient = state
         .player_organization()
         .expect("fixture should have player organization");
@@ -1210,26 +1154,14 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
     // Attention preferences persist with the campaign envelope so a restored campaign
     // keeps its pause behavior.
     let default_auto_pause = state.attention_settings().clone();
-    let leader = state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should exist")
-        .leader();
-    let request = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "Unexpected condition requires guidance.".to_owned(),
-        },
-    )
-    .expect("pending decision should validate")
-    .commit(&mut state)
-    .expect("validated pending decision should remain current");
+    // The operation's police response arrives and raises the exception decision through
+    // the canonical arrival path.
+    let request = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if let Some(decision) = outcome.decision_requests.first() {
+            break *decision;
+        }
+    };
     // Exception-class requests pause by default.
     assert!(request.requests_pause);
 
@@ -1240,7 +1172,7 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
         &state,
         ReportDraft {
             recipient,
-            kind: ReportKind::PoliceIntelligence,
+            kind: ReportKind::Legal,
             title: "Pending guidance".to_owned(),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Exception,
@@ -1258,10 +1190,10 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
     .commit(&mut state)
     .expect("pending-decision report should commit");
 
-    // Toggle two classes off their defaults before saving so the round trip proves
-    // changed preferences, not just restored defaults.
+    // Toggle both interrupting classes off their defaults before saving so the round trip
+    // proves changed preferences, not just restored defaults.
     state.set_auto_pause(AttentionClass::Exception, false);
-    state.set_auto_pause(AttentionClass::Notable, true);
+    state.set_auto_pause(AttentionClass::Crisis, false);
 
     let envelope = build_save(&registry, &state).expect("valid pending state should save");
     let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
@@ -1279,15 +1211,15 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
     assert_eq!(
         restored
             .attention_settings()
-            .is_auto_pause_enabled(AttentionClass::Notable),
-        true,
-        "toggled-on Notable auto-pause must survive save/load"
+            .is_auto_pause_enabled(AttentionClass::Crisis),
+        false,
+        "toggled-off Crisis auto-pause must survive save/load"
     );
     assert_ne!(
-        default_auto_pause.is_auto_pause_enabled(AttentionClass::Notable),
+        default_auto_pause.is_auto_pause_enabled(AttentionClass::Crisis),
         restored
             .attention_settings()
-            .is_auto_pause_enabled(AttentionClass::Notable)
+            .is_auto_pause_enabled(AttentionClass::Crisis)
     );
     assert_eq!(
         restored

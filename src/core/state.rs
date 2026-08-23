@@ -23,7 +23,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 57;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 58;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -181,8 +181,17 @@ impl AppState {
         &self.campaign.attention
     }
 
-    /// Canonical mutation path for the persistent auto-pause preference.
+    /// Canonical mutation path for the persistent auto-pause preference. Only interrupting
+    /// classes are settable: decisions carry `Exception` or `Crisis` attention exclusively,
+    /// so a stored preference for any other class could never be observed.
     pub fn set_auto_pause(&mut self, attention: AttentionClass, enabled: bool) {
+        assert!(
+            matches!(
+                attention,
+                AttentionClass::Exception | AttentionClass::Crisis
+            ),
+            "auto-pause preferences apply only to interrupting attention classes"
+        );
         if enabled {
             self.campaign.attention.auto_pause.insert(attention);
         } else {

@@ -806,7 +806,7 @@ impl WorldState {
             .map(BusinessOwnershipChangeRecord::new_owner)
     }
 
-    pub fn business_was_owned_during(
+    pub fn has_business_owner_during(
         &self,
         business: BusinessId,
         owner: BusinessOwner,

@@ -1,15 +1,12 @@
-//! Focused tests for operation authorization, transitions, aborts, and indexes.
+﻿//! Focused tests for operation authorization, transitions, aborts, and indexes.
 
 use super::*;
 use crate::build_registry;
-use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::MandateId;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
 use crate::core::time::SimTime;
-use crate::decisions::decision_system::validate_request_decision;
-use crate::decisions::{DecisionContext, DecisionRequestDraft, OperationExceptionReason};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -42,6 +39,15 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
         },
     )
     .expect("organization fixture should validate");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Test Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police organization fixture should validate");
     let leader = insert_character(
         &mut state,
         CharacterDraft {
@@ -73,6 +79,17 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
         },
     )
     .expect("neighborhood fixture should validate");
+    crate::legal::jurisdiction_system::validate_set_jurisdiction(
+        &state,
+        crate::legal::JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([neighborhood]),
+            case_intake_priority: Rating::try_new(80).expect("fixture priority should validate"),
+        },
+    )
+    .expect("precinct jurisdiction fixture should validate")
+    .commit(&mut state)
+    .expect("precinct jurisdiction fixture should commit");
     let business = insert_business(
         &registry,
         &mut state,
@@ -795,29 +812,20 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
         ));
     draft
         .contingencies
-        .push(crate::operations::OperationContingency::RequestDecisionOnUnexpectedCondition);
+        .push(crate::operations::OperationContingency::RequestDecisionOnPoliceArrival);
     let operation = validate_authorize_operation(&registry, &state, draft)
         .expect("decision-capable operation should validate")
         .commit(&mut state)
         .expect("decision-capable operation should commit");
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin before its deadline");
-    let decision = validate_request_decision(
-        &state,
-        DecisionRequestDraft {
-            requester: leader,
-            context: DecisionContext::OperationException {
-                operation,
-                reason: OperationExceptionReason::UnexpectedCondition,
-            },
-            attention: AttentionClass::Exception,
-            summary: "The crew encountered an unexpected condition.".to_owned(),
-        },
-    )
-    .expect("operation exception should request a decision")
-    .commit(&mut state)
-    .expect("decision request should commit")
-    .decision;
+    // The dispatched response arrives and pauses the operation pending leadership.
+    let decision = loop {
+        let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+        if let Some(request) = outcome.decision_requests.first() {
+            break request.decision;
+        }
+    };
     assert_eq!(
         state
             .operations()
@@ -827,8 +835,9 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
         OperationStatus::AwaitingDecision
     );
 
-    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
-    crate::core::simulation::run_tick(&registry, &mut state);
+    while state.now() < SimTime::from_minutes(12) {
+        crate::core::simulation::run_tick(&registry, &mut state);
+    }
 
     let record = state
         .operations()

@@ -78,7 +78,7 @@ fn explicit_transfer_creates_stable_organization_knowledge_and_provenance() {
         &state,
         ReportDraft {
             recipient: organization,
-            kind: ReportKind::PoliceIntelligence,
+            kind: ReportKind::Legal,
             title: "Unreported member knowledge".to_owned(),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,
@@ -156,7 +156,7 @@ fn explicit_transfer_creates_stable_organization_knowledge_and_provenance() {
         &state,
         ReportDraft {
             recipient: organization,
-            kind: ReportKind::PoliceIntelligence,
+            kind: ReportKind::Legal,
             title: "Reported member knowledge".to_owned(),
             entries: vec![ReportEntry {
                 attention: AttentionClass::Notable,

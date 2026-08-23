@@ -23,11 +23,11 @@ use crate::legal::investigation_work_execution::{
     InvestigationWorkRandomness,
 };
 use crate::operations::operation_execution::{
-    decide_operation_resolution, due_in_progress_operations, validate_operation_resolution_plan,
-    OperationResolutionRandomness,
+    decide_operation_resolution, find_due_in_progress_operations,
+    validate_operation_resolution_plan, OperationResolutionRandomness,
 };
 use crate::operations::operation_system::{
-    apply_transition, due_authorized_operations, due_operations_with_missed_deadlines,
+    apply_transition, find_due_authorized_operations, find_due_operations_with_missed_deadlines,
     has_missed_operation_deadline, validate_deadline_missed_operation, OperationTransition,
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
@@ -73,7 +73,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Opportunity expiry runs before other due work so its durable lifecycle report is available
     // to every same-minute consumer, including the executive brief synthesized at the end.
     let expired_opportunities = apply_opportunity_expiry(registry, state);
-    let due_authorized = due_authorized_operations(state);
+    let due_authorized = find_due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
     for operation in due_authorized {
         if has_missed_operation_deadline(state, operation) {
@@ -87,7 +87,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             started_operations.push(operation);
         }
     }
-    for operation in due_operations_with_missed_deadlines(state) {
+    for operation in find_due_operations_with_missed_deadlines(state) {
         let record = state
             .operations()
             .get_operation(operation)
@@ -115,7 +115,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         .expect("due police responses must commit through canonical arrival processing");
     let arrived_police_responses = police_response_outcome.arrived;
     let decision_requests = police_response_outcome.decisions;
-    let due_operations = due_in_progress_operations(state);
+    let due_operations = find_due_in_progress_operations(state);
     let mut resolved_operations = Vec::with_capacity(due_operations.len());
     for operation in due_operations {
         let kind = state

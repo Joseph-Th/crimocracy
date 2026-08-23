@@ -346,10 +346,7 @@ fn decision_entities(decision: &DecisionRequestRecord) -> BTreeSet<EntityRef> {
         EntityRef::DecisionRequest(decision.id()),
     ]);
     match decision.context() {
-        DecisionContext::OperationException {
-            operation,
-            reason: _,
-        } => {
+        DecisionContext::OperationPoliceArrival { operation, .. } => {
             entities.insert(EntityRef::Operation(operation));
         }
         DecisionContext::RecruitmentApproval(context) => {

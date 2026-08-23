@@ -108,6 +108,7 @@ impl ReputationState {
         self.records.get(&(organization, audience))
     }
 
+    #[cfg(test)]
     pub fn records_for_organization(
         &self,
         organization: OrganizationId,

@@ -32,6 +32,10 @@ pub struct BusinessEconomyRecord {
     last_cycle_at: Option<SimTime>,
     /// Sabotage damage horizon: while set and not yet passed, cycles earn degraded gross.
     disrupted_through: Option<SimTime>,
+    /// Trailing-loss counting starts at this instant. Set when the economy resumes after any
+    /// suspension so the authored losing-cycle threshold applies to losses suffered since the
+    /// restart instead of resurrecting pre-suspension history on the first losing cycle.
+    loss_streak_anchor: Option<SimTime>,
     /// Street-cash volume this front has absorbed since its last operating cycle. The
     /// laundering plausibility budget is per cycle, so splitting one large sum into many
     /// transfers cannot hide more than the front's authored share of legitimate earnings.
@@ -61,8 +65,12 @@ impl BusinessEconomyRecord {
     pub fn last_cycle_at(&self) -> Option<SimTime> {
         self.last_cycle_at
     }
+    #[cfg(test)]
     pub fn disrupted_through(&self) -> Option<SimTime> {
         self.disrupted_through
+    }
+    pub(crate) fn loss_streak_anchor(&self) -> Option<SimTime> {
+        self.loss_streak_anchor
     }
     pub fn is_disrupted(&self, now: SimTime) -> bool {
         self.disrupted_through.is_some_and(|through| now <= through)
@@ -263,6 +271,9 @@ impl EconomyState {
         business: BusinessId,
         status: BusinessOperatingStatus,
         next_cycle_at: Option<SimTime>,
+        // Installed only when the economy returns to Active: restarts the chronic-loss grace
+        // window so pre-suspension losses cannot instantly re-suspend a resumed business.
+        loss_streak_anchor: Option<SimTime>,
     ) {
         let (was_active, old_next_cycle_at) = {
             let record = self
@@ -294,6 +305,9 @@ impl EconomyState {
             .expect("validated business economy disappeared before status commit");
         record.status = status;
         record.next_cycle_at = next_cycle_at;
+        if let Some(anchor) = loss_streak_anchor {
+            record.loss_streak_anchor = Some(anchor);
+        }
         record.version = record
             .version
             .checked_add(1)
@@ -435,6 +449,7 @@ pub(crate) fn build_business_economy_record(
         next_cycle_at: Some(next_cycle_at),
         last_cycle_at: None,
         disrupted_through: None,
+        loss_streak_anchor: None,
         laundered_this_cycle: Money::ZERO,
         version: 1,
     }

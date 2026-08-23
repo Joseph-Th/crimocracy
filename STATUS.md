@@ -4,7 +4,7 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 
 ## Runtime foundation
 
-- `AppState` owns serializable campaign state, simulation time, typed ID counters, attention settings, and independent deterministic RNG streams for generic, operation, investigation, business, enterprise, and recruitment work.
+- `AppState` owns serializable campaign state, simulation time, typed ID counters, attention settings, and independent deterministic RNG streams for operation, investigation, business, enterprise, and recruitment work.
 - `Registry` owns immutable Rust-authored definitions. Runtime records and generated values belong to `AppState` and its domain owners.
 - Save/load validates envelope, schema, authored content revision, registry references, cross-references, indexes, and ID high-water marks before accepting state. Compatibility is current-version only; no implicit migration or defaulting.
 - [`core::simulation::run_tick`](src/core/simulation.rs) is the canonical one-minute pipeline. It processes due work in stable order and returns `TickOutcome`.
@@ -25,8 +25,8 @@ Scope authority: what the foundation implements and what it explicitly excludes.
 | Decisions | Durable typed requests, recipient/context indexes, versioned resolution, attention classes | `src/decisions/` via `decision_system` |
 | Delegation | Organization-owned mandates, responsibility scopes, policy overrides, budget authority, revision, revocation, dependency checks | `src/delegation/` via `delegation_system` |
 | Recruitment | Relationship-gated recruitment, defection, cooldowns, executive approval, delegated autonomy, canonical membership reassignment, refused-approach loyalty reporting to the candidate's organization, organization competence reputation as an authored scoring term | `src/recruitment/` via `recruitment_system` |
-| Enterprises | Routine criminal enterprises (protection, gambling, alcohol distribution, bookmaking, loan sharking, fencing), authored economics, venue-function requirements, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement with chronic-loss suspension at the authored threshold, financial reporting, daily delegated-autonomy expansion for non-player organizations with police-fear posture gating and influence-aware district consolidation preference | `src/enterprises/` via `enterprise_execution` and reporting modules |
-| Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting, sabotage disruption horizons with degraded earning power, chronic-loss suspension after an authored run of net-losing cycles | `src/economy/` via `business_economy_system` and reporting modules |
+| Enterprises | Routine criminal enterprises (protection, gambling, alcohol distribution, bookmaking, loan sharking, fencing), authored economics, venue-function requirements, manager authority, district-heat surcharge from active investigations with player-visible manager reporting, scheduled cycles, balanced settlement with chronic-loss suspension at the authored threshold (the losing-cycle count restarts at every resumption), financial reporting, daily delegated-autonomy expansion for non-player organizations with police-fear posture gating and influence-aware district consolidation preference | `src/enterprises/` via `enterprise_execution` and reporting modules |
+| Legitimate economy | Business operating economies, ownership transfer/history, scheduled cycles, authored economics, accounting information, comparative reporting, sabotage disruption horizons with degraded earning power, chronic-loss suspension after an authored run of net-losing cycles (counted since the latest resumption) | `src/economy/` via `business_economy_system` and reporting modules |
 | Money laundering | Street-cash-to-accounted-funds conversion through owned cash-intensive fronts, authored fee split to the front's operating account, per-cycle plausibility budget capped at an authored fraction of the front's legitimate gross potential so splitting one sum across transfers cannot exceed it; commit re-validates against the front's economy version | `src/finance/` via `finance_system::validate_launder_funds` |
 | Reputation | Contextual per-audience organizational standing across fear/reliability/competence/treachery, sparse records created at the authored baseline on first touch and erased when decay returns them to baseline, deterministic operation-consequence producers (success competence, exposure fear, violent-approach business fear), daily baseline decay, underworld competence as an authored recruitment-scoring term | `src/reputation/` via `reputation_system` |
 | Legal institutions | Jurisdictions, patrol deployments, timed police response, investigations, evidence graphs, staffing with investigator-held case-activity knowledge refreshed on every lifecycle transition and lead assignment, detective work, witness interviews and named testimony, cold cases, autonomous evidence-threshold arrests/custody, detainee informant recruitment and disclosures, representation (automatic-policy retention is swept at custody release; explicitly commanded retention is not), prosecution referral | `src/legal/` via named legal system modules |
@@ -59,8 +59,8 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 ## Version facts
 
-The current authored content revision is 28.
+The current authored content revision is 29.
 
-The current in-memory state schema version is 57.
+The current in-memory state schema version is 58.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

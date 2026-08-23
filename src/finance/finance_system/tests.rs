@@ -1072,6 +1072,6 @@ fn laundering_requires_a_street_cash_source_account() {
     };
     assert!(matches!(
         error,
-        LaunderingError::AccountOwnerMismatch { .. }
+        LaunderingError::InvalidStreetAccountKind(_)
     ));
 }

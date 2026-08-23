@@ -310,13 +310,24 @@ pub fn decide_business_cycle(
 
 /// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
 /// the scan stays bounded regardless of how much history a long-lived business accumulates.
+/// Cycles settled before the economy's loss-streak anchor predate its current grace window
+/// (a resumed business starts counting fresh) and do not extend the streak.
 fn count_trailing_losing_cycles(state: &AppState, business: BusinessId, limit: u8) -> u32 {
+    let anchor = state
+        .economy
+        .get_business_economy(business)
+        .and_then(|economy| economy.loss_streak_anchor());
     let mut losing = 0u32;
     let mut cycles = state.economy.cycles_for(business).collect::<Vec<_>>();
     cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
     for cycle in cycles.iter().rev() {
         if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
             break;
+        }
+        // Cycles settled at or before the anchor predate the grace window; the first
+        // post-resume cycle always settles strictly later than the resume instant.
+        if anchor.is_some_and(|anchor| cycle.occurred_at() <= anchor) {
+            continue;
         }
         losing += 1;
     }
@@ -417,6 +428,7 @@ impl ValidatedBusinessCycle {
             state.economy.set_status(
                 self.plan.snapshot.business,
                 BusinessOperatingStatus::Suspended,
+                None,
                 None,
             );
         }
@@ -586,9 +598,12 @@ impl ValidatedBusinessEconomyStatusChange {
             BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
         };
         let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
+        // Resuming restarts the chronic-loss grace window at the actual resume instant.
+        let loss_streak_anchor =
+            (self.change == BusinessEconomyStatusChange::Resume).then_some(state.now());
         state
             .economy
-            .set_status(self.business, status, next_cycle_at);
+            .set_status(self.business, status, next_cycle_at, loss_streak_anchor);
         Ok(())
     }
 }
@@ -756,20 +771,15 @@ fn resolve_gross_before_variance(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
-/// Authored sabotage damage: disrupted cycles earn the authored fraction of normal gross.
+/// Authored sabotage damage: disrupted cycles earn the authored fraction of normal gross,
+/// rounded with the crate's shared symmetric convention.
 fn resolve_disrupted_gross(
     business: BusinessId,
     normal_gross: Money,
     gross_basis_points: u32,
 ) -> Result<Money, BusinessEconomyError> {
-    let discounted = i128::from(normal_gross.cents())
-        .checked_mul(i128::from(gross_basis_points))
-        .and_then(|value| value.checked_div(10_000))
-        .and_then(|value| i64::try_from(value).ok());
-    match discounted {
-        Some(cents) => Ok(Money::from_cents(cents)),
-        None => Err(BusinessEconomyError::ArithmeticOverflow(business)),
-    }
+    crate::finance::helpers::resolve_basis_point_share(normal_gross, gross_basis_points)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
 fn weighted_rating(

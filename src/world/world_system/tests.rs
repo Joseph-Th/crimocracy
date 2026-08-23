@@ -239,25 +239,25 @@ fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history()
             .business_owner_at(business, SimTime::from_minutes(20)),
         Some(BusinessOwner::Character(individual_owner))
     );
-    assert!(state.world().business_was_owned_during(
+    assert!(state.world().has_business_owner_during(
         business,
         BusinessOwner::Organization(second_owner),
         SimTime::from_minutes(15),
         SimTime::from_minutes(20),
     ));
-    assert!(!state.world().business_was_owned_during(
+    assert!(!state.world().has_business_owner_during(
         business,
         BusinessOwner::Organization(first_owner),
         SimTime::from_minutes(15),
         SimTime::from_minutes(20),
     ));
-    assert!(!state.world().business_was_owned_during(
+    assert!(!state.world().has_business_owner_during(
         business,
         BusinessOwner::Organization(second_owner),
         SimTime::from_minutes(20),
         SimTime::from_minutes(20),
     ));
-    assert!(state.world().business_was_owned_during(
+    assert!(state.world().has_business_owner_during(
         business,
         BusinessOwner::Character(individual_owner),
         SimTime::from_minutes(20),

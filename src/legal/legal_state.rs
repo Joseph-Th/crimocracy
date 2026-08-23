@@ -6,6 +6,7 @@
 //! through read-only getters, and sibling `legal_state_validation.rs` owns the
 //! `has_consistent_*` projection checks over the same private fields.
 
+#[cfg(test)]
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     ArrestId, CaseWitnessId, CharacterId, ContactId, EvidenceId, InformantDisclosureId,
@@ -71,6 +72,7 @@ impl LegalState {
     pub fn get_informant(&self, id: InformantId) -> Option<&InformantRecord> {
         self.informants.get(&id)
     }
+    #[cfg(test)]
     pub fn get_informant_disclosure(
         &self,
         id: InformantDisclosureId,
@@ -88,6 +90,7 @@ impl LegalState {
             .get(&(character, handler))
             .and_then(|id| self.informants.get(id))
     }
+    #[cfg(test)]
     pub fn informant_disclosures_from_information(
         &self,
         information: InformationId,
@@ -298,6 +301,7 @@ impl LegalState {
             .flatten()
             .filter_map(|organization| self.jurisdictions.get(organization))
     }
+    #[cfg(test)]
     pub fn evidence_from_origin(&self, origin: EntityRef) -> impl Iterator<Item = &EvidenceRecord> {
         self.indexes
             .evidence

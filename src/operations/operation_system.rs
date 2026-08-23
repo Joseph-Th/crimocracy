@@ -1,4 +1,4 @@
-//! Operation validation and lifecycle execution; sibling records contain no resolution logic.
+﻿//! Operation validation and lifecycle execution; sibling records contain no resolution logic.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
@@ -279,7 +279,9 @@ impl<'registry> ValidatedOperation<'registry> {
         // target business or neighborhood lifecycle change, or intelligence transferred out of the
         // organization between validation and commit, must stale the authorization. Topic and
         // objective-shape relevance are invariant here because intelligence topics are immutable
-        // and the authored operation definition is static.
+        // and the authored operation definition is static. Entity existence needs no separate
+        // re-check: entity records are append-only, so anything validated at authorization still
+        // exists at commit.
         validate_operation_objective(
             state,
             self.draft.kind,
@@ -515,7 +517,7 @@ pub fn validate_authorize_operation<'registry>(
                 ));
             }
             crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
-            | crate::operations::OperationContingency::RequestDecisionOnUnexpectedCondition => {}
+            | crate::operations::OperationContingency::RequestDecisionOnPoliceArrival => {}
         }
     }
 
@@ -722,7 +724,7 @@ pub(crate) fn is_valid_operation_objective(
 ) -> bool {
     match objective {
         OperationObjective::AcquireProperty { target } => {
-            kind.supports_property_acquisition() && matches!(target, EntityRef::Business(_))
+            kind.can_acquire_property() && matches!(target, EntityRef::Business(_))
         }
         OperationObjective::GatherInformation { target } => {
             kind == OperationKind::Surveillance
@@ -731,7 +733,7 @@ pub(crate) fn is_valid_operation_objective(
                 )
         }
         OperationObjective::ObtainCash { target } => {
-            kind.supports_cash_acquisition() && matches!(target, EntityRef::Business(_))
+            kind.can_take_cash() && matches!(target, EntityRef::Business(_))
         }
         OperationObjective::Frighten { target } => {
             kind == OperationKind::WitnessPressure && matches!(target, EntityRef::Character(_))
@@ -918,7 +920,7 @@ fn validate_operation_objective(
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     if let OperationObjective::AcquireProperty { target } = objective {
-        if !kind.supports_property_acquisition() {
+        if !kind.can_acquire_property() {
             return Err(OperationError::InvalidObjectiveForKind {
                 kind,
                 objective: OperationObjectiveKind::AcquireProperty,
@@ -968,7 +970,7 @@ fn validate_operation_objective(
     Ok(())
 }
 
-pub(crate) fn due_authorized_operations(state: &AppState) -> Vec<OperationId> {
+pub(crate) fn find_due_authorized_operations(state: &AppState) -> Vec<OperationId> {
     state.operations.due_authorized_at_or_before(state.now())
 }
 
@@ -988,7 +990,7 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
 /// the deadline minute itself; the strict comparison lets that same-minute resolution win over
 /// the abort scan. Only work that failed to resolve by its deadline — reachable when a decision
 /// request pauses the operation across the deadline — is reported here for a hard abort.
-pub(crate) fn due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
+pub(crate) fn find_due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
     let mut due = state
         .operations
         .operations_with_status(OperationStatus::InProgress)
@@ -1516,7 +1518,7 @@ fn build_abort_summary(
                 },
             )?;
             Ok(format!(
-        "{} was aborted after leadership reviewed an execution exception: {} Objective resolution was not completed.",
+        "{} was aborted after leadership reviewed an execution exception: {}. Objective resolution was not completed.",
         operation.title(),
         decision.summary()
       ))

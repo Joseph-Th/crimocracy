@@ -14,8 +14,7 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::enterprise_reporting::{
-    resolve_enterprise_financial_summary, resolve_manager_enterprise_financial_summary,
-    resolve_neighborhood_enterprise_financial_summary,
+    resolve_enterprise_financial_summary, resolve_neighborhood_enterprise_financial_summary,
     resolve_organization_enterprise_financial_summary,
 };
 use crate::enterprises::EnterpriseKind;
@@ -1221,13 +1220,6 @@ fn financial_reporting_drills_down_without_cached_totals() {
         period_end,
     )
     .expect("organization financial summary should resolve");
-    let manager_summary = resolve_manager_enterprise_financial_summary(
-        &fixture.state,
-        fixture.authority.manager,
-        period_start,
-        period_end,
-    )
-    .expect("manager financial summary should resolve");
     let neighborhood = match fixture.location {
         EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
@@ -1244,7 +1236,6 @@ fn financial_reporting_drills_down_without_cached_totals() {
     assert_eq!(enterprise_summary.totals.cycle_count, 2);
     assert_eq!(enterprise_summary.totals.notable_cycle_count, 1);
     assert_eq!(enterprise_summary.totals, organization_summary.totals);
-    assert_eq!(enterprise_summary.totals, manager_summary.totals);
     assert_eq!(enterprise_summary.totals, neighborhood_summary.totals);
     assert_eq!(
         enterprise_summary
@@ -1750,5 +1741,35 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             .map(|record| record.status()),
         Some(crate::enterprises::EnterpriseStatus::Active)
     );
+
+    // Resumption restarts the losing-cycle grace window: pre-suspension losses must not
+    // re-suspend the racket on its first post-resume losing settlement.
+    for cycle_index in 0..threshold {
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_enterprise_cycle(&registry, &state, enterprise, 0)
+            .expect("post-resume losing cycle should decide");
+        assert!(plan.net_cash().cents() < 0);
+        validate_enterprise_cycle_plan(&state, plan)
+            .expect("post-resume losing plan should validate")
+            .commit(&mut state)
+            .expect("post-resume losing cycle should commit");
+        let status = state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .map(|record| record.status());
+        if cycle_index + 1 < threshold {
+            assert_eq!(
+                status,
+                Some(crate::enterprises::EnterpriseStatus::Active),
+                "a resumed racket gets a fresh grace window"
+            );
+        } else {
+            assert_eq!(
+                status,
+                Some(crate::enterprises::EnterpriseStatus::Suspended),
+                "threshold consecutive post-resume losses suspend again"
+            );
+        }
+    }
     crate::core::invariants::validate_invariants(&state);
 }

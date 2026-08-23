@@ -78,7 +78,7 @@ pub fn resolve_organization_business_financial_summary(
                     return false;
                 }
                 let ownership_start = period_start.max(economy.established_at());
-                state.world.business_was_owned_during(
+                state.world.has_business_owner_during(
                     business.id(),
                     owner,
                     ownership_start,

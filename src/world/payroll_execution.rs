@@ -118,8 +118,8 @@ fn apply_organization_payroll(
         .expect("payroll total must not overflow money");
 
     // Wages are paid in full or not at all: a boss either meets payroll or the whole crew goes
-    // unpaid and resentful. Funding drains the organization's general cash accounts only â€”
-    // enterprise floats are delegated working capital under mandate authority â€” ordered by
+    // unpaid and resentful. Funding drains the organization's general cash accounts only —
+    // enterprise floats are delegated working capital under mandate authority — ordered by
     // balance then ID so the debit split is deterministic.
     let available: i64 = funding
         .iter()
@@ -156,7 +156,7 @@ fn apply_organization_payroll(
     if paid.cents() > 0 {
         for member in members
             .iter()
-            .map(|(member, _)| member_wage_account(state, *member))
+            .map(|(member, _)| ensure_member_wage_account(state, *member))
         {
             postings.push(LedgerPosting {
                 account: member,
@@ -206,7 +206,7 @@ fn apply_organization_payroll(
 
 /// The member's personal street-cash pocket, created once on first pay and reused after;
 /// wages land where later financial-satisfaction and bribery systems can find them.
-fn member_wage_account(state: &mut AppState, member: CharacterId) -> FinancialAccountId {
+fn ensure_member_wage_account(state: &mut AppState, member: CharacterId) -> FinancialAccountId {
     let owner = FinancialOwner::Character(member);
     if let Some(existing) = state
         .finance()

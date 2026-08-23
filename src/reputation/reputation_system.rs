@@ -184,6 +184,30 @@ pub(crate) fn apply_operation_reputation_consequences(
     Ok(shifts)
 }
 
+/// Player-facing labels for the standing audiences, exhaustive so a new audience must be
+/// named here before it can appear in a report.
+fn audience_label(audience: AudienceKind) -> &'static str {
+    match audience {
+        AudienceKind::Underworld => "the underworld",
+        AudienceKind::Police => "the police",
+        AudienceKind::Businesses => "business owners",
+        AudienceKind::Residents => "residents",
+        AudienceKind::Political => "political figures",
+        AudienceKind::Press => "the press",
+    }
+}
+
+/// Player-facing labels for the standing dimensions, exhaustive so a new dimension must be
+/// named here before it can appear in a report.
+fn dimension_label(dimension: ReputationDimension) -> &'static str {
+    match dimension {
+        ReputationDimension::Fear => "fear of us",
+        ReputationDimension::Reliability => "reliability in us",
+        ReputationDimension::Competence => "opinion of our competence",
+        ReputationDimension::Treachery => "suspicion of our treachery",
+    }
+}
+
 /// Player-facing causality for standing shifts ([`GAME_DESIGN.md`] §53.1): the
 /// organization legitimately knows how its own street standing moved after its own
 /// operation, so each shift becomes a Notable entry in a canonical Standing report —
@@ -201,6 +225,8 @@ pub(crate) fn apply_standing_feedback(
     }
     let mut summary = String::from("Word travels after the job:");
     for (index, shift) in shifts.iter().enumerate() {
+        // Produced pairs get hand-written prose; any future producer pair still reads as
+        // proper text through the exhaustive labels instead of leaking debug names.
         let clause = match (shift.audience, shift.dimension, shift.delta > 0) {
             (AudienceKind::Underworld, ReputationDimension::Competence, true) => {
                 " the underworld rates our competence higher".to_owned()
@@ -220,12 +246,13 @@ pub(crate) fn apply_standing_feedback(
             (AudienceKind::Businesses, ReputationDimension::Fear, false) => {
                 " business owners relax around us".to_owned()
             }
-            (audience, dimension, rising) => {
-                format!(
-                    " {audience:?} {dimension:?} {}",
-                    if rising { "rises" } else { "falls" }
-                )
-            }
+            (audience, dimension, rising) => format!(
+                " {} {} among {} {}",
+                dimension_label(dimension),
+                if rising { "rises" } else { "falls" },
+                audience_label(audience),
+                if rising { "slightly" } else { "somewhat" }
+            ),
         };
         if index > 0 {
             summary.push(';');

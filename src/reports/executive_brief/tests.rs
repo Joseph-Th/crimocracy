@@ -157,7 +157,7 @@ fn record_report(
         state,
         ReportDraft {
             recipient,
-            kind: ReportKind::PoliceIntelligence,
+            kind: ReportKind::Legal,
             title: title.to_owned(),
             entries,
         },

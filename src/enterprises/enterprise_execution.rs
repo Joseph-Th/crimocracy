@@ -9,8 +9,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::delegation::delegation_system::{
-    ensure_mandate_authority_current, resolve_mandate_authority, resolve_policy_for_manager,
-    DelegationError,
+    ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
 };
 use crate::delegation::{
     MandateAuthority, MandateStatus, ResolvedMandateAuthority, ResponsibilityFunction,
@@ -35,8 +34,7 @@ use crate::intelligence::{
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::{
-    AutonomyLevel, BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile,
-    PolicyKind, Rating,
+    AutonomyLevel, BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -120,8 +118,6 @@ pub enum EnterpriseError {
     EnterpriseNotActive(EnterpriseId),
     #[error("enterprise {0} is not suspended")]
     EnterpriseNotSuspended(EnterpriseId),
-    #[error("enterprise {0} is already closed")]
-    EnterpriseClosed(EnterpriseId),
     #[error("enterprise {enterprise} is not due for a cycle until {due_at:?}")]
     CycleNotDue {
         enterprise: EnterpriseId,
@@ -386,7 +382,8 @@ fn select_autonomous_expansion(
                 candidates.push((scope, EnterpriseLocation::Neighborhood(neighborhood)));
             }
             for (business_id, business) in &owned_venues {
-                if business.neighborhood() != neighborhood || !kind_fits_host(definition, business)
+                if business.neighborhood() != neighborhood
+                    || !is_valid_host_kind(definition, business)
                 {
                     continue;
                 }
@@ -401,7 +398,7 @@ fn select_autonomous_expansion(
             let Some(business) = owned_venues.get(business_id) else {
                 continue;
             };
-            if kind_fits_host(definition, business) {
+            if is_valid_host_kind(definition, business) {
                 candidates.push((*scope, EnterpriseLocation::Business(*business_id)));
             }
         }
@@ -423,7 +420,7 @@ fn select_autonomous_expansion(
     None
 }
 
-fn kind_fits_host(
+fn is_valid_host_kind(
     definition: &EnterpriseDefinition,
     business: &crate::world::BusinessRecord,
 ) -> bool {
@@ -499,9 +496,6 @@ struct EnterpriseCycleSnapshot {
     /// Manager capability feeds gross revenue, so a manager mutation between decide and
     /// commit would otherwise settle economics computed from a stale rating.
     manager_version: (CharacterId, u32),
-    /// Authored policy axis for the enterprise kind, if any. Re-checked at validation and
-    /// commit because the resolved setting is delegation-owned and never persisted here.
-    policy_check: Option<PolicyKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -619,12 +613,6 @@ pub fn decide_enterprise_cycle(
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    // Validate that the manager still holds the authored policy authority for this enterprise
-    // kind. The resolved setting is delegation-owned state and is never persisted on the cycle.
-    let policy_check = definition.policy();
-    if let Some(policy_kind) = policy_check {
-        resolve_policy_for_manager(state, record.manager(), policy_kind)?;
-    }
     let variance_notable = i32::from(variance_basis_points).unsigned_abs()
         >= u32::from(economics.notable_variance_basis_points());
     // A hot district taxes the racket even on a normal-variance night, and a losing night is
@@ -672,7 +660,6 @@ pub fn decide_enterprise_cycle(
             supporting_business_versions,
             host_business_version,
             manager_version,
-            policy_check,
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,
@@ -691,13 +678,24 @@ pub fn decide_enterprise_cycle(
 
 /// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
 /// the scan stays bounded regardless of how much history a long-lived racket accumulates.
+/// Cycles settled before the enterprise's loss-streak anchor predate its current grace window
+/// (a resumed racket starts counting fresh) and do not extend the streak.
 fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limit: u8) -> u32 {
+    let anchor = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .and_then(|record| record.loss_streak_anchor());
     let mut losing = 0u32;
     let mut cycles = state.enterprises.cycles_for(enterprise).collect::<Vec<_>>();
     cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
     for cycle in cycles.iter().rev() {
         if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
             break;
+        }
+        // Cycles settled at or before the anchor predate the grace window; the first
+        // post-resume cycle always settles strictly later than the resume instant.
+        if anchor.is_some_and(|anchor| cycle.occurred_at() <= anchor) {
+            continue;
         }
         losing += 1;
     }
@@ -726,10 +724,6 @@ fn ensure_manager_authority_current(
             expected: expected_version,
             found: record.version(),
         });
-    }
-    // A standing order revoked between plan and validation must not settle a cycle.
-    if let Some(policy_kind) = snapshot.policy_check {
-        resolve_policy_for_manager(state, manager, policy_kind)?;
     }
     Ok(())
 }
@@ -843,6 +837,7 @@ impl ValidatedEnterpriseCycle {
             state.enterprises.set_status(
                 self.plan.snapshot.enterprise,
                 EnterpriseStatus::Suspended,
+                None,
                 None,
             );
         }
@@ -968,7 +963,6 @@ pub fn validate_enterprise_cycle_plan(
 enum EnterpriseStatusChange {
     Suspend,
     Resume,
-    Close,
 }
 
 pub struct ValidatedEnterpriseStatusChange {
@@ -1019,12 +1013,17 @@ impl ValidatedEnterpriseStatusChange {
         let next_status = match self.change {
             EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
             EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
-            EnterpriseStatusChange::Close => EnterpriseStatus::Closed,
         };
         let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
-        state
-            .enterprises
-            .set_status(self.enterprise, next_status, next_cycle_at);
+        // Resuming restarts the chronic-loss grace window at the actual resume instant.
+        let loss_streak_anchor =
+            (self.change == EnterpriseStatusChange::Resume).then_some(state.now());
+        state.enterprises.set_status(
+            self.enterprise,
+            next_status,
+            next_cycle_at,
+            loss_streak_anchor,
+        );
         Ok(())
     }
 }
@@ -1041,7 +1040,6 @@ pub fn validate_suspend_enterprise(
         return Err(match record.status() {
             EnterpriseStatus::Active => unreachable!(),
             EnterpriseStatus::Suspended => EnterpriseError::EnterpriseNotActive(enterprise),
-            EnterpriseStatus::Closed => EnterpriseError::EnterpriseClosed(enterprise),
         });
     }
     Ok(ValidatedEnterpriseStatusChange {
@@ -1068,7 +1066,6 @@ pub fn validate_resume_enterprise(
             return Err(EnterpriseError::EnterpriseNotSuspended(enterprise))
         }
         EnterpriseStatus::Suspended => {}
-        EnterpriseStatus::Closed => return Err(EnterpriseError::EnterpriseClosed(enterprise)),
     }
     let authority = resolve_mandate_authority(state, record.authority())?;
     validate_enterprise_environment(
@@ -1102,27 +1099,6 @@ pub fn validate_resume_enterprise(
         cycle_duration: Some(cycle_duration),
         authority: Some(authority),
         supporting_business_versions,
-    })
-}
-
-pub fn validate_close_enterprise(
-    state: &AppState,
-    enterprise: EnterpriseId,
-) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
-    let record = state
-        .enterprises
-        .get_enterprise(enterprise)
-        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
-    if record.status() == EnterpriseStatus::Closed {
-        return Err(EnterpriseError::EnterpriseClosed(enterprise));
-    }
-    Ok(ValidatedEnterpriseStatusChange {
-        enterprise,
-        expected_version: record.version(),
-        change: EnterpriseStatusChange::Close,
-        cycle_duration: None,
-        authority: None,
-        supporting_business_versions: BTreeMap::new(),
     })
 }
 

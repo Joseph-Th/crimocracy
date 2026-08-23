@@ -133,6 +133,8 @@ pub(crate) enum OperationResolutionError {
     #[error(transparent)]
     Witness(#[from] crate::legal::witness_system::WitnessError),
     #[error(transparent)]
+    Arrest(#[from] crate::legal::arrest_system::ArrestError),
+    #[error(transparent)]
     BusinessEconomy(#[from] BusinessEconomyError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
@@ -574,21 +576,15 @@ impl ValidatedOperationResolution {
         // itself has reached its terminal record; the validated release was checked against
         // the arrest version seen during plan validation.
         if let Some(release) = self.detainee_release {
-            release
-                .commit(state)
-                .expect("validated detainee release must commit atomically");
+            release.commit(state)?;
         }
         for intimidation in self.witness_intimidation {
-            intimidation
-                .commit(state)
-                .expect("validated witness intimidation must commit atomically");
+            intimidation.commit(state)?;
         }
         // Sabotage damage runs last so the target's economy degrades only after the
         // operation itself has reached its terminal record.
         if let Some(disruption) = self.business_disruption {
-            disruption
-                .commit(state)
-                .expect("validated business disruption must commit atomically");
+            disruption.commit(state)?;
         }
         // Personal after-action knowledge for each participant: the crew knows what went
         // down even though the organization's own record is the org-held after-action.
@@ -800,12 +796,13 @@ pub(crate) fn validate_operation_resolution_plan(
             },
         ) = (record.kind(), record.objective())
         {
-            let economy_active = state
-                .economy
-                .get_business_economy(*business)
-                .is_some_and(|economy| {
-                    economy.status() == crate::economy::BusinessOperatingStatus::Active
-                });
+            let economy_active =
+                state
+                    .economy
+                    .get_business_economy(*business)
+                    .is_some_and(|economy| {
+                        economy.status() == crate::economy::BusinessOperatingStatus::Active
+                    });
             if economy_active {
                 business_disruption = Some(validate_disrupt_business_economy(
                     registry, state, *business,
@@ -1014,7 +1011,7 @@ fn validate_exposure_incident(
     ))
 }
 
-pub(crate) fn due_in_progress_operations(state: &AppState) -> Vec<OperationId> {
+pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<OperationId> {
     state.operations.due_in_progress_at_or_before(state.now())
 }
 

@@ -647,7 +647,7 @@ fn validate_recruitment_plan_with_authority(
         // leak the hidden recruiting organization: the defector's former organization is told
         // only that the member left, and the player discovers the destination through
         // surveillance, not a global history read. So a defection event omits the destination
-        // organization entity and its name â€” and also the recruiter, whose membership would
+        // organization entity and its name — and also the recruiter, whose membership would
         // resolve straight back to that organization.
         if plan.context.previous_organization.is_some() {
             Some(validate_record_event(

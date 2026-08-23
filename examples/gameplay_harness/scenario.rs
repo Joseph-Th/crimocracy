@@ -1,4 +1,4 @@
-//! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
+﻿//! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
 
 use crimocracy::contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft};
 use crimocracy::core::entity::EntityRef;
@@ -857,9 +857,9 @@ pub fn authorize_burglary(
     let contingencies = match strategy {
         Strategy::Rush | Strategy::Recon => vec![
             OperationContingency::AbortOnPoliceArrivalBeforeEntry,
-            OperationContingency::RequestDecisionOnUnexpectedCondition,
+            OperationContingency::RequestDecisionOnPoliceArrival,
         ],
-        Strategy::Press => vec![OperationContingency::RequestDecisionOnUnexpectedCondition],
+        Strategy::Press => vec![OperationContingency::RequestDecisionOnPoliceArrival],
     };
     Ok(validate_authorize_operation(
         scenario.registry,

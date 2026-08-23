@@ -362,6 +362,10 @@ pub enum LaunderingError {
         account: FinancialAccountId,
         organization: crate::core::id::OrganizationId,
     },
+    #[error("street-cash source account {0} must hold street cash")]
+    InvalidStreetAccountKind(FinancialAccountId),
+    #[error("destination account {0} must hold accounted funds")]
+    InvalidAccountedAccountKind(FinancialAccountId),
     #[error("business {0} does not exist")]
     MissingBusiness(crate::core::id::BusinessId),
     #[error("business {0} is not owned by the requesting organization")]
@@ -449,10 +453,9 @@ pub fn validate_launder_funds(
         });
     }
     if street.kind() != AccountKind::StreetCash {
-        return Err(LaunderingError::AccountOwnerMismatch {
-            account: draft.street_account,
-            organization: draft.organization,
-        });
+        return Err(LaunderingError::InvalidStreetAccountKind(
+            draft.street_account,
+        ));
     }
     let accounted = state
         .finance
@@ -465,10 +468,9 @@ pub fn validate_launder_funds(
         });
     }
     if accounted.kind() != AccountKind::AccountedFunds {
-        return Err(LaunderingError::AccountOwnerMismatch {
-            account: draft.accounted_account,
-            organization: draft.organization,
-        });
+        return Err(LaunderingError::InvalidAccountedAccountKind(
+            draft.accounted_account,
+        ));
     }
     let business_record = state
         .world

@@ -843,6 +843,7 @@ fn authority_sightline_summary(
     active_case_against_surveiller: bool,
     outcome: OperationObjectiveOutcome,
 ) -> String {
+    use crate::legal::case_knowledge::CaseActivityStatus;
     // The observation reports only visible authority activity tied to a case the surveilling
     // organization already knows exists; it never reveals evidence, subjects, or case internals.
     if outcome == OperationObjectiveOutcome::Partial {
@@ -850,15 +851,24 @@ fn authority_sightline_summary(
       "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
     );
     }
-    if active_case_against_surveiller {
-        format!(
-      "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
-    )
+    // Dependable reads lead with the shared anchored activity marker so player-facing
+    // parsers read the sightline without hidden state and free text cannot spoof the parse.
+    let (status, prose) = if active_case_against_surveiller {
+        (
+            CaseActivityStatus::Active,
+            format!(
+        "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
+      ),
+        )
     } else {
-        format!(
-      "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
-    )
-    }
+        (
+            CaseActivityStatus::Shelved,
+            format!(
+        "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
+      ),
+        )
+    };
+    format!("{} {prose}", status.marker())
 }
 
 fn organization_summary(
@@ -953,7 +963,6 @@ fn enterprise_status_label(status: EnterpriseStatus) -> &'static str {
     match status {
         EnterpriseStatus::Active => "active",
         EnterpriseStatus::Suspended => "inactive or suspended",
-        EnterpriseStatus::Closed => "closed",
     }
 }
 

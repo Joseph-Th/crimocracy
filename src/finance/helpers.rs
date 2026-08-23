@@ -19,6 +19,17 @@ pub fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> Option<
     Some(Money::from_cents(cents))
 }
 
+/// Reduces an amount to its basis-point share (`0..=10_000` maps to 0..100%), rounded half
+/// away from zero to match the crate's single rounding convention.
+pub fn resolve_basis_point_share(amount: Money, basis_points: u32) -> Option<Money> {
+    let scaled = i128::from(amount.cents()).checked_mul(i128::from(basis_points))?;
+    let negative = scaled < 0;
+    let adjusted = (scaled.abs() + 5_000) / 10_000;
+    let adjusted = if negative { -adjusted } else { adjusted };
+    let cents = i64::try_from(adjusted).ok()?;
+    Some(Money::from_cents(cents))
+}
+
 /// Builds a balanced two-posting settlement for a net cash amount.
 /// The settlement account is the fictitious counterparty.
 pub fn build_settlement_postings(

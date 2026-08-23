@@ -131,7 +131,7 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                 )?;
                 let approval_context = match decision_record.context() {
                     DecisionContext::RecruitmentApproval(context) => context,
-                    DecisionContext::OperationException { .. } => {
+                    DecisionContext::OperationPoliceArrival { .. } => {
                         return Err(StateValidationError::InvalidRecruitmentAttempt {
                             attempt: attempt.id(),
                         });
