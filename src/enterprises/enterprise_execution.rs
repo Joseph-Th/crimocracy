@@ -4,7 +4,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, CharacterId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
-    IdExhaustionError, IdKind, OrganizationId,
+    IdExhaustionError, IdKind, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -328,25 +328,30 @@ fn select_autonomous_expansion(
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
 ) -> Option<(EnterpriseKind, ResponsibilityScope, EnterpriseLocation)> {
-    let mut district_scopes: Vec<ResponsibilityScope> = mandate
-        .scopes()
-        .iter()
-        .filter(|scope| matches!(scope, ResponsibilityScope::Neighborhood(_)))
-        .copied()
-        .collect();
     // District preference is influence-aware, not id order: districts the organization
     // already leads consolidate first, contested or empty districts follow. Ties break on
-    // neighborhood id, so the ordering stays deterministic.
-    district_scopes.sort_by_key(|scope| {
-        let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
-            unreachable!("district scopes are pre-filtered to neighborhoods");
-        };
-        let leads = resolve_neighborhood_influence(state, *neighborhood)
-            .expect("mandate scopes reference live neighborhoods")
-            .economic_leader()
-            .is_some_and(|leader| leader == organization);
-        (u8::from(!leads), *neighborhood)
-    });
+    // neighborhood id, so the ordering stays deterministic. Tiers are computed once per
+    // mandate rather than per comparison.
+    let mut district_scopes: Vec<(u8, NeighborhoodId)> = mandate
+        .scopes()
+        .iter()
+        .filter_map(|scope| match scope {
+            ResponsibilityScope::Neighborhood(id) => Some(*id),
+            ResponsibilityScope::Business(_) | ResponsibilityScope::Function(_) => None,
+        })
+        .map(|id| {
+            let leads = resolve_neighborhood_influence(state, id)
+                .expect("mandate scopes reference live neighborhoods")
+                .economic_leader()
+                .is_some_and(|leader| leader == organization);
+            (u8::from(!leads), id)
+        })
+        .collect();
+    district_scopes.sort_unstable();
+    let district_scopes: Vec<ResponsibilityScope> = district_scopes
+        .into_iter()
+        .map(|(_, id)| ResponsibilityScope::Neighborhood(id))
+        .collect();
     let business_scopes: Vec<ResponsibilityScope> = mandate
         .scopes()
         .iter()
@@ -367,22 +372,22 @@ fn select_autonomous_expansion(
             && definition.required_network_functions().is_empty();
 
         let mut candidates: Vec<(ResponsibilityScope, EnterpriseLocation)> = Vec::new();
-        for scope in &district_scopes {
+        for scope in district_scopes.iter().copied() {
             let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
                 continue;
             };
             // Asset-free rackets run at the district itself; venue-hosted rackets need an
             // owned venue in the same district whose functions carry every requirement.
             if asset_free {
-                candidates.push((*scope, EnterpriseLocation::Neighborhood(*neighborhood)));
+                candidates.push((scope, EnterpriseLocation::Neighborhood(neighborhood)));
             }
             for (business_id, business) in &owned_venues {
-                if business.neighborhood() != *neighborhood || !kind_fits_host(definition, business)
+                if business.neighborhood() != neighborhood || !kind_fits_host(definition, business)
                 {
                     continue;
                 }
                 // The district scope covers venues inside its own neighborhood.
-                candidates.push((*scope, EnterpriseLocation::Business(*business_id)));
+                candidates.push((scope, EnterpriseLocation::Business(*business_id)));
             }
         }
         for scope in &business_scopes {

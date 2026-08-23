@@ -1000,6 +1000,39 @@ fn operation_intelligence_must_be_owned_and_relevant() {
 #[test]
 fn require_intelligence_topic_constraint_gates_authorization() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    // Sabotage requires a target with an active operating economy; establish one so the
+    // intelligence gate is what this test exercises.
+    let EntityRef::Business(business_id) = target else {
+        panic!("fixture target should be a business");
+    };
+    let operating = crate::finance::finance_system::insert_account(
+        &mut state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(business_id),
+            kind: crate::finance::AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("operating account should validate");
+    let settlement = crate::finance::finance_system::insert_account(
+        &mut state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(business_id),
+            kind: crate::finance::AccountKind::Settlement,
+        },
+    )
+    .expect("settlement account should validate");
+    crate::economy::business_economy_system::validate_establish_business_economy(
+        &registry,
+        &state,
+        crate::economy::BusinessEconomyDraft {
+            business: business_id,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("target economy fixture should validate")
+    .commit(&mut state)
+    .expect("target economy fixture should commit");
     let specialist = insert_character(
         &mut state,
         CharacterDraft {
@@ -1105,4 +1138,46 @@ fn sabotage_objective_is_rejected_for_non_sabotage_kinds() {
         error,
         OperationError::InvalidObjectiveTarget { .. }
     ));
+}
+
+#[test]
+fn sabotage_of_a_business_without_an_operating_economy_is_rejected_atomically() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    // The fixture business has no operating economy record: there is nothing to disrupt.
+    let specialist = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Sabotage Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("specialist fixture should validate");
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.kind = OperationKind::Sabotage;
+    draft.title = "Economy-less sabotage".to_owned();
+    draft.objective = OperationObjective::DisruptBusiness { target };
+    draft.approach = OperationApproach::Covert;
+    draft.roles.insert(RoleKind::EntrySpecialist, specialist);
+
+    let EntityRef::Business(business) = target else {
+        panic!("fixture target should be a business");
+    };
+    assert!(state.economy().get_business_economy(business).is_none());
+
+    let error = match validate_authorize_operation(&registry, &state, draft) {
+        Err(error) => error,
+        Ok(_) => panic!("sabotage of an economy-less business must be rejected"),
+    };
+    assert!(
+        matches!(
+            error,
+            OperationError::TargetWithoutOperatingEconomy(economyless) if economyless == business
+        ),
+        "unexpected error: {error}"
+    );
 }

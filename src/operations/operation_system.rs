@@ -148,6 +148,8 @@ pub enum OperationError {
     DeadlineBeforeStart,
     #[error("plan lacks required {0:?} intelligence")]
     MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
+    #[error("business {0} has no active operating economy to disrupt")]
+    TargetWithoutOperatingEconomy(crate::core::id::BusinessId),
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
     #[error("operation {0} cannot begin before its scheduled time")]
@@ -790,10 +792,25 @@ fn validate_active_field_objective_targets(
         }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::GatherInformation { .. } => Ok(()),
-        // Sabotage targets a business whose premises the crew must physically reach, so
-        // the usual active-field-target check applies.
+        // Sabotage targets a business whose premises the crew must physically reach, and
+        // one that actually operates: disrupting a shuttered or economy-less storefront
+        // would resolve into nothing, so authorization rejects it up front.
         OperationObjective::DisruptBusiness { target } => {
-            validate_active_field_objective_target(state, *target)
+            validate_active_field_objective_target(state, *target)?;
+            let EntityRef::Business(business) = *target else {
+                return Err(OperationError::InvalidObjectiveTarget {
+                    objective: objective.kind(),
+                    target: *target,
+                });
+            };
+            let economy = state
+                .economy
+                .get_business_economy(business)
+                .ok_or(OperationError::TargetWithoutOperatingEconomy(business))?;
+            if economy.status() != crate::economy::BusinessOperatingStatus::Active {
+                return Err(OperationError::TargetWithoutOperatingEconomy(business));
+            }
+            Ok(())
         }
         // Extraction targets a person who may legitimately be in custody, so the usual
         // active-field-target check does not apply; custody state is validated separately.
