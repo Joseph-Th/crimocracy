@@ -450,6 +450,130 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
 }
 
 #[test]
+fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let local_neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(neighborhood) => neighborhood,
+        EnterpriseLocation::Business(_) => {
+            panic!("enterprise fixture should be located in a neighborhood")
+        }
+    };
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Sustained Heat Police".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    validate_set_jurisdiction(
+        &fixture.state,
+        JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([local_neighborhood]),
+            case_intake_priority: rating(80),
+        },
+    )
+    .expect("jurisdiction should validate")
+    .commit(&mut fixture.state)
+    .expect("jurisdiction should commit");
+    let manager = fixture.authority.manager;
+
+    let open_case = |fixture: &mut EnterpriseFixture, title: &str| {
+        let origin = validate_authorize_operation(
+            &registry,
+            &fixture.state,
+            OperationDraft {
+                title: format!("{title} origin patrol"),
+                kind: OperationKind::Surveillance,
+                responsible_organization: fixture.organization,
+                leader: manager,
+                objective: OperationObjective::GatherInformation {
+                    target: EntityRef::Neighborhood(local_neighborhood),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+            },
+        )
+        .expect("origin operation should validate")
+        .commit(&mut fixture.state)
+        .expect("origin operation should commit");
+        validate_incident_intake(
+            &fixture.state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: title.to_owned(),
+                subjects: BTreeSet::from([
+                    EntityRef::Operation(origin),
+                    EntityRef::Character(manager),
+                ]),
+                evidence: vec![IncidentEvidenceDraft {
+                    subject: EntityRef::Character(manager),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: fixture.state.now(),
+                }],
+                origin_operation: Some(origin),
+                notified_organizations: BTreeSet::from([fixture.organization]),
+                witness: None,
+            },
+        )
+        .expect("incident intake should validate")
+        .commit(&mut fixture.state)
+        .expect("incident intake should commit");
+    };
+    let settle_cycle = |fixture: &mut EnterpriseFixture| {
+        // Settle one due cycle and return the attention class its plan carried.
+        settle_cycle_inner(&registry, fixture, enterprise)
+    };
+
+    open_case(&mut fixture, "First ward inquiry");
+    let first_hot = settle_cycle(&mut fixture);
+    assert_eq!(first_hot, AttentionClass::Notable);
+
+    // The next cycle pays the same surcharge while the case stays open. The cost is known
+    // news by now, so it settles as routine instead of repeating an identical report.
+    let second_hot = settle_cycle(&mut fixture);
+    assert_eq!(second_hot, AttentionClass::Routine);
+
+    open_case(&mut fixture, "Second ward inquiry");
+    let escalated = settle_cycle(&mut fixture);
+    assert_eq!(escalated, AttentionClass::Notable);
+
+    validate_state(&fixture.state).expect("sustained heat state should validate");
+    validate_invariants(&fixture.state);
+}
+
+/// Settles one due cycle for `enterprise` and returns its committed attention class.
+fn settle_cycle_inner(
+    registry: &Registry,
+    fixture: &mut EnterpriseFixture,
+    enterprise: EnterpriseId,
+) -> AttentionClass {
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_enterprise_cycle(registry, &fixture.state, enterprise, 0)
+        .expect("due enterprise cycle should resolve");
+    let attention = plan.attention();
+    validate_enterprise_cycle_plan(&fixture.state, plan)
+        .expect("cycle plan should validate")
+        .commit(&mut fixture.state)
+        .expect("cycle settlement should commit");
+    attention
+}
+
+#[test]
 fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

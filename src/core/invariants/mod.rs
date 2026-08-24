@@ -929,11 +929,12 @@ pub fn validate_state_against_registry(
         let economics = registry.get_enterprise(enterprise.kind()).economics();
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
         // Notability must agree with the production rule in `enterprise_execution`: a notable
-        // variance, persisted street heat from active investigations at settlement, or a
-        // net-losing settlement makes the manager's cycle report player-visible. Heat is read
-        // from the committed cycle rather than recomputed, because the investigations that
-        // produced it may since have closed; it must still be a whole number of the authored
-        // per-case surcharge.
+        // variance, a net-losing settlement, or street heat that appeared or changed since the
+        // previous settlement makes the manager's cycle report player-visible. A sustained
+        // identical surcharge is a known cost and settles as routine. Heat is read from the
+        // committed cycles rather than recomputed, because the investigations that produced it
+        // may since have closed; it must still be a whole number of the authored per-case
+        // surcharge.
         let per_case = economics.heat_surcharge_per_active_case().cents();
         if cycle.investigation_heat().cents() < 0
             || (per_case == 0 && cycle.investigation_heat().cents() != 0)
@@ -941,8 +942,17 @@ pub fn validate_state_against_registry(
         {
             return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
         }
+        let mut previous_heat = None;
+        for prior in state.enterprises.cycles_for(cycle.enterprise()) {
+            if prior.id() == cycle.id() {
+                break;
+            }
+            previous_heat = Some(prior.investigation_heat());
+        }
+        let heat_reportable = cycle.investigation_heat() > crate::finance::Money::ZERO
+            && previous_heat != Some(cycle.investigation_heat());
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
-            || cycle.investigation_heat() > crate::finance::Money::ZERO
+            || heat_reportable
             || cycle.net_cash() < crate::finance::Money::ZERO
         {
             AttentionClass::Notable

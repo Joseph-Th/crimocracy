@@ -1,12 +1,15 @@
-﻿//! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
+//! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
 
 use crimocracy::contacts::contact_system::{
     find_pending_disclosure_sources, validate_contact_disclosure,
 };
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{OperationId, OrganizationId};
+use crimocracy::core::id::{FinancialAccountId, OperationId, OrganizationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::finance::finance_system::{
+    validate_launder_funds, LaunderingDraft, LaunderingError, ValidatedLaundering,
+};
 use crimocracy::finance::Money;
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
 use crimocracy::legal::InvestigationWorkKind;
@@ -91,6 +94,118 @@ pub fn read_police_contact(
         );
     }
     Ok(read)
+}
+
+/// Working capital the racket's till keeps while its take is being laundered day by day.
+pub const LAUNDERING_FLOAT_FLOOR_CENTS: i64 = 5_000;
+
+/// Runs street cash through an owned cash-intensive front's books via the canonical
+/// laundering path. The organization asks for the full amount first; a capacity rejection is
+/// player-visible accounting information — the front's books can only plausibly absorb an
+/// authored share of its legitimate volume per cycle — so the beat launders what fits and
+/// leaves the rest where it sits. Returns the committed gross amount, if any.
+pub fn launder_through_front(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    source_account: FinancialAccountId,
+    requested_cents: i64,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    if requested_cents <= 0 {
+        return Ok(None);
+    }
+    let front_name = scenario
+        .state
+        .world()
+        .get_business(scenario.front)
+        .expect("laundering front must persist")
+        .name()
+        .to_owned();
+    let draft = |amount: Money| LaunderingDraft {
+        organization: scenario.player,
+        street_account: source_account,
+        business: scenario.front,
+        accounted_account: scenario.accounted_funds,
+        amount,
+    };
+    let validated = match validate_launder_funds(
+        scenario.registry,
+        &scenario.state,
+        draft(Money::from_cents(requested_cents)),
+    ) {
+        Ok(validated) => Some(validated),
+        Err(LaunderingError::CapacityExceeded { capacity_cents, .. }) => {
+            metrics.laundering_capacity_rejections =
+                metrics.laundering_capacity_rejections.saturating_add(1);
+            if capacity_cents <= 0 {
+                if narrative {
+                    println!(
+                        "[LAUNDER] {front_name}'s books already carry this cycle's plausible volume; {} stays street cash.",
+                        format_cents(requested_cents),
+                    );
+                }
+                return Ok(None);
+            }
+            if narrative {
+                println!(
+                    "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash.",
+                    format_cents(capacity_cents),
+                    format_cents(requested_cents),
+                );
+            }
+            Some(validate_launder_funds(
+                scenario.registry,
+                &scenario.state,
+                draft(Money::from_cents(capacity_cents)),
+            )?)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let Some(validated) = validated else {
+        return Ok(None);
+    };
+    let (gross, fee) = commit_laundering(scenario, metrics, validated, source_account)?;
+    if narrative {
+        println!(
+            "[LAUNDER] {front_name} absorbed {}; the house kept {} as booked revenue, and {} now sits as accounted money.",
+            format_cents(gross),
+            format_cents(fee),
+            format_cents(gross - fee),
+        );
+    }
+    Ok(Some(gross))
+}
+
+/// Commits a validated laundering transaction and records its gross/fee split in the run
+/// metrics from the committed ledger postings, never from recomputed game math.
+fn commit_laundering(
+    scenario: &mut Scenario,
+    metrics: &mut RunMetrics,
+    validated: ValidatedLaundering,
+    source_account: FinancialAccountId,
+) -> Result<(i64, i64), Box<dyn Error>> {
+    let transaction = validated.commit(&mut scenario.state)?;
+    let record = scenario
+        .state
+        .finance()
+        .get_transaction(transaction)
+        .expect("committed laundering transaction must be queryable");
+    let gross = record
+        .postings()
+        .iter()
+        .find(|posting| posting.account == source_account)
+        .map(|posting| -posting.amount.cents())
+        .expect("laundering transaction must debit its street source");
+    let credited = record
+        .postings()
+        .iter()
+        .find(|posting| posting.account == scenario.accounted_funds)
+        .map(|posting| posting.amount.cents())
+        .expect("laundering transaction must credit accounted funds");
+    let fee = gross - credited;
+    metrics.laundered_gross_cents += gross;
+    metrics.launder_fee_cents += fee;
+    Ok((gross, fee))
 }
 
 pub fn play_session(
@@ -469,6 +584,29 @@ pub fn play_session(
                 format_cents(disposition.realized_value.cents())
             );
         }
+        // Resale cash is still dirty money: it cannot touch legitimate ledgers until it has
+        // passed through an owned front's books, so leadership launders it immediately.
+        if narrative {
+            let front_name = scenario
+                .state
+                .world()
+                .get_business(scenario.front)
+                .expect("laundering front must persist")
+                .name()
+                .to_owned();
+            println!(
+                "[DECIDE]  Dirty cash buys nothing legitimate. Run the resale proceeds through {front_name}'s books."
+            );
+        }
+        let realized_cents = disposition.realized_value.cents();
+        let treasury_account = scenario.liquidation_cash;
+        launder_through_front(
+            &mut scenario,
+            narrative,
+            &mut metrics,
+            treasury_account,
+            realized_cents,
+        )?;
     }
 
     metrics.player_legal_activity_information = scenario
@@ -616,10 +754,42 @@ pub fn play_session(
             }
             // Bounded polling loop: the authored cold-case decay guarantees a deterministic shelf,
             // so the poll terminates when the refreshed investigator knowledge becomes disclosable.
+            // Polling starts once the shelf becomes possible, so the wait's bookkeeping beats —
+            // laundering the racket's till through the club's books day by day — land on those
+            // polling days, each one showing the front's per-cycle plausible volume.
             for _ in 0..40 {
                 if scenario.state.now() < poll_at {
                     run_until(&mut scenario, poll_at, narrative, &mut metrics)?;
                 }
+                // The racket's own till is the natural laundering source while the district
+                // stays quiet: the club launders its gambling take day by day, keeping a
+                // working-capital floor in the till. The general wage float is untouched.
+                let canal_float = scenario
+                    .state
+                    .enterprises()
+                    .get_enterprise(scenario.enterprise)
+                    .expect("canal enterprise must persist")
+                    .cash_account();
+                let float_balance = scenario
+                    .state
+                    .finance()
+                    .get_account(canal_float)
+                    .expect("enterprise float account must persist")
+                    .balance()
+                    .cents();
+                let launderable = (float_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0);
+                if narrative && launderable > 0 {
+                    println!(
+                        "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers today."
+                    );
+                }
+                launder_through_front(
+                    &mut scenario,
+                    narrative,
+                    &mut metrics,
+                    canal_float,
+                    launderable,
+                )?;
                 let read = read_police_contact(&mut scenario, narrative, &mut metrics)?;
                 match read {
                     Some(false) => {
@@ -701,7 +871,7 @@ pub fn play_session(
         if scenario.state.now() < observation_end {
             run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
         }
-        let financials = resolve_financial_view(&scenario)?;
+        let financials = resolve_financial_view(&scenario, &metrics)?;
         let mut financials = financials;
         financials.payroll_paid_cents = metrics.payroll_paid_cents;
         financials.payroll_short_cents = metrics.payroll_short_cents;
@@ -757,6 +927,15 @@ pub fn play_session(
         .reports_for(scenario.player)
         .filter(|report| report.kind() == ReportKind::ExecutiveBrief)
         .count();
+    metrics.accounted_balance_cents = Some(
+        scenario
+            .state
+            .finance()
+            .get_account(scenario.accounted_funds)
+            .expect("accounted-funds account must persist")
+            .balance()
+            .cents(),
+    );
 
     Ok(metrics)
 }
@@ -1068,6 +1247,15 @@ pub fn liquidate_second_act_property(
             format_cents(disposition.realized_value.cents())
         );
     }
+    // Same money discipline as the first score: resale cash goes through the front's books
+    // before the organization treats it as spendable value.
+    launder_through_front(
+        scenario,
+        narrative,
+        metrics,
+        scenario.liquidation_cash,
+        disposition.realized_value.cents(),
+    )?;
     Ok(())
 }
 
@@ -1177,7 +1365,7 @@ pub fn maybe_capture_matched_financials(
     if !boundary_reached || metrics.matched_legitimate_net_cents.is_some() {
         return Ok(());
     }
-    let view = resolve_financial_view(scenario)?;
+    let view = resolve_financial_view(scenario, metrics)?;
     metrics.matched_legitimate_net_cents = Some(view.legitimate_net_cents);
     metrics.matched_enterprise_net_cents = Some(view.enterprise_net_cents);
     Ok(())

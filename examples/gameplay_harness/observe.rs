@@ -81,7 +81,7 @@ pub fn observe_tick(
                     .expect("case owner must persist")
                     .name();
                 println!(
-                    "[DEV AUDIT] minute {}: {} shelved the case (hidden institutional beat; the organization learns this through its own channels).",
+                    "[DEV AUDIT] {}: {} shelved the case (hidden institutional beat; the organization learns this through its own channels).",
                     stamp(outcome.now.as_minutes()),
                     owner_name
                 );
@@ -309,8 +309,8 @@ pub fn observe_tick(
                 .get_character(*investigator)
                 .expect("staffed investigator must persist");
             println!(
-                "[DEV AUDIT] minute {:>4}: {} assigned {} as lead investigator.",
-                outcome.now.as_minutes(),
+                "[DEV AUDIT] {}: {} assigned {} as lead investigator.",
+                stamp(outcome.now.as_minutes()),
                 case.title(),
                 investigator.name(),
             );
@@ -326,10 +326,10 @@ pub fn observe_tick(
                 .evidence_id()
                 .and_then(|evidence| scenario.state.legal().get_evidence(evidence));
             println!(
-                "[DEV AUDIT] minute {:>4}: scheduled {:?} due minute {} using {:?} evidence.",
-                outcome.now.as_minutes(),
+                "[DEV AUDIT] {}: scheduled {:?} due {} using {:?} evidence.",
+                stamp(outcome.now.as_minutes()),
                 work.kind(),
-                work.due_at().as_minutes(),
+                stamp(work.due_at().as_minutes()),
                 source.map(|evidence| evidence.kind()),
             );
         }
@@ -346,8 +346,8 @@ pub fn observe_tick(
                 .derived_evidence()
                 .and_then(|evidence| scenario.state.legal().get_evidence(evidence));
             println!(
-                "[DEV AUDIT] minute {:>4}: {:?} resolved {:?} at margin {}; derived {:?}.",
-                outcome.now.as_minutes(),
+                "[DEV AUDIT] {}: {:?} resolved {:?} at margin {}; derived {:?}.",
+                stamp(outcome.now.as_minutes()),
                 work.kind(),
                 resolution.outcome(),
                 resolution.margin(),
@@ -389,7 +389,9 @@ pub fn observe_tick(
             );
         }
         // A notable cycle carries its manager's report as organization-held information; the
-        // narrative surfaces it so heat-driven cost pressure is legible when it happens.
+        // narrative surfaces it so heat-driven cost pressure is legible when it happens. Only
+        // this organization's cycles are player-visible: another organization's manager report
+        // is information they hold, not something our leadership can read.
         for cycle_id in &outcome.enterprise_cycles {
             let cycle = scenario
                 .state
@@ -397,6 +399,14 @@ pub fn observe_tick(
                 .get_cycle(*cycle_id)
                 .expect("settled enterprise cycle must persist");
             if cycle.attention() != AttentionClass::Notable {
+                continue;
+            }
+            let owns_cycle = scenario
+                .state
+                .enterprises()
+                .get_enterprise(cycle.enterprise())
+                .is_some_and(|record| record.organization() == scenario.player);
+            if !owns_cycle {
                 continue;
             }
             let summary = cycle

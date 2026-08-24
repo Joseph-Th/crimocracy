@@ -292,8 +292,9 @@ struct EnterpriseCycleEconomics {
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
-    /// Street-heat portion of `operating_cost`. Nonzero heat makes the cycle notable so the
-    /// organization hears why its racket got more expensive while police work stays heavy.
+    /// Street-heat portion of `operating_cost`. Heat that appears or changes makes the cycle
+    /// notable so the organization hears why its racket got more expensive; a sustained
+    /// identical surcharge settles as routine.
     investigation_heat: Money,
     attention: AttentionClass,
 }
@@ -410,15 +411,23 @@ pub fn decide_enterprise_cycle(
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let variance_notable = i32::from(variance_basis_points).unsigned_abs()
         >= u32::from(economics.notable_variance_basis_points());
-    // A hot district taxes the racket even on a normal-variance night, and a losing night is
-    // always manager-report-worthy: chronic silent losses are exactly what the authority must
-    // see before the authored suspension threshold stops the bleeding.
-    let attention =
-        if variance_notable || cost.investigation_heat > Money::ZERO || net_cash < Money::ZERO {
-            AttentionClass::Notable
-        } else {
-            AttentionClass::Routine
-        };
+    // A losing night is always manager-report-worthy: chronic silent losses are exactly what
+    // the authority must see before the authored suspension threshold stops the bleeding.
+    // Street heat is report-worthy when it *appears or changes* — the first taxed cycle (and
+    // any later change in the surcharge) tells the organization why its racket got more
+    // expensive. A sustained identical surcharge is a known cost, not fresh news: repeating it
+    // every cycle would bury real exceptions in alert noise, so it settles as routine and
+    // stays visible through the financial summaries instead.
+    let previous_heat = latest_cycle_investigation_heat(state, enterprise);
+    let heat_changed = previous_heat != Some(cost.investigation_heat);
+    let attention = if variance_notable
+        || net_cash < Money::ZERO
+        || (cost.investigation_heat > Money::ZERO && heat_changed)
+    {
+        AttentionClass::Notable
+    } else {
+        AttentionClass::Routine
+    };
     let trailing_losing_cycles = count_trailing_losing_cycles(
         state,
         enterprise,
@@ -469,6 +478,17 @@ pub fn decide_enterprise_cycle(
             settlement_account: record.settlement_account(),
         },
     })
+}
+
+/// The street-heat portion of the enterprise's most recently settled cycle, or `None` when the
+/// racket has never settled. Cycle IDs are allocated sequentially, so index order is settlement
+/// order.
+fn latest_cycle_investigation_heat(state: &AppState, enterprise: EnterpriseId) -> Option<Money> {
+    state
+        .enterprises
+        .cycles_for(enterprise)
+        .next_back()
+        .map(|cycle| cycle.investigation_heat())
 }
 
 /// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so

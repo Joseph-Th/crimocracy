@@ -390,7 +390,10 @@ pub fn host_district_label(scenario: &Scenario, business: BusinessId) -> String 
         .unwrap_or_else(|| "unknown district".to_owned())
 }
 
-pub fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<dyn Error>> {
+pub fn resolve_financial_view(
+    scenario: &Scenario,
+    metrics: &RunMetrics,
+) -> Result<FinancialView, Box<dyn Error>> {
     let business_summary = resolve_organization_business_financial_summary(
         &scenario.state,
         scenario.player,
@@ -490,6 +493,9 @@ pub fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<
         liquidated_property_operations,
         liquidated_property_cash_cents: liquidated_property_cash.cents(),
         cash_position,
+        laundered_gross_cents: metrics.laundered_gross_cents,
+        launder_fee_cents: metrics.launder_fee_cents,
+        laundering_capacity_rejections: metrics.laundering_capacity_rejections,
         payroll_paid_cents: 0,
         payroll_short_cents: 0,
     })
@@ -546,6 +552,22 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
             "  Cash position (total {}): {}.",
             format_cents(total),
             lines.join(", "),
+        );
+    }
+    if view.laundered_gross_cents > 0 || view.laundering_capacity_rejections > 0 {
+        println!(
+            "  Laundered to date: {} gross through the front's books, {} kept as booked revenue{}; the books refused {} over-capacity request(s).",
+            format_cents(view.laundered_gross_cents),
+            format_cents(view.launder_fee_cents),
+            if view.laundered_gross_cents > 0 {
+                format!(
+                    ", {} now accounted",
+                    format_cents(view.laundered_gross_cents - view.launder_fee_cents)
+                )
+            } else {
+                String::new()
+            },
+            view.laundering_capacity_rejections,
         );
     }
     println!(
@@ -711,6 +733,13 @@ pub fn print_metrics(metrics: &RunMetrics) {
             optional_cents(metrics.expansion_net_cents),
         );
     }
+    println!(
+        "        money: laundered {} gross through the front's books (house fee {}, accounted balance {}), books refused {} over-capacity request(s)",
+        optional_cents(Some(metrics.laundered_gross_cents)),
+        optional_cents(Some(metrics.launder_fee_cents)),
+        optional_cents(metrics.accounted_balance_cents),
+        metrics.laundering_capacity_rejections,
+    );
     if metrics.win_back_attempted {
         println!(
             "        win-back: attempted (accepted {:?}, margin {:?}), refusal leak to rival {:?}",
@@ -886,31 +915,36 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         rush.legitimate_net_cents == press.legitimate_net_cents
             && press.legitimate_net_cents == recon.legitimate_net_cents
     };
-    // Any branch that drew a case pays district heat; the checkpoint shows when a heated
-    // branch demonstrably earned less than an unheated one over the same matched window. With
-    // casing risk live, more than one branch can be heated, so compare against any unheated
-    // branch rather than hard-coding RECON as the clean control.
+    // Any branch whose case lived across the whole matched window pays the street surcharge
+    // on every cycle in it; branches whose cases appeared later (or never) pay less over the
+    // same window. With casing risk live, nearly every branch draws some case, so the honest
+    // signal is differential: an early-opened case must cost more than a cleaner branch earned.
+    let boundary = |run: &RunMetrics| run.matched_financial_boundary_minute.unwrap_or(u64::MAX);
     let enterprise_window = |run: &RunMetrics| {
         run.matched_enterprise_net_cents
             .or(run.enterprise_net_cents)
     };
-    let heat_branches = [
-        (rush.session_case_staffed, enterprise_window(rush)),
-        (press.session_case_staffed, enterprise_window(press)),
-        (recon.session_case_staffed, enterprise_window(recon)),
-    ];
-    let heated_nets: Vec<i64> = heat_branches
+    let all_runs = [rush, press, recon];
+    let all_nets: Vec<i64> = all_runs
         .iter()
-        .filter_map(|(heated, net)| if *heated { *net } else { None })
+        .filter_map(|run| enterprise_window(run))
         .collect();
-    let unheated_nets: Vec<i64> = heat_branches
+    let long_case_nets: Vec<i64> = all_runs
         .iter()
-        .filter_map(|(heated, net)| if *heated { None } else { *net })
+        .filter_map(|run| {
+            let case_lived_across_window = run.investigation_created
+                && run
+                    .case_open_minute
+                    .is_some_and(|open| open < boundary(run));
+            case_lived_across_window
+                .then_some(())
+                .and_then(|_| enterprise_window(run))
+        })
         .collect();
-    let enterprise_heat_shown = !heated_nets.is_empty()
-        && unheated_nets
+    let enterprise_heat_shown = !long_case_nets.is_empty()
+        && long_case_nets
             .iter()
-            .any(|unheated| heated_nets.iter().any(|heated| heated < unheated));
+            .any(|heated| all_nets.iter().any(|net| net > heated));
     print_loop_checkpoint(
         "routine",
         legitimate_isolated,
@@ -919,7 +953,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
     print_loop_checkpoint(
         "heat cost",
         enterprise_heat_shown,
-        "an active investigation in the district raises the delegated enterprise's operating cost",
+        "a case that stayed open across the whole matched window taxes the delegated enterprise every cycle, visibly earning less than branches whose districts stayed clean longer",
     );
     let liquidation_varies = rush
         .second_act_property_realized_cash_cents
@@ -932,6 +966,17 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "venue choice",
         liquidation_varies || recon.property_realized_cash_cents.is_some(),
         "liquidated resale value reflects the venue's district police presence",
+    );
+    let laundering_shown = rush.laundered_gross_cents > 0
+        && recon.laundered_gross_cents > 0
+        && press.laundered_gross_cents > 0
+        && [rush, press, recon]
+            .iter()
+            .all(|run| run.laundered_gross_cents - run.launder_fee_cents > 0);
+    print_loop_checkpoint(
+        "clean money",
+        laundering_shown,
+        "street earnings pass through an owned front's books into accounted funds, and the front's plausible-volume ceiling visibly caps how fast dirty money becomes clean",
     );
     println!("Observed decision leverage:");
     println!(
@@ -980,6 +1025,13 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "  - Diversification leverage: while the case stayed hot, PRESS converted idle street cash into a Harbor District book earning {} surcharge-free, versus the canal book's heat-taxed window net of {}.",
         optional_dollars(press.expansion_net_cents),
         optional_dollars(press.enterprise_net_cents),
+    );
+    println!(
+        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches, so conversion speed — not desire — limits how fast dirty money becomes clean.",
+        optional_cents(Some(recon.laundered_gross_cents)),
+        rush.laundering_capacity_rejections
+            + press.laundering_capacity_rejections
+            + recon.laundering_capacity_rejections,
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(

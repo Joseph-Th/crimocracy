@@ -157,7 +157,8 @@ pub(super) struct EnterpriseCycleFinancials {
     net_cash: Money,
     variance_basis_points: i16,
     /// Street-heat portion of `operating_cost` at settlement. Persisted because notability
-    /// depends on it and the active-investigation state that produced it changes over time.
+    /// depends on it and on the previous cycle's heat, while the active-investigation state
+    /// that produced both changes over time.
     investigation_heat: Money,
 }
 

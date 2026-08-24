@@ -157,6 +157,15 @@ pub enum HarnessContractError {
     NoActionablePatrolWindows,
     #[error("no safe operation window was derivable from the surveillance report")]
     NoSafeOperationWindow,
+    #[error(
+        "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c minus fee {fee}c does not equal the accounted balance {balance:?}c"
+    )]
+    InconsistentLaunderingEvidence {
+        strategy: Strategy,
+        gross: i64,
+        fee: i64,
+        balance: Option<i64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +477,9 @@ pub struct Scenario<'registry> {
     pub resale_venue: BusinessId,
     pub liquidation_cash: FinancialAccountId,
     pub liquidation_settlement: FinancialAccountId,
+    /// Organization accounted funds: the clean-money side of laundering through an owned
+    /// cash-intensive front.
+    pub accounted_funds: FinancialAccountId,
     pub boss: CharacterId,
     pub lieutenant: CharacterId,
     pub burglar: CharacterId,
@@ -604,6 +616,15 @@ pub struct RunMetrics {
     /// Canonical police-contact channel usage: how many times the organization asked its
     /// standing contact what the institution knows and received a fresh disclosure.
     pub contact_reads: u32,
+    // Money-state evidence: street cash routed through an owned cash-intensive front's books.
+    pub laundered_gross_cents: i64,
+    /// The front's authored cut of everything it absorbed.
+    pub launder_fee_cents: i64,
+    /// Times the books refused a request because it exceeded the cycle's plausible volume:
+    /// the player-visible shape of the laundering constraint.
+    pub laundering_capacity_rejections: u32,
+    /// Final accounted-funds balance, for the clean-money accounting identity contract.
+    pub accounted_balance_cents: Option<i64>,
     /// Payroll evidence across the session: what wages cost and where they went unpaid.
     pub payroll_paid_cents: i64,
     pub payroll_short_cents: i64,
@@ -816,6 +837,10 @@ pub struct FinancialView {
     /// Organization-owned balances grouped by account kind, so the readout shows the cash
     /// position a boss would actually govern, not only cycle flows.
     pub cash_position: Vec<(AccountKind, i64)>,
+    /// Money-state evidence: what the organization routed through its front's books.
+    pub laundered_gross_cents: i64,
+    pub launder_fee_cents: i64,
+    pub laundering_capacity_rejections: u32,
     /// Session-to-date wage costs from observed payroll outcomes.
     pub payroll_paid_cents: i64,
     pub payroll_short_cents: i64,

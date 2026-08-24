@@ -618,6 +618,15 @@ pub fn build_scenario(
             kind: AccountKind::Settlement,
         },
     )?;
+    // Clean-money destination: laundering routes street cash into the organization's
+    // accounted funds through an owned cash-intensive front's canonical finance path.
+    let accounted_funds = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::AccountedFunds,
+        },
+    )?;
     // Rival treasury accounts: the expansion pass draws its operating cash and a free
     // settlement account from these through the same ownership checks a player command faces.
     let rival_cash = insert_account(
@@ -746,6 +755,7 @@ pub fn build_scenario(
         resale_venue,
         liquidation_cash,
         liquidation_settlement,
+        accounted_funds,
         boss,
         lieutenant,
         burglar,
@@ -930,8 +940,11 @@ pub fn discover_second_opportunity(
             .opportunities()
             .get_opportunity(opportunity)
             .expect("committed second opportunity must be queryable");
-        println!("[OBSERVE] {}", stamp(discovered_at.as_minutes()));
-        println!("          Opportunity: {}", record.summary());
+        println!(
+            "[OBSERVE] {}: Opportunity: {}",
+            stamp(discovered_at.as_minutes()),
+            record.summary()
+        );
         println!(
             "          Source: {}",
             scenario

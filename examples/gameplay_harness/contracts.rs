@@ -39,12 +39,32 @@ pub fn validate_run_metrics(
     {
         return Err(HarnessContractError::MissingFinancialObservation { strategy });
     }
-    // Payroll is the standing carrying cost of headcount: any session that crosses a
+    // Payroll is the standing carrying cost of headcount: any session that crossed a
     // campaign-day boundary must have met its wages from organizational cash.
     if require_financials && metrics.payroll_paid_cents <= 0 {
         return Err(HarnessContractError::MissingStrategyEvidence {
             strategy,
             evidence: "a session crossing a campaign-day boundary must meet payroll through the canonical ledger path",
+        });
+    }
+    // The money state contract: whatever the organization routed through its front's books
+    // must reconcile exactly — accounted funds are gross minus the front's authored fee — and
+    // a branch that liquidated stolen property must have laundered those proceeds rather than
+    // leaving organizational value in exposed street cash.
+    if let Some(balance) = metrics.accounted_balance_cents {
+        if balance != metrics.laundered_gross_cents - metrics.launder_fee_cents {
+            return Err(HarnessContractError::InconsistentLaunderingEvidence {
+                strategy,
+                gross: metrics.laundered_gross_cents,
+                fee: metrics.launder_fee_cents,
+                balance: Some(balance),
+            });
+        }
+    }
+    if metrics.property_realized_cash_cents.is_some() && metrics.laundered_gross_cents == 0 {
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "liquidated proceeds must be laundered through an owned cash-intensive front before they count as spendable organizational money",
         });
     }
     Ok(())
