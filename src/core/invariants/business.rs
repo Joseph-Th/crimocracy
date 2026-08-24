@@ -51,11 +51,12 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                 business: economy.business(),
             });
         }
+        // Settlement order is sequential-ID order, so the newest cycle is a direct index
+        // lookup; scanning the whole history per economy would grow with campaign length.
         let latest_cycle_at = state
             .economy
-            .cycles_for(economy.business())
-            .map(|cycle| cycle.occurred_at())
-            .max();
+            .latest_cycle(economy.business())
+            .map(|cycle| cycle.occurred_at());
         if latest_cycle_at != economy.last_cycle_at() {
             return Err(StateValidationError::InvalidBusinessEconomySchedule {
                 business: economy.business(),
@@ -296,11 +297,12 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                 enterprise: enterprise.id(),
             });
         }
+        // Settlement order is sequential-ID order, so the newest cycle is a direct index
+        // lookup; scanning the whole history per enterprise would grow with campaign length.
         let latest_cycle_at = state
             .enterprises
-            .cycles_for(enterprise.id())
-            .map(|cycle| cycle.occurred_at())
-            .max();
+            .latest_cycle(enterprise.id())
+            .map(|cycle| cycle.occurred_at());
         if latest_cycle_at != enterprise.last_cycle_at() {
             return Err(StateValidationError::InvalidEnterpriseSchedule {
                 enterprise: enterprise.id(),

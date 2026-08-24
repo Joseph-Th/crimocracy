@@ -8,6 +8,7 @@
 
 #[cfg(test)]
 use crate::core::entity::EntityRef;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     ArrestId, CaseWitnessId, CharacterId, ContactId, EvidenceId, InformantDisclosureId,
     InformantId, InformationId, InvestigationId, InvestigationWorkId, LegalRepresentationId,
@@ -20,10 +21,11 @@ use crate::legal::records::{
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
     InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
     InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
-    LegalIndexes, LegalRepresentationEndReason, LegalRepresentationRecord,
-    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
-    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
-    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
+    LegalIndexes, LegalRepresentationEndReason, LegalRepresentationOrigin,
+    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentRecord,
+    PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord, PoliceResponseStatus,
+    ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
+    ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -363,8 +365,8 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.case_witnesses.get(id))
     }
-    /// Test-only observation surface; production reads go through case-scoped getters.
-    #[cfg(test)]
+    /// Canonical statement lookup: each testimony statement owns a unique derived evidence
+    /// record, so the by-evidence index is the O(log n) authority for this relation.
     pub fn witness_statement_for_evidence(
         &self,
         evidence: EvidenceId,
@@ -479,17 +481,55 @@ impl LegalState {
             .iter()
             .copied()
     }
+    /// Every active case in id order; per-tick institutional passes scan this instead of
+    /// the full case history.
+    pub(crate) fn active_investigations(&self) -> impl Iterator<Item = &InvestigationRecord> {
+        self.indexes
+            .investigations
+            .active
+            .iter()
+            .filter_map(|id| self.investigations.get(id))
+    }
     pub(crate) fn investigation_work(&self) -> impl Iterator<Item = &InvestigationWorkRecord> {
         self.investigation_work.values()
     }
     pub(crate) fn case_witnesses(&self) -> impl Iterator<Item = &CaseWitnessRecord> {
         self.case_witnesses.values()
     }
+    /// Every case registration naming `character` as witness, in id order; witness-pressure
+    /// authorization and resolution scan this instead of the full witness history.
+    pub(crate) fn case_witnesses_for_character(
+        &self,
+        character: CharacterId,
+    ) -> impl Iterator<Item = &CaseWitnessRecord> {
+        self.indexes
+            .witnesses
+            .case_witnesses_by_character
+            .get(&character)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.case_witnesses.get(id))
+    }
     pub(crate) fn witness_statements(&self) -> impl Iterator<Item = &WitnessStatementRecord> {
         self.witness_statements.values()
     }
     pub(crate) fn informants(&self) -> impl Iterator<Item = &InformantRecord> {
         self.informants.values()
+    }
+    /// Every active informant in id order; the disclosure pass scans this instead of the
+    /// full terminated-and-active informant history.
+    pub(crate) fn active_informants(&self) -> impl Iterator<Item = &InformantRecord> {
+        self.indexes
+            .informants
+            .active
+            .iter()
+            .filter_map(|id| self.informants.get(id))
+    }
+    /// O(1) emptiness probe over the active-informant index, so per-tick passes that build
+    /// cross-referenced views (handler-to-case maps) can skip that work entirely on quiet
+    /// ticks without changing what they would have produced.
+    pub(crate) fn has_active_informants(&self) -> bool {
+        !self.indexes.informants.active.is_empty()
     }
     pub(crate) fn informant_disclosures(&self) -> impl Iterator<Item = &InformantDisclosureRecord> {
         self.informant_disclosures.values()
@@ -509,8 +549,81 @@ impl LegalState {
     pub(crate) fn arrests(&self) -> impl Iterator<Item = &ArrestRecord> {
         self.arrests.values()
     }
+    /// Raw-id extremes of every id-keyed collection, read from key order; these feed
+    /// allocator validation without walking full record histories.
+    pub(crate) fn investigation_id_bounds(&self) -> Option<(u32, u32)> {
+        self.investigations.id_bounds()
+    }
+    pub(crate) fn investigation_work_id_bounds(&self) -> Option<(u32, u32)> {
+        self.investigation_work.id_bounds()
+    }
+    pub(crate) fn patrol_deployment_id_bounds(&self) -> Option<(u32, u32)> {
+        self.patrol_deployments.id_bounds()
+    }
+    pub(crate) fn police_response_id_bounds(&self) -> Option<(u32, u32)> {
+        self.police_responses.id_bounds()
+    }
+    pub(crate) fn case_witness_id_bounds(&self) -> Option<(u32, u32)> {
+        self.case_witnesses.id_bounds()
+    }
+    pub(crate) fn witness_statement_id_bounds(&self) -> Option<(u32, u32)> {
+        self.witness_statements.id_bounds()
+    }
+    pub(crate) fn informant_id_bounds(&self) -> Option<(u32, u32)> {
+        self.informants.id_bounds()
+    }
+    pub(crate) fn informant_disclosure_id_bounds(&self) -> Option<(u32, u32)> {
+        self.informant_disclosures.id_bounds()
+    }
+    pub(crate) fn evidence_id_bounds(&self) -> Option<(u32, u32)> {
+        self.evidence.id_bounds()
+    }
+    pub(crate) fn arrest_id_bounds(&self) -> Option<(u32, u32)> {
+        self.arrests.id_bounds()
+    }
+    pub(crate) fn legal_representation_id_bounds(&self) -> Option<(u32, u32)> {
+        self.legal_representations.id_bounds()
+    }
+    pub(crate) fn prosecution_case_id_bounds(&self) -> Option<(u32, u32)> {
+        self.prosecution_cases.id_bounds()
+    }
+    pub(crate) fn prosecution_referral_id_bounds(&self) -> Option<(u32, u32)> {
+        self.prosecution_referrals.id_bounds()
+    }
+    /// Every currently detained arrest in id order; per-tick custody passes scan this
+    /// instead of the full arrest history.
+    pub(crate) fn detained_arrests(&self) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .detained
+            .iter()
+            .filter_map(|id| self.arrests.get(id))
+    }
+    /// O(1) emptiness probes over the custody-cluster indexes, so per-tick passes can skip
+    /// their cross-referenced scans entirely on ticks with no live custody work.
+    pub(crate) fn has_detained_arrests(&self) -> bool {
+        !self.indexes.arrests.detained.is_empty()
+    }
+    pub(crate) fn has_active_automatic_policy_representations(&self) -> bool {
+        !self
+            .indexes
+            .representations
+            .active_automatic_policy
+            .is_empty()
+    }
     pub(crate) fn legal_representations(&self) -> impl Iterator<Item = &LegalRepresentationRecord> {
         self.legal_representations.values()
+    }
+    /// Active representations retained through automatic policy, in id order; the custody
+    /// sweep scans this instead of the full representation history.
+    pub(crate) fn active_automatic_policy_representations(
+        &self,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .active_automatic_policy
+            .iter()
+            .filter_map(|id| self.legal_representations.get(id))
     }
     pub(crate) fn prosecution_cases(&self) -> impl Iterator<Item = &ProsecutionCaseRecord> {
         self.prosecution_cases.values()
@@ -540,6 +653,7 @@ impl LegalState {
                 .insert(record.id());
         }
         if record.status() == InvestigationStatus::Active {
+            self.indexes.investigations.active.insert(record.id());
             self.indexes
                 .investigations
                 .cases_by_last_activity
@@ -624,6 +738,7 @@ impl LegalState {
             previous_active.is_none(),
             "Ownership Exclusivity: duplicate active informant relationship inserted"
         );
+        self.indexes.informants.active.insert(id);
         let previous = self.informants.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -653,6 +768,11 @@ impl LegalState {
             removed,
             Some(id),
             "Derived Data Consistency: active informant index changed before termination"
+        );
+        let removed_active = self.indexes.informants.active.remove(&id);
+        debug_assert!(
+            removed_active,
+            "Derived Data Consistency: terminated informant was not indexed as active"
         );
     }
     pub(crate) fn insert_informant_disclosure(
@@ -789,6 +909,12 @@ impl LegalState {
             .witnesses
             .case_witnesses_by_investigation
             .entry(investigation_id)
+            .or_default()
+            .insert(id);
+        self.indexes
+            .witnesses
+            .case_witnesses_by_character
+            .entry(record.witness())
             .or_default()
             .insert(id);
         let investigation = self
@@ -1021,6 +1147,13 @@ impl LegalState {
                 .investigations
                 .active_without_lead
                 .remove(&investigation_id);
+        }
+        let was_active = previous_status == InvestigationStatus::Active;
+        let is_active = investigation.status == InvestigationStatus::Active;
+        if is_active && !was_active {
+            self.indexes.investigations.active.insert(investigation_id);
+        } else if was_active && !is_active {
+            self.indexes.investigations.active.remove(&investigation_id);
         }
         match (previous_status, status) {
             // Suspending or closing an active case shelves it: it leaves the cold-decay index.
@@ -1400,6 +1533,7 @@ impl LegalState {
             previous_active.is_none(),
             "Ownership Exclusivity: character has multiple active detentions"
         );
+        self.indexes.arrests.detained.insert(id);
         let previous = self.arrests.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -1417,6 +1551,11 @@ impl LegalState {
             removed,
             Some(id),
             "Derived Data Consistency: active detention index changed before release"
+        );
+        let removed_detained = self.indexes.arrests.detained.remove(&id);
+        debug_assert!(
+            removed_detained,
+            "Derived Data Consistency: released arrest was not indexed as detained"
         );
         let record = self
             .arrests
@@ -1436,6 +1575,12 @@ impl LegalState {
             LegalRepresentationStatus::Active,
             "Lifecycle Validity: new legal representation must begin active"
         );
+        if record.origin() == LegalRepresentationOrigin::AutomaticPolicy {
+            self.indexes
+                .representations
+                .active_automatic_policy
+                .insert(id);
+        }
         self.indexes
             .representations
             .by_arrest
@@ -1495,12 +1640,12 @@ impl LegalState {
         information: InformationId,
         report: ReportId,
     ) {
-        let (arrest, contact) = {
+        let (arrest, contact, origin) = {
             let record = self
                 .legal_representations
                 .get(&id)
                 .expect("validated legal representation disappeared before end commit");
-            (record.arrest(), record.contact())
+            (record.arrest(), record.contact(), record.origin())
         };
         let removed = self
             .indexes
@@ -1521,6 +1666,17 @@ impl LegalState {
                     .active_by_contact
                     .remove(&contact);
             }
+        }
+        if origin == LegalRepresentationOrigin::AutomaticPolicy {
+            let removed_automatic = self
+                .indexes
+                .representations
+                .active_automatic_policy
+                .remove(&id);
+            debug_assert!(
+                removed_automatic,
+                "Derived Data Consistency: ended automatic-policy representation was not indexed"
+            );
         }
         let record = self
             .legal_representations

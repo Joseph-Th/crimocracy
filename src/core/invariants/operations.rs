@@ -1,4 +1,4 @@
-﻿//! Release-safe structural validation for the operations subsystem.
+//! Release-safe structural validation for the operations subsystem.
 
 use super::opportunities::validate_operation_exposure_links;
 use crate::core::attention::AttentionClass;
@@ -320,7 +320,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                 if !operation_after_action_reports.insert(report.id())
                     || report.recipient() != operation.responsible_organization()
                     || report.kind() != ReportKind::AfterAction
-                    || report.title() != format!("{} after-action report", operation.title())
+                    || !is_after_action_title(report.title(), operation.title())
                     || report.generated_at() != resolution.resolved_at()
                     || report.entries().len() != 1
                     || !report_entry.is_some_and(|entry| {
@@ -457,6 +457,12 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
     Ok(())
 }
 
+/// The canonical after-action report title for an operation, compared against the authored
+/// suffix so per-record validation never rebuilds the string.
+fn is_after_action_title(title: &str, operation_title: &str) -> bool {
+    title.strip_suffix(" after-action report") == Some(operation_title)
+}
+
 fn validate_operation_property_disposition(
     state: &AppState,
     operation: &OperationRecord,
@@ -569,6 +575,14 @@ fn validate_operation_property_disposition(
         return Err(invalid());
     }
 
+    // The disposition summary is rebuilt once per record and compared against both the
+    // persisted information and the persisted report entry.
+    let expected_summary = build_disposition_summary(
+        operation.title(),
+        venue.name(),
+        proceeds.estimated_value(),
+        disposition.realized_value(),
+    );
     let information = state
         .intelligence
         .get_information(disposition.information())
@@ -582,13 +596,7 @@ fn validate_operation_property_disposition(
         || information.recorded_at() != disposition.disposed_at()
         || information.reliability() != Reliability::DirectAccess
         || information.specificity() != Specificity::Precise
-        || information.summary()
-            != build_disposition_summary(
-                operation.title(),
-                venue.name(),
-                proceeds.estimated_value(),
-                disposition.realized_value(),
-            )
+        || information.summary() != expected_summary
     {
         return Err(invalid());
     }
@@ -596,12 +604,6 @@ fn validate_operation_property_disposition(
         .reports
         .get_report(disposition.report())
         .ok_or_else(invalid)?;
-    let expected_summary = build_disposition_summary(
-        operation.title(),
-        venue.name(),
-        proceeds.estimated_value(),
-        disposition.realized_value(),
-    );
     if report.recipient() != operation.responsible_organization()
         || report.kind() != ReportKind::Financial
         || report.title() != "Property disposition"
@@ -614,11 +616,13 @@ fn validate_operation_property_disposition(
     if entry.attention != AttentionClass::Notable
         || entry.summary != expected_summary
         || !entry.sources.is_empty()
-        || entry.entities
-            != BTreeSet::from([
-                EntityRef::Operation(operation.id()),
-                EntityRef::Business(disposition.venue()),
-            ])
+        || entry.entities.len() != 2
+        || !entry
+            .entities
+            .contains(&EntityRef::Operation(operation.id()))
+        || !entry
+            .entities
+            .contains(&EntityRef::Business(disposition.venue()))
         || entry.decision.is_some()
     {
         return Err(invalid());
@@ -735,8 +739,11 @@ fn validate_operation_cash_disposition(
     if entry.attention != AttentionClass::Notable
         || entry.summary != summary
         || !entry.sources.is_empty()
-        || entry.entities
-            != BTreeSet::from([EntityRef::Operation(operation.id()), proceeds.target()])
+        || entry.entities.len() != 2
+        || !entry
+            .entities
+            .contains(&EntityRef::Operation(operation.id()))
+        || !entry.entities.contains(&proceeds.target())
         || entry.decision.is_some()
     {
         return Err(invalid());
@@ -1067,16 +1074,15 @@ fn validate_operation_abort_links(
             } else {
                 entry_at
             };
+            // The operation index scopes this to the handful of decisions tied to this
+            // operation; scanning every decision ever requested would grow unbounded.
             let matching_continue_decisions = state
                 .decisions
-                .decisions()
+                .decisions_for_operation(operation.id())
                 .filter(|decision| {
                     matches!(
-                      decision.context(),
-                      DecisionContext::OperationPoliceArrival {
-                        operation: decision_operation,
-                        ..
-                      } if decision_operation == operation.id()
+                        decision.context(),
+                        DecisionContext::OperationPoliceArrival { .. }
                     ) && decision.resolution().is_some_and(|resolution| {
                         resolution.response() == DecisionResponse::Continue
                             && resolution.resolved_at() == abort.aborted_at()
@@ -1261,7 +1267,7 @@ fn validate_operation_abort_artifacts(
     if !operation_after_action_reports.insert(report.id())
         || report.recipient() != operation.responsible_organization()
         || report.kind() != ReportKind::AfterAction
-        || report.title() != format!("{} after-action report", operation.title())
+        || !is_after_action_title(report.title(), operation.title())
         || report.generated_at() != abort.aborted_at()
         || report.entries().len() != 1
         || !report_entry.is_some_and(|entry| {

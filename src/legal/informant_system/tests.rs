@@ -10,7 +10,8 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
 };
 use crate::legal::investigation_system::{
-    validate_add_evidence, validate_open_investigation, InvestigationError,
+    validate_add_evidence, validate_open_investigation, validate_transition_investigation,
+    InvestigationError, InvestigationTransition,
 };
 use crate::legal::ArrestDraft;
 use crate::legal::{EvidenceDraft, InvestigationDraft};
@@ -487,5 +488,129 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
         1
     );
     validate_state(&fixture.state).expect("post-pass state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn per_tick_scan_indexes_track_lifecycle_transitions() {
+    let mut fixture = fixture();
+    let active_cases = |state: &crate::core::state::AppState| -> Vec<InvestigationId> {
+        state
+            .legal()
+            .active_investigations()
+            .map(|record| record.id())
+            .collect()
+    };
+    assert_eq!(active_cases(&fixture.state), vec![fixture.investigation]);
+
+    // Custody: an evidence-backed arrest enters the detained scan surface, and its
+    // release through the canonical path leaves it.
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Member custody inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.member)]),
+        },
+    )
+    .expect("subject case should validate")
+    .commit(&mut fixture.state)
+    .expect("subject case should commit");
+    let evidence = crate::legal::investigation_system::validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.member),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("case evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("case evidence should commit");
+    let arrest = crate::legal::arrest_system::validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.member,
+            investigation: case,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("custody arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("custody arrest should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .detained_arrests()
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![arrest]
+    );
+
+    // An established informant enters the active-informant scan surface.
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_informants()
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![informant]
+    );
+    validate_invariants(&fixture.state);
+
+    // Suspension leaves the active-case scan surface; resume re-enters it.
+    validate_transition_investigation(
+        &fixture.state,
+        fixture.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .expect("suspension should validate")
+    .commit(&mut fixture.state)
+    .expect("suspension should commit");
+    // Only the custody inquiry opened above stays on the active scan surface.
+    assert_eq!(active_cases(&fixture.state), vec![case]);
+    validate_transition_investigation(
+        &fixture.state,
+        fixture.investigation,
+        InvestigationTransition::Resume,
+    )
+    .expect("resume should validate")
+    .commit(&mut fixture.state)
+    .expect("resume should commit");
+    assert_eq!(
+        active_cases(&fixture.state),
+        vec![fixture.investigation, case]
+    );
+
+    crate::legal::arrest_system::validate_release_arrest(&fixture.state, arrest)
+        .expect("release should validate")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    assert!(fixture.state.legal().detained_arrests().next().is_none());
+
+    validate_terminate_informant(&fixture.state, informant)
+        .expect("termination should validate")
+        .commit(&mut fixture.state)
+        .expect("termination should commit");
+    assert!(fixture.state.legal().active_informants().next().is_none());
+    validate_state(&fixture.state).expect("post-transition state should validate");
     validate_invariants(&fixture.state);
 }

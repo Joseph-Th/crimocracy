@@ -2,6 +2,7 @@
 
 pub mod contact_system;
 
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{CharacterId, ContactDisclosureId, ContactId, InformationId, OrganizationId};
 use crate::core::time::SimTime;
 use crate::social::RelationshipDimensions;
@@ -253,8 +254,16 @@ impl ContactState {
         self.contacts.values()
     }
 
+    pub(crate) fn contact_id_bounds(&self) -> Option<(u32, u32)> {
+        self.contacts.id_bounds()
+    }
+
     pub(crate) fn disclosures(&self) -> impl Iterator<Item = &ContactDisclosureRecord> {
         self.disclosures.values()
+    }
+
+    pub(crate) fn disclosure_id_bounds(&self) -> Option<(u32, u32)> {
+        self.disclosures.id_bounds()
     }
 
     pub(crate) fn insert_contact(&mut self, record: InstitutionalContactRecord) {
@@ -444,14 +453,6 @@ impl ContactState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: contact indexes disagree with source records"
-        );
     }
 }
 

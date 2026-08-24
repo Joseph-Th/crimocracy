@@ -2,6 +2,7 @@
 
 pub mod delegation_system;
 
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
 };
@@ -175,6 +176,9 @@ pub struct DelegationState {
     records: BTreeMap<MandateId, MandateRecord>,
     active_by_manager: BTreeMap<CharacterId, MandateId>,
     active_by_scope: BTreeMap<ResponsibilityScope, BTreeSet<MandateId>>,
+    /// Every active mandate by id, so per-day autonomy passes iterate governed mandates
+    /// without rescanning the revoked-and-active mandate history.
+    active: BTreeSet<MandateId>,
 }
 
 impl DelegationState {
@@ -206,6 +210,14 @@ impl DelegationState {
     pub(crate) fn mandates(&self) -> impl Iterator<Item = &MandateRecord> {
         self.records.values()
     }
+    /// Every active mandate in id order; daily autonomy passes scan this instead of the
+    /// full revoked-and-active mandate history.
+    pub(crate) fn active_mandates(&self) -> impl Iterator<Item = &MandateRecord> {
+        self.active.iter().filter_map(|id| self.records.get(id))
+    }
+    pub(crate) fn mandate_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
 
     pub(crate) fn insert(&mut self, record: MandateRecord) {
         let id = record.id();
@@ -217,6 +229,7 @@ impl DelegationState {
         for scope in record.scopes() {
             self.active_by_scope.entry(*scope).or_default().insert(id);
         }
+        self.active.insert(id);
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -271,6 +284,11 @@ impl DelegationState {
             Some(id),
             "Derived Data Consistency: active manager mandate index disagrees with record"
         );
+        let removed_active = self.active.remove(&id);
+        debug_assert!(
+            removed_active,
+            "Derived Data Consistency: revoked mandate was not indexed as active"
+        );
         for scope in scopes {
             Self::remove_scope_index(&mut self.active_by_scope, scope, id);
         }
@@ -302,7 +320,9 @@ impl DelegationState {
         for record in self.records.values() {
             match record.status() {
                 MandateStatus::Active => {
-                    if self.active_by_manager.get(&record.manager()) != Some(&record.id()) {
+                    if self.active_by_manager.get(&record.manager()) != Some(&record.id())
+                        || !self.active.contains(&record.id())
+                    {
                         return false;
                     }
                     for scope in record.scopes() {
@@ -316,7 +336,9 @@ impl DelegationState {
                     }
                 }
                 MandateStatus::Revoked => {
-                    if self.active_by_manager.get(&record.manager()) == Some(&record.id()) {
+                    if self.active_by_manager.get(&record.manager()) == Some(&record.id())
+                        || self.active.contains(&record.id())
+                    {
                         return false;
                     }
                     for scope in record.scopes() {
@@ -348,15 +370,16 @@ impl DelegationState {
                 }
             }
         }
+        for id in &self.active {
+            if !self
+                .records
+                .get(id)
+                .is_some_and(|record| record.status() == MandateStatus::Active)
+            {
+                return false;
+            }
+        }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: delegation indexes disagree with source records"
-        );
     }
 }
 

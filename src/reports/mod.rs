@@ -6,7 +6,7 @@ pub mod report_system;
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{DecisionRequestId, InformationId, OrganizationId, ReportId};
+use crate::core::id::{DecisionRequestId, IdKeyedBounds, InformationId, OrganizationId, ReportId};
 use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,6 +120,9 @@ impl ReportState {
     pub(crate) fn reports(&self) -> impl Iterator<Item = &ReportRecord> {
         self.records.values()
     }
+    pub(crate) fn report_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
     pub(crate) fn insert(&mut self, report: ReportRecord) {
         self.by_recipient
             .entry(report.recipient())
@@ -153,21 +156,6 @@ impl ReportState {
             }
         }
         true
-    }
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: report indexes disagree with source records"
-        );
-        for report in self.records.values() {
-            debug_assert!(
-                self.by_recipient
-                    .get(&report.recipient())
-                    .is_some_and(|ids| ids.contains(&report.id())),
-                "Index Completeness: report recipient index is missing a report"
-            );
-        }
     }
 }
 

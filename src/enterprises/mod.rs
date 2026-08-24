@@ -5,6 +5,7 @@ pub mod enterprise_execution;
 pub mod enterprise_reporting;
 
 use crate::core::attention::AttentionClass;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, InformationId,
     LedgerTransactionId, MandateId, NeighborhoodId, OrganizationId,
@@ -314,6 +315,30 @@ impl EnterpriseState {
             .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
     }
 
+    /// The most recent settled cycle for an enterprise, in O(log n): settlement order is
+    /// sequential-ID order, so the last indexed ID is the newest cycle.
+    pub fn latest_cycle(&self, enterprise: EnterpriseId) -> Option<&EnterpriseCycleRecord> {
+        self.cycles_by_enterprise
+            .get(&enterprise)?
+            .last()
+            .and_then(|id| self.cycles.get(id))
+    }
+
+    /// The settled cycle immediately preceding `cycle` for its enterprise, in O(log n).
+    /// Sequential-ID settlement order makes the highest ID below `cycle` the prior cycle;
+    /// this is what per-cycle reportability comparisons need without walking the history.
+    pub fn prior_cycle(
+        &self,
+        enterprise: EnterpriseId,
+        cycle: EnterpriseCycleId,
+    ) -> Option<&EnterpriseCycleRecord> {
+        self.cycles_by_enterprise
+            .get(&enterprise)?
+            .range(..cycle)
+            .next_back()
+            .and_then(|id| self.cycles.get(id))
+    }
+
     pub fn active_for_mandate(
         &self,
         mandate: MandateId,
@@ -344,9 +369,15 @@ impl EnterpriseState {
     pub(crate) fn enterprises(&self) -> impl Iterator<Item = &EnterpriseRecord> {
         self.records.values()
     }
+    pub(crate) fn enterprise_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
 
     pub(crate) fn cycles(&self) -> impl Iterator<Item = &EnterpriseCycleRecord> {
         self.cycles.values()
+    }
+    pub(crate) fn enterprise_cycle_id_bounds(&self) -> Option<(u32, u32)> {
+        self.cycles.id_bounds()
     }
 
     pub(crate) fn insert(&mut self, record: EnterpriseRecord) {
@@ -633,14 +664,6 @@ impl EnterpriseState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: enterprise indexes disagree with source records"
-        );
     }
 }
 

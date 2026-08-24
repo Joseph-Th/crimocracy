@@ -770,16 +770,24 @@ pub fn apply_automatic_legal_support(
     // them is still active.
     // Explicitly commanded retentions are never swept here — their matter is leadership's
     // to end, not governance's.
+    //
+    // Both halves of this stage need custody work to observe: the sweep ends automatic
+    // representations whose detainee left, and retention needs a detained member. With no
+    // representation and nobody in custody there is nothing this pass could do, so quiet
+    // ticks skip both scans.
+    if !state.legal.has_active_automatic_policy_representations()
+        && !state.legal.has_detained_arrests()
+    {
+        return Ok(Vec::new());
+    }
     let concluded: Vec<LegalRepresentationId> = state
         .legal
-        .legal_representations()
+        .active_automatic_policy_representations()
         .filter(|record| {
-            record.origin() == crate::legal::LegalRepresentationOrigin::AutomaticPolicy
-                && record.status() == LegalRepresentationStatus::Active
-                && state
-                    .legal
-                    .get_arrest(record.arrest())
-                    .is_none_or(|arrest| arrest.status() != ArrestStatus::Detained)
+            state
+                .legal
+                .get_arrest(record.arrest())
+                .is_none_or(|arrest| arrest.status() != ArrestStatus::Detained)
         })
         .map(|record| record.id())
         .collect();
@@ -797,8 +805,7 @@ pub fn apply_automatic_legal_support(
 
     let candidates: Vec<crate::core::id::ArrestId> = state
         .legal
-        .arrests()
-        .filter(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
+        .detained_arrests()
         .filter(|arrest| {
             state
                 .legal

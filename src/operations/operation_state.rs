@@ -1,5 +1,6 @@
 //! Operation state storage and index maintenance; sibling `operations` types define records.
 
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{BusinessId, InformationId, OperationId, OrganizationId, PoliceResponseId};
 use crate::core::time::SimTime;
 use crate::operations::{
@@ -102,6 +103,9 @@ impl OperationState {
 
     pub(crate) fn operations(&self) -> impl Iterator<Item = &OperationRecord> {
         self.records.values()
+    }
+    pub(crate) fn operation_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
     }
 
     pub(crate) fn find_due_authorized(&self, now: SimTime) -> Vec<OperationId> {
@@ -636,15 +640,5 @@ impl OperationState {
             }
         }
         true
-    }
-
-    /// Debug builds re-derive the full index consistency check on every mutation boundary;
-    /// `has_consistent_indexes` is the single authority so the two can never drift apart.
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: operation indexes disagree with source records"
-        );
     }
 }

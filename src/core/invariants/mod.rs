@@ -374,209 +374,165 @@ fn validate_reputations(state: &AppState) -> Result<(), StateValidationError> {
 }
 
 fn validate_id_allocators(state: &AppState) -> Result<(), StateValidationError> {
+    // Each check reads only the smallest and largest persisted id from the collection's
+    // key order; walking every record per allocator per validation would rescan whole
+    // histories that grow for the life of the campaign.
     validate_id_allocator(
         &state.ids,
         IdKind::Organization,
-        state.world.organizations().map(|record| record.id().raw()),
+        state.world.organization_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Character,
-        state.world.characters().map(|record| record.id().raw()),
+        state.world.character_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Neighborhood,
-        state.world.neighborhoods().map(|record| record.id().raw()),
+        state.world.neighborhood_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Business,
-        state.world.businesses().map(|record| record.id().raw()),
+        state.world.business_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::BusinessOwnershipChange,
-        state
-            .world
-            .business_ownership_changes()
-            .map(|record| record.id().raw()),
+        state.world.ownership_change_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Operation,
-        state
-            .operations
-            .operations()
-            .map(|record| record.id().raw()),
+        state.operations.operation_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Opportunity,
-        state
-            .opportunities
-            .opportunities()
-            .map(|record| record.id().raw()),
+        state.opportunities.opportunity_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Information,
-        state
-            .intelligence
-            .information()
-            .map(|record| record.id().raw()),
+        state.intelligence.information_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Contact,
-        state.contacts.contacts().map(|record| record.id().raw()),
+        state.contacts.contact_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::ContactDisclosure,
-        state.contacts.disclosures().map(|record| record.id().raw()),
+        state.contacts.disclosure_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Investigation,
-        state.legal.investigations().map(|record| record.id().raw()),
+        state.legal.investigation_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::InvestigationWork,
-        state
-            .legal
-            .investigation_work()
-            .map(|record| record.id().raw()),
+        state.legal.investigation_work_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::PatrolDeployment,
-        state
-            .legal
-            .patrol_deployments()
-            .map(|record| record.id().raw()),
+        state.legal.patrol_deployment_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::PoliceResponse,
-        state
-            .legal
-            .police_responses()
-            .map(|record| record.id().raw()),
+        state.legal.police_response_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::CaseWitness,
-        state.legal.case_witnesses().map(|record| record.id().raw()),
+        state.legal.case_witness_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::WitnessStatement,
-        state
-            .legal
-            .witness_statements()
-            .map(|record| record.id().raw()),
+        state.legal.witness_statement_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Informant,
-        state.legal.informants().map(|record| record.id().raw()),
+        state.legal.informant_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::InformantDisclosure,
-        state
-            .legal
-            .informant_disclosures()
-            .map(|record| record.id().raw()),
+        state.legal.informant_disclosure_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Evidence,
-        state.legal.all_evidence().map(|record| record.id().raw()),
+        state.legal.evidence_id_bounds(),
     )?;
-    validate_id_allocator(
-        &state.ids,
-        IdKind::Arrest,
-        state.legal.arrests().map(|record| record.id().raw()),
-    )?;
+    validate_id_allocator(&state.ids, IdKind::Arrest, state.legal.arrest_id_bounds())?;
     validate_id_allocator(
         &state.ids,
         IdKind::LegalRepresentation,
-        state
-            .legal
-            .legal_representations()
-            .map(|record| record.id().raw()),
+        state.legal.legal_representation_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::ProsecutionCase,
-        state
-            .legal
-            .prosecution_cases()
-            .map(|record| record.id().raw()),
+        state.legal.prosecution_case_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::ProsecutionReferral,
-        state
-            .legal
-            .prosecution_referrals()
-            .map(|record| record.id().raw()),
+        state.legal.prosecution_referral_id_bounds(),
     )?;
-    validate_id_allocator(
-        &state.ids,
-        IdKind::Report,
-        state.reports.reports().map(|record| record.id().raw()),
-    )?;
+    validate_id_allocator(&state.ids, IdKind::Report, state.reports.report_id_bounds())?;
     validate_id_allocator(
         &state.ids,
         IdKind::HistoryEvent,
-        state.history.events().map(|record| record.id().raw()),
+        state.history.event_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::FinancialAccount,
-        state.finance.accounts().map(|record| record.id().raw()),
+        state.finance.account_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::LedgerTransaction,
-        state.finance.transactions().map(|record| record.id().raw()),
+        state.finance.transaction_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::DecisionRequest,
-        state.decisions.decisions().map(|record| record.id().raw()),
+        state.decisions.decision_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Mandate,
-        state.delegation.mandates().map(|record| record.id().raw()),
+        state.delegation.mandate_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::RecruitmentAttempt,
-        state.recruitment.attempts().map(|record| record.id().raw()),
+        state.recruitment.attempt_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::Enterprise,
-        state
-            .enterprises
-            .enterprises()
-            .map(|record| record.id().raw()),
+        state.enterprises.enterprise_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::EnterpriseCycle,
-        state.enterprises.cycles().map(|record| record.id().raw()),
+        state.enterprises.enterprise_cycle_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,
         IdKind::BusinessCycle,
-        state.economy.cycles().map(|record| record.id().raw()),
+        state.economy.business_cycle_id_bounds(),
     )?;
     Ok(())
 }
@@ -584,15 +540,13 @@ fn validate_id_allocators(state: &AppState) -> Result<(), StateValidationError> 
 fn validate_id_allocator(
     counters: &IdCounters,
     kind: IdKind,
-    ids: impl Iterator<Item = u32>,
+    bounds: Option<(u32, u32)>,
 ) -> Result<(), StateValidationError> {
-    let mut highest = 0;
-    for id in ids {
-        if id == 0 {
-            return Err(StateValidationError::InvalidPersistentId { kind: kind.label() });
-        }
-        highest = highest.max(id);
+    // Ids are allocated monotonically, so a zero id would also be the smallest key.
+    if bounds.is_some_and(|(smallest, _)| smallest == 0) {
+        return Err(StateValidationError::InvalidPersistentId { kind: kind.label() });
     }
+    let highest = bounds.map_or(0, |(_, largest)| largest);
     let next = counters.next_raw(kind);
     if next <= highest {
         return Err(StateValidationError::InvalidIdAllocator {
@@ -942,13 +896,13 @@ pub fn validate_state_against_registry(
         {
             return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
         }
-        let mut previous_heat = None;
-        for prior in state.enterprises.cycles_for(cycle.enterprise()) {
-            if prior.id() == cycle.id() {
-                break;
-            }
-            previous_heat = Some(prior.investigation_heat());
-        }
+        // Settlement order is sequential-ID order, so the prior settlement is the highest
+        // indexed cycle ID below this one; walking every earlier cycle per cycle would be
+        // quadratic in settled history.
+        let previous_heat = state
+            .enterprises
+            .prior_cycle(cycle.enterprise(), cycle.id())
+            .map(|prior| prior.investigation_heat());
         let heat_reportable = cycle.investigation_heat() > crate::finance::Money::ZERO
             && previous_heat != Some(cycle.investigation_heat());
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
@@ -1089,27 +1043,13 @@ pub fn validate_invariants(state: &AppState) {
         "Serialization Completeness: in-memory state schema version is not current"
     );
 
-    state.world.debug_validate_indexes();
-    state.finance.debug_validate_indexes();
-    state.social.debug_validate_indexes();
-    state.intelligence.debug_validate_indexes();
-    state.contacts.debug_validate_indexes();
-    state.recruitment.debug_validate_indexes();
-    state.operations.debug_validate_indexes();
-    state.opportunities.debug_validate_indexes();
-    state.decisions.debug_validate_indexes();
-    state.delegation.debug_validate_indexes();
-    state.economy.debug_validate_indexes();
-    state.enterprises.debug_validate_indexes();
-    state.reputation.debug_validate_indexes();
-    state.legal.debug_validate_indexes();
-    state.reports.debug_validate_indexes();
-
     // The release-safe structural validators are the single source of truth for record,
-    // lifecycle, provenance, and index coherence. Keep them authoritative here instead of
-    // re-implementing reduced-fidelity copies inline, which has historically drifted from
-    // the release-safe checks (for example, the supervision-cycle walk must detect
-    // multi-character cycles rather than only self-reference).
+    // lifecycle, provenance, index, and balance coherence — including every subsystem's
+    // derived-index consistency (`validate_indexes`), finance balance agreement, and the
+    // reputation index check inside `validate_reputations`. Keep them authoritative here
+    // instead of re-running reduced-fidelity copies alongside them, which has historically
+    // drifted from the release-safe checks (for example, the supervision-cycle walk must
+    // detect multi-character cycles rather than only self-reference).
     if let Err(error) = validate_state(state) {
         panic!("State Runtime Validity: release-safe structural validation failed: {error:?}");
     }

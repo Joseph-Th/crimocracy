@@ -8,8 +8,8 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
-    Admissibility, ArrestStatus, EvidenceAssessment, EvidenceConnection, EvidenceIdentity,
-    EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
+    Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
+    EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
     InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
     InvestigationStatus,
 };
@@ -437,10 +437,23 @@ pub fn apply_detainee_informant_recruitment(
 
     let decision_delay = registry.legal().informant_decision_delay().as_minutes();
     let now = state.now();
+    // The decision instant is a pure function of `arrested_at`, so the cheap timing gate
+    // runs first: a detainee not reaching their decision minute this tick skips every
+    // record lookup below. Predicates are pure reads, so evaluating them in this order
+    // selects exactly the same candidates.
     let candidates: Vec<(CharacterId, OrganizationId)> = state
         .legal
-        .arrests()
-        .filter(|arrest| arrest.status() == ArrestStatus::Detained)
+        .detained_arrests()
+        .filter(|arrest| {
+            let minutes_in_custody = now
+                .as_minutes()
+                .saturating_sub(arrest.arrested_at().as_minutes());
+            // Exact equality is safe because the canonical pipeline advances exactly one
+            // minute per tick and this pass runs every tick: each detention reaches its
+            // decision minute under observation exactly once. A batched or skipped pass
+            // would need a persisted decided-marker instead.
+            minutes_in_custody == u64::from(decision_delay)
+        })
         .filter_map(|arrest| {
             let handler = arrest.authority();
             let character = arrest.character();
@@ -464,14 +477,7 @@ pub fn apply_detainee_informant_recruitment(
             {
                 return None;
             }
-            let minutes_in_custody = now
-                .as_minutes()
-                .saturating_sub(arrest.arrested_at().as_minutes());
-            // Exact equality is safe because the canonical pipeline advances exactly one
-            // minute per tick and this pass runs every tick: each detention reaches its
-            // decision minute under observation exactly once. A batched or skipped pass
-            // would need a persisted decided-marker instead.
-            (minutes_in_custody == u64::from(decision_delay)).then_some((character, handler))
+            Some((character, handler))
         })
         .collect();
 
@@ -515,16 +521,19 @@ pub fn apply_detainee_informant_recruitment(
 pub fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
+    // Disclosures need a live informant relationship on one side and an active case on the
+    // other. With no active informant the handler-to-case view could never be consulted,
+    // so quiet custody ticks skip building it entirely.
+    if !state.legal.has_active_informants() {
+        return Ok(Vec::new());
+    }
     // Active cases owned by each handler, keyed by their origin operation. Built once per
     // pass in investigation-id order so the smallest matching case id wins deterministically.
     let mut cases_by_handler_origin: BTreeMap<
         OrganizationId,
         BTreeMap<OperationId, InvestigationId>,
     > = BTreeMap::new();
-    for investigation in state.legal.investigations() {
-        if investigation.status() != InvestigationStatus::Active {
-            continue;
-        }
+    for investigation in state.legal.active_investigations() {
         if let Some(EntityRef::Operation(origin)) = investigation.origin() {
             cases_by_handler_origin
                 .entry(investigation.owner())
@@ -536,8 +545,7 @@ pub fn apply_informant_disclosures(
 
     let candidates: Vec<(InformantId, InformationId, InvestigationId)> = state
         .legal
-        .informants()
-        .filter(|informant| informant.status() == InformantStatus::Active)
+        .active_informants()
         .flat_map(|informant| {
             let handler = informant.handler();
             let character = informant.character();

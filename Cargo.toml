@@ -54,6 +54,15 @@ overflow-checks = true
 inherits = "dev"
 opt-level = 1
 
+# Third-party code compiles optimized in every dev-derived profile. Dependencies
+# rebuild only when the lockfile changes, so the everyday edit loop pays nothing,
+# while the state-owned ChaCha8 streams and serde paths stop running unoptimized.
+# Measured warm (harness-full --samples 8, min of 3): 3.9s -> 3.5s; run artifacts
+# stay byte-identical. Raising [profile.harness] itself to opt-level 2 was measured
+# and lost: no runtime gain over opt-level 1 at materially higher rebuild cost.
+[profile.dev.package."*"]
+opt-level = 3
+
 [lints.rust]
 unsafe_code = "forbid"
 

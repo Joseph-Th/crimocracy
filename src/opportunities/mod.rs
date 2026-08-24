@@ -3,6 +3,7 @@
 pub mod opportunity_system;
 
 use crate::core::entity::EntityRef;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{InformationId, OperationId, OpportunityId, OrganizationId, ReportId};
 use crate::core::time::SimTime;
 use crate::operations::OperationKind;
@@ -218,6 +219,9 @@ impl OpportunityState {
     pub(crate) fn opportunities(&self) -> impl Iterator<Item = &OpportunityRecord> {
         self.records.values()
     }
+    pub(crate) fn opportunity_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
 
     pub(crate) fn find_due_expiring(&self, now: SimTime) -> Vec<OpportunityId> {
         self.open_by_expiry
@@ -404,14 +408,6 @@ impl OpportunityState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: opportunity indexes disagree with source records"
-        );
     }
 }
 

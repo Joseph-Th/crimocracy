@@ -46,7 +46,7 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 
 `cargo check-fast` and `cargo test-focused` are the inner loop. `scripts/watch.ps1` is the hands-free form of that loop: it reruns one focused lane on every save and never builds more than that lane. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
 
-All `harness*` aliases execute on `[profile.harness]` (`target\harness\`): dev semantics with `opt-level = 1`, so runs are ~10x faster than dev-profile execution while library iteration caches stay untouched in `target\debug\`. After a library edit, the first harness command pays an optimized lib rebuild (~50s); example-only edits recompile in ~2-3s and never rebuild the lib.
+All `harness*` aliases execute on `[profile.harness]` (`target\harness\`): dev semantics with `opt-level = 1`, so runs are ~10x faster than dev-profile execution while library iteration caches stay untouched in `target\debug\`. After a library edit, the first harness command pays an optimized lib rebuild (~50s); example-only edits recompile in ~2-3s and never rebuild the lib. Dependencies compile at `opt-level 3` in every dev-derived profile (`[profile.dev.package."*"]`): they rebuild only on lockfile changes, so iteration pays nothing, and warm harness runs measure ~10% faster with byte-identical artifacts.
 
 ### Broad completion gate
 

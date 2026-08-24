@@ -4,6 +4,7 @@ pub mod finance_system;
 pub mod helpers;
 
 use crate::core::entity::EntityRef;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, LedgerTransactionId, MandateId, OrganizationId,
 };
@@ -178,6 +179,9 @@ pub struct FinanceState {
     transactions: BTreeMap<LedgerTransactionId, LedgerTransactionRecord>,
     accounts_by_owner: BTreeMap<FinancialOwner, BTreeSet<FinancialAccountId>>,
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
+    /// Every account referenced by at least one ledger posting, so guarded cleanup proves
+    /// an account unused without scanning the append-only transaction history.
+    posted_accounts: BTreeSet<FinancialAccountId>,
 }
 
 impl FinanceState {
@@ -218,9 +222,21 @@ impl FinanceState {
     pub(crate) fn accounts(&self) -> impl Iterator<Item = &FinancialAccountRecord> {
         self.accounts.values()
     }
+    pub(crate) fn account_id_bounds(&self) -> Option<(u32, u32)> {
+        self.accounts.id_bounds()
+    }
+    pub(crate) fn transaction_id_bounds(&self) -> Option<(u32, u32)> {
+        self.transactions.id_bounds()
+    }
 
     pub(crate) fn transactions(&self) -> impl Iterator<Item = &LedgerTransactionRecord> {
         self.transactions.values()
+    }
+
+    /// Whether any committed ledger posting references `account`. O(log n) over the
+    /// maintained posting index instead of a scan of the full transaction history.
+    pub(crate) fn has_postings(&self, account: FinancialAccountId) -> bool {
+        self.posted_accounts.contains(&account)
     }
 
     pub(crate) fn insert_account(&mut self, record: FinancialAccountRecord) {
@@ -271,6 +287,9 @@ impl FinanceState {
                 .or_default()
                 .insert(record.id());
         }
+        for posting in record.postings() {
+            self.posted_accounts.insert(posting.account);
+        }
         let previous = self.transactions.insert(record.id(), record);
         debug_assert!(
             previous.is_none(),
@@ -299,7 +318,14 @@ impl FinanceState {
                 }
             }
         }
+        let mut referenced_accounts = BTreeSet::new();
         for transaction in self.transactions.values() {
+            for posting in transaction.postings() {
+                if !self.posted_accounts.contains(&posting.account) {
+                    return false;
+                }
+                referenced_accounts.insert(posting.account);
+            }
             if let Some(usage) = transaction.budget_usage() {
                 if !self
                     .transactions_by_mandate
@@ -321,6 +347,9 @@ impl FinanceState {
                 }
             }
         }
+        if referenced_accounts != self.posted_accounts {
+            return false;
+        }
         true
     }
 
@@ -338,18 +367,6 @@ impl FinanceState {
         self.accounts.values().all(|account| {
             derived.get(&account.id()).copied().unwrap_or(Money::ZERO) == account.balance()
         })
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: finance indexes disagree with source records"
-        );
-        debug_assert!(
-            self.has_consistent_balances(),
-            "Derived Data Consistency: financial account balances disagree with ledger postings"
-        );
     }
 }
 

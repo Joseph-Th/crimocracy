@@ -21,6 +21,12 @@ macro_rules! define_id {
             }
         }
 
+        impl PersistentId for $name {
+            fn pid_raw(self) -> u32 {
+                self.0
+            }
+        }
+
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(formatter, concat!($label, "-{}"), self.0)
@@ -62,6 +68,28 @@ define_id!(RecruitmentAttemptId, "recruitment");
 define_id!(EnterpriseId, "enterprise");
 define_id!(EnterpriseCycleId, "enterprise-cycle");
 define_id!(BusinessCycleId, "business-cycle");
+
+/// Raw-id extraction for id-keyed ordered maps; implemented by every [`define_id`] type.
+pub(crate) trait PersistentId: Copy {
+    fn pid_raw(self) -> u32;
+}
+
+/// `(smallest, largest)` raw key of a map keyed by a persistent id, read from the map's
+/// key order in O(log n) per extreme. Allocator validation only needs these extremes:
+/// ids are allocated monotonically, so any zero id would also be the smallest key.
+pub(crate) trait IdKeyedBounds {
+    fn id_bounds(&self) -> Option<(u32, u32)>;
+}
+
+impl<K, V> IdKeyedBounds for std::collections::BTreeMap<K, V>
+where
+    K: Ord + PersistentId,
+{
+    fn id_bounds(&self) -> Option<(u32, u32)> {
+        let smallest = self.keys().next()?;
+        Some((smallest.pid_raw(), self.keys().next_back()?.pid_raw()))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WorldIdCounters {

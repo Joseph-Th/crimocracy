@@ -71,8 +71,15 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                 opportunity: opportunity.id(),
             },
         )?;
-        let mut expected_entities = context.targets().clone();
-        expected_entities.insert(EntityRef::Organization(opportunity.organization()));
+        // Element-wise comparison so per-record validation never clones the target set.
+        let expected_entities_contains = |entities: &BTreeSet<EntityRef>| {
+            entities.len() == context.targets().len() + 1
+                && entities.contains(&EntityRef::Organization(opportunity.organization()))
+                && context
+                    .targets()
+                    .iter()
+                    .all(|target| entities.contains(target))
+        };
         let expected_sources: Vec<_> = opportunity.source_information().iter().copied().collect();
         if report.recipient() != opportunity.organization()
             || report.kind() != ReportKind::Opportunity
@@ -82,7 +89,7 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                 entry.attention == AttentionClass::Notable
                     && entry.summary == opportunity.summary()
                     && entry.sources == expected_sources
-                    && entry.entities == expected_entities
+                    && expected_entities_contains(&entry.entities)
                     && entry.decision.is_none()
             })
         {
@@ -137,7 +144,7 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                                     opportunity.summary(),
                                 )
                             && entry.sources == expected_sources
-                            && entry.entities == expected_entities
+                            && expected_entities_contains(&entry.entities)
                             && entry.decision.is_none()
                     })
                     || state

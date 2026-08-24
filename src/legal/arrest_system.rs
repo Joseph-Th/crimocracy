@@ -260,6 +260,22 @@ fn validate_arrest_dependencies(
     Ok(authority)
 }
 
+/// Participants bound to any non-terminal operation. Served from the status indexes rather
+/// than the full operation history: terminal operations release their participants.
+fn collect_booked_characters(state: &AppState) -> std::collections::BTreeSet<CharacterId> {
+    let mut booked = std::collections::BTreeSet::new();
+    for status in [
+        OperationStatus::Authorized,
+        OperationStatus::InProgress,
+        OperationStatus::AwaitingDecision,
+    ] {
+        for operation in state.operations().operations_with_status(status) {
+            booked.extend(operation.participants().iter().copied());
+        }
+    }
+    booked
+}
+
 fn validate_character_can_enter_custody(
     state: &AppState,
     character: CharacterId,
@@ -274,23 +290,32 @@ fn validate_character_can_enter_custody(
             work: work.id(),
         });
     }
-    for operation in state.operations.operations() {
-        if matches!(
-            operation.status(),
-            OperationStatus::Authorized
-                | OperationStatus::InProgress
-                | OperationStatus::AwaitingDecision
-        ) && (operation.leader() == character
-            || operation
-                .roles()
-                .values()
-                .any(|participant| *participant == character))
-        {
-            return Err(ArrestError::ActiveOperationResponsibility {
-                character,
-                operation: operation.id(),
-            });
+    // Only non-terminal operations can hold the character; scanning the status indexes
+    // instead of the full record history keeps this O(live bookings), not O(campaign).
+    // The full-history scan this replaces visited records in ascending ID order and named
+    // the first conflict, so the smallest conflicting operation ID is selected explicitly.
+    let mut conflict: Option<OperationId> = None;
+    for status in [
+        OperationStatus::Authorized,
+        OperationStatus::InProgress,
+        OperationStatus::AwaitingDecision,
+    ] {
+        for operation in state.operations.operations_with_status(status) {
+            let holds_booking = operation.leader() == character
+                || operation
+                    .roles()
+                    .values()
+                    .any(|participant| *participant == character);
+            if holds_booking && conflict.is_none_or(|current| operation.id() < current) {
+                conflict = Some(operation.id());
+            }
         }
+    }
+    if let Some(operation) = conflict {
+        return Err(ArrestError::ActiveOperationResponsibility {
+            character,
+            operation,
+        });
     }
     Ok(())
 }
@@ -353,19 +378,20 @@ const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
 pub fn apply_autonomous_evidence_arrests(
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
-    let candidates: Vec<(InvestigationId, CharacterId)> = state
-        .legal()
-        .investigations()
-        .filter(|investigation| {
-            investigation.status() == InvestigationStatus::Active
-                && matches!(investigation.origin(), Some(EntityRef::Operation(_)))
-        })
-        .flat_map(|investigation| {
+    // Single scan over active operation-originated cases; subject pairs append directly so
+    // a tick with no candidates allocates nothing beyond the one candidate buffer.
+    let mut candidates: Vec<(InvestigationId, CharacterId)> = Vec::new();
+    for investigation in state.legal().active_investigations() {
+        if !matches!(investigation.origin(), Some(EntityRef::Operation(_))) {
+            continue;
+        }
+        let investigation_id = investigation.id();
+        candidates.extend(
             investigation
                 .subjects()
                 .iter()
                 .filter_map(|subject| match subject {
-                    EntityRef::Character(character) => Some((investigation.id(), *character)),
+                    EntityRef::Character(character) => Some((investigation_id, *character)),
                     EntityRef::Organization(_)
                     | EntityRef::Neighborhood(_)
                     | EntityRef::Business(_)
@@ -376,29 +402,27 @@ pub fn apply_autonomous_evidence_arrests(
                     | EntityRef::DecisionRequest(_)
                     | EntityRef::Mandate(_)
                     | EntityRef::Enterprise(_) => None,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    // One pass over the live operation set per tick, not per candidate: every participant
-    // bound to a non-terminal operation is protected from custody conversion.
-    let mut booked_characters = std::collections::BTreeSet::new();
-    for status in [
-        OperationStatus::Authorized,
-        OperationStatus::InProgress,
-        OperationStatus::AwaitingDecision,
-    ] {
-        for operation in state.operations().operations_with_status(status) {
-            booked_characters.extend(operation.participants().iter().copied());
-        }
+                }),
+        );
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
     }
 
+    // One pass over the live operation set per tick, not per candidate: every participant
+    // bound to a non-terminal operation is protected from custody conversion. Built lazily
+    // on the first candidate — operations never mutate during this pass (a booked suspect
+    // is skipped before any arrest validation), so deferring the build past candidate
+    // collection cannot change what it observes.
+    let mut booked_characters = Option::<std::collections::BTreeSet<CharacterId>>::None;
     let mut arrests = Vec::new();
     for (investigation_id, character) in candidates {
         // A detained character may not hold any non-terminal operation booking; skip
         // suspects whose crew work is still live rather than tearing it up mid-flight.
-        if booked_characters.contains(&character) {
+        if booked_characters
+            .get_or_insert_with(|| collect_booked_characters(state))
+            .contains(&character)
+        {
             continue;
         }
         if state.legal.active_arrest_for_character(character).is_some() {
@@ -412,28 +436,27 @@ pub fn apply_autonomous_evidence_arrests(
             _ => continue,
         };
         let owner = investigation.owner();
-        let qualifying: Vec<EvidenceId> = investigation
-            .evidence()
-            .iter()
-            .filter_map(|id| state.legal.get_evidence(*id))
-            .filter(|evidence| evidence.subject() == EntityRef::Character(character))
-            .filter(|evidence| evidence.custodian() == owner)
-            .filter(|evidence| evidence.strength() != crate::legal::EvidenceStrength::Weak)
-            .filter(|evidence| {
-                evidence.admissibility() != crate::legal::Admissibility::Inadmissible
-            })
-            .map(|evidence| evidence.id())
-            .collect();
-        let has_strong = qualifying.iter().any(|id| {
-            matches!(
-                state
-                    .legal
-                    .get_evidence(*id)
-                    .map(crate::legal::EvidenceRecord::strength),
-                Some(crate::legal::EvidenceStrength::Strong)
-                    | Some(crate::legal::EvidenceStrength::Direct)
-            )
-        });
+        // Single lookup per evidence record decides qualification and the strong/direct
+        // bar together, instead of resolving each qualifying item a second time.
+        let mut qualifying: Vec<EvidenceId> = Vec::new();
+        let mut has_strong = false;
+        for evidence_id in investigation.evidence().iter() {
+            let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
+                continue;
+            };
+            if evidence.subject() != EntityRef::Character(character)
+                || evidence.custodian() != owner
+                || evidence.strength() == crate::legal::EvidenceStrength::Weak
+                || evidence.admissibility() == crate::legal::Admissibility::Inadmissible
+            {
+                continue;
+            }
+            has_strong |= matches!(
+                evidence.strength(),
+                crate::legal::EvidenceStrength::Strong | crate::legal::EvidenceStrength::Direct
+            );
+            qualifying.push(evidence.id());
+        }
         if qualifying.len() < MIN_ARREST_QUALIFYING_EVIDENCE || !has_strong {
             continue;
         }

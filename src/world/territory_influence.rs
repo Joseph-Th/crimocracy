@@ -13,7 +13,6 @@
 
 use crate::core::id::{NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
-use crate::delegation::MandateStatus;
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
@@ -131,16 +130,14 @@ pub fn resolve_neighborhood_influence(
         }
     }
 
-    // Governance: an active territorial mandate scoped to the district itself.
+    // Governance: an active territorial mandate scoped to the district itself. The
+    // active-by-scope index serves this directly; scanning the full mandate history per
+    // district resolution would grow with every mandate ever issued.
     let governed: BTreeSet<OrganizationId> = state
         .delegation()
-        .mandates()
-        .filter(|mandate| mandate.status() == MandateStatus::Active)
-        .filter(|mandate| {
-            mandate.scopes().iter().any(|scope| {
-                *scope == crate::delegation::ResponsibilityScope::Neighborhood(neighborhood)
-            })
-        })
+        .active_for_scope(crate::delegation::ResponsibilityScope::Neighborhood(
+            neighborhood,
+        ))
         .map(|mandate| mandate.organization())
         .collect();
 

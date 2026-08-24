@@ -770,8 +770,7 @@ pub fn apply_due_witness_interview_scheduling(
     let mut scheduled = Vec::new();
     let candidates: Vec<InvestigationId> = state
         .legal
-        .investigations()
-        .filter(|investigation| investigation.status() == InvestigationStatus::Active)
+        .active_investigations()
         .map(|investigation| investigation.id())
         .collect();
     for investigation_id in candidates {

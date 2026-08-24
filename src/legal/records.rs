@@ -273,6 +273,9 @@ pub(super) struct LegalRepresentationIndexes {
     pub(super) by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
     pub(super) active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
     pub(super) active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
+    /// Active automatic-policy retentions, so the per-tick custody sweep concludes only its
+    /// own matters without scanning the full representation history, which grows forever.
+    pub(super) active_automatic_policy: BTreeSet<LegalRepresentationId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +471,9 @@ pub(super) struct ArrestIndexes {
     pub(super) by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
     pub(super) by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
     pub(super) active_by_character: BTreeMap<CharacterId, ArrestId>,
+    /// Every currently detained arrest, so per-tick custody passes (informant recruitment,
+    /// automatic legal support) scan detainees instead of the full arrest history.
+    pub(super) detained: BTreeSet<ArrestId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1358,6 +1364,10 @@ pub(super) struct InvestigationIndexes {
     pub(super) investigations_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationId>>,
     pub(super) active_without_lead: BTreeSet<InvestigationId>,
+    /// Every active case regardless of lead status, so per-tick institutional passes
+    /// (evidence arrests, witness scheduling, informant disclosures) iterate live work
+    /// instead of the full case history, which grows for the life of the campaign.
+    pub(super) active: BTreeSet<InvestigationId>,
     /// Every active case keyed by its last activity instant, so cold-case decay finds due
     /// institutional-inactivity candidates deterministically without scanning the case set.
     pub(super) cases_by_last_activity: BTreeMap<SimTime, BTreeSet<InvestigationId>>,
@@ -1375,12 +1385,19 @@ pub(super) struct WitnessIndexes {
     pub(super) case_witness_by_case_character:
         BTreeMap<(InvestigationId, CharacterId), CaseWitnessId>,
     pub(super) case_witnesses_by_investigation: BTreeMap<InvestigationId, BTreeSet<CaseWitnessId>>,
+    /// Every registration naming a character as case witness, so witness-pressure targeting
+    /// scans that character's own registrations instead of the full witness history, which
+    /// grows for the life of the campaign.
+    pub(super) case_witnesses_by_character: BTreeMap<CharacterId, BTreeSet<CaseWitnessId>>,
     pub(super) witness_statement_by_evidence: BTreeMap<EvidenceId, WitnessStatementId>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct InformantIndexes {
     pub(super) active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
+    /// Every active informant relationship by id, so the disclosure pass iterates working
+    /// informants instead of the full terminated-and-active history.
+    pub(super) active: BTreeSet<InformantId>,
     pub(super) disclosures_by_informant: BTreeMap<InformantId, BTreeSet<InformantDisclosureId>>,
     pub(super) disclosure_by_evidence: BTreeMap<EvidenceId, InformantDisclosureId>,
     pub(super) disclosures_by_information: BTreeMap<InformationId, BTreeSet<InformantDisclosureId>>,

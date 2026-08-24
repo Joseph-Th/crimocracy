@@ -61,6 +61,6 @@ These are scope boundaries, not evidence for unmodeled design goals.
 
 The current authored content revision is 33.
 
-The current in-memory state schema version is 61.
+The current in-memory state schema version is 63.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

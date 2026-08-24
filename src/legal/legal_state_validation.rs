@@ -6,7 +6,8 @@
 use crate::legal::legal_state::LegalState;
 use crate::legal::records::{
     ArrestStatus, InformantStatus, InvestigationStatus, InvestigationWorkStatus,
-    LegalRepresentationStatus, PatrolDeploymentStatus, PoliceResponseStatus, ProsecutionCaseStatus,
+    LegalRepresentationOrigin, LegalRepresentationStatus, PatrolDeploymentStatus,
+    PoliceResponseStatus, ProsecutionCaseStatus,
 };
 
 impl LegalState {
@@ -162,10 +163,28 @@ impl LegalState {
                 }
                 LegalRepresentationStatus::Active | LegalRepresentationStatus::Ended => {}
             }
+            if self
+                .indexes
+                .representations
+                .active_automatic_policy
+                .contains(&id)
+                != (record.status() == LegalRepresentationStatus::Active
+                    && record.origin() == LegalRepresentationOrigin::AutomaticPolicy)
+            {
+                return false;
+            }
         }
         for (arrest, id) in &self.indexes.representations.active_by_arrest {
             if !self.legal_representations.get(id).is_some_and(|record| {
                 record.arrest() == *arrest && record.status() == LegalRepresentationStatus::Active
+            }) {
+                return false;
+            }
+        }
+        for id in &self.indexes.representations.active_automatic_policy {
+            if !self.legal_representations.get(id).is_some_and(|record| {
+                record.status() == LegalRepresentationStatus::Active
+                    && record.origin() == LegalRepresentationOrigin::AutomaticPolicy
             }) {
                 return false;
             }
@@ -260,6 +279,11 @@ impl LegalState {
                 ArrestStatus::Released if active == Some(&id) => return false,
                 ArrestStatus::Detained | ArrestStatus::Released => {}
             }
+            if self.indexes.arrests.detained.contains(&id)
+                != (arrest.status() == ArrestStatus::Detained)
+            {
+                return false;
+            }
         }
         for (character, ids) in &self.indexes.arrests.by_character {
             if ids.iter().any(|id| {
@@ -285,6 +309,15 @@ impl LegalState {
             if !self.arrests.get(id).is_some_and(|record| {
                 record.character() == *character && record.status() == ArrestStatus::Detained
             }) {
+                return false;
+            }
+        }
+        for id in &self.indexes.arrests.detained {
+            if !self
+                .arrests
+                .get(id)
+                .is_some_and(|record| record.status() == ArrestStatus::Detained)
+            {
                 return false;
             }
         }
@@ -388,6 +421,15 @@ impl LegalState {
             {
                 return false;
             }
+            if self
+                .indexes
+                .investigations
+                .active
+                .contains(&investigation.id())
+                != (investigation.status() == InvestigationStatus::Active)
+            {
+                return false;
+            }
             for investigator in investigation.assigned_investigators() {
                 if !self
                     .indexes
@@ -408,6 +450,15 @@ impl LegalState {
                     record.status() == InvestigationStatus::Active
                         && record.lead_investigator().is_none()
                 })
+            {
+                return false;
+            }
+        }
+        for investigation in &self.indexes.investigations.active {
+            if !self
+                .investigations
+                .get(investigation)
+                .is_some_and(|record| record.status() == InvestigationStatus::Active)
             {
                 return false;
             }
@@ -447,6 +498,20 @@ impl LegalState {
                 InformantStatus::Active if active_index != Some(&id) => return false,
                 InformantStatus::Terminated if active_index == Some(&id) => return false,
                 InformantStatus::Active | InformantStatus::Terminated => {}
+            }
+            if self.indexes.informants.active.contains(&id)
+                != (informant.status() == InformantStatus::Active)
+            {
+                return false;
+            }
+        }
+        for id in &self.indexes.informants.active {
+            if !self
+                .informants
+                .get(id)
+                .is_some_and(|record| record.status() == InformantStatus::Active)
+            {
+                return false;
             }
         }
         for (key, id) in &self.indexes.informants.active_by_character_handler {
@@ -541,6 +606,12 @@ impl LegalState {
                     .case_witnesses_by_investigation
                     .get(&witness.investigation())
                     .is_some_and(|ids| ids.contains(&witness.id()))
+                || !self
+                    .indexes
+                    .witnesses
+                    .case_witnesses_by_character
+                    .get(&witness.witness())
+                    .is_some_and(|ids| ids.contains(&witness.id()))
             {
                 return false;
             }
@@ -569,6 +640,17 @@ impl LegalState {
                     .case_witnesses
                     .get(id)
                     .is_some_and(|record| record.investigation() == *investigation)
+                {
+                    return false;
+                }
+            }
+        }
+        for (character, ids) in &self.indexes.witnesses.case_witnesses_by_character {
+            for id in ids {
+                if !self
+                    .case_witnesses
+                    .get(id)
+                    .is_some_and(|record| record.witness() == *character)
                 {
                     return false;
                 }
@@ -860,14 +942,5 @@ impl LegalState {
             }
         }
         true
-    }
-    /// Debug builds re-derive the full index consistency check on every mutation boundary;
-    /// `has_consistent_indexes` is the single authority so the two can never drift apart.
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: legal indexes disagree with source records"
-        );
     }
 }

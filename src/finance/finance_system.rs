@@ -106,13 +106,10 @@ pub(crate) fn remove_unused_account(state: &mut AppState, account: FinancialAcco
     if record.balance() != Money::ZERO {
         return false;
     }
-    let referenced = state.finance.transactions().any(|transaction| {
-        transaction
-            .postings()
-            .iter()
-            .any(|posting| posting.account == account)
-    });
-    if referenced {
+    // The maintained posting index answers this in O(log n); the transaction history is
+    // append-only and grows for the life of the campaign, so scanning it here would make
+    // every rejected reservation cost O(total transactions ever).
+    if state.finance.has_postings(account) {
         return false;
     }
     state.finance.remove_account(account);

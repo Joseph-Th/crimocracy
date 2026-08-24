@@ -6,7 +6,8 @@ use super::{
     NeighborhoodRecord, OrganizationRecord, PolicySetting,
 };
 use crate::core::id::{
-    BusinessId, BusinessOwnershipChangeId, CharacterId, NeighborhoodId, OrganizationId,
+    BusinessId, BusinessOwnershipChangeId, CharacterId, IdKeyedBounds, NeighborhoodId,
+    OrganizationId,
 };
 use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
@@ -215,6 +216,21 @@ impl WorldState {
     pub fn get_business(&self, id: BusinessId) -> Option<&BusinessRecord> {
         self.businesses.records.get(&id)
     }
+    pub(crate) fn organization_id_bounds(&self) -> Option<(u32, u32)> {
+        self.organizations.id_bounds()
+    }
+    pub(crate) fn character_id_bounds(&self) -> Option<(u32, u32)> {
+        self.characters.records.id_bounds()
+    }
+    pub(crate) fn neighborhood_id_bounds(&self) -> Option<(u32, u32)> {
+        self.neighborhoods.id_bounds()
+    }
+    pub(crate) fn business_id_bounds(&self) -> Option<(u32, u32)> {
+        self.businesses.records.id_bounds()
+    }
+    pub(crate) fn ownership_change_id_bounds(&self) -> Option<(u32, u32)> {
+        self.businesses.ownership_changes.id_bounds()
+    }
     pub fn characters_in_organization(
         &self,
         id: OrganizationId,
@@ -338,16 +354,8 @@ impl WorldState {
     pub(crate) fn characters(&self) -> impl Iterator<Item = &CharacterRecord> {
         self.characters.records.values()
     }
-    pub(crate) fn neighborhoods(&self) -> impl Iterator<Item = &NeighborhoodRecord> {
-        self.neighborhoods.values()
-    }
     pub(crate) fn businesses(&self) -> impl Iterator<Item = &BusinessRecord> {
         self.businesses.records.values()
-    }
-    pub(crate) fn business_ownership_changes(
-        &self,
-    ) -> impl Iterator<Item = &BusinessOwnershipChangeRecord> {
-        self.businesses.ownership_changes.values()
     }
     pub(crate) fn insert_organization(&mut self, record: OrganizationRecord) {
         let previous = self.organizations.insert(record.id(), record);
@@ -591,14 +599,5 @@ impl WorldState {
             }
         }
         true
-    }
-    /// Debug builds re-derive the full index consistency check on every mutation boundary;
-    /// `has_consistent_indexes` is the single authority so the two can never drift apart.
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: world indexes disagree with source records"
-        );
     }
 }

@@ -3,6 +3,7 @@
 use crate::contacts::ContactStatus;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
@@ -105,12 +106,6 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
             }
             (None, Some(_)) | (Some(_), None) => false,
         };
-        let expected_retained_entities = BTreeSet::from([
-            EntityRef::Character(representation.defendant()),
-            EntityRef::Character(representation.counsel()),
-            EntityRef::Organization(representation.counsel_institution()),
-            EntityRef::Investigation(arrest.investigation()),
-        ]);
         let retained_report_is_valid = retained_report.recipient() == representation.sponsor()
             && retained_report.kind() == ReportKind::Legal
             && retained_report.title() == "Legal representation retained"
@@ -120,7 +115,16 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
             && retained_report.entries()[0].summary == retained_information.summary()
             && retained_report.entries()[0].sources.is_empty()
             && retained_report.entries()[0].decision.is_none()
-            && retained_report.entries()[0].entities == expected_retained_entities;
+            // Compared element-wise so per-record validation never rebuilds the entity set.
+            && {
+                let entities = &retained_report.entries()[0].entities;
+                entities.len() == 4
+                    && entities.contains(&EntityRef::Character(representation.defendant()))
+                    && entities.contains(&EntityRef::Character(representation.counsel()))
+                    && entities
+                        .contains(&EntityRef::Organization(representation.counsel_institution()))
+                    && entities.contains(&EntityRef::Investigation(arrest.investigation()))
+            };
 
         if arrest.character() != representation.defendant()
             || sponsor.kind() != OrganizationKind::Criminal
@@ -200,11 +204,7 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
                     .reports
                     .get_report(ended_report_id)
                     .ok_or_else(invalid)?;
-                let expected_ended_entities = BTreeSet::from([
-                    EntityRef::Character(representation.defendant()),
-                    EntityRef::Character(representation.counsel()),
-                    EntityRef::Organization(representation.counsel_institution()),
-                ]);
+                let ended_entities = &ended_report.entries()[0].entities;
                 if representation.version() != 2
                     || ended_at < representation.retained_at()
                     || ended_at > state.now()
@@ -236,7 +236,12 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
                     || ended_report.entries()[0].summary != ended_information.summary()
                     || !ended_report.entries()[0].sources.is_empty()
                     || ended_report.entries()[0].decision.is_some()
-                    || ended_report.entries()[0].entities != expected_ended_entities
+                    || ended_entities.len() != 3
+                    || !ended_entities.contains(&EntityRef::Character(representation.defendant()))
+                    || !ended_entities.contains(&EntityRef::Character(representation.counsel()))
+                    || !ended_entities.contains(&EntityRef::Organization(
+                        representation.counsel_institution(),
+                    ))
                     || !information_ids.insert(ended_information_id)
                     || !report_ids.insert(ended_report_id)
                 {
@@ -302,13 +307,16 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
             return Err(invalid_case());
         }
 
-        let expected_entities = BTreeSet::from([
-            EntityRef::Character(case.defendant()),
-            EntityRef::Organization(case.source_authority()),
-            EntityRef::Organization(case.prosecutor_office()),
-            EntityRef::Character(case.lead_prosecutor()),
-            EntityRef::Investigation(case.source_investigation()),
-        ]);
+        // The resolution report's entity set is compared element-wise (both statuses below)
+        // so per-record validation never rebuilds this set per case.
+        let expected_entities_contains = |entities: &BTreeSet<EntityRef>| {
+            entities.len() == 5
+                && entities.contains(&EntityRef::Character(case.defendant()))
+                && entities.contains(&EntityRef::Organization(case.source_authority()))
+                && entities.contains(&EntityRef::Organization(case.prosecutor_office()))
+                && entities.contains(&EntityRef::Character(case.lead_prosecutor()))
+                && entities.contains(&EntityRef::Investigation(case.source_investigation()))
+        };
 
         match case.status() {
             ProsecutionCaseStatus::Reviewing => {
@@ -388,7 +396,7 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
                     || report.entries()[0].summary != information.summary()
                     || !report.entries()[0].sources.is_empty()
                     || report.entries()[0].decision.is_some()
-                    || report.entries()[0].entities != expected_entities
+                    || !expected_entities_contains(&report.entries()[0].entities)
                 {
                     return Err(invalid_case());
                 }
@@ -463,7 +471,7 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
                 || report.entries()[0].summary != information.summary()
                 || !report.entries()[0].sources.is_empty()
                 || report.entries()[0].decision.is_some()
-                || report.entries()[0].entities != expected_entities
+                || !expected_entities_contains(&report.entries()[0].entities)
             {
                 return Err(invalid_referral());
             }
@@ -517,7 +525,8 @@ pub(crate) fn validate_developed_review_evidence(
             )
         || derived.admissibility() != source.admissibility()
         || derived.discovered_at() != resolution.resolved_at()
-        || derived.derived_from() != &BTreeSet::from([source_id])
+        || derived.derived_from().len() != 1
+        || !derived.derived_from().contains(&source_id)
         || source_id >= derived_id
     {
         return Err(invalid());
@@ -668,6 +677,20 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    // Characters bound to any non-terminal operation, computed once for the whole arrest
+    // pass: the detained-arm check below only needs membership, so rescanning the live
+    // operation set per detained arrest would be quadratic in custody volume for no
+    // extra coverage.
+    let booked_characters: BTreeSet<CharacterId> = [
+        OperationStatus::Authorized,
+        OperationStatus::InProgress,
+        OperationStatus::AwaitingDecision,
+    ]
+    .into_iter()
+    .flat_map(|status| state.operations.operations_with_status(status))
+    .flat_map(|operation| operation.participants())
+    .collect();
+
     for arrest in state.legal.arrests() {
         let _ = state.world.get_character(arrest.character()).ok_or(
             StateValidationError::InvalidArrest {
@@ -711,18 +734,9 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
         match arrest.status() {
             ArrestStatus::Detained => {
-                let active_operation = state.operations.operations().any(|operation| {
-                    matches!(
-                        operation.status(),
-                        OperationStatus::Authorized
-                            | OperationStatus::InProgress
-                            | OperationStatus::AwaitingDecision
-                    ) && (operation.leader() == arrest.character()
-                        || operation
-                            .roles()
-                            .values()
-                            .any(|participant| *participant == arrest.character()))
-                });
+                // Only live statuses can hold the character; scanning completed operation
+                // history here would grow unbounded with campaign length.
+                let active_operation = booked_characters.contains(&arrest.character());
                 if arrest.released_at().is_some()
                     || arrest.version() != 1
                     || !matches!(
@@ -917,7 +931,8 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
             .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
         let focus_is_valid = match (work.kind(), work.focus()) {
             (InvestigationWorkKind::EvidenceReview, InvestigationWorkFocus::Evidence(source)) => {
-                work.source_evidence() == &BTreeSet::from([source])
+                work.source_evidence().len() == 1
+                    && work.source_evidence().contains(&source)
                     && state.legal.get_evidence(source).is_some_and(|evidence| {
                         evidence.investigation() == work.investigation()
                             && evidence.discovered_at() <= work.scheduled_at()
@@ -1009,17 +1024,11 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                                 )?;
                                 // The interview's derived evidence is the recorded
                                 // testimony; the named statement must exist on the case
-                                // witness and point back at the same evidence.
+                                // witness and point back at the same evidence. The
+                                // by-evidence statement index is the direct lookup.
                                 let statement_ok = state
                                     .legal
-                                    .get_case_witness(case_witness)
-                                    .and_then(|witness| {
-                                        witness
-                                            .statements()
-                                            .iter()
-                                            .filter_map(|id| state.legal.get_witness_statement(*id))
-                                            .find(|statement| statement.evidence() == derived_id)
-                                    })
+                                    .witness_statement_for_evidence(derived_id)
                                     .is_some_and(|statement| {
                                         statement.case_witness() == case_witness
                                             && statement.recorded_at() == resolution.resolved_at()

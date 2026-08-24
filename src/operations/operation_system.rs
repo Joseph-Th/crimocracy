@@ -790,16 +790,23 @@ fn validate_active_field_objective_targets(
                     target: *target,
                 });
             };
-            let is_case_witness = state.legal.case_witnesses().any(|witness| {
-                witness.witness() == character
-                    && state
-                        .legal
-                        .get_investigation(witness.investigation())
-                        .is_some_and(|investigation| {
-                            investigation.status() == crate::legal::InvestigationStatus::Active
-                                && investigation.owner() != responsible_organization
-                        })
-            });
+            // The by-character witness index scopes this probe to the target's own
+            // registrations instead of the full ever-growing witness history.
+            let is_case_witness =
+                state
+                    .legal
+                    .case_witnesses_for_character(character)
+                    .any(|witness| {
+                        witness.witness() == character
+                            && state
+                                .legal
+                                .get_investigation(witness.investigation())
+                                .is_some_and(|investigation| {
+                                    investigation.status()
+                                        == crate::legal::InvestigationStatus::Active
+                                        && investigation.owner() != responsible_organization
+                                })
+                    });
             if !is_case_witness {
                 return Err(OperationError::TargetNotCaseWitness(character));
             }

@@ -793,9 +793,11 @@ pub(crate) fn validate_operation_resolution_plan(
         ) = (record.kind(), record.objective())
         {
             let responsible_organization = record.responsible_organization();
+            // The by-character witness index scopes this to the target's own registrations;
+            // scanning every witness ever registered would grow with campaign length.
             let targets: Vec<_> = state
                 .legal
-                .case_witnesses()
+                .case_witnesses_for_character(*character)
                 .filter(|witness| witness.witness() == *character)
                 .filter(|witness| {
                     state

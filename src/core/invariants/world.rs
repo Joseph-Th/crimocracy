@@ -408,7 +408,8 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
             || disclosed.reliability() != source.reliability()
             || disclosed.specificity() != source.specificity()
             || disclosed.summary() != source.summary()
-            || disclosed.derived_from() != &BTreeSet::from([source.id()])
+            || disclosed.derived_from().len() != 1
+            || !disclosed.derived_from().contains(&source.id())
             || state
                 .contacts
                 .disclosure_for_information(disclosed.id())

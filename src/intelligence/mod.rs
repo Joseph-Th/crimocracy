@@ -3,7 +3,7 @@
 pub mod intelligence_system;
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, InformationId, OrganizationId};
+use crate::core::id::{CharacterId, IdKeyedBounds, InformationId, OrganizationId};
 use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,6 +196,9 @@ impl IntelligenceState {
     pub(crate) fn information(&self) -> impl Iterator<Item = &InformationRecord> {
         self.records.values()
     }
+    pub(crate) fn information_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
     pub(crate) fn insert(&mut self, record: InformationRecord) {
         let id = record.id();
         self.by_holder
@@ -303,41 +306,6 @@ impl IntelligenceState {
             }
         }
         true
-    }
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: intelligence indexes disagree with source records"
-        );
-        for record in self.records.values() {
-            debug_assert!(
-                self.by_holder
-                    .get(&record.holder())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: information holder index is missing a record"
-            );
-            debug_assert!(
-                self.by_holder_topic
-                    .get(&(record.holder(), record.topic()))
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: information holder/topic index is missing a record"
-            );
-            debug_assert!(
-                self.by_subject
-                    .get(&record.subject())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: information subject index is missing a record"
-            );
-            for source in record.derived_from() {
-                debug_assert!(
-                    self.derived_by_source
-                        .get(source)
-                        .is_some_and(|ids| ids.contains(&record.id())),
-                    "Index Completeness: information provenance index is missing a derived record"
-                );
-            }
-        }
     }
 }
 

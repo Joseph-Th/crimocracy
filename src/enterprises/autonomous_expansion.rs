@@ -6,7 +6,7 @@ use crate::core::id::{
     BusinessId, EnterpriseId, FinancialAccountId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::delegation::{MandateAuthority, MandateStatus, ResponsibilityScope};
+use crate::delegation::{MandateAuthority, ResponsibilityScope};
 use crate::enterprises::enterprise_execution::validate_establish_enterprise;
 use crate::enterprises::{
     EnterpriseDraft, EnterpriseKind, EnterpriseLocation, ALL_ENTERPRISE_KINDS,
@@ -35,15 +35,11 @@ pub(crate) fn apply_due_autonomous_enterprises(
         return Vec::new();
     }
     let player_organization = state.player_organization();
-    let mandates: Vec<_> = state
-        .delegation()
-        .mandates()
-        .filter(|mandate| mandate.status() == MandateStatus::Active)
-        .cloned()
-        .collect();
+    // Active mandates iterate in mandate-id order, so every eligible authority is evaluated
+    // in a single stable sequence; the active-mandate index keeps revoked history out of
+    // this daily scan.
+    let mandates: Vec<_> = state.delegation().active_mandates().cloned().collect();
     let mut established = Vec::new();
-    // Records iterate in mandate-id order, so every eligible authority is evaluated in a
-    // single stable sequence.
     for mandate in mandates {
         let organization = mandate.organization();
         if Some(organization) == player_organization {

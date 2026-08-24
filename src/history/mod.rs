@@ -4,6 +4,7 @@ pub mod history_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::HistoryEventId;
+use crate::core::id::IdKeyedBounds;
 use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,6 +58,9 @@ impl HistoryState {
     }
     pub(crate) fn events(&self) -> impl Iterator<Item = &HistoryEventRecord> {
         self.records.values()
+    }
+    pub(crate) fn event_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
     }
     pub(crate) fn insert(&mut self, event: HistoryEventRecord) {
         let previous = self.records.insert(event.id(), event);

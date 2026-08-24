@@ -161,3 +161,49 @@ fn authority_snapshot_rejects_later_mandate_revision() {
     );
     validate_invariants(&state);
 }
+
+#[test]
+fn active_mandate_index_tracks_revocation() {
+    let (_, mut state, authority) = make_authority_fixture();
+    let active_ids = |state: &AppState| -> Vec<MandateId> {
+        state
+            .delegation()
+            .active_mandates()
+            .map(|m| m.id())
+            .collect()
+    };
+    assert_eq!(active_ids(&state), vec![authority.mandate]);
+    assert_eq!(
+        state
+            .delegation()
+            .active_for_scope(ResponsibilityScope::Function(
+                ResponsibilityFunction::Finance
+            ))
+            .map(|m| m.id())
+            .collect::<Vec<_>>(),
+        vec![authority.mandate]
+    );
+
+    validate_revoke_mandate(&state, authority.mandate)
+        .expect("revocation should validate")
+        .commit(&mut state)
+        .expect("revocation should commit");
+
+    assert!(active_ids(&state).is_empty());
+    assert!(state
+        .delegation()
+        .active_for_scope(ResponsibilityScope::Function(
+            ResponsibilityFunction::Finance
+        ))
+        .next()
+        .is_none());
+    // The revoked mandate stays in durable history; only the live-work scan surfaces shrank.
+    assert_eq!(
+        state
+            .delegation()
+            .get_mandate(authority.mandate)
+            .map(|m| m.status()),
+        Some(MandateStatus::Revoked)
+    );
+    validate_invariants(&state);
+}

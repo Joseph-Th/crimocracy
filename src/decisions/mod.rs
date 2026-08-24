@@ -3,6 +3,7 @@
 pub mod decision_system;
 
 use crate::core::attention::AttentionClass;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     CharacterId, DecisionRequestId, OperationId, OrganizationId, PoliceResponseId,
 };
@@ -282,6 +283,9 @@ impl DecisionState {
     pub(crate) fn decisions(&self) -> impl Iterator<Item = &DecisionRequestRecord> {
         self.records.values()
     }
+    pub(crate) fn decision_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
 
     pub(crate) fn insert(&mut self, record: DecisionRequestRecord) {
         let id = record.id();
@@ -409,14 +413,6 @@ impl DecisionState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: decision indexes disagree with source records"
-        );
     }
 }
 

@@ -5,6 +5,7 @@ pub mod business_economy_system;
 pub mod business_reporting;
 
 use crate::core::attention::AttentionClass;
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessCycleId, BusinessId, FinancialAccountId, InformationId, LedgerTransactionId,
 };
@@ -189,6 +190,15 @@ impl EconomyState {
             .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
     }
 
+    /// The most recent settled cycle for a business, in O(log n): settlement order is
+    /// sequential-ID order, so the last indexed ID is the newest cycle.
+    pub fn latest_cycle(&self, business: BusinessId) -> Option<&BusinessCycleRecord> {
+        self.cycles_by_business
+            .get(&business)?
+            .last()
+            .and_then(|id| self.cycles.get(id))
+    }
+
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,
@@ -211,6 +221,9 @@ impl EconomyState {
 
     pub(crate) fn cycles(&self) -> impl Iterator<Item = &BusinessCycleRecord> {
         self.cycles.values()
+    }
+    pub(crate) fn business_cycle_id_bounds(&self) -> Option<(u32, u32)> {
+        self.cycles.id_bounds()
     }
 
     pub(crate) fn insert(&mut self, record: BusinessEconomyRecord) {
@@ -424,14 +437,6 @@ impl EconomyState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: business economy indexes disagree with source records"
-        );
     }
 }
 

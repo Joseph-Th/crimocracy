@@ -2,6 +2,7 @@
 
 pub mod recruitment_system;
 
+use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     CharacterId, DecisionRequestId, HistoryEventId, InformationId, MandateId, OrganizationId,
     RecruitmentAttemptId,
@@ -329,6 +330,9 @@ impl RecruitmentState {
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
         self.records.values()
     }
+    pub(crate) fn attempt_id_bounds(&self) -> Option<(u32, u32)> {
+        self.records.id_bounds()
+    }
 
     pub(crate) fn insert(&mut self, record: RecruitmentAttemptRecord) {
         let id = record.id();
@@ -415,35 +419,6 @@ impl RecruitmentState {
             }
         }
         true
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_validate_indexes(&self) {
-        debug_assert!(
-            self.has_consistent_indexes(),
-            "Derived Data Consistency: recruitment indexes disagree with source records"
-        );
-        for record in self.records.values() {
-            debug_assert!(
-                self.by_candidate
-                    .get(&record.candidate())
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: recruitment candidate index is missing an attempt"
-            );
-            debug_assert!(
-                self.by_candidate_organization
-                    .get(&(record.candidate(), record.target_organization()))
-                    .is_some_and(|ids| ids.contains(&record.id())),
-                "Index Completeness: recruitment candidate-organization index is missing an attempt"
-            );
-            if let RecruitmentAuthority::ApprovedDecision { decision, .. } = record.authority() {
-                debug_assert_eq!(
-                    self.by_approval_decision.get(&decision),
-                    Some(&record.id()),
-                    "Index Completeness: recruitment approval index is missing an attempt"
-                );
-            }
-        }
     }
 }
 
