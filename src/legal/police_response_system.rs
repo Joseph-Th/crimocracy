@@ -21,7 +21,7 @@ pub(crate) struct PoliceResponseDispatchDraft {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub(crate) enum PoliceResponseError {
+pub enum PoliceResponseError {
     #[error("law-enforcement authority {0} does not exist")]
     MissingAuthority(OrganizationId),
     #[error("organization {0} cannot provide patrol response")]

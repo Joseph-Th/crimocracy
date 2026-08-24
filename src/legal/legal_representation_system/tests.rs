@@ -25,6 +25,7 @@ use crate::world::world_system::set_policy;
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,
 };
+use crate::world::PolicyKind;
 use crate::world::PolicySetting;
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,6 +36,7 @@ struct Fixture {
     sponsor: OrganizationId,
     handler: CharacterId,
     defendant: CharacterId,
+    supervisor: Option<CharacterId>,
     firm: OrganizationId,
     counsel: CharacterId,
     contact: ContactId,
@@ -68,6 +70,12 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
+    fixture_with_options(counsel_kind, false)
+}
+
+/// Full retention fixture. With `supervised_defendant`, the arrested associate reports to an
+/// inserted street boss whose mandate standing orders can be exercised by tests.
+fn fixture_with_options(counsel_kind: OrganizationKind, supervised_defendant: bool) -> Fixture {
     let registry = build_registry();
     let mut state = AppState::new(0x1A77_0A93);
     let sponsor = insert_organization(
@@ -110,12 +118,27 @@ fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
         },
     )
     .expect("contact handler should validate");
+    let supervisor = supervised_defendant.then(|| {
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Street Boss".to_owned(),
+                organization: Some(sponsor),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("street boss should validate")
+    });
     let defendant = insert_character(
         &mut state,
         CharacterDraft {
             name: "Arrested Associate".to_owned(),
             organization: Some(sponsor),
-            supervisor: None,
+            supervisor,
             autonomy: AutonomyLevel::Guided,
             capabilities: BTreeMap::new(),
             traits: BTreeSet::new(),
@@ -243,6 +266,7 @@ fn fixture_with_counsel_institution(counsel_kind: OrganizationKind) -> Fixture {
         sponsor,
         handler,
         defendant,
+        supervisor,
         firm,
         counsel,
         contact,
@@ -338,6 +362,54 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
         .legal()
         .active_representation_for_arrest(untouched.arrest)
         .is_none());
+}
+
+#[test]
+fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
+    let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
+    let supervisor = fx
+        .supervisor
+        .expect("supervised fixture should carry a boss");
+    // The organization keeps its default CaseByCase policy; only the supervisor's mandate
+    // standing order makes support automatic for the crew under them.
+    validate_assign_mandate(
+        &fx.state,
+        MandateDraft {
+            organization: fx.sponsor,
+            manager: supervisor,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(ResponsibilityFunction::Legal)]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::AssociateLegalSupport,
+                PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("mandate with legal-support standing order should validate")
+    .commit(&mut fx.state)
+    .expect("mandate should commit");
+
+    // Without a mandate override this default-policy organization would never act.
+    let untouched = fixture();
+    assert!(untouched
+        .state
+        .legal()
+        .active_representation_for_arrest(untouched.arrest)
+        .is_none());
+
+    let outcome = run_tick(&fx.registry, &mut fx.state);
+    assert_eq!(
+        outcome.automatic_legal_support.len(),
+        1,
+        "the supervised defendant's retention must follow the mandate standing order"
+    );
+    assert!(fx
+        .state
+        .legal()
+        .active_representation_for_arrest(fx.arrest)
+        .is_some());
+    validate_state(&fx.state).expect("mandate-driven support state should remain valid");
+    validate_invariants(&fx.state);
 }
 
 #[test]

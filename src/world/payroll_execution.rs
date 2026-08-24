@@ -55,8 +55,7 @@ impl PayrollOutcome {
 /// Payroll shares the executive brief's day-boundary cadence: it runs exactly once per
 /// simulated day and never at minute zero before any campaign time has passed.
 fn is_payroll_due(now: SimTime) -> bool {
-    let minutes = now.as_minutes();
-    minutes != 0 && minutes.is_multiple_of(1_440)
+    crate::core::time::is_day_boundary(now)
 }
 
 /// Autonomous payroll pass over every active criminal organization, in stable organization-ID

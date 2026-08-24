@@ -9,7 +9,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::delegation::delegation_system::{resolve_mandate_authority, DelegationError};
+use crate::delegation::delegation_system::{
+    resolve_mandate_authority, resolve_policy_for_manager, DelegationError,
+};
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::finance_system::{
     validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
@@ -803,13 +805,25 @@ pub fn apply_automatic_legal_support(
         })
         .filter_map(|arrest| {
             let defendant = arrest.character();
-            let organization = state.world.get_character(defendant)?.organization()?;
+            let defendant_record = state.world.get_character(defendant)?;
+            let organization = defendant_record.organization()?;
             let record = state.world.get_organization(organization)?;
             if record.kind() != OrgKind::Criminal {
                 return None;
             }
+            // The mandate standing order of whoever supervises the detained associate
+            // governs first — delegation overrides are real policy, not decoration. Without
+            // a resolvable supervisor the organization default applies.
+            let setting = defendant_record
+                .supervisor()
+                .and_then(|supervisor| {
+                    resolve_policy_for_manager(state, supervisor, PolicyKind::AssociateLegalSupport)
+                        .ok()
+                })
+                .map(|resolved| resolved.setting)
+                .or_else(|| record.policy(PolicyKind::AssociateLegalSupport));
             matches!(
-                record.policy(PolicyKind::AssociateLegalSupport),
+                setting,
                 Some(PolicySetting::AssociateLegalSupport(
                     crate::world::LegalSupportPolicy::Automatic,
                 )),

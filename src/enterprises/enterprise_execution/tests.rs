@@ -1773,3 +1773,96 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
     }
     crate::core::invariants::validate_invariants(&state);
 }
+
+#[test]
+fn establishment_rejects_a_duplicate_kind_at_an_occupied_location_even_when_suspended() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let first = establish_protection(&registry, &mut fixture);
+    let duplicate_draft = || EnterpriseDraft {
+        kind: EnterpriseKind::Protection,
+        organization: fixture.organization,
+        authority: fixture.authority,
+        location: fixture.location,
+        supporting_businesses: BTreeSet::new(),
+        cash_account: fixture.cash,
+        settlement_account: fixture.settlement,
+    };
+    assert!(matches!(
+        validate_establish_enterprise(&registry, &fixture.state, duplicate_draft()),
+        Err(EnterpriseError::DuplicateEnterpriseAtLocation { .. })
+    ));
+    validate_suspend_enterprise(&fixture.state, first)
+        .expect("active enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("enterprise suspension should commit");
+    // A suspended racket still occupies its spot until manually resumed; a fresh identical
+    // racket must not resurrect the losses the chronic-loss threshold already shut down.
+    assert!(matches!(
+        validate_establish_enterprise(&registry, &fixture.state, duplicate_draft()),
+        Err(EnterpriseError::DuplicateEnterpriseAtLocation { .. })
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .enterprises_at(fixture.location)
+            .count(),
+        1,
+        "rejected duplicates leave authoritative state unchanged"
+    );
+    crate::core::invariants::validate_invariants(&fixture.state);
+}
+
+#[test]
+fn establishment_commit_rejects_a_host_venue_that_changed_after_validation() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Rival Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let validated = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization: fixture.organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("hosted racket should validate against the owned venue");
+    // The venue changes hands between validation and commit; the pinned host version must
+    // reject the stale plan instead of establishing an unqualified hosting arrangement.
+    validate_transfer_business_ownership(&fixture.state, venue, BusinessOwner::Independent)
+        .expect("venue transfer should validate")
+        .commit(&mut fixture.state)
+        .expect("venue transfer should commit");
+    assert!(matches!(
+        validated.commit(&mut fixture.state),
+        Err(EnterpriseError::StaleHostBusiness { .. })
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .enterprises_at(EnterpriseLocation::Business(venue))
+            .count(),
+        0,
+        "a rejected establishment leaves no record behind"
+    );
+    crate::core::invariants::validate_invariants(&fixture.state);
+}

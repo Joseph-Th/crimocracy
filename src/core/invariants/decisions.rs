@@ -343,7 +343,6 @@ fn validate_recruitment_approval_decision(
         DecisionStatus::Pending => {
             if state.decisions.pending_for_recruitment_approval(
                 context.target_organization(),
-                context.recruiter(),
                 context.candidate(),
             ) != Some(decision.id())
                 || linked_attempt.is_some()
@@ -464,6 +463,8 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
             }
         }
         match mandate.status() {
+            // Exhaustiveness tripwire: a new mandate status must be either validated here or
+            // explicitly judged irrelevant to budget-account coherence.
             MandateStatus::Active => {}
             MandateStatus::Revoked => {}
         }

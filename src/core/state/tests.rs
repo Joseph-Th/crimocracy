@@ -235,7 +235,8 @@ fn make_test_scenario() -> TestScenario {
                 BusinessFunction::MeetingSpace,
             ]),
             neighborhood: south_ward,
-            owner: BusinessOwner::Organization(player),
+            // An independent owner: an organization cannot target its own premises.
+            owner: BusinessOwner::Independent,
         },
     )
     .expect("business fixture should validate");
@@ -280,7 +281,7 @@ fn make_test_scenario() -> TestScenario {
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
-            kind: AccountKind::Payable,
+            kind: AccountKind::AccountedFunds,
         },
     )
     .expect("budget destination account fixture should validate");
@@ -513,7 +514,9 @@ fn test_mixed_scenario_soak_preserves_invariants() {
                 .player_organization()
                 .expect("fixture should have player organization"),
         ))
-        .find(|account| account.kind() == AccountKind::Payable)
+        .find(|account| {
+            account.kind() == AccountKind::AccountedFunds && account.id() != budget_funding
+        })
         .expect("fixture should have budget destination account")
         .id();
     let budget_authorization = MandateAuthority {

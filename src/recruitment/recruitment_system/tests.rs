@@ -281,14 +281,9 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
-    assert!(
-        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-            .expect("autonomous recruitment before cadence should be a no-op")
-            .is_empty()
-    );
+    assert!(apply_due_autonomous_recruitment(&registry, &mut fixture.state).is_empty());
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
-    let attempts = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-        .expect("delegated broad recruiter should act at the authored cadence");
+    let attempts = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
     assert_eq!(attempts.len(), 1);
     let attempt = fixture
         .state
@@ -308,11 +303,7 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
             ..
         } if found_mandate == mandate && manager == fixture.recruiter
     ));
-    assert!(
-        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-            .expect("same-minute repeat should be blocked by recruitment history")
-            .is_empty()
-    );
+    assert!(apply_due_autonomous_recruitment(&registry, &mut fixture.state).is_empty());
     validate_state(&fixture.state).expect("autonomous recruitment state should validate");
     validate_invariants(&fixture.state);
 }
@@ -371,11 +362,10 @@ fn approval_required_recruitment_executes_only_after_approval() {
     .expect("approval request should commit");
 
     assert_eq!(
-        fixture.state.decisions().pending_for_recruitment_approval(
-            fixture.target,
-            fixture.recruiter,
-            fixture.candidate,
-        ),
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
         Some(request.decision)
     );
     assert_eq!(

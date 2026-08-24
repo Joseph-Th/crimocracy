@@ -135,6 +135,11 @@ pub enum EnterpriseError {
         expected: u32,
         found: u32,
     },
+    #[error("a {kind:?} enterprise already exists at {location:?}")]
+    DuplicateEnterpriseAtLocation {
+        kind: EnterpriseKind,
+        location: EnterpriseLocation,
+    },
     #[error(
         "enterprise cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
@@ -154,6 +159,9 @@ pub struct ValidatedEnterpriseEstablishment {
     authority: ResolvedMandateAuthority,
     cycle_duration: SimDuration,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
+    /// The venue-hosting business's version at validation time; commit re-checks it so a
+    /// host that changed hands or lost a required function between phases cannot host.
+    host_business_version: Option<(BusinessId, u32)>,
 }
 
 impl ValidatedEnterpriseEstablishment {
@@ -165,6 +173,24 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.authority,
             self.draft.location,
         )?;
+        if let Some((business_id, expected)) = self.host_business_version {
+            // The host passed venue validation at validate time; any change of ownership or
+            // function bumps the business version, so re-checking the pinned version is enough.
+            let business =
+                state
+                    .world
+                    .get_business(business_id)
+                    .ok_or(EnterpriseError::InvalidLocation(
+                        EnterpriseLocation::Business(business_id),
+                    ))?;
+            if business.version() != expected {
+                return Err(EnterpriseError::StaleHostBusiness {
+                    business: business_id,
+                    expected,
+                    found: business.version(),
+                });
+            }
+        }
         validate_supporting_business_versions(state, &self.supporting_business_versions)?;
         validate_supporting_businesses(
             state,
@@ -200,6 +226,19 @@ pub fn validate_establish_enterprise(
     let definition = registry.get_enterprise(draft.kind);
     let authority = resolve_mandate_authority(state, draft.authority)?;
     validate_enterprise_environment(state, draft.organization, draft.authority, draft.location)?;
+    // One racket of a kind per spot — including suspended ones. A suspended racket stays
+    // on its location's books until manually resumed, so a fresh identical racket would
+    // resurrect losses the chronic-loss threshold already shut down.
+    if state
+        .enterprises()
+        .enterprises_at(draft.location)
+        .any(|record| record.kind() == draft.kind)
+    {
+        return Err(EnterpriseError::DuplicateEnterpriseAtLocation {
+            kind: draft.kind,
+            location: draft.location,
+        });
+    }
     validate_enterprise_business_dependencies(
         definition,
         state,
@@ -217,17 +256,24 @@ pub fn validate_establish_enterprise(
     let cycle_duration = definition.economics().cycle();
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, &draft.supporting_businesses)?;
+    let host_business_version = match draft.location {
+        EnterpriseLocation::Business(business_id) => {
+            let business = state
+                .world
+                .get_business(business_id)
+                .ok_or(EnterpriseError::InvalidLocation(draft.location))?;
+            Some((business_id, business.version()))
+        }
+        EnterpriseLocation::Neighborhood(_) => None,
+    };
     Ok(ValidatedEnterpriseEstablishment {
         draft,
         authority,
         cycle_duration,
         supporting_business_versions,
+        host_business_version,
     })
 }
-
-/// One campaign-day cadence for delegated enterprise expansion, mirroring the payroll and
-/// executive-brief day boundary.
-const AUTONOMOUS_ENTERPRISE_CADENCE_MINUTES: u64 = 1_440;
 
 /// Daily delegated-autonomy expansion for organizations other than the player's: every active
 /// mandate whose manager holds Delegated or Broad autonomy may open one enterprise per pass
@@ -242,8 +288,7 @@ pub(crate) fn apply_due_autonomous_enterprises(
     registry: &Registry,
     state: &mut AppState,
 ) -> Vec<EnterpriseId> {
-    let minutes = state.now().as_minutes();
-    if minutes == 0 || !minutes.is_multiple_of(AUTONOMOUS_ENTERPRISE_CADENCE_MINUTES) {
+    if !crate::core::time::is_day_boundary(state.now()) {
         return Vec::new();
     }
     let player_organization = state.player_organization();
@@ -403,18 +448,17 @@ fn select_autonomous_expansion(
             }
         }
 
-        for (covering_scope, location) in candidates {
-            let already_operating = state
+        // Skip candidates already occupied by the same kind under the exact rule the
+        // canonical establishment path enforces — including suspended rackets, so selection
+        // never proposes a draft the owner would reject.
+        let open_candidate = candidates.into_iter().find(|(_, location)| {
+            !state
                 .enterprises()
-                .enterprises_for_organization(organization)
-                .any(|record| {
-                    record.status() == EnterpriseStatus::Active
-                        && record.kind() == kind
-                        && record.location() == location
-                });
-            if !already_operating {
-                return Some((kind, covering_scope, location));
-            }
+                .enterprises_at(*location)
+                .any(|record| record.kind() == kind)
+        });
+        if let Some((covering_scope, location)) = open_candidate {
+            return Some((kind, covering_scope, location));
         }
     }
     None
@@ -462,11 +506,12 @@ fn autonomous_enterprise_accounts(
             | AccountKind::ConcealedCash
             | AccountKind::Settlement
             | AccountKind::AccountedFunds
-            | AccountKind::LegitimateOperating
-            | AccountKind::Receivable
-            | AccountKind::Payable => {}
+            | AccountKind::LegitimateOperating => {}
         }
     }
+    // Cash solvency is checked before any account insertion so a rival without fundable
+    // cash never accumulates orphaned settlement accounts from a skipped expansion.
+    let cash = cash?;
     let settlement = match settlement {
         Some(id) => id,
         None => insert_account(
@@ -478,7 +523,7 @@ fn autonomous_enterprise_accounts(
         )
         .ok()?,
     };
-    Some((cash?, settlement))
+    Some((cash, settlement))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -685,21 +730,13 @@ fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limi
         .enterprises
         .get_enterprise(enterprise)
         .and_then(|record| record.loss_streak_anchor());
-    let mut losing = 0u32;
-    let mut cycles = state.enterprises.cycles_for(enterprise).collect::<Vec<_>>();
-    cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
-    for cycle in cycles.iter().rev() {
-        if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
-            break;
-        }
-        // Cycles settled at or before the anchor predate the grace window; the first
-        // post-resume cycle always settles strictly later than the resume instant.
-        if anchor.is_some_and(|anchor| cycle.occurred_at() <= anchor) {
-            continue;
-        }
-        losing += 1;
-    }
-    losing
+    crate::finance::helpers::count_trailing_losing_cycles(
+        &state.enterprises.cycles_for(enterprise).collect::<Vec<_>>(),
+        |cycle| (cycle.occurred_at(), cycle.id()),
+        |cycle| cycle.net_cash(),
+        anchor,
+        limit,
+    )
 }
 
 pub struct ValidatedEnterpriseCycle {
@@ -1105,7 +1142,7 @@ pub fn validate_resume_enterprise(
 pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
     state
         .enterprises
-        .due_at_or_before(state.now())
+        .find_due_cycles(state.now())
         .into_iter()
         .filter(|enterprise| {
             state
@@ -1371,8 +1408,6 @@ fn validate_enterprise_accounts(
         AccountKind::StreetCash | AccountKind::ConcealedCash => {}
         AccountKind::AccountedFunds
         | AccountKind::LegitimateOperating
-        | AccountKind::Receivable
-        | AccountKind::Payable
         | AccountKind::Settlement => {
             return Err(EnterpriseError::InvalidCashAccountKind(cash_account))
         }
@@ -1382,9 +1417,7 @@ fn validate_enterprise_accounts(
         AccountKind::StreetCash
         | AccountKind::ConcealedCash
         | AccountKind::AccountedFunds
-        | AccountKind::LegitimateOperating
-        | AccountKind::Receivable
-        | AccountKind::Payable => {
+        | AccountKind::LegitimateOperating => {
             return Err(EnterpriseError::InvalidSettlementAccountKind(
                 settlement_account,
             ))

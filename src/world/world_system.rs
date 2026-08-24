@@ -417,7 +417,9 @@ pub fn insert_business(
         .world
         .get_neighborhood(draft.neighborhood)
         .ok_or(WorldError::MissingNeighborhood(draft.neighborhood))?;
-    registry.get_business(draft.kind);
+    // BusinessKind is a closed vocabulary, so definition presence is a build-time
+    // invariant; the lookup's panic is the tripwire if authoring ever drifts.
+    let _ = registry.get_business(draft.kind);
     validate_business_owner(state, draft.owner)?;
     state
         .ids

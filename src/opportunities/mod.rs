@@ -219,7 +219,7 @@ impl OpportunityState {
         self.records.values()
     }
 
-    pub(crate) fn due_expiring_at_or_before(&self, now: SimTime) -> Vec<OpportunityId> {
+    pub(crate) fn find_due_expiring(&self, now: SimTime) -> Vec<OpportunityId> {
         self.open_by_expiry
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())

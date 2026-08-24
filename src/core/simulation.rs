@@ -252,18 +252,17 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
     // already in place when a rival pitches them.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
-    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state)
-        .expect("valid state should resolve due autonomous recruitment");
+    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state);
     // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
     // minute governs with its current roster. Selection consumes no randomness, so matched
     // branches observe identical rival growth unless their own actions touched rival state.
     let autonomous_enterprises =
         crate::enterprises::enterprise_execution::apply_due_autonomous_enterprises(registry, state);
-    // Reputation consequences run right after the day's operational work so an audience's
-    // impression moves in the same tick that produced it, and before the daily decay pass so
-    // fresh adjustments are never immediately eroded. The player organization additionally
-    // receives a Standing report per shifting operation — its own street standing is
-    // legitimate self-knowledge, surfaced through the canonical report path.
+    // Reputation consequences run after payroll, recruitment, and delegated expansion —
+    // earlier in the same tick deliberately reads pre-consequence competence — but before
+    // the daily decay pass so fresh adjustments are never immediately eroded. The player
+    // organization additionally receives a Standing report per shifting operation — its own
+    // street standing is legitimate self-knowledge, surfaced through the canonical report path.
     let player_organization = state.player_organization();
     for operation in &resolved_operations {
         let (organization, approach, objective_outcome, exposure_level) = {

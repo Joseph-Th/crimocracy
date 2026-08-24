@@ -82,7 +82,6 @@ impl RelationshipRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SocialState {
     relationships: BTreeMap<RelationshipKey, RelationshipRecord>,
-    by_subject: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
     by_target: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
 }
 
@@ -132,7 +131,6 @@ impl SocialState {
                         version: 1,
                     },
                 );
-                self.by_subject.entry(from).or_default().insert(to);
                 self.by_target.entry(to).or_default().insert(from);
             }
         }
@@ -140,28 +138,11 @@ impl SocialState {
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         for record in self.relationships.values() {
             if !self
-                .by_subject
-                .get(&record.from())
-                .is_some_and(|targets| targets.contains(&record.to()))
-            {
-                return false;
-            }
-            if !self
                 .by_target
                 .get(&record.to())
                 .is_some_and(|sources| sources.contains(&record.from()))
             {
                 return false;
-            }
-        }
-        for (from, targets) in &self.by_subject {
-            for to in targets {
-                if !self.relationships.contains_key(&RelationshipKey {
-                    from: *from,
-                    to: *to,
-                }) {
-                    return false;
-                }
             }
         }
         for (to, sources) in &self.by_target {

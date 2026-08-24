@@ -1,4 +1,4 @@
-﻿//! Operation validation and lifecycle execution; sibling records contain no resolution logic.
+//! Operation validation and lifecycle execution; sibling records contain no resolution logic.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
@@ -21,6 +21,7 @@ use crate::intelligence::{
 use crate::operations::operation_state::{pause_duration_minutes, shift_past_pause};
 use crate::operations::police_response_integration::{
     decide_operation_police_response_start, OperationPoliceResponseStartPlan,
+    PoliceResponseIntegrationError,
 };
 use crate::operations::surveillance_integration::validate_surveillance_request;
 use crate::operations::{
@@ -31,6 +32,7 @@ use crate::operations::{
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
+use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -145,12 +147,28 @@ pub enum OperationError {
     MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
     #[error("business {0} has no active operating economy to disrupt")]
     TargetWithoutOperatingEconomy(crate::core::id::BusinessId),
+    #[error("business {business} is owned by the sponsoring organization")]
+    SelfTargetedBusiness {
+        business: crate::core::id::BusinessId,
+    },
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
     #[error("operation {0} cannot begin before its scheduled time")]
     StartBeforeScheduled(OperationId),
-    #[error("police response context for operation {0} could not be validated")]
-    InvalidPoliceResponseContext(OperationId),
+    #[error(
+        "operation {operation} changed after begin validation; expected version {expected}, found {found}"
+    )]
+    StaleBeginOperation {
+        operation: OperationId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
+        "operation begin plan was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleBeginTime { expected: SimTime, found: SimTime },
+    #[error(transparent)]
+    PoliceResponseDispatch(#[from] crate::legal::police_response_system::PoliceResponseError),
     #[error(
         "operation {0:?} does not define an entry milestone for the police-arrival contingency"
     )]
@@ -758,7 +776,8 @@ fn validate_active_field_objective_targets(
 ) -> Result<(), OperationError> {
     match objective {
         OperationObjective::ObtainCash { target } => {
-            validate_active_field_objective_target(state, *target)
+            validate_active_field_objective_target(state, *target)?;
+            reject_self_owned_target(state, responsible_organization, *target)
         }
         // Witness pressure is only meaningful against a character who is actually a named
         // witness on an active case run by another authority; anything else would resolve
@@ -786,13 +805,24 @@ fn validate_active_field_objective_targets(
             }
             Ok(())
         }
-        OperationObjective::AcquireProperty { .. }
-        | OperationObjective::GatherInformation { .. } => Ok(()),
+        // Property and sabotage targets are businesses whose premises the crew acts on.
+        // Taking value out of, or disrupting, the organization's own premises would enrich
+        // or disrupt itself — victim and sponsor the same ledger entity — so authorization
+        // rejects self-targeting up front instead of resolving into an incoherent haul.
+        OperationObjective::AcquireProperty { target } => {
+            let EntityRef::Business(_) = *target else {
+                return Ok(());
+            };
+            validate_active_field_objective_target(state, *target)?;
+            reject_self_owned_target(state, responsible_organization, *target)
+        }
+        OperationObjective::GatherInformation { .. } => Ok(()),
         // Sabotage targets a business whose premises the crew must physically reach, and
         // one that actually operates: disrupting a shuttered or economy-less storefront
         // would resolve into nothing, so authorization rejects it up front.
         OperationObjective::DisruptBusiness { target } => {
             validate_active_field_objective_target(state, *target)?;
+            reject_self_owned_target(state, responsible_organization, *target)?;
             let EntityRef::Business(business) = *target else {
                 return Err(OperationError::InvalidObjectiveTarget {
                     objective: objective.kind(),
@@ -855,6 +885,26 @@ fn find_non_terminal_extraction_targeting(
     })
     .map(|operation| operation.id())
     .min()
+}
+
+/// Rejects take/disrupt objectives aimed at a business the sponsoring organization owns.
+fn reject_self_owned_target(
+    state: &AppState,
+    organization: OrganizationId,
+    target: EntityRef,
+) -> Result<(), OperationError> {
+    let EntityRef::Business(business) = target else {
+        return Ok(());
+    };
+    let owner = state
+        .world
+        .get_business(business)
+        .ok_or(OperationError::MissingEntity(target))?
+        .owner();
+    if owner == BusinessOwner::Organization(organization) {
+        return Err(OperationError::SelfTargetedBusiness { business });
+    }
+    Ok(())
 }
 
 fn validate_active_field_objective_target(
@@ -971,7 +1021,7 @@ fn validate_operation_objective(
 }
 
 pub(crate) fn find_due_authorized_operations(state: &AppState) -> Vec<OperationId> {
-    state.operations.due_authorized_at_or_before(state.now())
+    state.operations.find_due_authorized(state.now())
 }
 
 /// True once the operation's earliest completion deadline minute has arrived or passed. Begin
@@ -1080,17 +1130,27 @@ impl ValidatedOperationStart {
             .operations
             .get_operation(self.operation)
             .ok_or(OperationError::MissingOperation(self.operation))?;
-        if record.version() != self.expected_version
-            || record.status() != OperationStatus::Authorized
-            || state.now() != self.started_at
-        {
-            return Err(OperationError::InvalidPoliceResponseContext(self.operation));
+        if record.version() != self.expected_version {
+            return Err(OperationError::StaleBeginOperation {
+                operation: self.operation,
+                expected: self.expected_version,
+                found: record.version(),
+            });
+        }
+        if record.status() != OperationStatus::Authorized {
+            return Err(OperationError::InvalidTransition {
+                status: record.status(),
+                transition: OperationTransition::Begin,
+            });
+        }
+        if state.now() != self.started_at {
+            return Err(OperationError::StaleBeginTime {
+                expected: self.started_at,
+                found: state.now(),
+            });
         }
         let entry_at = self.police_response.entry_at();
-        let response = self
-            .police_response
-            .commit_dispatch(state)
-            .map_err(|_| OperationError::InvalidPoliceResponseContext(self.operation))?;
+        let response = self.police_response.commit_dispatch(state)?;
         state.operations.begin(
             self.operation,
             self.started_at,
@@ -1099,6 +1159,23 @@ impl ValidatedOperationStart {
             response,
         );
         Ok(())
+    }
+}
+
+/// Start planning resolves only the operation record and dispatch validation; its decision
+/// and intelligence failure modes belong exclusively to the response-arrival pass.
+fn map_police_start_planning_error(error: PoliceResponseIntegrationError) -> OperationError {
+    match error {
+        PoliceResponseIntegrationError::MissingOperation(operation) => {
+            OperationError::MissingOperation(operation)
+        }
+        PoliceResponseIntegrationError::PoliceResponse(dispatch) => dispatch.into(),
+        PoliceResponseIntegrationError::Decision(_)
+        | PoliceResponseIntegrationError::Intelligence(_) => {
+            unreachable!(
+                "police response start planning does not validate decisions or intelligence"
+            )
+        }
     }
 }
 
@@ -1143,7 +1220,7 @@ pub(crate) fn validate_begin_operation(
         }
     }
     let police_response = decide_operation_police_response_start(registry, state, operation)
-        .map_err(|_| OperationError::InvalidPoliceResponseContext(operation))?;
+        .map_err(map_police_start_planning_error)?;
     Ok(ValidatedOperationStart {
         operation,
         expected_version: record.version(),
@@ -1305,22 +1382,6 @@ pub(crate) fn validate_police_arrival_abort_if_applicable(
     }
 }
 
-pub(crate) fn projected_resume_entry_at(
-    operation: &OperationRecord,
-    resumed_at: SimTime,
-) -> Option<SimTime> {
-    let entry_at = operation.entry_at()?;
-    let paused_at = operation.awaiting_decision_since()?;
-    if entry_at <= paused_at {
-        return Some(entry_at);
-    }
-    Some(shift_past_pause(
-        entry_at,
-        pause_duration_minutes(paused_at, resumed_at),
-        "entry time",
-    ))
-}
-
 fn validate_operation_abort(
     state: &AppState,
     operation: OperationId,
@@ -1364,11 +1425,6 @@ fn validate_operation_abort(
             if police_arrival_can_abort(state, record, response) =>
         {
             OperationAbortPhase::InProgress
-        }
-        (OperationStatus::AwaitingDecision, OperationAbortCause::PoliceArrival(response))
-            if police_arrival_can_abort(state, record, response) =>
-        {
-            OperationAbortPhase::AwaitingDecision
         }
         (status, cause) => {
             return Err(OperationError::InvalidAbortCause {
@@ -1590,7 +1646,11 @@ fn abort_entities(
     entities
 }
 
-fn police_arrival_can_abort(
+/// Pre-entry police-arrival abort gate. Each operation receives at most one police
+/// response, dispatched at begin while the operation is `InProgress`; a decision pause can
+/// only originate from that same response's post-arrival request, so an arrival can always
+/// only abort an operation that is still `InProgress` and has not entered yet.
+pub(crate) fn police_arrival_can_abort(
     state: &AppState,
     operation: &OperationRecord,
     response: PoliceResponseId,
@@ -1620,8 +1680,10 @@ fn police_arrival_can_abort(
     };
     let entry_at = match operation.status() {
         OperationStatus::InProgress => operation.entry_at(),
-        OperationStatus::AwaitingDecision => projected_resume_entry_at(operation, state.now()),
-        OperationStatus::Authorized | OperationStatus::Completed | OperationStatus::Aborted => None,
+        OperationStatus::Authorized
+        | OperationStatus::AwaitingDecision
+        | OperationStatus::Completed
+        | OperationStatus::Aborted => None,
     };
     entry_at.is_some_and(|entry_at| effective_arrival < entry_at)
 }

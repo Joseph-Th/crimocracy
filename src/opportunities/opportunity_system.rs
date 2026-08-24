@@ -594,7 +594,7 @@ pub(crate) fn apply_opportunity_expiry(
     registry: &Registry,
     state: &mut AppState,
 ) -> Vec<OpportunityId> {
-    let due = state.opportunities.due_expiring_at_or_before(state.now());
+    let due = state.opportunities.find_due_expiring(state.now());
     let mut expired = Vec::with_capacity(due.len());
     let mut drifted = None;
     for opportunity in due {

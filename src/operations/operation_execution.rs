@@ -1012,7 +1012,7 @@ fn validate_exposure_incident(
 }
 
 pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<OperationId> {
-    state.operations.due_in_progress_at_or_before(state.now())
+    state.operations.find_due_in_progress(state.now())
 }
 
 fn validate_plan_snapshot(
@@ -1213,7 +1213,12 @@ fn resolve_target_neighborhoods(
     entities: Vec<EntityRef>,
 ) -> BTreeSet<NeighborhoodId> {
     let mut neighborhoods = BTreeSet::new();
-    for entity in entities {
+    // Control-plane targets proxy to the world footprint of their owner, mirroring
+    // FreeDetainee custody proxying: surveilling an active case or another crew's plan
+    // happens where that authority operates, not nowhere. Without the proxy, exposure and
+    // police response for such operations could never attribute to a neighborhood.
+    let mut queue: Vec<EntityRef> = entities;
+    while let Some(entity) = queue.pop() {
         match entity {
             EntityRef::Neighborhood(id) => {
                 neighborhoods.insert(id);
@@ -1259,9 +1264,20 @@ fn resolve_target_neighborhoods(
                     }
                 }
             }
-            EntityRef::Operation(_)
-            | EntityRef::Investigation(_)
-            | EntityRef::Evidence(_)
+            EntityRef::Operation(id) => {
+                if let Some(operation) = state.operations.get_operation(id) {
+                    queue.push(EntityRef::Organization(
+                        operation.responsible_organization(),
+                    ));
+                }
+            }
+            EntityRef::Investigation(id) => {
+                if let Some(investigation) = state.legal.get_investigation(id) {
+                    queue.push(EntityRef::Organization(investigation.owner()));
+                }
+            }
+            // Unsupported surveillance targets can never reach this derivation validated.
+            EntityRef::Evidence(_)
             | EntityRef::FinancialAccount(_)
             | EntityRef::DecisionRequest(_)
             | EntityRef::Mandate(_) => {}

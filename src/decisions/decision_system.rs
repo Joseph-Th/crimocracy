@@ -367,11 +367,10 @@ impl ValidatedRecruitmentApprovalRequest {
                 unreachable!("validated recruitment approval must retain recruitment context")
             }
         };
-        if let Some(decision) = state.decisions.pending_for_recruitment_approval(
-            context.target_organization(),
-            context.recruiter(),
-            context.candidate(),
-        ) {
+        if let Some(decision) = state
+            .decisions
+            .pending_for_recruitment_approval(context.target_organization(), context.candidate())
+        {
             return Err(DecisionError::ExistingPendingRecruitmentApproval { decision });
         }
         validate_recruitment_approval_authority_snapshot(state, context)?;
@@ -430,11 +429,10 @@ pub fn validate_request_recruitment_approval(
     if approval != ApprovalPolicy::RequireApproval {
         return Err(DecisionError::RecruitmentApprovalPolicyMismatch { policy: approval });
     }
-    if let Some(decision) = state.decisions.pending_for_recruitment_approval(
-        draft.target_organization,
-        draft.recruiter,
-        draft.candidate,
-    ) {
+    if let Some(decision) = state
+        .decisions
+        .pending_for_recruitment_approval(draft.target_organization, draft.candidate)
+    {
         return Err(DecisionError::ExistingPendingRecruitmentApproval { decision });
     }
     let proposal = validate_recruitment_proposal(

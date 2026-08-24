@@ -9,9 +9,9 @@ use crate::delegation::delegation_system::{
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::finance::{
-    build_budget_usage, AccountKind, BudgetUsageRecord, FinancialAccountDraft,
-    FinancialAccountRecord, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    LedgerTransactionRecord, Money,
+    build_budget_usage, helpers::resolve_basis_point_share, AccountKind, BudgetUsageRecord,
+    FinancialAccountDraft, FinancialAccountRecord, FinancialOwner, LedgerPosting,
+    LedgerTransactionDraft, LedgerTransactionRecord, Money,
 };
 use crate::registry::Registry;
 use crate::world::BusinessOwner;
@@ -498,29 +498,25 @@ pub fn validate_launder_funds(
     // rather than many small transfers.
     let gross_potential = resolve_business_gross_potential(registry, state, draft.business)?;
     let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
-    let capacity_cents = i128::from(gross_potential.cents())
-        .checked_mul(i128::from(capacity_basis_points))
-        .and_then(|value| value.checked_div(10_000))
-        .and_then(|value| i64::try_from(value).ok())
+    let capacity = resolve_basis_point_share(gross_potential, capacity_basis_points)
         .ok_or(LaunderingError::ArithmeticOverflow)?;
-    let already_laundered = economy.laundered_this_cycle().cents();
-    let remaining_cents = capacity_cents.saturating_sub(already_laundered);
-    if draft.amount.cents() > remaining_cents {
+    let already_laundered = economy.laundered_this_cycle();
+    let remaining = capacity
+        .checked_sub(already_laundered)
+        .unwrap_or(Money::ZERO);
+    if draft.amount > remaining {
         return Err(LaunderingError::CapacityExceeded {
             business: draft.business,
             requested_cents: draft.amount.cents(),
-            capacity_cents: remaining_cents,
+            capacity_cents: remaining.cents(),
         });
     }
     // Fee split: the front keeps the authored cut as legitimate revenue.
-    let fee_cents = i128::from(draft.amount.cents())
-        .checked_mul(i128::from(registry.laundering().fee_basis_points()))
-        .and_then(|value| value.checked_div(10_000))
-        .and_then(|value| i64::try_from(value).ok())
+    let fee = resolve_basis_point_share(draft.amount, registry.laundering().fee_basis_points())
         .ok_or(LaunderingError::ArithmeticOverflow)?;
     let credited = draft
         .amount
-        .checked_sub(Money::from_cents(fee_cents))
+        .checked_sub(fee)
         .ok_or(LaunderingError::ArithmeticOverflow)?;
     let mut postings = vec![
         LedgerPosting {
@@ -534,10 +530,10 @@ pub fn validate_launder_funds(
             amount: credited,
         },
     ];
-    if fee_cents > 0 {
+    if fee > Money::ZERO {
         postings.push(LedgerPosting {
             account: economy.operating_account(),
-            amount: Money::from_cents(fee_cents),
+            amount: fee,
         });
     }
     let business_name = business_record.name().to_owned();

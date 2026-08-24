@@ -1,6 +1,7 @@
 //! Shared financial arithmetic used by enterprise and business economy cycles.
 
 use crate::core::id::FinancialAccountId;
+use crate::core::time::SimTime;
 use crate::finance::{LedgerPosting, Money};
 
 /// Weighted contribution of a rating point value without overflow.
@@ -80,6 +81,35 @@ pub fn describe_gross_variance(basis_points: i16) -> String {
         let direction = if basis_points > 0 { "over" } else { "under" };
         format!("gross ran about {percent:.1}% {direction} plan")
     }
+}
+
+/// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
+/// the scan stays bounded regardless of how much history accumulates. Cycles settled at or
+/// before the loss-streak anchor predate the current grace window (a resumed operation
+/// starts counting fresh) and do not extend the streak. Shared verbatim by enterprise and
+/// business economies so chronic-loss semantics can never drift between them.
+pub fn count_trailing_losing_cycles<T, K: Ord>(
+    cycles: &[T],
+    sort_key: impl Fn(&T) -> (SimTime, K),
+    net_cash: impl Fn(&T) -> Money,
+    anchor: Option<SimTime>,
+    limit: u8,
+) -> u32 {
+    let mut ordered: Vec<&T> = cycles.iter().collect();
+    ordered.sort_unstable_by_key(|cycle| sort_key(cycle));
+    let mut losing = 0u32;
+    for cycle in ordered.iter().rev() {
+        if net_cash(cycle) >= Money::ZERO || losing >= u32::from(limit) {
+            break;
+        }
+        // Cycles settled at or before the anchor predate the grace window; the first
+        // post-resume cycle always settles strictly later than the resume instant.
+        if anchor.is_some_and(|anchor| sort_key(cycle).0 <= anchor) {
+            continue;
+        }
+        losing += 1;
+    }
+    losing
 }
 
 #[cfg(test)]

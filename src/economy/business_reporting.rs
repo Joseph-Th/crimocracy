@@ -40,6 +40,8 @@ pub enum BusinessReportingError {
     ArithmeticOverflow,
 }
 
+/// Test-only drill-down; production reporting aggregates at organization scope.
+#[cfg(test)]
 pub fn resolve_business_financial_summary(
     state: &AppState,
     business: BusinessId,

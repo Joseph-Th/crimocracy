@@ -22,7 +22,9 @@ use crate::legal::police_response_system::{
     ValidatedPoliceResponseDispatch,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
-use crate::operations::operation_system::validate_police_arrival_abort_operation;
+use crate::operations::operation_system::{
+    police_arrival_can_abort, validate_police_arrival_abort_operation,
+};
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::registry::OperationExecutionDefinition;
 use crate::registry::Registry;
@@ -60,11 +62,10 @@ impl OperationPoliceResponseStartPlan {
     pub(crate) fn commit_dispatch(
         self,
         state: &mut AppState,
-    ) -> Result<Option<PoliceResponseId>, PoliceResponseIntegrationError> {
+    ) -> Result<Option<crate::core::id::PoliceResponseId>, PoliceResponseError> {
         self.dispatch
             .map(|dispatch| dispatch.commit(state))
             .transpose()
-            .map_err(Into::into)
     }
 }
 
@@ -151,13 +152,9 @@ pub(crate) fn apply_due_police_response_arrivals(
                 .operations
                 .get_operation(response.source_operation())
                 .expect("police response source operation must exist");
-            let should_abort = operation.status() == OperationStatus::InProgress
-                && operation
-                    .contingencies()
-                    .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry)
-                && operation
-                    .entry_at()
-                    .is_some_and(|entry_at| state.now() < entry_at);
+            // The owning pre-entry abort predicate, shared with the canonical abort
+            // validator so the tick pass and validation can never disagree.
+            let should_abort = police_arrival_can_abort(state, operation, response_id);
             let decision = if !should_abort
                 && operation.status() == OperationStatus::InProgress
                 && operation
@@ -177,10 +174,7 @@ pub(crate) fn apply_due_police_response_arrivals(
             // records debrief-derived organizational PoliceActivity knowledge through the
             // abort path — different holder, reliability, and consumer, so both records are
             // intentional and must stay.
-            let participant_pressure = if matches!(
-                operation.status(),
-                OperationStatus::InProgress | OperationStatus::AwaitingDecision
-            ) {
+            let participant_pressure = if operation.status() == OperationStatus::InProgress {
                 validate_participant_police_pressure_information(
                     state,
                     operation,

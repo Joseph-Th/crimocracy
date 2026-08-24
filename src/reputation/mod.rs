@@ -92,7 +92,6 @@ impl ReputationRecord {
 pub struct ReputationState {
     /// Keyed by (organization, audience); sparse — untouched impressions stay absent.
     records: BTreeMap<(OrganizationId, AudienceKind), ReputationRecord>,
-    by_organization: BTreeMap<OrganizationId, Vec<AudienceKind>>,
 }
 
 impl ReputationState {
@@ -113,14 +112,9 @@ impl ReputationState {
         &self,
         organization: OrganizationId,
     ) -> impl Iterator<Item = &ReputationRecord> {
-        let audiences = self
-            .by_organization
-            .get(&organization)
-            .cloned()
-            .unwrap_or_default();
-        audiences
-            .into_iter()
-            .filter_map(move |audience| self.records.get(&(organization, audience)))
+        self.records
+            .values()
+            .filter(move |record| record.organization() == organization)
     }
 
     #[cfg(test)]
@@ -141,15 +135,6 @@ impl ReputationState {
     /// (organization, audience) pair; later movement goes through `apply_delta`.
     pub(crate) fn insert_record(&mut self, record: ReputationRecord) {
         let key = (record.organization(), record.audience());
-        self.by_organization
-            .entry(record.organization())
-            .or_default();
-        if !self.by_organization[&record.organization()].contains(&record.audience()) {
-            self.by_organization
-                .get_mut(&record.organization())
-                .expect("just-inserted organization bucket")
-                .push(record.audience());
-        }
         let previous = self.records.insert(key, record);
         debug_assert!(
             previous.is_none(),
@@ -172,34 +157,14 @@ impl ReputationState {
             .map(|(key, _)| *key)
             .collect();
         for key in faded {
-            let (organization, audience) = key;
             self.records.remove(&key);
-            if let Some(bucket) = self.by_organization.get_mut(&organization) {
-                bucket.retain(|entry| *entry != audience);
-                if bucket.is_empty() {
-                    self.by_organization.remove(&organization);
-                }
-            }
         }
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         for ((organization, audience), record) in &self.records {
-            if *organization != record.organization()
-                || *audience != record.audience()
-                || !self
-                    .by_organization
-                    .get(organization)
-                    .is_some_and(|bucket| bucket.contains(audience))
-            {
+            if *organization != record.organization() || *audience != record.audience() {
                 return false;
-            }
-        }
-        for (organization, audiences) in &self.by_organization {
-            for audience in audiences {
-                if !self.records.contains_key(&(*organization, *audience)) {
-                    return false;
-                }
             }
         }
         true

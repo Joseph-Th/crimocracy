@@ -1,4 +1,4 @@
-﻿//! Focused tests for operation authorization, transitions, aborts, and indexes.
+//! Focused tests for operation authorization, transitions, aborts, and indexes.
 
 use super::*;
 use crate::build_registry;
@@ -132,6 +132,46 @@ fn make_test_draft(
         contingencies: Vec::new(),
         scheduled_for: SimTime::ZERO,
     }
+}
+
+#[test]
+fn operation_rejects_take_targets_owned_by_the_sponsoring_organization() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let mut state = state;
+    let neighborhood = match target {
+        EntityRef::Business(id) => state
+            .world()
+            .get_business(id)
+            .expect("fixture business should exist")
+            .neighborhood(),
+        other => panic!("unexpected fixture target {other:?}"),
+    };
+    let front = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Family Front".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("owned front fixture should validate");
+
+    // A take against the organization's own premises would enrich it out of itself;
+    // authorization rejects the self-target before anything is created.
+    let error = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, EntityRef::Business(front)),
+    )
+    .expect_err("self-targeted operation must be rejected");
+    assert!(matches!(error, OperationError::SelfTargetedBusiness { .. }));
+    validate_invariants(&state);
 }
 
 #[test]

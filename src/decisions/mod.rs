@@ -95,7 +95,6 @@ impl DecisionContext {
             }
             Self::RecruitmentApproval(context) => DecisionPendingKey::RecruitmentApproval {
                 target_organization: context.target_organization(),
-                recruiter: context.recruiter(),
                 candidate: context.candidate(),
             },
         }
@@ -222,7 +221,6 @@ enum DecisionPendingKey {
     Operation(OperationId),
     RecruitmentApproval {
         target_organization: OrganizationId,
-        recruiter: CharacterId,
         candidate: CharacterId,
     },
 }
@@ -264,16 +262,18 @@ impl DecisionState {
             .filter_map(|id| self.records.get(id))
     }
 
+    /// One live approval per (target organization, candidate): two managers of the same
+    /// organization cannot both hold an approvable request for the same candidate, which
+    /// would strand the loser as permanently unresolvable after the first approval flips
+    /// membership.
     pub fn pending_for_recruitment_approval(
         &self,
         target_organization: OrganizationId,
-        recruiter: CharacterId,
         candidate: CharacterId,
     ) -> Option<DecisionRequestId> {
         self.pending_by_context
             .get(&DecisionPendingKey::RecruitmentApproval {
                 target_organization,
-                recruiter,
                 candidate,
             })
             .copied()

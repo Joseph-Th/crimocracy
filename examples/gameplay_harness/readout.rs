@@ -467,12 +467,9 @@ pub fn resolve_financial_view(scenario: &Scenario) -> Result<FinancialView, Box<
         .finance()
         .accounts_for(FinancialOwner::Organization(scenario.player))
     {
-        // Settlement and payable accounts are ledger counterparties, not governable cash;
-        // a boss reads their cash position from what they actually hold or are owed.
-        if !matches!(
-            account.kind(),
-            AccountKind::Settlement | AccountKind::Payable
-        ) {
+        // Settlement accounts are ledger counterparties, not governable cash; a boss
+        // reads their cash position from what they actually hold.
+        if account.kind() != AccountKind::Settlement {
             *cash_kinds.entry(account.kind()).or_default() += account.balance().cents();
         }
     }
@@ -565,8 +562,6 @@ pub fn account_kind_label(kind: AccountKind) -> &'static str {
         AccountKind::ConcealedCash => "concealed cash",
         AccountKind::AccountedFunds => "accounted funds",
         AccountKind::LegitimateOperating => "legitimate operating",
-        AccountKind::Receivable => "receivable",
-        AccountKind::Payable => "payable",
         AccountKind::Settlement => "settlement",
     }
 }

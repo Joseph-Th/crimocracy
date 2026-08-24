@@ -317,21 +317,13 @@ fn count_trailing_losing_cycles(state: &AppState, business: BusinessId, limit: u
         .economy
         .get_business_economy(business)
         .and_then(|economy| economy.loss_streak_anchor());
-    let mut losing = 0u32;
-    let mut cycles = state.economy.cycles_for(business).collect::<Vec<_>>();
-    cycles.sort_unstable_by_key(|cycle| (cycle.occurred_at(), cycle.id()));
-    for cycle in cycles.iter().rev() {
-        if cycle.net_cash() >= Money::ZERO || losing >= u32::from(limit) {
-            break;
-        }
-        // Cycles settled at or before the anchor predate the grace window; the first
-        // post-resume cycle always settles strictly later than the resume instant.
-        if anchor.is_some_and(|anchor| cycle.occurred_at() <= anchor) {
-            continue;
-        }
-        losing += 1;
-    }
-    losing
+    crate::finance::helpers::count_trailing_losing_cycles(
+        &state.economy.cycles_for(business).collect::<Vec<_>>(),
+        |cycle| (cycle.occurred_at(), cycle.id()),
+        |cycle| cycle.net_cash(),
+        anchor,
+        limit,
+    )
 }
 
 pub struct ValidatedBusinessCycle {

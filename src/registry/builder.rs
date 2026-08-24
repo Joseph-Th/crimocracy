@@ -194,6 +194,8 @@ pub(crate) enum RegistryBuildError {
     InvalidReputationCeiling,
     #[error("authored reputation consequence deltas must stay in -25..=25")]
     InvalidReputationDelta,
+    #[error("reputation daily decay step must be positive")]
+    InvalidReputationDecayStep,
     #[error("executive brief cadence must be positive")]
     InvalidExecutiveBriefCadence,
     #[error("executive brief must suppress routine source entries")]
@@ -351,6 +353,11 @@ impl RegistryBuilder {
             if !(-25..=25).contains(&delta) {
                 return Err(RegistryBuildError::InvalidReputationDelta);
             }
+        }
+        if spec.daily_decay_step == 0 {
+            // A zero decay step would make decay a structural no-op: impressions never
+            // recover and faded records are never erased.
+            return Err(RegistryBuildError::InvalidReputationDecayStep);
         }
         self.reputation = Some(ReputationConfigDefinition {
             baseline: spec.baseline,

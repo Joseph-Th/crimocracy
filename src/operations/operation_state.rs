@@ -104,14 +104,14 @@ impl OperationState {
         self.records.values()
     }
 
-    pub(crate) fn due_authorized_at_or_before(&self, now: SimTime) -> Vec<OperationId> {
+    pub(crate) fn find_due_authorized(&self, now: SimTime) -> Vec<OperationId> {
         self.authorized_by_start
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
 
-    pub(crate) fn due_in_progress_at_or_before(&self, now: SimTime) -> Vec<OperationId> {
+    pub(crate) fn find_due_in_progress(&self, now: SimTime) -> Vec<OperationId> {
         self.in_progress_by_resolution_due
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())

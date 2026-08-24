@@ -52,8 +52,6 @@ pub enum AccountKind {
     ConcealedCash,
     AccountedFunds,
     LegitimateOperating,
-    Receivable,
-    Payable,
     Settlement,
 }
 

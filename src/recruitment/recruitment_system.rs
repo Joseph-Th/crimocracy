@@ -278,7 +278,7 @@ pub fn find_recruitment_candidates(
 pub(crate) fn apply_due_autonomous_recruitment(
     registry: &Registry,
     state: &mut AppState,
-) -> Result<Vec<RecruitmentAttemptId>, RecruitmentError> {
+) -> Vec<RecruitmentAttemptId> {
     let cadence = u64::from(
         registry
             .recruitment()
@@ -286,7 +286,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
             .as_minutes(),
     );
     if state.now() == SimTime::ZERO || !state.now().as_minutes().is_multiple_of(cadence) {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
@@ -365,7 +365,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
         };
         attempts.push(attempt);
     }
-    Ok(attempts)
+    attempts
 }
 
 fn autonomous_recruitment_approach(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {
@@ -480,11 +480,10 @@ pub fn validate_recruitment_attempt(
             supervisor,
         });
     }
-    if let Some(pending) = state.decisions().pending_for_recruitment_approval(
-        draft.target_organization,
-        draft.recruiter,
-        draft.candidate,
-    ) {
+    if let Some(pending) = state
+        .decisions()
+        .pending_for_recruitment_approval(draft.target_organization, draft.candidate)
+    {
         // An approval request already covers this candidate; a direct attempt must not race it.
         return Err(RecruitmentError::PendingRecruitmentApproval { decision: pending });
     }

@@ -1794,6 +1794,39 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
 }
 
 #[test]
+fn control_plane_surveillance_targets_proxy_to_their_owner_footprint() {
+    let (_registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture(true);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Open Case Watch".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(operation)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+
+    // Surveillance of a control-plane record must attribute to the world footprint of its
+    // owner — the case runs where its authority has jurisdiction — so exposure and police
+    // response for such operations cannot silently vanish into "no neighborhood".
+    let attributed = resolve_target_neighborhoods(
+        &state,
+        vec![
+            EntityRef::Operation(operation),
+            EntityRef::Investigation(investigation),
+        ],
+    );
+    assert_eq!(
+        attributed,
+        BTreeSet::from([neighborhood]),
+        "operation and investigation targets attribute via their owning organization"
+    );
+}
+
+#[test]
 fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() {
     let (registry, mut original, police, _neighborhood, operation) =
         make_exposed_business_operation_fixture(true);

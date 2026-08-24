@@ -126,62 +126,69 @@ pub(crate) fn apply_operation_reputation_consequences(
         OperationObjectiveOutcome::Partial => config.partial_underworld_competence(),
         OperationObjectiveOutcome::Failed => 0,
     };
-    if competence_delta != 0 {
-        apply_delta(
-            registry,
-            state,
-            organization,
-            AudienceKind::Underworld,
-            ReputationDimension::Competence,
-            competence_delta,
-        )?;
-        shifts.push(AppliedStandingShift {
-            audience: AudienceKind::Underworld,
-            dimension: ReputationDimension::Competence,
-            delta: competence_delta,
-        });
-    }
+    shifts.extend(applied_shift(
+        registry,
+        state,
+        organization,
+        AudienceKind::Underworld,
+        ReputationDimension::Competence,
+        competence_delta,
+    )?);
 
     let police_fear = match exposure_level {
         OperationExposureLevel::None | OperationExposureLevel::Trace => 0,
         OperationExposureLevel::Witnessed => config.witnessed_exposure_police_fear(),
         OperationExposureLevel::Identifying => config.identifying_exposure_police_fear(),
     };
-    if police_fear != 0 {
-        apply_delta(
+    shifts.extend(applied_shift(
+        registry,
+        state,
+        organization,
+        AudienceKind::Police,
+        ReputationDimension::Fear,
+        police_fear,
+    )?);
+
+    if approach == OperationApproach::Violent {
+        shifts.extend(applied_shift(
             registry,
             state,
             organization,
-            AudienceKind::Police,
+            AudienceKind::Businesses,
             ReputationDimension::Fear,
-            police_fear,
-        )?;
-        shifts.push(AppliedStandingShift {
-            audience: AudienceKind::Police,
-            dimension: ReputationDimension::Fear,
-            delta: police_fear,
-        });
-    }
-
-    if approach == OperationApproach::Violent {
-        let businesses_fear = config.violent_businesses_fear();
-        if businesses_fear != 0 {
-            apply_delta(
-                registry,
-                state,
-                organization,
-                AudienceKind::Businesses,
-                ReputationDimension::Fear,
-                businesses_fear,
-            )?;
-            shifts.push(AppliedStandingShift {
-                audience: AudienceKind::Businesses,
-                dimension: ReputationDimension::Fear,
-                delta: businesses_fear,
-            });
-        }
+            config.violent_businesses_fear(),
+        )?);
     }
     Ok(shifts)
+}
+
+/// Applies one authored consequence through the canonical delta path and reports the pair
+/// only when the score actually moved. A score already clamped at a rail did not move, and
+/// reporting movement that did not happen would fabricate causal feedback about standing.
+fn applied_shift(
+    registry: &Registry,
+    state: &mut AppState,
+    organization: OrganizationId,
+    audience: AudienceKind,
+    dimension: ReputationDimension,
+    delta: i8,
+) -> Result<Option<AppliedStandingShift>, ReputationError> {
+    if delta == 0 {
+        return Ok(None);
+    }
+    let previous = resolve_score(
+        registry,
+        &state.reputation,
+        organization,
+        audience,
+        dimension,
+    );
+    let next = apply_delta(registry, state, organization, audience, dimension, delta)?;
+    Ok((next != previous).then_some(AppliedStandingShift {
+        audience,
+        dimension,
+        delta,
+    }))
 }
 
 /// Player-facing labels for the standing audiences, exhaustive so a new audience must be
@@ -284,9 +291,7 @@ pub(crate) fn apply_standing_feedback(
 /// records stay absent — decay never manufactures impressions. Runs on the payroll's day
 /// boundary so all daily passes observe the same campaign-day rhythm.
 pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppState) -> usize {
-    const DAY_BOUNDARY_MINUTES: u64 = 1_440;
-    let minutes = state.now().as_minutes();
-    if minutes == 0 || !minutes.is_multiple_of(DAY_BOUNDARY_MINUTES) {
+    if !crate::core::time::is_day_boundary(state.now()) {
         return 0;
     }
     // Snapshot the touched impressions first: mutation goes through the canonical path,
@@ -517,6 +522,50 @@ mod tests {
                 other => panic!("violent success must not touch {other:?}"),
             }
         }
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn operation_consequences_do_not_report_clamped_scores_as_movement() {
+        let (registry, mut state, organization) = make_state();
+
+        // Police fear already sits on the upper rail before the job.
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+            100,
+        )
+        .expect("pre-clamp should apply");
+        let shifts = apply_operation_reputation_consequences(
+            &registry,
+            &mut state,
+            organization,
+            OperationApproach::Violent,
+            OperationObjectiveOutcome::Achieved,
+            OperationExposureLevel::Identifying,
+        )
+        .expect("consequences should apply");
+        // The clamped fear dimension did not move, so it must not surface as standing
+        // feedback; the dimensions with headroom still report normally.
+        assert!(!shifts.iter().any(|shift| {
+            shift.audience == AudienceKind::Police && shift.dimension == ReputationDimension::Fear
+        }));
+        assert!(shifts.iter().any(|shift| {
+            shift.audience == AudienceKind::Underworld
+                && shift.dimension == ReputationDimension::Competence
+        }));
+        assert_eq!(
+            state
+                .reputation
+                .get_record(organization, AudienceKind::Police)
+                .expect("police impression should persist")
+                .score(ReputationDimension::Fear),
+            100,
+            "the clamp itself is unchanged"
+        );
         validate_invariants(&state);
     }
 

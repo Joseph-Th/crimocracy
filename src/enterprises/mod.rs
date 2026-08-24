@@ -316,7 +316,7 @@ impl EnterpriseState {
             .and_then(|id| self.records.get(id))
     }
 
-    pub(crate) fn due_at_or_before(&self, now: SimTime) -> Vec<EnterpriseId> {
+    pub(crate) fn find_due_cycles(&self, now: SimTime) -> Vec<EnterpriseId> {
         self.active_by_next_cycle
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
