@@ -10,6 +10,9 @@ use crimocracy::delegation::delegation_system::{validate_assign_mandate, validat
 use crimocracy::delegation::{
     MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
 };
+use crimocracy::economy::business_acquisition::{
+    validate_acquire_business, BusinessAcquisitionDraft,
+};
 use crimocracy::economy::business_economy_system::validate_establish_business_economy;
 use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::enterprises::enterprise_execution::validate_establish_enterprise;
@@ -487,9 +490,12 @@ pub fn build_scenario(
     )?;
 
     // Second-district expansion fixture: a quiet harbor neighborhood outside Central Precinct's
-    // jurisdiction, with a player-owned social club able to host a second gambling enterprise.
-    // No jurisdiction is authored here on purpose: with no case-intake authority there is no
-    // district heat, which is exactly the diversification lesson the PRESS arc proves.
+    // jurisdiction, with an independently owned social club able to host a second gambling
+    // enterprise. No jurisdiction is authored here on purpose: with no case-intake authority
+    // there is no district heat, which is exactly the diversification lesson the PRESS arc
+    // proves. The club starts independent on purpose too: hosting a racket requires owning the
+    // venue, so diversification must run through the canonical acquisition path (clean money
+    // buys the club) before the delegated expansion can establish anything there.
     let expansion_neighborhood = insert_neighborhood(
         &mut state,
         NeighborhoodDraft {
@@ -518,33 +524,9 @@ pub fn build_scenario(
                 BusinessFunction::CustomerAccess,
             ]),
             neighborhood: expansion_neighborhood,
-            owner: BusinessOwner::Organization(player),
+            owner: BusinessOwner::Independent,
         },
     )?;
-    let expansion_business_operating = insert_account(
-        &mut state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Business(expansion_front),
-            kind: AccountKind::LegitimateOperating,
-        },
-    )?;
-    let expansion_business_settlement = insert_account(
-        &mut state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Business(expansion_front),
-            kind: AccountKind::Settlement,
-        },
-    )?;
-    validate_establish_business_economy(
-        registry,
-        &state,
-        BusinessEconomyDraft {
-            business: expansion_front,
-            operating_account: expansion_business_operating,
-            settlement_account: expansion_business_settlement,
-        },
-    )?
-    .commit(&mut state)?;
     let expansion_cash = insert_account(
         &mut state,
         FinancialAccountDraft {
@@ -1051,11 +1033,10 @@ pub fn establish_harbor_expansion(
     metrics.expansion_established = true;
     if narrative {
         println!(
-            "[DECIDE]  Standing down does not mean standing still. Revise {lieutenant_name}'s mandate to cover both districts, capitalize a harbor float from idle gambling cash, and open a second book in Harbor District."
+            "[DECIDE]  The club is ours. Revise {lieutenant_name}'s mandate to cover both districts, capitalize a harbor float from idle gambling cash, and open a second book in Harbor District."
         );
         println!(
-            "[DELEGATE] {} now holds an expanded two-district mandate (v2); routine authority over the new enterprise is delegated.",
-            lieutenant_name
+            "[DELEGATE] {lieutenant_name} now holds an expanded two-district mandate (v2); routine authority over the new enterprise is delegated.",
         );
         println!(
             "[EXPAND]   Gambling enterprise established at Pier Nine Social Club (Harbor District) with a {} float.",
@@ -1066,6 +1047,88 @@ pub fn establish_harbor_expansion(
         );
     }
     Ok(())
+}
+
+/// The PRESS diversification purchase: the harbor club starts independently owned, and
+/// hosting a racket requires owning the venue, so the branch must buy it outright through
+/// the canonical acquisition path. The purchase is gated on accounted funds by production
+/// validation — street cash cannot buy legitimacy — so while the books are short, the
+/// attempt is recorded (once) as player-visible rejection evidence and retried on a later
+/// day. Returns true once the club belongs to the organization.
+pub fn acquire_harbor_front(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<bool, Box<dyn Error>> {
+    let price = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::Hospitality)
+        .economics()
+        .acquisition_cost();
+    let accounted = scenario
+        .state
+        .finance()
+        .get_account(scenario.accounted_funds)
+        .expect("accounted-funds account must persist")
+        .balance();
+    if accounted < price {
+        if metrics.acquisition_rejections == 0 && narrative {
+            println!(
+                "[ACQUIRE] The seller wants {} for the harbor club; our accounted books hold only {}. The deal waits for clean money.",
+                format_cents(price.cents()),
+                format_cents(accounted.cents()),
+            );
+        }
+        metrics.acquisition_rejections = metrics.acquisition_rejections.saturating_add(1);
+        return Ok(false);
+    }
+    let front_name = scenario
+        .state
+        .world()
+        .get_business(scenario.expansion_front)
+        .expect("expansion venue must persist")
+        .name()
+        .to_owned();
+    validate_acquire_business(
+        scenario.registry,
+        &scenario.state,
+        BusinessAcquisitionDraft {
+            organization: scenario.player,
+            business: scenario.expansion_front,
+            funding_account: scenario.accounted_funds,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    // The purchase must read back through production state: ownership moved, and the
+    // acquired venue's first operating economy is live.
+    assert_eq!(
+        scenario
+            .state
+            .world()
+            .get_business(scenario.expansion_front)
+            .expect("acquired venue must persist")
+            .owner(),
+        crimocracy::world::BusinessOwner::Organization(scenario.player),
+        "a committed acquisition must transfer venue ownership"
+    );
+    assert!(
+        scenario
+            .state
+            .economy()
+            .get_business_economy(scenario.expansion_front)
+            .is_some(),
+        "a committed acquisition must open the venue's operating economy"
+    );
+    metrics.front_acquired = true;
+    metrics.acquisition_price_cents = Some(price.cents());
+    metrics.acquisition_spent_cents = price.cents();
+    if narrative {
+        println!(
+            "[ACQUIRE] {front_name} purchased outright for {}. Dirty money became a legitimate address.",
+            format_cents(price.cents()),
+        );
+    }
+    Ok(true)
 }
 
 /// The RUSH rebuild beat: after an autonomous rival departure removed the entry specialist, the

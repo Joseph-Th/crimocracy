@@ -162,6 +162,36 @@ pub(crate) fn apply_operation_reputation_consequences(
     Ok(shifts)
 }
 
+/// Deterministic consequence pass over a racket that drew a dedicated vice inquiry this
+/// tick. A case built on the racket itself is at least as alarming to its owner as being
+/// witnessed on a job: police fear rises through the single canonical delta path, which
+/// throttles delegated expansion while it decays. Returns exactly what moved so callers can
+/// surface feedback through their own channels.
+pub(crate) fn apply_vice_inquiry_reputation_consequences(
+    registry: &Registry,
+    state: &mut AppState,
+    organization: OrganizationId,
+) -> Result<Vec<AppliedStandingShift>, ReputationError> {
+    let responsible = state
+        .world
+        .get_organization(organization)
+        .ok_or(ReputationError::MissingOrganization(organization))?;
+    if responsible.kind() != OrganizationKind::Criminal {
+        return Ok(Vec::new());
+    }
+    let fear = registry.reputation().vice_inquiry_police_fear();
+    Ok(applied_shift(
+        registry,
+        state,
+        organization,
+        AudienceKind::Police,
+        ReputationDimension::Fear,
+        fear,
+    )?
+    .into_iter()
+    .collect())
+}
+
 /// Applies one authored consequence through the canonical delta path and reports the pair
 /// only when the score actually moved. A score already clamped at a rail did not move, and
 /// reporting movement that did not happen would fabricate causal feedback about standing.
@@ -217,11 +247,14 @@ fn dimension_label(dimension: ReputationDimension) -> &'static str {
 
 /// Player-facing causality for standing shifts ([`GAME_DESIGN.md`] §53.1): the
 /// organization legitimately knows how its own street standing moved after its own
-/// operation, so each shift becomes a Notable entry in a canonical Standing report —
-/// which the executive brief then surfaces. Rival organizations never receive these.
+/// activity, so each shift becomes a Notable entry in a canonical Standing report —
+/// which the executive brief then surfaces. `lead_in` names the kind of activity that
+/// moved the impression (a job, a racket drawing heat). Rival organizations never
+/// receive these.
 pub(crate) fn apply_standing_feedback(
     state: &mut AppState,
     organization: OrganizationId,
+    lead_in: &str,
     shifts: &[AppliedStandingShift],
 ) -> Result<(), crate::reports::report_system::ReportError> {
     // Structural privacy rule: only the player organization receives its own standing
@@ -230,7 +263,7 @@ pub(crate) fn apply_standing_feedback(
     if shifts.is_empty() || state.player_organization() != Some(organization) {
         return Ok(());
     }
-    let mut summary = String::from("Word travels after the job:");
+    let mut summary = String::from(lead_in);
     for (index, shift) in shifts.iter().enumerate() {
         // Hand-written prose per produced pair where it adds nuance; every other pair reads
         // as proper text through the exhaustive labels instead of leaking debug names.
@@ -813,6 +846,7 @@ mod tests {
         apply_standing_feedback(
             &mut state,
             organization,
+            "Word travels after the job:",
             &[
                 AppliedStandingShift {
                     audience: AudienceKind::Underworld,
@@ -864,6 +898,7 @@ mod tests {
         apply_standing_feedback(
             &mut state,
             organization,
+            "Word travels after the job:",
             &[
                 AppliedStandingShift {
                     audience: AudienceKind::Underworld,
@@ -889,8 +924,89 @@ mod tests {
     #[test]
     fn shifts_that_move_nothing_produce_no_feedback() {
         let (_, mut state, organization) = make_state_with_player();
-        apply_standing_feedback(&mut state, organization, &[]).expect("empty feedback is a no-op");
+        apply_standing_feedback(&mut state, organization, "Word travels after the job:", &[])
+            .expect("empty feedback is a no-op");
         assert_eq!(standing_reports(&state, organization), 0);
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn vice_inquiry_raises_owner_police_fear_through_the_canonical_path() {
+        let (registry, mut state, organization) = make_state();
+        let baseline = registry.reputation().baseline();
+        let authored = registry.reputation().vice_inquiry_police_fear();
+        assert!(authored > 0, "a dedicated inquiry must scare its owner");
+
+        // A criminal racket owner's police fear rises by exactly the authored step.
+        let shifts =
+            apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+                .expect("vice-inquiry consequences should apply");
+        assert_eq!(shifts.len(), 1);
+        assert_eq!(shifts[0].audience, AudienceKind::Police);
+        assert_eq!(shifts[0].dimension, ReputationDimension::Fear);
+        assert_eq!(shifts[0].delta, authored);
+        assert_eq!(
+            resolve_score(
+                &registry,
+                &state.reputation,
+                organization,
+                AudienceKind::Police,
+                ReputationDimension::Fear
+            ),
+            baseline + u8::try_from(authored).expect("authored fear delta must be non-negative")
+        );
+
+        // Non-criminal institutions hold no street reputation to move.
+        let precinct = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Vice Test Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police fixture should validate");
+        let shifts = apply_vice_inquiry_reputation_consequences(&registry, &mut state, precinct)
+            .expect("consequence pass should succeed");
+        assert!(
+            shifts.is_empty(),
+            "an institution cannot be scared of itself"
+        );
+        assert!(state
+            .reputation
+            .get_record(precinct, AudienceKind::Police)
+            .is_none());
+
+        validate_invariants(&state);
+    }
+
+    #[test]
+    fn player_racket_vice_heat_surfaces_as_standing_report() {
+        let (registry, mut state, organization) = make_state_with_player();
+
+        let shifts =
+            apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+                .expect("vice-inquiry consequences should apply");
+        apply_standing_feedback(
+            &mut state,
+            organization,
+            "News of the rackets travels:",
+            &shifts,
+        )
+        .expect("standing feedback should record");
+
+        assert_eq!(standing_reports(&state, organization), 1);
+        let report = state
+            .reports()
+            .reports_for(organization)
+            .find(|report| report.kind() == ReportKind::Standing)
+            .expect("standing report should persist");
+        let summary = &report.entries()[0].summary;
+        assert!(
+            summary.starts_with("News of the rackets travels:")
+                && summary.contains("police watch us more warily"),
+            "the entry must name the racket heat and its consequence: {summary}"
+        );
         validate_invariants(&state);
     }
 }

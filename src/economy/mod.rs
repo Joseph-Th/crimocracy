@@ -1,5 +1,6 @@
 //! Independent business operating state and durable economic cycle history; `business_economy_system` owns lifecycle and settlement, `business_reporting` is read-only aggregation.
 
+pub mod business_acquisition;
 pub mod business_economy_system;
 pub mod business_reporting;
 

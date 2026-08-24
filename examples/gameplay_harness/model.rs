@@ -607,12 +607,23 @@ pub struct RunMetrics {
     pub debrief_patrol_information: Vec<InformationId>,
     /// Topics carried into the second-score plan, proving what act 2 actually knew.
     pub second_act_planning_topics: BTreeSet<InformationTopic>,
-    // District-diversification evidence: PRESS capitalizes a second-district enterprise out of
-    // its idle street cash while the home district is legally hot, so the same heat that taxes
-    // the canal racket never touches the harbor book.
+    // District-diversification evidence: PRESS buys its second-district venue outright
+    // through the canonical acquisition path (gated on accounted funds), then capitalizes
+    // a second-district enterprise out of idle street cash while the home district is
+    // legally hot.
     pub expansion_enterprise: Option<EnterpriseId>,
     pub expansion_established: bool,
     pub expansion_net_cents: Option<i64>,
+    /// True once the branch purchased the harbor venue through the canonical acquisition
+    /// path: ownership moved, and accounted funds paid the authored price in full.
+    pub front_acquired: bool,
+    /// The authored kind price the acquisition actually paid, quoted from production state.
+    pub acquisition_price_cents: Option<i64>,
+    /// Accounted funds spent on acquisitions; part of the clean-money accounting identity.
+    pub acquisition_spent_cents: i64,
+    /// Validated purchase attempts that failed for short books before the price was covered:
+    /// the player-visible shape of the legitimacy gate on dirty money.
+    pub acquisition_rejections: u32,
     /// Canonical police-contact channel usage: how many times the organization asked its
     /// standing contact what the institution knows and received a fresh disclosure.
     pub contact_reads: u32,

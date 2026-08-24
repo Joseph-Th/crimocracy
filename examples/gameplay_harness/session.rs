@@ -757,9 +757,13 @@ pub fn play_session_with_fixture_view(
                 }
             }
             // Once the matched observation window has closed, standing down no longer means
-            // sitting on idle capital: the organization diversifies into the quiet harbor
-            // district, whose rackets pay no heat surcharge because Central Precinct's case
-            // never touched them. This is real agency during the wait, not a time skip.
+            // sitting on idle capital. Each day the organization launders the racket's take
+            // through its front's books, and as soon as those accounted funds cover the
+            // venue's authored price it buys the independent harbor club outright through
+            // the canonical acquisition path — dirty money cannot buy legitimacy, so the
+            // clean-money war chest gates the diversification. Owning the venue is what
+            // lets the delegated expansion establish a second racket there, outside Central
+            // Precinct's jurisdiction. Real agency during the wait, not a time skip.
             let matched_boundary = SimTime::from_minutes(
                 metrics
                     .matched_financial_boundary_minute
@@ -768,50 +772,80 @@ pub fn play_session_with_fixture_view(
             if scenario.state.now() < matched_boundary {
                 run_until(&mut scenario, matched_boundary, narrative, &mut metrics)?;
             }
-            establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
             if narrative {
                 println!(
-                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only — has anything moved on the case?"
+                    "[DECIDE]  Standing down does not mean standing still: build clean money day by day, then buy the harbor club and open a second book the home case cannot touch."
                 );
             }
-            // Bounded polling loop: the authored cold-case decay guarantees a deterministic shelf,
-            // so the poll terminates when the refreshed investigator knowledge becomes disclosable.
-            // Polling starts once the shelf becomes possible, so the wait's bookkeeping beats —
-            // laundering the racket's till through the club's books day by day — land on those
-            // polling days, each one showing the front's per-cycle plausible volume.
+            // Bounded daily loop: the authored cold-case decay guarantees a deterministic
+            // shelf, and laundering accumulates accounted funds at the front's authored
+            // pace, so both waits terminate. Each beat launders the racket's till (keeping
+            // a working-capital floor), attempts the purchase once the books can cover it,
+            // expands on success, and polls the precinct channel once per campaign day.
+            // A till authored as concealed cash stays exactly that: hidden money cannot
+            // route through the front's ledgers without exposing it, so the beat leaves
+            // it parked and launders only what sits in street cash.
             for _ in 0..40 {
                 if scenario.state.now() < poll_at {
                     run_until(&mut scenario, poll_at, narrative, &mut metrics)?;
                 }
-                // The racket's own till is the natural laundering source while the district
-                // stays quiet: the club launders its gambling take day by day, keeping a
-                // working-capital floor in the till. The general wage float is untouched.
-                let canal_float = scenario
+                let canal_enterprise = scenario
                     .state
                     .enterprises()
                     .get_enterprise(scenario.enterprise)
-                    .expect("canal enterprise must persist")
-                    .cash_account();
-                let float_balance = scenario
+                    .expect("canal enterprise must persist");
+                let canal_float = canal_enterprise.cash_account();
+                let float_is_street_cash = scenario
                     .state
                     .finance()
                     .get_account(canal_float)
-                    .expect("enterprise float account must persist")
-                    .balance()
-                    .cents();
-                let launderable = (float_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0);
-                if narrative && launderable > 0 {
+                    .is_some_and(|account| {
+                        account.kind() == crimocracy::finance::AccountKind::StreetCash
+                    });
+                if float_is_street_cash {
+                    let float_balance = scenario
+                        .state
+                        .finance()
+                        .get_account(canal_float)
+                        .expect("enterprise float account must persist")
+                        .balance()
+                        .cents();
+                    let launderable = (float_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0);
+                    if narrative && launderable > 0 {
+                        println!(
+                            "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers today."
+                        );
+                    }
+                    launder_through_front(
+                        &mut scenario,
+                        narrative,
+                        &mut metrics,
+                        canal_float,
+                        launderable,
+                    )?;
+                } else if narrative {
                     println!(
-                        "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers today."
+                        "[LAUNDER] The club's take sits in concealed cash this cycle; it stays off {}'s books.",
+                        scenario
+                            .state
+                            .world()
+                            .get_business(scenario.front)
+                            .expect("laundering front must persist")
+                            .name(),
                     );
                 }
-                launder_through_front(
-                    &mut scenario,
-                    narrative,
-                    &mut metrics,
-                    canal_float,
-                    launderable,
-                )?;
+                // The diversification purchase: gated on accounted funds by production
+                // validation, so the beat simply retries each day until the books qualify.
+                if !metrics.front_acquired
+                    && acquire_harbor_front(&mut scenario, narrative, &mut metrics)?
+                {
+                    establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
+                    if narrative {
+                        println!(
+                            "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only — has anything moved on the case?"
+                        );
+                    }
+                }
                 let read = read_police_contact(&mut scenario, narrative, &mut metrics)?;
                 match read {
                     Some(false) => {
@@ -819,7 +853,6 @@ pub fn play_session_with_fixture_view(
                         println!(
                             "[CONSEQUENCE RESOLVED] The channel confirms the precinct shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
                         );
-                        break;
                     }
                     Some(true) => {
                         println!(
@@ -827,6 +860,9 @@ pub fn play_session_with_fixture_view(
                         );
                     }
                     None => {}
+                }
+                if metrics.cold_case_confirmed == Some(true) && metrics.front_acquired {
+                    break;
                 }
                 poll_at = poll_at
                     + SimDuration::from_minutes(
@@ -838,6 +874,26 @@ pub fn play_session_with_fixture_view(
                 println!(
                     "[VERIFY]  The channel never produced a dependable read on the case's activity."
                 );
+            }
+            // The diversified book must prove itself as live economy, not a paper
+            // establishment: keep the world running until the second racket has settled
+            // real cycles before the final financial view.
+            if metrics.front_acquired {
+                if let Some(expansion) = metrics.expansion_enterprise {
+                    for _ in 0..10 {
+                        let settled_cycles =
+                            scenario.state.enterprises().cycles_for(expansion).count();
+                        if settled_cycles >= 2 {
+                            break;
+                        }
+                        let next_day = scenario.state.now()
+                            + SimDuration::from_minutes(
+                                u32::try_from(campaign_day_minutes)
+                                    .expect("authored campaign day must fit the duration type"),
+                            );
+                        run_until(&mut scenario, next_day, narrative, &mut metrics)?;
+                    }
+                }
             }
         }
     }

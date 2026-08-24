@@ -48,11 +48,16 @@ pub fn validate_run_metrics(
         });
     }
     // The money state contract: whatever the organization routed through its front's books
-    // must reconcile exactly — accounted funds are gross minus the front's authored fee — and
-    // a branch that liquidated stolen property must have laundered those proceeds rather than
-    // leaving organizational value in exposed street cash.
+    // must reconcile exactly — accounted funds are gross minus the front's authored fee,
+    // minus anything already spent on legitimate acquisitions — and a branch that
+    // liquidated stolen property must have laundered those proceeds rather than leaving
+    // organizational value in exposed street cash.
     if let Some(balance) = metrics.accounted_balance_cents {
-        if balance != metrics.laundered_gross_cents - metrics.launder_fee_cents {
+        if balance
+            != metrics.laundered_gross_cents
+                - metrics.launder_fee_cents
+                - metrics.acquisition_spent_cents
+        {
             return Err(HarnessContractError::InconsistentLaunderingEvidence {
                 strategy,
                 gross: metrics.laundered_gross_cents,
@@ -288,21 +293,33 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
     })
 }
 
-/// Full-mode narrative PRESS sessions must convert the standing-down wait into governance:
-/// the branch revises its mandate, capitalizes a second-district float from idle street cash,
-/// and opens a diversified enterprise that the hot home-district case cannot tax. The harbor
-/// book must also have actually earned by session end, proving the expansion is live economy,
+/// Full-mode narrative PRESS sessions must convert the standing-down wait into wealth and
+/// governance: the branch launders day by day until its accounted books cover the venue's
+/// authored price, buys the independent harbor club outright through the canonical
+/// acquisition path (a short book must first surface as a canonical rejection), revises
+/// its mandate, capitalizes a second-district float from idle street cash, and opens a
+/// diversified enterprise that the hot home-district case cannot tax. The harbor book
+/// must also have actually earned by session end, proving the expansion is live economy,
 /// not a paper establishment.
 pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
     }
-    if metrics.expansion_established && metrics.expansion_net_cents.is_some_and(|net| net > 0) {
+    let acquisition_complete = metrics.front_acquired
+        && metrics.acquisition_price_cents.is_some_and(|price| price > 0)
+        && metrics.acquisition_spent_cents == metrics.acquisition_price_cents.unwrap_or_default()
+        // The legitimacy gate must be visible: the branch attempted the purchase before
+        // its accounted books could cover the authored price at least once.
+        && metrics.acquisition_rejections > 0;
+    if acquisition_complete
+        && metrics.expansion_established
+        && metrics.expansion_net_cents.is_some_and(|net| net > 0)
+    {
         Ok(())
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
-            evidence: "the standing-down wait must end in district diversification: a revised mandate, a capitalized second-district enterprise, and positive harbor earnings by session end",
+            evidence: "the standing-down wait must end in legitimate wealth and district diversification: a canonical accounted-funds acquisition of the harbor venue (after a visible short-book rejection), a revised mandate, a capitalized second-district enterprise, and positive harbor earnings by session end",
         })
     }
 }

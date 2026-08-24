@@ -507,6 +507,10 @@ pub struct BusinessEconomicsDefinition {
     pub(crate) notable_variance_basis_points: u16,
     /// Consecutive net-losing cycles after which the operating economy suspends.
     pub(crate) losing_cycles_before_suspension: u8,
+    /// Authored purchase price for acquiring an independently owned business of this kind.
+    /// Acquisition pays this from accounted funds, so legitimate expansion is gated on
+    /// laundering throughput rather than on raw street cash.
+    pub(crate) acquisition_cost: Money,
 }
 impl BusinessEconomicsDefinition {
     pub fn cycle(&self) -> SimDuration {
@@ -535,6 +539,9 @@ impl BusinessEconomicsDefinition {
     }
     pub fn losing_cycles_before_suspension(&self) -> u8 {
         self.losing_cycles_before_suspension
+    }
+    pub fn acquisition_cost(&self) -> Money {
+        self.acquisition_cost
     }
 }
 #[derive(Clone, Debug)]
@@ -655,6 +662,9 @@ pub struct ReputationConfigSpec {
     pub expansion_police_fear_ceiling: u8,
     pub witnessed_exposure_police_fear: i8,
     pub identifying_exposure_police_fear: i8,
+    /// Police fear applied when one of the organization's own rackets draws a dedicated vice
+    /// inquiry: a case built on the racket itself is at least as alarming as being seen.
+    pub vice_inquiry_police_fear: i8,
     pub achieved_underworld_competence: i8,
     pub partial_underworld_competence: i8,
     pub violent_businesses_fear: i8,
@@ -666,6 +676,7 @@ pub struct ReputationConfigDefinition {
     pub(super) expansion_police_fear_ceiling: u8,
     pub(super) witnessed_exposure_police_fear: i8,
     pub(super) identifying_exposure_police_fear: i8,
+    pub(super) vice_inquiry_police_fear: i8,
     pub(super) achieved_underworld_competence: i8,
     pub(super) partial_underworld_competence: i8,
     pub(super) violent_businesses_fear: i8,
@@ -685,6 +696,9 @@ impl ReputationConfigDefinition {
     }
     pub fn identifying_exposure_police_fear(self) -> i8 {
         self.identifying_exposure_police_fear
+    }
+    pub fn vice_inquiry_police_fear(self) -> i8 {
+        self.vice_inquiry_police_fear
     }
     pub fn achieved_underworld_competence(self) -> i8 {
         self.achieved_underworld_competence

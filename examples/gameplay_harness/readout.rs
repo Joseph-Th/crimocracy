@@ -979,6 +979,14 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         laundering_shown,
         "street earnings pass through an owned front's books into accounted funds, and the front's plausible-volume ceiling visibly caps how fast dirty money becomes clean",
     );
+    let wealth_loop_shown = press.front_acquired
+        && press.acquisition_price_cents.is_some()
+        && press.acquisition_rejections > 0;
+    print_loop_checkpoint(
+        "legit wealth",
+        wealth_loop_shown,
+        "accounted wealth converts into an owned legitimate asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket — the money loop closes",
+    );
     let any_vice = [rush, press, recon]
         .iter()
         .any(|run| run.vice_inquiries_drawn > 0);
@@ -1031,16 +1039,17 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         rush.burglary_terminal_minute.unwrap_or_default(),
     );
     println!(
-        "  - Diversification leverage: while the case stayed hot, PRESS converted idle street cash into a Harbor District book earning {} surcharge-free, versus the canal book's heat-taxed window net of {}.",
+        "  - Diversification leverage: while the case stayed hot, PRESS bought its harbor venue outright with clean money and converted idle street cash into a second-district book earning {} surcharge-free, versus the canal book's heat-taxed window net of {}.",
         optional_dollars(press.expansion_net_cents),
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
-        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches, so conversion speed — not desire — limits how fast dirty money becomes clean.",
+        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed — not desire — limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
         optional_cents(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections
             + recon.laundering_capacity_rejections,
+        optional_dollars(press.acquisition_price_cents),
     );
     println!(
         "  - Visibility leverage: the branches drew {} vice inquiries this comparison. Every cycle a racket runs under active district casework risks a dedicated inquiry on the racket itself, taxing every book in that district — including rivals' — until the case shelves; going dark or moving districts are the honest counters.",
@@ -1057,10 +1066,10 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways — surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
-        "  - The delegation pillar now carries real weight in the narrative arc: PRESS re-scopes its lieutenant's mandate mid-crisis to open a second district. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."
+        "  - The delegation pillar now carries real weight in the narrative arc: PRESS must own its second-district venue before anything can be established there, so the arc runs acquisition -> mandate revision -> enterprise establishment through canonical paths. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."
     );
     println!(
-        "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling."
+        "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling. Acquisition covers only independently owned sellers at authored kind prices; rival-owned venues and negotiated prices remain outside scope."
     );
 }
 

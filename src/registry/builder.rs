@@ -215,6 +215,8 @@ pub(crate) enum RegistryBuildError {
     BusinessNotableVarianceOutOfRange(BusinessKind),
     #[error("business {0:?} losing-cycle suspension threshold must be at least one cycle")]
     BusinessSuspensionThresholdOutOfRange(BusinessKind),
+    #[error("business {0:?} acquisition cost must be positive")]
+    InvalidBusinessAcquisitionCost(BusinessKind),
     #[error("enterprise {0:?} must have a positive cycle duration")]
     InvalidEnterpriseCycle(EnterpriseKind),
     #[error("enterprise {0:?} contains a negative authored economic value")]
@@ -357,6 +359,7 @@ impl RegistryBuilder {
         for delta in [
             spec.witnessed_exposure_police_fear,
             spec.identifying_exposure_police_fear,
+            spec.vice_inquiry_police_fear,
             spec.achieved_underworld_competence,
             spec.partial_underworld_competence,
             spec.violent_businesses_fear,
@@ -378,6 +381,7 @@ impl RegistryBuilder {
             expansion_police_fear_ceiling: spec.expansion_police_fear_ceiling,
             witnessed_exposure_police_fear: spec.witnessed_exposure_police_fear,
             identifying_exposure_police_fear: spec.identifying_exposure_police_fear,
+            vice_inquiry_police_fear: spec.vice_inquiry_police_fear,
             achieved_underworld_competence: spec.achieved_underworld_competence,
             partial_underworld_competence: spec.partial_underworld_competence,
             violent_businesses_fear: spec.violent_businesses_fear,
@@ -888,6 +892,9 @@ impl RegistryBuilder {
         ];
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeBusinessEconomicValue(kind));
+        }
+        if economics.acquisition_cost.cents() <= 0 {
+            return Err(RegistryBuildError::InvalidBusinessAcquisitionCost(kind));
         }
         if economics.gross_variance_basis_points > 5_000 {
             return Err(RegistryBuildError::BusinessVarianceOutOfRange(kind));

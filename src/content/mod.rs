@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 31;
+pub const CURRENT_CONTENT_REVISION: u32 = 33;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -128,6 +128,7 @@ fn register_reputation(builder: &mut RegistryBuilder) {
             expansion_police_fear_ceiling: 60,
             witnessed_exposure_police_fear: 4,
             identifying_exposure_police_fear: 7,
+            vice_inquiry_police_fear: 5,
             achieved_underworld_competence: 3,
             partial_underworld_competence: 1,
             violent_businesses_fear: 3,
@@ -359,6 +360,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 1_000,
                 notable_variance_basis_points: 800,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(36_000),
             },
         ),
         (
@@ -373,6 +375,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(60_000),
             },
         ),
         (
@@ -387,6 +390,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 700,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(56_000),
             },
         ),
         (
@@ -401,6 +405,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 700,
                 notable_variance_basis_points: 600,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(90_000),
             },
         ),
         (
@@ -415,6 +420,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 500,
                 notable_variance_basis_points: 450,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(27_000),
             },
         ),
         (
@@ -429,6 +435,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 900,
                 notable_variance_basis_points: 700,
                 losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(64_000),
             },
         ),
     ];

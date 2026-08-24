@@ -304,6 +304,41 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             crate::reputation::reputation_system::apply_standing_feedback(
                 state,
                 organization,
+                "Word travels after the job:",
+                &shifts,
+            )
+            .expect("player standing feedback must record through the canonical report path");
+        }
+    }
+    // A racket that drew a vice inquiry this tick pays the same institutional memory as an
+    // exposed operation: police fear rises (throttling delegated expansion while it decays),
+    // and the player organization reads its own standing through the canonical report path.
+    let vice_inquiry_owners: Vec<crate::core::id::OrganizationId> = enterprise_cycles
+        .iter()
+        .filter_map(|cycle_id| {
+            let cycle = state.enterprises().get_cycle(*cycle_id)?;
+            if !cycle.drew_vice_attention() {
+                return None;
+            }
+            state
+                .enterprises()
+                .get_enterprise(cycle.enterprise())
+                .map(|enterprise| enterprise.organization())
+        })
+        .collect();
+    for organization in vice_inquiry_owners {
+        let shifts =
+            crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
+                registry,
+                state,
+                organization,
+            )
+            .expect("valid state should apply vice-inquiry reputation consequences");
+        if Some(organization) == player_organization {
+            crate::reputation::reputation_system::apply_standing_feedback(
+                state,
+                organization,
+                "News of the rackets travels:",
                 &shifts,
             )
             .expect("player standing feedback must record through the canonical report path");

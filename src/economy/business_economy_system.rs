@@ -155,6 +155,22 @@ pub fn validate_establish_business_economy(
     })
 }
 
+impl ValidatedBusinessEconomyEstablishment {
+    /// Cross-domain composition hook (business acquisition): builds an establishment token
+    /// whose accounts are reserved only during the composing operation's own commit. The
+    /// token's [`Self::commit`] still runs the complete establishment validation against
+    /// live state, so a mis-constructed reservation rejects there.
+    pub(crate) fn over_accounts_to_be_reserved(
+        draft: BusinessEconomyDraft,
+        cycle_duration: SimDuration,
+    ) -> Self {
+        Self {
+            draft,
+            cycle_duration,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BusinessCycleSnapshot {
     business: BusinessId,
