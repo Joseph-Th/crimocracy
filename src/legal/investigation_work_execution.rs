@@ -712,7 +712,6 @@ fn resolve_interview_statement_draft(
     case_witness: CaseWitnessId,
     margin: i16,
 ) -> Result<WitnessStatementDraft, InvestigationWorkError> {
-    use crate::core::id::OperationId;
     use std::cmp::Reverse;
 
     let investigation = state
@@ -728,8 +727,10 @@ fn resolve_interview_statement_draft(
         .map(|evidence| evidence.subject())
         .or_else(|| {
             investigation
-                .origin_operation()
-                .map(|operation: OperationId| EntityRef::Operation(operation))
+                .origin()
+                .filter(|origin| {
+                    matches!(origin, EntityRef::Operation(_) | EntityRef::Enterprise(_))
+                })
                 .or_else(|| {
                     investigation
                         .subjects()

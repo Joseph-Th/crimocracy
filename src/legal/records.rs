@@ -925,10 +925,11 @@ pub struct InvestigationRecord {
     pub(super) subjects: BTreeSet<EntityRef>,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) opened_at: SimTime,
-    /// The operation whose exposure opened this case. Only operation-originated cases are
-    /// eligible for deterministic cold-case decay; institution-authored cases keep their own
-    /// lifecycle until an explicit transition.
-    pub(super) origin_operation: Option<OperationId>,
+    /// The entity whose exposure or notoriety opened this case (an operation today, and any
+    /// future origin the intake vocabulary grows). Only originated cases are eligible for
+    /// deterministic cold-case decay; institution-authored cases keep their own lifecycle
+    /// until an explicit transition.
+    pub(super) origin: Option<EntityRef>,
     /// Organizations that were surfaced the case-open legal-activity knowledge when the case was
     /// opened. Surveillance of the owning authority uses this set (never the hidden evidence
     /// graph) to report whether that organization's case is still being actively worked.
@@ -976,8 +977,8 @@ impl InvestigationRecord {
     pub fn opened_at(&self) -> SimTime {
         self.opened_at
     }
-    pub fn origin_operation(&self) -> Option<OperationId> {
-        self.origin_operation
+    pub fn origin(&self) -> Option<EntityRef> {
+        self.origin
     }
     pub fn notified_organizations(&self) -> &BTreeSet<OrganizationId> {
         &self.notified_organizations
@@ -1477,9 +1478,9 @@ pub struct IncidentIntakeDraft {
     pub title: String,
     pub subjects: BTreeSet<EntityRef>,
     pub evidence: Vec<IncidentEvidenceDraft>,
-    /// The operation whose exposure opened this case; only operation-originated incidents carry
+    /// The entity whose exposure or notoriety opened this case; only originated incidents carry
     /// this link so cold-case decay never touches institution-authored casework.
-    pub origin_operation: Option<OperationId>,
+    pub origin: Option<EntityRef>,
     /// Organizations surfaced the case-open legal-activity knowledge at intake; the owning
     /// authority and later surveillance read only this set to decide what is visible about the
     /// case, never the hidden evidence or investigation internals.

@@ -616,6 +616,9 @@ pub struct RunMetrics {
     /// Canonical police-contact channel usage: how many times the organization asked its
     /// standing contact what the institution knows and received a fresh disclosure.
     pub contact_reads: u32,
+    /// Player-owned cycles that drew a vice inquiry: sustained district casework converting
+    /// into a dedicated investigation on the racket itself.
+    pub vice_inquiries_drawn: u32,
     // Money-state evidence: street cash routed through an owned cash-intensive front's books.
     pub laundered_gross_cents: i64,
     /// The front's authored cut of everything it absorbed.
@@ -666,6 +669,7 @@ pub struct Aggregate {
     pub player_personnel_departures: u64,
     pub player_poach_warnings: u64,
     pub contact_reads: u64,
+    pub vice_inquiries: u64,
     pub payroll_paid_total_cents: i128,
     pub payroll_short_total_cents: i128,
 }
@@ -732,6 +736,7 @@ impl Aggregate {
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
         self.player_poach_warnings += u64::from(metrics.player_poach_warnings);
         self.contact_reads += u64::from(metrics.contact_reads);
+        self.vice_inquiries += u64::from(metrics.vice_inquiries_drawn);
         self.payroll_paid_total_cents += i128::from(metrics.payroll_paid_cents);
         self.payroll_short_total_cents += i128::from(metrics.payroll_short_cents);
     }
@@ -783,7 +788,7 @@ impl Aggregate {
        pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
-       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}
+       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}  vice hits {:>3}
                  payroll paid {:>7.0}c  unpaid {:>6.0}c",
             self.samples,
             self.fixture_variations,
@@ -814,6 +819,7 @@ impl Aggregate {
             self.player_poach_warnings,
             self.player_personnel_departures,
             self.contact_reads,
+            self.vice_inquiries,
             self.payroll_paid_total_cents as f64 / self.samples as f64,
             self.payroll_short_total_cents as f64 / self.samples as f64,
         );

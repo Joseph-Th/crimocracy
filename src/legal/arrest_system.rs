@@ -346,7 +346,7 @@ pub fn validate_release_arrest(
 /// exists; it never generates new leads.
 const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
 
-/// Runs the police institution's evidence-to-custody conversion across operation-originated
+/// Runs the police institution's evidence-to-custody conversion across originated
 /// cases: when an identified subject has enough admissible non-weak evidence against them,
 /// the owning authority makes the arrest through the canonical validated path. Subjects who
 /// currently hold any non-terminal operation booking are left alone until their work ends.
@@ -358,7 +358,7 @@ pub fn apply_autonomous_evidence_arrests(
         .investigations()
         .filter(|investigation| {
             investigation.status() == InvestigationStatus::Active
-                && investigation.origin_operation().is_some()
+                && matches!(investigation.origin(), Some(EntityRef::Operation(_)))
         })
         .flat_map(|investigation| {
             investigation

@@ -85,6 +85,8 @@ pub enum InvestigationError {
     InactiveInvestigation,
     #[error("incident intake must contain at least one evidence record")]
     NoIncidentEvidence,
+    #[error("entity {0:?} cannot originate a case")]
+    InvalidCaseOrigin(EntityRef),
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]
     ForensicAnalysisRequiresInvestigationWork,
     #[error(
@@ -140,7 +142,7 @@ impl ValidatedInvestigation {
             subjects: self.draft.subjects,
             evidence: Default::default(),
             opened_at: state.now(),
-            origin_operation: None,
+            origin: None,
             notified_organizations: Default::default(),
             last_activity_at: state.now(),
             version: 1,
@@ -355,9 +357,10 @@ fn validate_investigation_transition_dependencies(
 /// Cold cases are suspended through the canonical lifecycle transition, which revalidates every
 /// dependency (no scheduled work, no active arrest) at the current minute, so work that appeared
 /// between the deadline index scan and this call simply keeps the case active and decay retries on
-/// the refreshed deadline. Only cases carrying an operation origination link are eligible:
-/// institution-authored casework keeps its lifecycle until an explicit staff decision. A case whose
-/// evidence identified a concrete character is a real, actionable lead and is never auto-shelved.
+/// the refreshed deadline. Only cases carrying a case-origination link (an operation or enterprise
+/// whose exposure opened them) are eligible: institution-authored casework keeps its lifecycle
+/// until an explicit staff decision. A case whose evidence identified a concrete character is a
+/// real, actionable lead and is never auto-shelved.
 /// The owned authority keeps the sitting case history intact so a later operation exposure in the
 /// same jurisdiction can resume the same shelf rather than starting from silence.
 pub(crate) fn apply_cold_case_decay(
@@ -378,7 +381,7 @@ pub(crate) fn apply_cold_case_decay(
             .legal
             .get_investigation(investigation)
             .expect("cold-case candidate must still exist");
-        if record.origin_operation().is_none() {
+        if record.origin().is_none() {
             continue;
         }
         // An operation-originated case whose every identified subject is in custody is fully
@@ -905,7 +908,7 @@ impl ValidatedIncidentIntake {
             subjects,
             evidence: Default::default(),
             opened_at: state.now(),
-            origin_operation: self.draft.origin_operation,
+            origin: self.draft.origin,
             notified_organizations: self.draft.notified_organizations,
             last_activity_at: state.now(),
             version: 1,
@@ -988,11 +991,14 @@ fn validate_incident_intake_dependencies(
     if draft.evidence.is_empty() {
         return Err(InvestigationError::NoIncidentEvidence);
     }
-    if let Some(operation) = draft.origin_operation {
-        if !is_entity_present(state, EntityRef::Operation(operation)) {
-            return Err(InvestigationError::MissingEntity(EntityRef::Operation(
-                operation,
-            )));
+    if let Some(origin) = draft.origin {
+        // Only entities that can legitimately originate casework may carry the link; the
+        // vocabulary grows deliberately so hidden consumers never meet a surprise variant.
+        if !matches!(origin, EntityRef::Operation(_) | EntityRef::Enterprise(_)) {
+            return Err(InvestigationError::InvalidCaseOrigin(origin));
+        }
+        if !is_entity_present(state, origin) {
+            return Err(InvestigationError::MissingEntity(origin));
         }
     }
     for organization in &draft.notified_organizations {

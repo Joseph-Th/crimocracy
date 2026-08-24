@@ -14,6 +14,7 @@ use crate::economy::business_economy_system::{
 };
 use crate::enterprises::enterprise_execution::{
     decide_enterprise_cycle, find_due_enterprises, validate_enterprise_cycle_plan,
+    EnterpriseCycleRandomness,
 };
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
@@ -235,13 +236,23 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .get_enterprise(enterprise)
             .expect("due enterprise must exist")
             .kind();
-        let variance_limit = registry
-            .get_enterprise(kind)
-            .economics()
-            .gross_variance_basis_points();
-        let variance = draw_basis_point_variance(state.enterprise_rng_mut(), variance_limit);
-        let plan = decide_enterprise_cycle(registry, state, enterprise, variance)
-            .expect("due active enterprise must resolve a valid cycle plan");
+        let economics = registry.get_enterprise(kind).economics();
+        // Both draws happen unconditionally per due cycle so the enterprise stream consumes
+        // the same number of values whatever the district's case pressure turns out to be.
+        let variance = draw_basis_point_variance(
+            state.enterprise_rng_mut(),
+            economics.gross_variance_basis_points(),
+        );
+        let vice_attention_roll = draw_index(state.enterprise_rng_mut(), 10_000)
+            .map(|drawn| drawn as u16)
+            .unwrap_or(0);
+        let plan = decide_enterprise_cycle(
+            registry,
+            state,
+            enterprise,
+            EnterpriseCycleRandomness::new(variance, vice_attention_roll),
+        )
+        .expect("due active enterprise must resolve a valid cycle plan");
         let cycle = validate_enterprise_cycle_plan(state, plan)
             .expect("fresh enterprise cycle plan must validate")
             .commit(state)

@@ -734,11 +734,12 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (house fee {}, accounted balance {}), books refused {} over-capacity request(s)",
+        "        money: laundered {} gross through the front's books (house fee {}, accounted balance {}), books refused {} over-capacity request(s), vice inquiries drawn {}",
         optional_cents(Some(metrics.laundered_gross_cents)),
         optional_cents(Some(metrics.launder_fee_cents)),
         optional_cents(metrics.accounted_balance_cents),
         metrics.laundering_capacity_rejections,
+        metrics.vice_inquiries_drawn,
     );
     if metrics.win_back_attempted {
         println!(
@@ -978,6 +979,14 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         laundering_shown,
         "street earnings pass through an owned front's books into accounted funds, and the front's plausible-volume ceiling visibly caps how fast dirty money becomes clean",
     );
+    let any_vice = [rush, press, recon]
+        .iter()
+        .any(|run| run.vice_inquiries_drawn > 0);
+    print_loop_checkpoint(
+        "vice heat",
+        any_vice,
+        "sustained district casework can convert into a dedicated vice inquiry on a racket itself: visible expansion carries discovery risk, lying low (suspending) or diversifying districts are real counter-play, and the inquiry shelves like any other case when the institution goes quiet",
+    );
     println!("Observed decision leverage:");
     println!(
         "  - Information leverage: RECON selected {} planning item(s) versus RUSH's {} and finished as {} versus {}.",
@@ -1033,9 +1042,13 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
             + press.laundering_capacity_rejections
             + recon.laundering_capacity_rejections,
     );
+    println!(
+        "  - Visibility leverage: the branches drew {} vice inquiries this comparison. Every cycle a racket runs under active district casework risks a dedicated inquiry on the racket itself, taxing every book in that district — including rivals' — until the case shelves; going dark or moving districts are the honest counters.",
+        rush.vice_inquiries_drawn + press.vice_inquiries_drawn + recon.vice_inquiries_drawn,
+    );
     println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs (reported by the manager in-cycle) and reduces resale value in heavily patrolled districts. Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
+        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs, compounds across cases, and can escalate into a vice inquiry on the racket itself (reported by the manager in-cycle). Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."

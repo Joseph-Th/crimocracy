@@ -143,23 +143,25 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         true,
         true,
     )?;
-    println!("\n--- CONTROLLED SESSION: PRESS ---");
-    let press = play_session(
+    println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
+    let press = play_session_with_fixture_view(
         &registry,
         Strategy::Press,
         ScenarioProfile::NightTrap,
         seed,
         true,
         true,
+        false,
     )?;
-    println!("\n--- CONTROLLED SESSION: RECON ---");
-    let recon = play_session(
+    println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
+    let recon = play_session_with_fixture_view(
         &registry,
         Strategy::Recon,
         ScenarioProfile::NightTrap,
         seed,
         true,
         true,
+        false,
     )?;
 
     println!("\n--- SAME-SCENARIO READOUT ---");

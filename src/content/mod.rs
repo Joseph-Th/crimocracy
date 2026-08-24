@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 30;
+pub const CURRENT_CONTENT_REVISION: u32 = 31;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -454,6 +454,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(35),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 300,
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 600,
                 losing_cycles_before_suspension: 3,
@@ -475,6 +476,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(45),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 500,
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
@@ -499,6 +501,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(40),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 400,
                 gross_variance_basis_points: 1_800,
                 notable_variance_basis_points: 1_200,
                 losing_cycles_before_suspension: 3,
@@ -527,6 +530,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(40),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 450,
                 gross_variance_basis_points: 2_200,
                 notable_variance_basis_points: 1_400,
                 losing_cycles_before_suspension: 3,
@@ -552,6 +556,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(25),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 150,
                 gross_variance_basis_points: 700,
                 notable_variance_basis_points: 550,
                 losing_cycles_before_suspension: 3,
@@ -574,6 +579,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(30),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 100,
                 gross_variance_basis_points: 1_000,
                 notable_variance_basis_points: 750,
                 losing_cycles_before_suspension: 3,

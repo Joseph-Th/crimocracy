@@ -165,12 +165,18 @@ pub(super) struct EnterpriseCycleFinancials {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct EnterpriseCycleArtifacts {
     attention: AttentionClass,
+    /// Set when this settlement drew a vice inquiry onto the racket: sustained district
+    /// casework converted into a new police investigation owned by the intake authority.
+    drew_vice_attention: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct EnterpriseCycleProvenance {
     transaction: Option<LedgerTransactionId>,
     information: Option<InformationId>,
+    /// Organization-facing legal-activity knowledge created when this cycle drew a vice
+    /// inquiry; `None` whenever no inquiry was opened.
+    vice_information: Option<InformationId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,12 +225,20 @@ impl EnterpriseCycleRecord {
         self.artifacts.attention
     }
 
+    pub fn drew_vice_attention(&self) -> bool {
+        self.artifacts.drew_vice_attention
+    }
+
     pub fn transaction(&self) -> Option<LedgerTransactionId> {
         self.provenance.transaction
     }
 
     pub fn information(&self) -> Option<InformationId> {
         self.provenance.information
+    }
+
+    pub fn vice_information(&self) -> Option<InformationId> {
+        self.provenance.vice_information
     }
 }
 

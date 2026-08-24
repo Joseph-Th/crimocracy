@@ -425,6 +425,10 @@ pub struct EnterpriseEconomicsDefinition {
     pub(crate) support_surcharge_per_business: Money,
     /// Per-cycle cost per active investigation targeting the enterprise's neighborhood.
     pub(crate) heat_surcharge_per_active_case: Money,
+    /// Per-cycle chance, in basis points, that each active originated case targeting the
+    /// enterprise's neighborhood draws a vice inquiry onto this racket (5_000 = even odds
+    /// per cycle). Sustained institutional attention eventually finds visible street work.
+    pub(crate) vice_attention_basis_points_per_active_case: u16,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
     /// Consecutive net-losing cycles after which the enterprise's own governance suspends it.
@@ -460,6 +464,9 @@ impl EnterpriseEconomicsDefinition {
     }
     pub fn heat_surcharge_per_active_case(&self) -> Money {
         self.heat_surcharge_per_active_case
+    }
+    pub fn vice_attention_basis_points_per_active_case(&self) -> u16 {
+        self.vice_attention_basis_points_per_active_case
     }
     pub fn gross_variance_basis_points(&self) -> u16 {
         self.gross_variance_basis_points

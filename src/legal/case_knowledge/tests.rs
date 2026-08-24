@@ -1,4 +1,4 @@
-﻿//! Focused tests for investigator-held case-activity knowledge: emission on staffing and
+//! Focused tests for investigator-held case-activity knowledge: emission on staffing and
 //! cold-case shelving, sightline parsing, and canonical contact-channel disclosure.
 
 use super::*;
@@ -165,7 +165,7 @@ fn open_operation_case(state: &mut AppState) -> InvestigationId {
                 admissibility: Admissibility::Unknown,
                 discovered_at: state.now(),
             }],
-            origin_operation: Some(origin),
+            origin: Some(EntityRef::Operation(origin)),
             notified_organizations: BTreeSet::from([criminal]),
             witness: None,
         },

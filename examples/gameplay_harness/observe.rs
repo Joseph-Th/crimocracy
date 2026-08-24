@@ -35,6 +35,26 @@ pub fn observe_tick(
             );
         }
     }
+    // Vice-attention evidence is counted for every session regardless of narration: sustained
+    // district casework converting into an inquiry on a player-owned racket is a core
+    // consequence-loop signal, and batch aggregates track how often it lands.
+    for cycle_id in &outcome.enterprise_cycles {
+        let drew_vice = scenario
+            .state
+            .enterprises()
+            .get_cycle(*cycle_id)
+            .is_some_and(|cycle| {
+                cycle.drew_vice_attention()
+                    && scenario
+                        .state
+                        .enterprises()
+                        .get_enterprise(cycle.enterprise())
+                        .is_some_and(|record| record.organization() == scenario.player)
+            });
+        if drew_vice {
+            metrics.vice_inquiries_drawn += 1;
+        }
+    }
     if narrative {
         for operation in &outcome.started_operations {
             let record = scenario
@@ -419,6 +439,21 @@ pub fn observe_tick(
                 stamp(outcome.now.as_minutes()),
                 summary,
             );
+            // The inquiry itself is organization-held legal knowledge with its own provenance:
+            // the racket now has a dedicated case, and the organization knows that much only.
+            if let Some(vice_information) = cycle.vice_information() {
+                let vice_summary = scenario
+                    .state
+                    .intelligence()
+                    .get_information(vice_information)
+                    .map(|record| record.summary().to_owned())
+                    .unwrap_or_else(|| "vice-inquiry knowledge missing".to_owned());
+                println!(
+                    "[VICE HEAT]  {}: {}",
+                    stamp(outcome.now.as_minutes()),
+                    vice_summary,
+                );
+            }
         }
         if let Some(report) = outcome.executive_brief {
             let report = scenario

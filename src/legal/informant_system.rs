@@ -525,7 +525,7 @@ pub fn apply_informant_disclosures(
         if investigation.status() != InvestigationStatus::Active {
             continue;
         }
-        if let Some(origin) = investigation.origin_operation() {
+        if let Some(EntityRef::Operation(origin)) = investigation.origin() {
             cases_by_handler_origin
                 .entry(investigation.owner())
                 .or_default()

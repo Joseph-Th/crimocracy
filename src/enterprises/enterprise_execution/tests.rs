@@ -245,8 +245,13 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
 
-    let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
-        .expect("due enterprise cycle should resolve");
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("due enterprise cycle should resolve");
     assert_eq!(
         plan.net_cash(),
         plan.gross_revenue()
@@ -372,7 +377,7 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
                     admissibility: Admissibility::Unknown,
                     discovered_at: fixture.state.now(),
                 }],
-                origin_operation: Some(origin),
+                origin: Some(EntityRef::Operation(origin)),
                 notified_organizations: BTreeSet::from([fixture.organization]),
                 witness: None,
             },
@@ -385,8 +390,13 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));
-        let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
-            .expect("due enterprise cycle should resolve");
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect("due enterprise cycle should resolve");
         let (cost, heat, attention) = (
             plan.operating_cost(),
             plan.investigation_heat(),
@@ -523,7 +533,7 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
                     admissibility: Admissibility::Unknown,
                     discovered_at: fixture.state.now(),
                 }],
-                origin_operation: Some(origin),
+                origin: Some(EntityRef::Operation(origin)),
                 notified_organizations: BTreeSet::from([fixture.organization]),
                 witness: None,
             },
@@ -563,8 +573,13 @@ fn settle_cycle_inner(
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let plan = decide_enterprise_cycle(registry, &fixture.state, enterprise, 0)
-        .expect("due enterprise cycle should resolve");
+    let plan = decide_enterprise_cycle(
+        registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("due enterprise cycle should resolve");
     let attention = plan.attention();
     validate_enterprise_cycle_plan(&fixture.state, plan)
         .expect("cycle plan should validate")
@@ -853,8 +868,13 @@ fn alcohol_distribution_uses_owned_business_network_and_survives_save_before_cyc
     );
 
     restored.advance_clock(SimDuration::from_minutes(1_440));
-    let plan = decide_enterprise_cycle(&registry, &restored, enterprise, 0)
-        .expect("valid alcohol distribution network should resolve a due cycle");
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &restored,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("valid alcohol distribution network should resolve a due cycle");
     assert_eq!(
         plan.net_cash(),
         plan.gross_revenue()
@@ -1163,8 +1183,13 @@ fn stale_cycle_plan_cannot_commit_after_enterprise_lifecycle_change() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, 0)
-        .expect("cycle should resolve");
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("cycle should resolve");
     validate_suspend_enterprise(&fixture.state, enterprise)
         .expect("enterprise should suspend")
         .commit(&mut fixture.state)
@@ -1325,8 +1350,13 @@ fn financial_reporting_drills_down_without_cached_totals() {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));
-        let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, variance)
-            .expect("due cycle should resolve for reporting fixture");
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(variance, u16::MAX),
+        )
+        .expect("due cycle should resolve for reporting fixture");
         validate_enterprise_cycle_plan(&fixture.state, plan)
             .expect("reporting fixture cycle should validate")
             .commit(&mut fixture.state)
@@ -1811,8 +1841,13 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
     let mut last_information = None;
     for cycle_index in 0..threshold {
         state.advance_clock(SimDuration::from_minutes(1_440));
-        let plan = decide_enterprise_cycle(&registry, &state, enterprise, 0)
-            .expect("losing enterprise cycle should decide");
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect("losing enterprise cycle should decide");
         assert!(
             plan.net_cash().cents() < 0,
             "fixture must produce a losing settlement"
@@ -1871,8 +1906,13 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
     // re-suspend the racket on its first post-resume losing settlement.
     for cycle_index in 0..threshold {
         state.advance_clock(SimDuration::from_minutes(1_440));
-        let plan = decide_enterprise_cycle(&registry, &state, enterprise, 0)
-            .expect("post-resume losing cycle should decide");
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect("post-resume losing cycle should decide");
         assert!(plan.net_cash().cents() < 0);
         validate_enterprise_cycle_plan(&state, plan)
             .expect("post-resume losing plan should validate")
@@ -1990,4 +2030,285 @@ fn establishment_commit_rejects_a_host_venue_that_changed_after_validation() {
         "a rejected establishment leaves no record behind"
     );
     crate::core::invariants::validate_invariants(&fixture.state);
+}
+
+fn insert_district_police(
+    registry: &Registry,
+    fixture: &mut EnterpriseFixture,
+    name: &str,
+    neighborhood: crate::core::id::NeighborhoodId,
+) -> OrganizationId {
+    let police = insert_organization(
+        registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: name.to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    validate_set_jurisdiction(
+        &fixture.state,
+        JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([neighborhood]),
+            case_intake_priority: rating(80),
+        },
+    )
+    .expect("jurisdiction should validate")
+    .commit(&mut fixture.state)
+    .expect("jurisdiction should commit");
+    police
+}
+
+/// Opens an originated district case through canonical intake so the neighborhood carries
+/// active case pressure for the vice-attention rolls.
+fn open_district_pressure_case(
+    registry: &Registry,
+    fixture: &mut EnterpriseFixture,
+    police: OrganizationId,
+    title: &str,
+    neighborhood: crate::core::id::NeighborhoodId,
+) {
+    let manager = fixture.authority.manager;
+    let origin = validate_authorize_operation(
+        registry,
+        &fixture.state,
+        OperationDraft {
+            title: format!("{title} origin patrol"),
+            kind: OperationKind::Surveillance,
+            responsible_organization: fixture.organization,
+            leader: manager,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Neighborhood(neighborhood),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut fixture.state)
+    .expect("origin operation should commit");
+    validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([fixture.organization]),
+            witness: None,
+        },
+    )
+    .expect("pressure case intake should validate")
+    .commit(&mut fixture.state)
+    .expect("pressure case intake should commit");
+}
+
+fn find_vice_investigation(
+    fixture: &EnterpriseFixture,
+    police: OrganizationId,
+    enterprise: EnterpriseId,
+) -> Option<crate::legal::InvestigationRecord> {
+    fixture
+        .state
+        .legal
+        .investigations_for_owner(police)
+        .find(|investigation| investigation.origin() == Some(EntityRef::Enterprise(enterprise)))
+        .cloned()
+}
+
+#[test]
+fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let police = insert_district_police(&registry, &mut fixture, "Vice Ward Police", neighborhood);
+
+    // A clean district never draws attention even on the strongest visibility roll.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let clean_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("clean cycle plan should resolve");
+    assert_eq!(clean_plan.attention(), AttentionClass::Routine);
+    validate_enterprise_cycle_plan(&fixture.state, clean_plan)
+        .expect("clean cycle plan should validate")
+        .commit(&mut fixture.state)
+        .expect("clean cycle settlement should commit");
+    assert!(
+        find_vice_investigation(&fixture, police, enterprise).is_none(),
+        "a clean district must not fabricate a vice inquiry"
+    );
+
+    // Once originated casework targets the racket's district, a low visibility roll opens a
+    // vice inquiry onto the enterprise itself.
+    open_district_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        "Market ward heat",
+        neighborhood,
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let hot_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("hot cycle plan should resolve");
+    assert_eq!(hot_plan.attention(), AttentionClass::Notable);
+    validate_enterprise_cycle_plan(&fixture.state, hot_plan)
+        .expect("hot cycle plan should validate")
+        .commit(&mut fixture.state)
+        .expect("hot cycle settlement should commit");
+
+    let vice_case = find_vice_investigation(&fixture, police, enterprise)
+        .expect("the visibility roll must open a vice inquiry on the racket");
+    assert_eq!(
+        vice_case.status(),
+        crate::legal::InvestigationStatus::Active
+    );
+    assert!(
+        vice_case
+            .subjects()
+            .contains(&EntityRef::Enterprise(enterprise)),
+        "the inquiry targets the racket itself"
+    );
+    assert_eq!(
+        vice_case.notified_organizations(),
+        &BTreeSet::from([fixture.organization]),
+        "the owning organization is surfaced the case-open knowledge"
+    );
+
+    // The organization holds provenance-bearing legal knowledge about the inquiry.
+    let legal_knowledge = fixture
+        .state
+        .intelligence()
+        .information_for_holder(KnowledgeHolder::Organization(fixture.organization))
+        .find(|information| {
+            information.topic() == crate::intelligence::InformationTopic::LegalActivity
+                && information.subject() == EntityRef::Enterprise(enterprise)
+        })
+        .expect("vice inquiry must surface as organization-held legal knowledge");
+    assert!(
+        legal_knowledge.summary().contains("Vice") || legal_knowledge.summary().contains("vice")
+    );
+
+    // The next cycle pays compounded street heat: the pressure case and the new inquiry both
+    // tax the district while they stay open, and the changed cost is manager-report-worthy.
+    let pressure = settle_cycle_inner(&registry, &mut fixture, enterprise);
+    assert_eq!(pressure, AttentionClass::Notable);
+    let settled_cycle = fixture
+        .state
+        .enterprises()
+        .cycles_for(enterprise)
+        .max_by_key(|cycle| cycle.occurred_at())
+        .expect("compounded cycle should persist");
+    assert_eq!(
+        settled_cycle.investigation_heat(),
+        Money::from_cents(10_000),
+        "two active district cases must compound the authored surcharge"
+    );
+
+    validate_state(&fixture.state).expect("vice-attention state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let police = insert_district_police(&registry, &mut fixture, "Cold Ward Police", neighborhood);
+    open_district_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        "Market ward heat",
+        neighborhood,
+    );
+
+    // Draw the vice inquiry with the strongest roll alignment.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let hot_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("hot cycle plan should resolve");
+    validate_enterprise_cycle_plan(&fixture.state, hot_plan)
+        .expect("hot cycle plan should validate")
+        .commit(&mut fixture.state)
+        .expect("hot cycle settlement should commit");
+    assert!(find_vice_investigation(&fixture, police, enterprise).is_some());
+
+    // With no institutional activity, cold-case decay shelves every originated case in the
+    // district. The clock jumps past the authored inactivity window without settling further
+    // cycles, so the decay sees exactly the two cases opened above.
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().cold_case_window().as_minutes() + 1,
+    ));
+    crate::legal::investigation_system::apply_cold_case_decay(
+        &mut fixture.state,
+        registry.legal().cold_case_window(),
+    )
+    .expect("cold-case decay should resolve");
+    let shelved = find_vice_investigation(&fixture, police, enterprise)
+        .expect("the vice case record must persist after shelving");
+    assert_eq!(
+        shelved.status(),
+        crate::legal::InvestigationStatus::Suspended,
+        "an inactive vice inquiry must shelf like any other originated case"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let quiet_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("quiet cycle plan should resolve");
+    assert_eq!(
+        quiet_plan.investigation_heat(),
+        Money::ZERO,
+        "shelved casework must stop taxing the racket"
+    );
+    validate_state(&fixture.state).expect("post-decay state should validate");
+    validate_invariants(&fixture.state);
 }

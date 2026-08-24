@@ -1045,7 +1045,7 @@ fn validate_exposure_incident(
                 admissibility: Admissibility::Unknown,
                 discovered_at,
             }],
-            origin_operation: Some(operation.id()),
+            origin: Some(EntityRef::Operation(operation.id())),
             notified_organizations: BTreeSet::from([operation.responsible_organization()]),
             witness,
         },
@@ -1343,7 +1343,9 @@ pub(crate) fn resolve_investigation_target_neighborhoods(
     investigation: &crate::legal::InvestigationRecord,
 ) -> BTreeSet<NeighborhoodId> {
     let mut entities: Vec<EntityRef> = investigation.subjects().iter().copied().collect();
-    if let Some(origin) = investigation.origin_operation() {
+    // Operation-originated cases also target their objective's entities. Enterprise-originated
+    // cases already carry the racket as a subject, whose location maps to a neighborhood below.
+    if let Some(EntityRef::Operation(origin)) = investigation.origin() {
         if let Some(operation) = state.operations.get_operation(origin) {
             entities.extend(operation.objective().referenced_entities());
         }

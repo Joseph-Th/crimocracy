@@ -216,6 +216,28 @@ pub fn play_session(
     narrative: bool,
     continue_for_financial_day: bool,
 ) -> Result<RunMetrics, Box<dyn Error>> {
+    play_session_with_fixture_view(
+        registry,
+        strategy,
+        profile,
+        seed,
+        narrative,
+        continue_for_financial_day,
+        narrative,
+    )
+}
+
+/// `print_fixture_view` exists so a narrative comparison prints the shared authored fixture
+/// once instead of repeating it per strategy: the world is identical across matched branches.
+pub fn play_session_with_fixture_view(
+    registry: &Registry,
+    strategy: Strategy,
+    profile: ScenarioProfile,
+    seed: u64,
+    narrative: bool,
+    continue_for_financial_day: bool,
+    print_fixture_view: bool,
+) -> Result<RunMetrics, Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seed, profile)?;
     let mut metrics = RunMetrics {
         strategy: Some(strategy),
@@ -234,7 +256,7 @@ pub fn play_session(
     metrics.matched_financial_boundary_minute =
         Some(campaign_day_minutes * if narrative { 2 } else { 1 });
 
-    if narrative {
+    if narrative && print_fixture_view {
         println!(
             "[FIXTURE] {} authored variation selected by simulation seed.",
             scenario.variation.label(),

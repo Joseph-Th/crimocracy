@@ -791,18 +791,45 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                 investigation: investigation.id(),
             });
         }
-        let origin = investigation.origin_operation();
+        let origin = investigation.origin();
         match origin {
-            Some(operation) => {
-                let operation_record = state.operations.get_operation(operation).ok_or(
-                    StateValidationError::InvalidInvestigationActivity {
-                        investigation: investigation.id(),
-                    },
-                )?;
+            Some(origin_entity) => {
+                // The originating entity's organization must have been surfaced the case-open
+                // knowledge: an organization whose own activity opened a case always knows a
+                // case exists, even while the evidence graph stays hidden.
+                let responsible_organization = match origin_entity {
+                    EntityRef::Operation(operation) => state
+                        .operations
+                        .get_operation(operation)
+                        .ok_or(StateValidationError::InvalidInvestigationActivity {
+                            investigation: investigation.id(),
+                        })?
+                        .responsible_organization(),
+                    EntityRef::Enterprise(enterprise) => state
+                        .enterprises
+                        .get_enterprise(enterprise)
+                        .ok_or(StateValidationError::InvalidInvestigationActivity {
+                            investigation: investigation.id(),
+                        })?
+                        .organization(),
+                    EntityRef::Organization(_)
+                    | EntityRef::Character(_)
+                    | EntityRef::Neighborhood(_)
+                    | EntityRef::Business(_)
+                    | EntityRef::Investigation(_)
+                    | EntityRef::Evidence(_)
+                    | EntityRef::FinancialAccount(_)
+                    | EntityRef::DecisionRequest(_)
+                    | EntityRef::Mandate(_) => {
+                        return Err(StateValidationError::InvalidInvestigationActivity {
+                            investigation: investigation.id(),
+                        })
+                    }
+                };
                 if investigation.notified_organizations().is_empty()
                     || !investigation
                         .notified_organizations()
-                        .contains(&operation_record.responsible_organization())
+                        .contains(&responsible_organization)
                 {
                     return Err(StateValidationError::InvalidInvestigationActivity {
                         investigation: investigation.id(),
