@@ -32,11 +32,27 @@ bincode = "1.3.3"
 #   codegen-units = 16          ~+19s per rebuild
 #   codegen-units = 256         ~+50s per rebuild
 #   linker = "rust-lld"         ~+40s per test-binary link
+#   opt-level = 1 here          test rebuild 24s -> 49s: doubles the dominant
+#                               iteration cost for a ~10x faster harness run
+# The last one lost only because [profile.dev] owns the everyday edit loop;
+# the same setting wins outright for harness execution, which is why the
+# dedicated [profile.harness] below exists. Warm gameplay-harness full mode
+# (--samples 1): ~17s at opt-level 0 vs ~1.7s at opt-level 1, with identical
+# observable behavior (overflow checks stay on; integer semantics unchanged).
 [profile.dev]
 debug = false
 incremental = false
 codegen-units = 32
 overflow-checks = true
+
+# Harness execution profile: dev semantics (overflow checks, no debuginfo,
+# deterministic behavior) compiled at opt-level 1. Owned by the `harness*`
+# cargo aliases and the broad gate's full-mode stage; library iteration lanes
+# stay on [profile.dev]. Artifacts live in target/harness/, so switching
+# between editing and harness running never invalidates the other's cache.
+[profile.harness]
+inherits = "dev"
+opt-level = 1
 
 [lints.rust]
 unsafe_code = "forbid"

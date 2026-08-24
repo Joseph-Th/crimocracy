@@ -16,13 +16,15 @@ test-release = ["test", "--locked", "--release", "--quiet"]
 soak = ["test", "--locked", "--lib", "core::state::tests::test_mixed_scenario_soak_preserves_invariants", "--", "--exact", "--nocapture"]
 
 # ── gameplay harness ────────────────────────────────────────────────────────
-# Direct harness executions (human-readable narrative output). Use --quiet to keep output concise.
-harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
-harness-rush = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
-harness-press = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
-harness-recon = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
+# All harness execution uses [profile.harness] (dev semantics, opt-level 1):
+# warm runs are ~10x faster than the dev profile and library iteration caches
+# in target/debug are never disturbed. Use --quiet to keep output concise.
+harness = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness"]
+harness-rush = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
+harness-press = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
+harness-recon = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
 # Full controlled comparison (bounded, deterministic, artifact-persisting).
-harness-full = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
+harness-full = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
 
 [build]
 # Incremental compilation is disabled in [profile.dev] (measured slower than a

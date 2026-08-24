@@ -32,20 +32,20 @@ Fast iteration uses the cheapest lane that proves the change. Routine completion
 
 | Need | Command | Warm |
 | --- | --- | --- |
-| Type-check library | `cargo check-fast` | ~0.9s |
+| Type-check library | `cargo check-fast` | ~0.4s |
 | Type-check harness | `cargo check-harness` | ~1s |
 | One focused test | `cargo test-focused <filter>` | ~0.5s |
 | Fast lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | Auto-rerun on save | `.\scripts\watch.cmd [-Filter <pattern> \| -Harness \| -Check]` | per-run warm cost of the chosen lane |
-| Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~1s |
+| Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~0.15s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
-| Broad local gate | `.\scripts\verify.cmd` | ~5-20s |
+| Broad local gate | `.\scripts\verify.cmd` | ~5-10s |
 
-The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test-release`.
+The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1` on `[profile.harness]`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test-release`.
 
 ## Gameplay harness
 
-Bounded deterministic evaluation surface, not a human-play test.
+Bounded deterministic evaluation surface, not a human-play test. All harness commands execute on `[profile.harness]` (dev semantics, `opt-level = 1`), so warm runs are ~10x faster than dev-profile execution and never disturb library iteration caches.
 
 ```text
 cargo harness
@@ -55,4 +55,4 @@ cargo harness-full --samples 8
 cargo harness-full -- --samples 8 --artifact-dir target/my-run
 ```
 
-Smoke covers canonical strategies; full mode compares all strategies on matched seeds and writes per-run `target/harness/*.json` artifacts that preserve seeds and raw metrics. Acting policy uses only player-visible information and surfaced decisions. See [`TESTING.md`](TESTING.md) for modes and evidence rules.
+Smoke covers canonical strategies; full mode compares all strategies on matched seeds and writes per-run `target/harness-runs/*.json` artifacts that preserve seeds and raw metrics. Acting policy uses only player-visible information and surfaced decisions. See [`TESTING.md`](TESTING.md) for modes and evidence rules.

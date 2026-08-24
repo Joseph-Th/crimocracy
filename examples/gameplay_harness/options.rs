@@ -106,6 +106,11 @@ pub fn parse_options(
                 }
                 artifact_dir = Some(PathBuf::from(value));
             }
+            // Standard end-of-options marker. Cargo aliases like `harness-full` already
+            // carry their own `--`, so `cargo harness-full -- --samples 8` arrives here
+            // with a second marker; the harness takes no positional arguments, so any
+            // number of them is inert rather than an error.
+            "--" => {}
             _ => {
                 return Err(HarnessCliError::UnsupportedArgument { argument });
             }
@@ -136,5 +141,7 @@ pub fn print_usage() {
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
     println!("         --seed accepts 0xHEX or decimal; --flag=value form also supported.");
     println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
-    println!("         --artifact-dir writes per-run JSON artifacts (default: target/harness/).");
+    println!(
+        "         --artifact-dir writes per-run JSON artifacts (default: target/harness-runs/)."
+    );
 }

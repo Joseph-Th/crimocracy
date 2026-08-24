@@ -1,7 +1,7 @@
 # verify.ps1 -- local Crimocracy completion gate for a solo developer.
 #
 # Optimized for fast incremental iteration: cached warm runs are ~0.7-1.5s for the
-# fast lane and ~3-8s for the full gate, because all stages reuse artifacts and
+# fast lane and ~5-10s for the full gate, because all stages reuse artifacts and
 # avoid redundant rebuilds. A small library edit costs ~7-16s to re-check and
 # ~23-31s to rebuild+link tests (see Cargo.toml profile notes for measured tuning).
 # Cold builds are dominated by rustc.
@@ -14,8 +14,8 @@
 #   2. cargo test --locked --lib --tests --quiet   (lib + integration, excludes examples)
 #   3. cargo test --locked --quiet --example gameplay_harness --lib   (harness unit tests)
 #   4. cargo test --locked --quiet --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
-#   5. gameplay-harness full mode (--samples 1): exercises every narrative/probe contract
-#      that smoke mode does not cover, in seconds
+#   5. gameplay-harness full mode on [profile.harness] (--samples 1): exercises every
+#      narrative/probe contract that smoke mode does not cover, in seconds
 #   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
@@ -239,8 +239,9 @@ Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", 
 
 # Full mode exercises every narrative, probe, and cross-branch contract that smoke mode
 # skips; a single-sample run costs seconds and has caught contract drift the gate
-# previously could not see.
-Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1")
+# previously could not see. It runs on [profile.harness] (dev semantics, opt-level 1):
+# warm runtime ~1.7s vs ~17s at dev's opt-level 0.
+Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1")
 
 if ($NoClippy) {
     Write-Host "  clippy (lib+harness)        SKIP (--NoClippy)" -ForegroundColor Yellow

@@ -121,7 +121,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     debug_assert_eq!(mode, HarnessMode::Full);
     debug_assert!(strategy.is_none());
     let registry = build_registry();
-    let artifact_dir = artifact_dir.unwrap_or_else(|| PathBuf::from("target/harness"));
+    // Distinct from the [profile.harness] build directory `target/harness/`, so
+    // `cargo clean` can never delete persisted run evidence.
+    let artifact_dir = artifact_dir.unwrap_or_else(|| PathBuf::from("target/harness-runs"));
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
@@ -243,7 +245,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
 
     // Persist per-run seeds and raw metrics beneath aggregate diagnostics.
-    // Full mode always writes artifacts; the directory defaults to target/harness.
+    // Full mode always writes artifacts; the directory defaults to target/harness-runs.
     println!("\n--- ARTIFACTS ---");
     let narrative_runs = [(&rush, seed), (&press, seed), (&recon, seed)];
     for (metrics, run_seed) in narrative_runs {
@@ -403,6 +405,22 @@ mod tests {
             error,
             HarnessCliError::InvalidStrategy { value } if value == "reckon"
         ));
+    }
+
+    #[test]
+    fn tolerates_end_of_options_markers_from_cargo_aliases() {
+        // `cargo harness-full -- --samples 8` appends after the alias's own `--`,
+        // so the parser receives a second marker; it must stay inert.
+        let options = parse_options(
+            ["--", "--mode", "full", "--samples", "2", "--"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("end-of-options markers should not reject valid arguments")
+        .expect("non-help arguments should request a run");
+
+        assert_eq!(options.mode, HarnessMode::Full);
+        assert_eq!(options.samples, 2);
     }
 
     #[test]
