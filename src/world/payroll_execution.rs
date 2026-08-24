@@ -24,14 +24,14 @@ use crate::social::RelationshipDimensions;
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 
-/// One organization's resolved payroll run for a single campaign day.
+/// One organization's resolved payroll run for a single campaign day. Payroll is strictly
+/// all-or-nothing: a positive `short` means no member was paid that day.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayrollOutcome {
     organization: OrganizationId,
     owed: Money,
     paid: Money,
     short: Money,
-    unpaid_members: Vec<CharacterId>,
 }
 
 impl PayrollOutcome {
@@ -46,9 +46,6 @@ impl PayrollOutcome {
     }
     pub fn short(&self) -> Money {
         self.short
-    }
-    pub fn unpaid_members(&self) -> &[CharacterId] {
-        &self.unpaid_members
     }
 }
 
@@ -191,11 +188,6 @@ fn apply_organization_payroll(
         owed,
         paid,
         short,
-        unpaid_members: if short.cents() > 0 {
-            members.iter().map(|(member, _)| *member).collect()
-        } else {
-            Vec::new()
-        },
     };
     if short.cents() > 0 {
         apply_shortfall_consequences(registry, state, organization, &outcome, &members);

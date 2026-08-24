@@ -218,6 +218,70 @@ fn review_draft(fixture: &WorkFixture, evidence: EvidenceId) -> InvestigationWor
 }
 
 #[test]
+fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
+    // Regression: a completed interview produces a statement only when it connects, so a
+    // hostile witness facing an incapable investigator used to be re-scheduled forever,
+    // consuming institutional work and refreshing the case's cold-case clock each cycle.
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        0,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.first,
+            cooperation: crate::legal::WitnessCooperation::Hostile,
+        },
+    )
+    .expect("case witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness registration should commit");
+
+    let limit = u32::from(registry.legal().witness_interview_attempt_limit());
+    for attempt in 1..=limit {
+        let scheduled = apply_due_witness_interview_scheduling(&registry, &mut fixture.state)
+            .expect("interview scheduling pass should resolve");
+        assert_eq!(
+            scheduled.len(),
+            1,
+            "attempt {attempt} should schedule exactly one interview"
+        );
+        loop {
+            let outcome = run_tick(&registry, &mut fixture.state);
+            if !outcome.resolved_investigation_work.is_empty() {
+                break;
+            }
+        }
+    }
+
+    // The authored attempt budget is spent: the scheduling pass must propose nothing further,
+    // even with the witness still statementless and the case active.
+    let witness = fixture
+        .state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("case witness should persist");
+    assert_eq!(
+        u32::from(witness.interview_attempts()),
+        limit,
+        "every completed interview counts against the budget"
+    );
+    assert!(
+        apply_due_witness_interview_scheduling(&registry, &mut fixture.state)
+            .expect("exhausted scheduling pass should resolve")
+            .is_empty()
+    );
+    validate_state(&fixture.state).expect("capped interview state should validate");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("capped interview state should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn evidence_review_develops_case_owned_evidence_without_inventing_subjects() {
     let registry = build_registry();
     let mut fixture = make_fixture(

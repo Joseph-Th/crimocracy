@@ -78,6 +78,8 @@ pub enum InvestigationWorkError {
         expected: u32,
         found: u32,
     },
+    #[error("resolution context for investigation work {work} changed after resolution planning")]
+    StaleResolutionContext { work: InvestigationWorkId },
     #[error("investigation work resolution was planned at {expected:?}, but simulation time is now {found:?}")]
     StaleResolutionTime { expected: SimTime, found: SimTime },
     #[error("investigation work variance {variance} exceeds authored limit {limit}")]
@@ -698,10 +700,12 @@ pub(crate) fn resolve_improved_evidence_reliability(
     }
 }
 
-/// Builds the canonical statement an interview records. The testimony targets the character
-/// subject backed by the strongest evidence already in the case graph (minimum ID breaking
-/// strength ties), or the case's origin operation when no person has been tied to the case
-/// yet. Confidence is a deterministic function of the interview margin.
+/// Builds the canonical statement an interview records. The testimony targets, in order of
+/// preference: the character backed by the strongest evidence already in the case graph
+/// (minimum ID breaking strength ties), the case's origin operation when no person has been
+/// tied to the case yet, a character named as a case subject, and finally the lowest case
+/// subject of any kind so institution-authored cases without an operation origin still
+/// produce a connected statement. Confidence is a deterministic function of the margin.
 fn resolve_interview_statement_draft(
     state: &AppState,
     work: &InvestigationWorkRecord,
@@ -726,6 +730,13 @@ fn resolve_interview_statement_draft(
             investigation
                 .origin_operation()
                 .map(|operation: OperationId| EntityRef::Operation(operation))
+                .or_else(|| {
+                    investigation
+                        .subjects()
+                        .iter()
+                        .find(|subject| matches!(subject, EntityRef::Character(_)))
+                        .copied()
+                })
                 .or_else(|| investigation.subjects().iter().next().copied())
         })
         .ok_or(InvestigationWorkError::InvalidFocus)?;
@@ -783,12 +794,19 @@ pub fn apply_due_witness_interview_scheduling(
             .legal
             .case_witnesses_for_investigation(investigation_id)
             .filter(|witness| witness.statements().is_empty())
+            // A witness who has sat through the authored attempt limit without producing a
+            // statement stops consuming institutional work: further interviews are futile,
+            // and each one would otherwise keep the case's activity clock fresh forever.
+            .filter(|witness| {
+                witness.interview_attempts() < registry.legal().witness_interview_attempt_limit()
+            })
             .map(|witness| witness.id())
             .collect();
         for case_witness in witnesses {
             let focus = InvestigationWorkFocus::witness(case_witness);
-            // A pending scheduled interview covers this witness; a completed interview always
-            // produced a statement, which the candidate filter above already excludes.
+            // A pending scheduled interview covers this witness; a completed interview was
+            // counted against the witness's attempt budget above, so only witnesses with
+            // remaining attempts reach this point.
             if state
                 .legal
                 .scheduled_work_for_focus(
@@ -906,11 +924,10 @@ pub fn validate_investigation_work_resolution_plan(
         || plan.margin != expected_margin
         || plan.outcome != expected_outcome
     {
-        return Err(InvestigationWorkError::StaleWork {
-            work: plan.work,
-            expected: plan.expected_work_version,
-            found: work.version(),
-        });
+        // The recomputed factors/margin/outcome disagree with the plan even though the work
+        // record itself may be unchanged, so this reports context drift rather than a
+        // version mismatch.
+        return Err(InvestigationWorkError::StaleResolutionContext { work: plan.work });
     }
     // A connected interview will record a statement at commit; validate it now so commit
     // only re-checks staleness.
@@ -984,7 +1001,9 @@ fn validate_resolution_snapshot(
 }
 
 pub(crate) fn find_due_scheduled_investigation_work(state: &AppState) -> Vec<InvestigationWorkId> {
-    state.legal.due_investigation_work_at_or_before(state.now())
+    state
+        .legal
+        .find_investigation_work_due_at_or_before(state.now())
 }
 
 #[cfg(test)]

@@ -84,6 +84,7 @@ impl ValidatedCaseWitnessRegistration {
                 cooperation: self.draft.cooperation,
                 registered_at: state.now(),
                 statements: Default::default(),
+                interview_attempts: 0,
                 version: 1,
             },
             state.now(),

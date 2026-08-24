@@ -39,7 +39,9 @@ pub struct Registry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LegalConfigDefinition {
-    cold_case_window: SimDuration,
+    pub(super) cold_case_window: SimDuration,
+    pub(super) witness_interview_attempt_limit: u8,
+    pub(super) informant_decision_delay: SimDuration,
 }
 
 impl LegalConfigDefinition {
@@ -47,6 +49,17 @@ impl LegalConfigDefinition {
     /// last evidence/work activity before the owning authority deterministically shelves it.
     pub fn cold_case_window(self) -> SimDuration {
         self.cold_case_window
+    }
+
+    /// Completed interviews a case witness may sit through without producing a statement
+    /// before investigators stop scheduling further futile interviews.
+    pub fn witness_interview_attempt_limit(self) -> u8 {
+        self.witness_interview_attempt_limit
+    }
+
+    /// How long after detention a detainee faces their single informant-recruitment decision.
+    pub fn informant_decision_delay(self) -> SimDuration {
+        self.informant_decision_delay
     }
 }
 

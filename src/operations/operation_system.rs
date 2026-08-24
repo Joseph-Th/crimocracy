@@ -564,8 +564,8 @@ fn find_busy_participant(
             .operations
             .active_operations_for_organization(organization)
             .find(|operation| {
-                operation_uses_character(operation, *participant)
-                    && operation_window_overlaps(
+                has_operation_participant(operation, *participant)
+                    && has_overlapping_operation_window(
                         registry,
                         operation,
                         state.now(),
@@ -577,7 +577,7 @@ fn find_busy_participant(
     })
 }
 
-fn operation_uses_character(operation: &OperationRecord, character: CharacterId) -> bool {
+fn has_operation_participant(operation: &OperationRecord, character: CharacterId) -> bool {
     operation.leader() == character
         || operation
             .roles()
@@ -616,7 +616,7 @@ pub(crate) fn validate_operation_resume_participants(
             .active_operations_for_organization(record.responsible_organization())
             .find(|other| {
                 other.id() != operation_id
-                    && operation_uses_character(other, participant)
+                    && has_operation_participant(other, participant)
                     && match projected_operation_window(other, resumed_at) {
                         Some((start, end)) => window_start < end && start < shifted_due_at,
                         // Authorized and not yet begun: any start inside the resumed window
@@ -662,7 +662,7 @@ fn projected_operation_window(
     Some((start, end))
 }
 
-fn operation_window_overlaps(
+fn has_overlapping_operation_window(
     registry: &Registry,
     existing: &OperationRecord,
     now: SimTime,
@@ -1035,6 +1035,22 @@ pub(crate) fn has_missed_operation_deadline(state: &AppState, operation: Operati
         .is_some_and(|deadline| state.now() >= deadline)
 }
 
+/// True once the operation's completion deadline has fully passed, using the same strict
+/// comparison as the overdue-abort scan. An explicit leadership abort resolved on the deadline
+/// minute itself is an active choice rather than a missed deadline, so the decision path uses
+/// this form and records its `Decision` cause; the automatic scan still produces
+/// `DeadlineMissed` artifacts because it only fires strictly after the deadline.
+pub(crate) fn has_operation_deadline_fully_passed(
+    state: &AppState,
+    operation: OperationId,
+) -> bool {
+    state
+        .operations
+        .get_operation(operation)
+        .and_then(resolve_earliest_operation_deadline)
+        .is_some_and(|deadline| state.now() > deadline)
+}
+
 /// Operations whose completion deadline has fully passed without resolution. Begin clamps
 /// `resolution_due_at` to a binding deadline, so an in-progress operation is due to resolve on
 /// the deadline minute itself; the strict comparison lets that same-minute resolution win over
@@ -1218,6 +1234,23 @@ pub(crate) fn validate_begin_operation(
         if *deadline < resolution_due_at {
             resolution_due_at = *deadline;
         }
+    }
+    // Begin-time re-check of the authorization rule that a deadline must leave room for the
+    // crew to reach the entry milestone: a begin issued later than `scheduled_for` shrinks
+    // the approach window, and an entry milestone at or after resolution would resolve the
+    // operation before its modeled approach begins.
+    let earliest_resolution = state.now()
+        + registry
+            .get_operation(record.kind())
+            .execution()
+            .operation_entry_offset()
+            .unwrap_or(SimDuration::from_minutes(0));
+    if resolution_due_at <= earliest_resolution {
+        return Err(OperationError::DeadlineMissed {
+            operation,
+            deadline: resolution_due_at,
+            now: state.now(),
+        });
     }
     let police_response = decide_operation_police_response_start(registry, state, operation)
         .map_err(map_police_start_planning_error)?;

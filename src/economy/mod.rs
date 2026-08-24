@@ -175,12 +175,17 @@ impl EconomyState {
         self.cycles.get(&id)
     }
 
-    pub fn cycles_for(&self, business: BusinessId) -> impl Iterator<Item = &BusinessCycleRecord> {
+    pub fn cycles_for(
+        &self,
+        business: BusinessId,
+    ) -> impl DoubleEndedIterator<Item = &BusinessCycleRecord> {
+        // Cycle IDs are allocated sequentially, so index order is settlement order; the
+        // double-ended bound lets consumers scan only the newest history.
         self.cycles_by_business
             .get(&business)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.cycles.get(id))
+            .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
     }
 
     pub fn get_by_settlement_account(

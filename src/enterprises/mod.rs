@@ -1,5 +1,6 @@
 //! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement.
 
+pub mod autonomous_expansion;
 pub mod enterprise_execution;
 pub mod enterprise_reporting;
 
@@ -288,12 +289,14 @@ impl EnterpriseState {
     pub fn cycles_for(
         &self,
         enterprise: EnterpriseId,
-    ) -> impl Iterator<Item = &EnterpriseCycleRecord> {
+    ) -> impl DoubleEndedIterator<Item = &EnterpriseCycleRecord> {
+        // Cycle IDs are allocated sequentially, so index order is settlement order; the
+        // double-ended bound lets consumers scan only the newest history.
         self.cycles_by_enterprise
             .get(&enterprise)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.cycles.get(id))
+            .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
     }
 
     pub fn active_for_mandate(

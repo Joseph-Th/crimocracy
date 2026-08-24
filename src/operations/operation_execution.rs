@@ -76,6 +76,8 @@ pub(crate) enum OperationResolutionError {
     CashProceedsOverflow { operation: OperationId },
     #[error("operation {operation} cash-proceeds context changed after resolution planning")]
     StaleCashProceedsContext { operation: OperationId },
+    #[error("sabotage target economy for operation {operation} changed after resolution planning")]
+    StaleSabotageContext { operation: OperationId },
     #[error(
         "extraction operation {operation} targets character {character}, who is not in custody"
     )]
@@ -226,6 +228,9 @@ struct OperationResolutionOutcomePlan {
     property_proceeds_plan: PropertyProceedsPlan,
     cash_proceeds_plan: CashProceedsPlan,
     surveillance: Option<SurveillanceIntelligencePlan>,
+    /// Whether a sabotage objective faces an operating economy to damage. Decided once here
+    /// so the after-action narrative and the validated disruption effect cannot disagree.
+    targets_operating_economy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,6 +335,27 @@ pub(crate) fn decide_operation_resolution(
     };
     let execution_margin = resolve_execution_margin(execution, factors);
     let objective_outcome = resolve_objective_outcome(execution, execution_margin);
+    // The sabotage narrative must describe only disruption that will actually be committed:
+    // a target whose economy went suspended between authorization and now has nothing
+    // operating to damage, so both the summary clause and the validated effect key off this
+    // one decision.
+    let sabotage_target = match (record.kind(), record.objective()) {
+        (
+            OperationKind::Sabotage,
+            OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(business),
+            },
+        ) => Some(*business),
+        _ => None,
+    };
+    let targets_operating_economy = sabotage_target.is_some_and(|business| {
+        state
+            .economy
+            .get_business_economy(business)
+            .is_some_and(|economy| {
+                economy.status() == crate::economy::BusinessOperatingStatus::Active
+            })
+    });
     let exposure = resolve_exposure_plan(
         registry,
         state,
@@ -375,6 +401,7 @@ pub(crate) fn decide_operation_resolution(
         summary.push_str(&clause);
     }
     if objective_outcome != OperationObjectiveOutcome::Failed
+        && targets_operating_economy
         && matches!(
             (record.kind(), record.objective()),
             (
@@ -421,6 +448,7 @@ pub(crate) fn decide_operation_resolution(
             property_proceeds_plan,
             cash_proceeds_plan,
             surveillance,
+            targets_operating_economy,
         },
         narrative: OperationResolutionNarrative {
             summary,
@@ -452,6 +480,13 @@ struct IncidentAuthoritySnapshot {
 }
 
 impl ValidatedOperationResolution {
+    /// Commits the whole resolution atomically. Every fallible effect (custody release,
+    /// witness intimidation, sabotage disruption) is validated inside
+    /// [`validate_operation_resolution_plan`] and re-checks only its version token at commit;
+    /// canonical callers validate and commit within the same tick minute, so no intervening
+    /// mutation can invalidate those tokens. A tail-effect failure after the terminal record
+    /// would therefore signal caller misuse (holding a validated plan across ticks), not a
+    /// reachable pipeline state.
     pub(crate) fn commit(
         self,
         state: &mut AppState,
@@ -621,29 +656,36 @@ pub(crate) fn validate_operation_resolution_plan(
         });
     }
     // Extraction success frees the target through the canonical arrest-release path; the
-    // release is validated here so commit re-checks only staleness.
-    let detainee_release = match (record.objective(), plan.outcome.objective_outcome) {
-        (
-            crate::operations::OperationObjective::FreeDetainee { target },
-            OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial,
-        ) => {
-            let arrest = state.legal.active_arrest_for_character(*target).ok_or(
-                OperationResolutionError::MissingDetaineeArrest {
-                    operation: plan.snapshot.operation,
-                    character: *target,
-                },
-            )?;
-            Some(
-                crate::legal::arrest_system::validate_release_arrest(state, arrest.id()).map_err(
-                    |error| OperationResolutionError::DetaineeRelease {
-                        operation: plan.snapshot.operation,
-                        character: *target,
-                        error: error.to_string(),
-                    },
-                )?,
-            )
+    // release is validated here so commit re-checks only staleness. The nested match keeps
+    // every objective and outcome variant explicit, so a new objective can never silently
+    // skip the extraction-release effect.
+    let detainee_release = match record.objective() {
+        crate::operations::OperationObjective::FreeDetainee { target } => {
+            match plan.outcome.objective_outcome {
+                OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial => {
+                    let arrest = state.legal.active_arrest_for_character(*target).ok_or(
+                        OperationResolutionError::MissingDetaineeArrest {
+                            operation: plan.snapshot.operation,
+                            character: *target,
+                        },
+                    )?;
+                    Some(
+                        crate::legal::arrest_system::validate_release_arrest(state, arrest.id())
+                            .map_err(|error| OperationResolutionError::DetaineeRelease {
+                                operation: plan.snapshot.operation,
+                                character: *target,
+                                error: error.to_string(),
+                            })?,
+                    )
+                }
+                OperationObjectiveOutcome::Failed => None,
+            }
         }
-        _ => None,
+        crate::operations::OperationObjective::AcquireProperty { .. }
+        | crate::operations::OperationObjective::ObtainCash { .. }
+        | crate::operations::OperationObjective::Frighten { .. }
+        | crate::operations::OperationObjective::GatherInformation { .. }
+        | crate::operations::OperationObjective::DisruptBusiness { .. } => None,
     };
     let surveillance_information = match &plan.outcome.surveillance {
         Some(surveillance) => validate_surveillance_information(
@@ -786,7 +828,9 @@ pub(crate) fn validate_operation_resolution_plan(
     // validated here so commit re-checks only staleness. A target whose economy went
     // suspended (or disappeared) between authorization and resolution has nothing operating
     // to disrupt: the resolution proceeds without a damage effect rather than failing the
-    // whole validated settlement — a modeled degenerate outcome, never an aborted tick.
+    // whole validated settlement — a modeled degenerate outcome, never an aborted tick. The
+    // plan's own decision is re-derived so the after-action narrative can never claim
+    // disruption the committed state will not carry.
     let mut business_disruption = None;
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
         if let (
@@ -803,6 +847,11 @@ pub(crate) fn validate_operation_resolution_plan(
                     .is_some_and(|economy| {
                         economy.status() == crate::economy::BusinessOperatingStatus::Active
                     });
+            if economy_active != plan.outcome.targets_operating_economy {
+                return Err(OperationResolutionError::StaleSabotageContext {
+                    operation: plan.snapshot.operation,
+                });
+            }
             if economy_active {
                 business_disruption = Some(validate_disrupt_business_economy(
                     registry, state, *business,

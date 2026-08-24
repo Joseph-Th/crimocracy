@@ -78,6 +78,14 @@ pub enum BusinessEconomyError {
         "business cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleCycleTime { expected: SimTime, found: SimTime },
+    #[error(
+        "business disruption for business {business} was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleDisruptionTime {
+        business: BusinessId,
+        expected: SimTime,
+        found: SimTime,
+    },
     #[error(transparent)]
     Finance(#[from] FinanceError),
     #[error(transparent)]
@@ -183,15 +191,21 @@ pub struct BusinessCyclePlan {
 }
 
 impl BusinessCyclePlan {
+    // Test-only drill-down: production consumers read the committed cycle records, not the
+    // intermediate plan, so these accessors exist solely for focused assertions.
+    #[cfg(test)]
     pub fn gross_revenue(&self) -> Money {
         self.economics.gross_revenue
     }
+    #[cfg(test)]
     pub fn operating_cost(&self) -> Money {
         self.economics.operating_cost
     }
+    #[cfg(test)]
     pub fn net_cash(&self) -> Money {
         self.economics.net_cash
     }
+    #[cfg(test)]
     pub fn attention(&self) -> AttentionClass {
         self.economics.attention
     }
@@ -317,9 +331,15 @@ fn count_trailing_losing_cycles(state: &AppState, business: BusinessId, limit: u
         .economy
         .get_business_economy(business)
         .and_then(|economy| economy.loss_streak_anchor());
+    let newest_first: Vec<_> = state
+        .economy
+        .cycles_for(business)
+        .rev()
+        .take(usize::from(limit))
+        .collect();
     crate::finance::helpers::count_trailing_losing_cycles(
-        &state.economy.cycles_for(business).collect::<Vec<_>>(),
-        |cycle| (cycle.occurred_at(), cycle.id()),
+        &newest_first,
+        |cycle| cycle.occurred_at(),
         |cycle| cycle.net_cash(),
         anchor,
         limit,
@@ -799,10 +819,20 @@ pub struct ValidatedBusinessDisruption {
     business: BusinessId,
     expected_economy_version: u32,
     disrupted_through: SimTime,
+    /// The instant the horizon was measured from. Commit rejects a token held across a
+    /// clock advance, mirroring the cycle path's time-staleness convention.
+    expected_now: SimTime,
 }
 
 impl ValidatedBusinessDisruption {
     pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
+        if state.now() != self.expected_now {
+            return Err(BusinessEconomyError::StaleDisruptionTime {
+                business: self.business,
+                expected: self.expected_now,
+                found: state.now(),
+            });
+        }
         let economy = state
             .economy
             .get_business_economy(self.business)
@@ -838,6 +868,7 @@ pub fn validate_disrupt_business_economy(
         business,
         expected_economy_version: economy.version(),
         disrupted_through,
+        expected_now: state.now(),
     })
 }
 

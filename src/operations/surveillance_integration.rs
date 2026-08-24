@@ -438,6 +438,13 @@ fn resolve_target_snapshot(
                 .legal
                 .get_investigation(id)
                 .ok_or(SurveillanceError::MissingTarget(target))?;
+            // Privacy boundary for watching a specific known case: its public face — title,
+            // owning authority, lifecycle status, and visibly assigned personnel — is fair
+            // surveillance observation, exactly like watching any business or character. The
+            // evidence graph and named subjects are never read here. This deliberately
+            // differs from the organization sightline above, which summarizes an authority's
+            // whole (mostly hidden) caseload and therefore requires prior notification
+            // before it may claim any case-activity read at all.
             let owner = state
                 .world
                 .get_organization(investigation.owner())

@@ -152,7 +152,7 @@ impl ValidatedPropertyDisposition {
                 found: operation.version(),
             });
         }
-        validate_operation_property_state(operation)?;
+        resolve_disposable_property(operation)?;
         let organization = operation.responsible_organization();
         let venue = state
             .world
@@ -208,7 +208,7 @@ pub fn validate_dispose_property(
         .operations
         .get_operation(draft.operation)
         .ok_or(PropertyDispositionError::MissingOperation(draft.operation))?;
-    let proceeds = validate_operation_property_state(operation)?;
+    let proceeds = resolve_disposable_property(operation)?;
     let organization = operation.responsible_organization();
     let venue = state
         .world
@@ -303,7 +303,7 @@ pub fn validate_dispose_property(
     })
 }
 
-fn validate_operation_property_state(
+fn resolve_disposable_property(
     operation: &crate::operations::OperationRecord,
 ) -> Result<crate::operations::OperationPropertyProceedsRecord, PropertyDispositionError> {
     if operation.status() != OperationStatus::Completed {
@@ -462,7 +462,7 @@ pub fn validate_deposit_operation_cash(
         .operations
         .get_operation(draft.operation)
         .ok_or(PropertyDispositionError::MissingOperation(draft.operation))?;
-    let proceeds = validate_operation_cash_state(operation)?;
+    let proceeds = resolve_disposable_cash(operation)?;
     let organization = operation.responsible_organization();
     validate_accounts(
         state,
@@ -566,7 +566,7 @@ impl ValidatedCashDisposition {
                 found: operation.version(),
             });
         }
-        validate_operation_cash_state(operation)?;
+        resolve_disposable_cash(operation)?;
         if state.now() != self.deposited_at {
             return Err(PropertyDispositionError::StaleTime {
                 expected: self.deposited_at,
@@ -598,7 +598,7 @@ impl ValidatedCashDisposition {
     }
 }
 
-fn validate_operation_cash_state(
+fn resolve_disposable_cash(
     operation: &crate::operations::OperationRecord,
 ) -> Result<crate::operations::OperationCashProceedsRecord, PropertyDispositionError> {
     if operation.status() != OperationStatus::Completed {

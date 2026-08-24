@@ -232,28 +232,35 @@ pub(crate) fn apply_standing_feedback(
     }
     let mut summary = String::from("Word travels after the job:");
     for (index, shift) in shifts.iter().enumerate() {
-        // Produced pairs get hand-written prose; any future producer pair still reads as
-        // proper text through the exhaustive labels instead of leaking debug names.
-        let clause = match (shift.audience, shift.dimension, shift.delta > 0) {
-            (AudienceKind::Underworld, ReputationDimension::Competence, true) => {
-                " the underworld rates our competence higher".to_owned()
+        // Hand-written prose per produced pair where it adds nuance; every other pair reads
+        // as proper text through the exhaustive labels instead of leaking debug names.
+        let rising = shift.delta > 0;
+        let clause = match (shift.audience, shift.dimension) {
+            (AudienceKind::Underworld, ReputationDimension::Competence) => {
+                if rising {
+                    " the underworld rates our competence higher".to_owned()
+                } else {
+                    " the underworld rates our competence lower".to_owned()
+                }
             }
-            (AudienceKind::Underworld, ReputationDimension::Competence, false) => {
-                " the underworld rates our competence lower".to_owned()
+            (AudienceKind::Police, ReputationDimension::Fear) => {
+                if rising {
+                    " the police watch us more warily".to_owned()
+                } else {
+                    " police wariness toward us eases".to_owned()
+                }
             }
-            (AudienceKind::Police, ReputationDimension::Fear, true) => {
-                " the police watch us more warily".to_owned()
+            (AudienceKind::Businesses, ReputationDimension::Fear) => {
+                if rising {
+                    " business owners grow warier of us".to_owned()
+                } else {
+                    " business owners relax around us".to_owned()
+                }
             }
-            (AudienceKind::Police, ReputationDimension::Fear, false) => {
-                " police wariness toward us eases".to_owned()
-            }
-            (AudienceKind::Businesses, ReputationDimension::Fear, true) => {
-                " business owners grow warier of us".to_owned()
-            }
-            (AudienceKind::Businesses, ReputationDimension::Fear, false) => {
-                " business owners relax around us".to_owned()
-            }
-            (audience, dimension, rising) => format!(
+            // Exhaustive fallback: `audience_label` and `dimension_label` each match every
+            // variant of their enum, so adding an audience or dimension fails to compile
+            // here until its label is authored.
+            (audience, dimension) => format!(
                 " {} {} among {} {}",
                 dimension_label(dimension),
                 if rising { "rises" } else { "falls" },

@@ -13,6 +13,7 @@ use crate::delegation::delegation_system::{
     MandateRevisionDraft,
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises;
 use crate::enterprises::enterprise_reporting::{
     resolve_enterprise_financial_summary, resolve_neighborhood_enterprise_financial_summary,
     resolve_organization_enterprise_financial_summary,

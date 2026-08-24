@@ -258,7 +258,10 @@ impl LegalState {
             .get(&operation)
             .and_then(|id| self.police_responses.get(id))
     }
-    pub(crate) fn due_police_responses_at_or_before(&self, now: SimTime) -> Vec<PoliceResponseId> {
+    pub(crate) fn find_police_responses_due_at_or_before(
+        &self,
+        now: SimTime,
+    ) -> Vec<PoliceResponseId> {
         self.indexes
             .police_responses
             .dispatched_by_arrival_due
@@ -408,7 +411,7 @@ impl LegalState {
             .get(&(investigation, kind, focus))
             .and_then(|id| self.investigation_work.get(id))
     }
-    pub(crate) fn due_investigation_work_at_or_before(
+    pub(crate) fn find_investigation_work_due_at_or_before(
         &self,
         now: SimTime,
     ) -> Vec<InvestigationWorkId> {
@@ -592,10 +595,7 @@ impl LegalState {
             .insert(investigation_id);
     }
 
-    pub(crate) fn active_case_ids_with_last_activity_at_or_before(
-        &self,
-        at: SimTime,
-    ) -> Vec<InvestigationId> {
+    pub(crate) fn find_active_cases_inactive_since(&self, at: SimTime) -> Vec<InvestigationId> {
         let mut candidates = Vec::new();
         for (_, ids) in self
             .indexes
@@ -952,6 +952,24 @@ impl LegalState {
                 .investigation_work
                 .get_mut(&id)
                 .expect("validated investigation work disappeared before completion");
+            // Count a completed interview against its witness whether or not it produced a
+            // statement, so scheduling can stop retrying witnesses who never open up.
+            if record.kind() == InvestigationWorkKind::WitnessInterview {
+                if let Some(case_witness) = record.focus().witness_id() {
+                    let witness = self
+                        .case_witnesses
+                        .get_mut(&case_witness)
+                        .expect("validated interview focus must reference an existing witness");
+                    witness.interview_attempts = witness
+                        .interview_attempts
+                        .checked_add(1)
+                        .expect("witness interview attempt counter exhausted");
+                    witness.version = witness
+                        .version
+                        .checked_add(1)
+                        .expect("case witness version counter exhausted");
+                }
+            }
             record.runtime.status = InvestigationWorkStatus::Completed;
             record.runtime.resolution = Some(resolution);
             record.runtime.version = record

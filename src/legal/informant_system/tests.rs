@@ -469,9 +469,12 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     .expect("custody arrest should commit");
 
     fixture.state.advance_clock(SimDuration::from_minutes(
-        RECRUITMENT_DECISION_OFFSET_MINUTES as u32,
+        build_registry()
+            .legal()
+            .informant_decision_delay()
+            .as_minutes() as u32,
     ));
-    let recruited = apply_detainee_informant_recruitment(&mut fixture.state)
+    let recruited = apply_detainee_informant_recruitment(&build_registry(), &mut fixture.state)
         .expect("recruitment pass should resolve without aborting the tick");
     assert!(recruited.is_empty());
     assert_eq!(

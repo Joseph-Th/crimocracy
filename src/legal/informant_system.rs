@@ -13,6 +13,7 @@ use crate::legal::{
     InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
     InvestigationStatus,
 };
+use crate::registry::Registry;
 use crate::world::OrganizationKind;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -416,11 +417,11 @@ pub(crate) const fn informant_reliability(reliability: Reliability) -> EvidenceR
 }
 
 /// A detained member gets exactly one recruitment decision, one authored cadence after the
-/// arrest. No extra per-arrest state is needed: the decision instant is a pure function of
-/// `arrested_at`, and the single draw consumes the state-owned investigation stream. The
-/// equality below relies on the canonical tick advancing exactly one simulated minute per
-/// call (`core::simulation::run_tick`); no adapter may fast-forward across minutes.
-pub(crate) const RECRUITMENT_DECISION_OFFSET_MINUTES: u64 = 1_440;
+/// arrest (read from the registry's legal configuration). No extra per-arrest state is
+/// needed: the decision instant is a pure function of `arrested_at`, and the single draw
+/// consumes the state-owned investigation stream. The equality below relies on the canonical
+/// tick advancing exactly one simulated minute per call (`core::simulation::run_tick`); no
+/// adapter may fast-forward across minutes.
 /// Base flip chance in percent; fear of prison (the character's Safety drive) adds up to
 /// 50 points on top.
 const BASE_FLIP_CHANCE_PERCENT: u32 = 25;
@@ -429,10 +430,12 @@ const BASE_FLIP_CHANCE_PERCENT: u32 = 25;
 /// draw per detained criminal member, one cadence window after their arrest. Members with
 /// something personal to hide behind stay quiet; scared ones talk.
 pub fn apply_detainee_informant_recruitment(
+    registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<InformantId>, InformantError> {
     use crate::world::OrganizationKind as OrgKind;
 
+    let decision_delay = registry.legal().informant_decision_delay().as_minutes();
     let now = state.now();
     let candidates: Vec<(CharacterId, OrganizationId)> = state
         .legal
@@ -468,8 +471,7 @@ pub fn apply_detainee_informant_recruitment(
             // minute per tick and this pass runs every tick: each detention reaches its
             // decision minute under observation exactly once. A batched or skipped pass
             // would need a persisted decided-marker instead.
-            (minutes_in_custody == RECRUITMENT_DECISION_OFFSET_MINUTES)
-                .then_some((character, handler))
+            (minutes_in_custody == u64::from(decision_delay)).then_some((character, handler))
         })
         .collect();
 

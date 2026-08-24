@@ -332,6 +332,18 @@ fn validate_investigation_transition_dependencies(
                     *investigator_id,
                 ));
             }
+            // Resuming re-applies the one-active-case rule: an investigator who took a
+            // different active case while this one was suspended cannot hold both, exactly as
+            // fresh assignment would refuse them.
+            if state
+                .legal
+                .active_investigation_for_investigator(*investigator_id)
+                .is_some_and(|active| active.id() != investigation_id)
+            {
+                return Err(InvestigationError::InvestigatorAtCaseCapacity {
+                    investigator: *investigator_id,
+                });
+            }
         }
     }
     Ok(())
@@ -358,7 +370,7 @@ pub(crate) fn apply_cold_case_decay(
         .saturating_sub(u64::from(cold_case_window.as_minutes()));
     let candidates = state
         .legal
-        .active_case_ids_with_last_activity_at_or_before(SimTime::from_minutes(threshold_minutes));
+        .find_active_cases_inactive_since(SimTime::from_minutes(threshold_minutes));
     let mut suspended = Vec::new();
     let mut closed = Vec::new();
     for investigation in candidates {
@@ -869,7 +881,10 @@ impl ValidatedIncidentIntake {
         self.draft.witness.is_some()
     }
 
-    pub fn commit(self, state: &mut AppState) -> Result<IncidentIntakeOutcome, InvestigationError> {
+    pub fn commit(
+        mut self,
+        state: &mut AppState,
+    ) -> Result<IncidentIntakeOutcome, InvestigationError> {
         validate_incident_intake_dependencies(state, &self.draft)?;
         state.ids.reserve_many(&[
             (IdKind::Investigation, 1),
@@ -877,6 +892,9 @@ impl ValidatedIncidentIntake {
             (IdKind::CaseWitness, u32::from(self.draft.witness.is_some())),
         ])?;
         let investigation = state.ids.next_investigation()?;
+        // The draft is consumed by this commit, so its subject set moves into the record
+        // instead of being cloned.
+        let subjects = std::mem::take(&mut self.draft.subjects);
         state.legal.insert_investigation(InvestigationRecord {
             id: investigation,
             owner: self.draft.owner,
@@ -884,7 +902,7 @@ impl ValidatedIncidentIntake {
             status: InvestigationStatus::Active,
             lead_investigator: None,
             assigned_investigators: Default::default(),
-            subjects: self.draft.subjects.clone(),
+            subjects,
             evidence: Default::default(),
             opened_at: state.now(),
             origin_operation: self.draft.origin_operation,
@@ -902,6 +920,7 @@ impl ValidatedIncidentIntake {
                     cooperation: witness.cooperation,
                     registered_at: state.now(),
                     statements: Default::default(),
+                    interview_attempts: 0,
                     version: 1,
                 },
                 state.now(),

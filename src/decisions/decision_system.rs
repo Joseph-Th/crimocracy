@@ -19,7 +19,7 @@ use crate::delegation::delegation_system::{
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
 use crate::operations::operation_system::{
-    has_missed_operation_deadline, validate_deadline_missed_operation,
+    has_operation_deadline_fully_passed, validate_deadline_missed_operation,
     validate_decision_abort_operation, validate_police_arrival_abort_if_applicable, OperationError,
     ValidatedOperationAbort,
 };
@@ -676,8 +676,10 @@ pub fn validate_resolve_decision(
                 )?;
             }
             let abort = match response {
+                // A leadership abort on the deadline minute itself is a choice, not a missed
+                // deadline: only an abort strictly after the deadline records `DeadlineMissed`.
                 DecisionResponse::Abort => Some(Box::new(
-                    if has_missed_operation_deadline(state, operation) {
+                    if has_operation_deadline_fully_passed(state, operation) {
                         validate_deadline_missed_operation(state, operation)?
                     } else {
                         validate_decision_abort_operation(state, operation, decision)?

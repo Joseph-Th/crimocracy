@@ -145,7 +145,6 @@ fn funded_payroll_moves_wages_into_member_pockets() {
             .expect("two-member payroll must fit money"),
         "boss and soldier are both paid members"
     );
-    assert!(outcome.unpaid_members().is_empty());
 
     // The soldier's pocket was created and funded; the treasury paid both wages.
     let pocket = fixture
@@ -198,8 +197,6 @@ fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
         .expect("a staffed criminal organization must run payroll");
     assert_eq!(outcome.paid(), Money::ZERO);
     assert_eq!(outcome.short(), outcome.owed());
-    // Every member went unpaid, boss included (the boss simply has no supervisor to resent).
-    assert_eq!(outcome.unpaid_members(), [fixture.boss, fixture.member]);
 
     // The unpaid member resents their supervisor through the canonical relationship path.
     let relationship = fixture

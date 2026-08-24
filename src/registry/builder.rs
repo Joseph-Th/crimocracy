@@ -4,7 +4,6 @@
 use super::definitions::*;
 use super::{LegalConfigDefinition, Registry};
 use crate::core::attention::AttentionClass;
-use crate::core::time::SimDuration;
 use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
 use crate::legal::{InvestigationWorkKind, ALL_INVESTIGATION_WORK_KINDS};
 use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
@@ -160,6 +159,10 @@ pub(crate) enum RegistryBuildError {
     DuplicateLegalConfig,
     #[error("legal cold-case window must be positive")]
     InvalidLegalColdWindow,
+    #[error("legal witness-interview attempt limit must be positive")]
+    InvalidLegalInterviewLimit,
+    #[error("legal informant decision delay must be positive")]
+    InvalidLegalInformantDelay,
     #[error("missing upkeep configuration definition")]
     MissingUpkeepConfig,
     #[error("duplicate upkeep configuration definition")]
@@ -258,15 +261,25 @@ impl RegistryBuilder {
     }
     pub(crate) fn register_legal(
         &mut self,
-        cold_case_window: SimDuration,
+        spec: LegalConfigSpec,
     ) -> Result<(), RegistryBuildError> {
         if self.legal.is_some() {
             return Err(RegistryBuildError::DuplicateLegalConfig);
         }
-        if cold_case_window.as_minutes() == 0 {
+        if spec.cold_case_window.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidLegalColdWindow);
         }
-        self.legal = Some(LegalConfigDefinition { cold_case_window });
+        if spec.witness_interview_attempt_limit == 0 {
+            return Err(RegistryBuildError::InvalidLegalInterviewLimit);
+        }
+        if spec.informant_decision_delay.as_minutes() == 0 {
+            return Err(RegistryBuildError::InvalidLegalInformantDelay);
+        }
+        self.legal = Some(LegalConfigDefinition {
+            cold_case_window: spec.cold_case_window,
+            witness_interview_attempt_limit: spec.witness_interview_attempt_limit,
+            informant_decision_delay: spec.informant_decision_delay,
+        });
         Ok(())
     }
     pub(crate) fn register_upkeep(

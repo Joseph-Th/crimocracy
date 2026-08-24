@@ -18,7 +18,6 @@ use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{InformationDraft, InformationTopic};
-use crate::legal::informant_system::RECRUITMENT_DECISION_OFFSET_MINUTES;
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
 use crate::legal::patrol_system::{
@@ -521,6 +520,64 @@ fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() 
     validate_state(&state).expect("sabotage resolution state should validate");
     validate_state_against_registry(&registry, &state)
         .expect("sabotage intake evidence should match the authored exposure kind");
+    validate_invariants(&state);
+}
+
+#[test]
+fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
+    // Regression: a target whose economy went suspended between authorization and resolution
+    // has nothing operating to disrupt, yet the after-action narrative unconditionally
+    // claimed disruption. The summary and the committed effect must agree.
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Sabotage, false, Vec::new());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized sabotage should persist");
+    let business = match record.objective() {
+        OperationObjective::DisruptBusiness {
+            target: EntityRef::Business(business),
+        } => *business,
+        objective => unreachable!("sabotage fixture must target a business: {objective:?}"),
+    };
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("an active target economy should suspend")
+        .commit(&mut state)
+        .expect("target economy suspension should commit");
+    run_tick(&registry, &mut state);
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.resolved_operations.is_empty() {
+            break;
+        }
+    }
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("resolved sabotage should persist");
+    let resolution = record
+        .resolution()
+        .expect("completed operation should persist its resolution");
+    let summary = state
+        .reports()
+        .get_report(resolution.after_action_report())
+        .expect("after-action report should persist")
+        .entries()[0]
+        .summary
+        .clone();
+    assert!(
+        !summary.contains(crate::operations::operation_economics::SABOTAGE_DISRUPTION_CLAUSE),
+        "a suspended target cannot be disrupted, so the after-action must not claim it: {summary}"
+    );
+    let economy = state
+        .economy()
+        .get_business_economy(business)
+        .expect("target economy should persist");
+    assert!(
+        economy.disrupted_through().is_none(),
+        "no disruption may be committed against a suspended economy"
+    );
+    validate_state(&state).expect("suspended-target sabotage state should validate");
     validate_invariants(&state);
 }
 
@@ -1751,8 +1808,8 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     // personally knows how their crew's job ended (every participant holds that
     // after-action knowledge), so the same pipeline pass discloses it into the
     // handler's case about that operation as InformantStatement evidence.
-    let decision_minute =
-        arrest_record.arrested_at().as_minutes() + RECRUITMENT_DECISION_OFFSET_MINUTES;
+    let decision_minute = arrest_record.arrested_at().as_minutes()
+        + u64::from(registry.legal().informant_decision_delay().as_minutes());
     loop {
         let outcome = run_tick(&registry, &mut state);
         let flipped = state

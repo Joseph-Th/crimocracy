@@ -235,6 +235,20 @@ impl FinanceState {
         );
     }
 
+    /// Removes an untouched account and its owner-index entry atomically. Callers must
+    /// guarantee the account carries no value or history (`finance_system::
+    /// remove_unused_account` is the guarded canonical path).
+    pub(crate) fn remove_account(&mut self, id: FinancialAccountId) {
+        if let Some(record) = self.accounts.remove(&id) {
+            if let Some(ids) = self.accounts_by_owner.get_mut(&record.owner()) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.accounts_by_owner.remove(&record.owner());
+                }
+            }
+        }
+    }
+
     pub(crate) fn apply_transaction(
         &mut self,
         record: LedgerTransactionRecord,

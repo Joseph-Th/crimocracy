@@ -190,7 +190,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // exactly one cadence window ago faces their single recruitment decision this minute, and
     // active informants disclose personally-held knowledge into their handler's cases.
     let informant_recruitments =
-        crate::legal::informant_system::apply_detainee_informant_recruitment(state)
+        crate::legal::informant_system::apply_detainee_informant_recruitment(registry, state)
             .expect("valid state should resolve detainee informant recruitment decisions");
     let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
         .expect("valid state should record due informant disclosures");
@@ -257,7 +257,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // minute governs with its current roster. Selection consumes no randomness, so matched
     // branches observe identical rival growth unless their own actions touched rival state.
     let autonomous_enterprises =
-        crate::enterprises::enterprise_execution::apply_due_autonomous_enterprises(registry, state);
+        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state);
     // Reputation consequences run after payroll, recruitment, and delegated expansion —
     // earlier in the same tick deliberately reads pre-consequence competence — but before
     // the daily decay pass so fresh adjustments are never immediately eroded. The player

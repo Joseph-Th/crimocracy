@@ -1,4 +1,4 @@
-﻿//! Operation-facing police dispatch planning and deterministic response-arrival processing.
+//! Operation-facing police dispatch planning and deterministic response-arrival processing.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{OperationId, PoliceResponseId};
@@ -17,9 +17,8 @@ use crate::intelligence::{
 use crate::legal::jurisdiction_system::resolve_police_response_authority;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
 use crate::legal::police_response_system::{
-    due_dispatched_police_responses, validate_dispatch_police_response,
-    validate_police_response_arrival, PoliceResponseDispatchDraft, PoliceResponseError,
-    ValidatedPoliceResponseDispatch,
+    find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
+    PoliceResponseDispatchDraft, PoliceResponseError, ValidatedPoliceResponseDispatch,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::operation_system::{
@@ -139,7 +138,7 @@ pub(crate) fn decide_operation_police_response_start(
 pub(crate) fn apply_due_police_response_arrivals(
     state: &mut AppState,
 ) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
-    let due = due_dispatched_police_responses(state);
+    let due = find_due_police_responses(state);
     let mut arrived = Vec::with_capacity(due.len());
     let mut decisions = Vec::new();
     for response_id in due {

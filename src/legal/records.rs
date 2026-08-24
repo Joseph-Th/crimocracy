@@ -722,6 +722,9 @@ pub struct CaseWitnessRecord {
     pub(super) cooperation: WitnessCooperation,
     pub(super) registered_at: SimTime,
     pub(super) statements: BTreeSet<WitnessStatementId>,
+    /// Completed interviews this witness has sat through, counted whether or not any
+    /// produced a statement. Caps futile re-interviews of witnesses who never open up.
+    pub(super) interview_attempts: u8,
     pub(super) version: u32,
 }
 
@@ -748,6 +751,10 @@ impl CaseWitnessRecord {
 
     pub fn statements(&self) -> &BTreeSet<WitnessStatementId> {
         &self.statements
+    }
+
+    pub fn interview_attempts(&self) -> u8 {
+        self.interview_attempts
     }
 
     pub fn version(&self) -> u32 {

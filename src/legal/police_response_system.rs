@@ -302,6 +302,8 @@ fn validate_arrival_dependencies(
     Ok(())
 }
 
-pub(crate) fn due_dispatched_police_responses(state: &AppState) -> Vec<PoliceResponseId> {
-    state.legal.due_police_responses_at_or_before(state.now())
+pub(crate) fn find_due_police_responses(state: &AppState) -> Vec<PoliceResponseId> {
+    state
+        .legal
+        .find_police_responses_due_at_or_before(state.now())
 }

@@ -95,6 +95,30 @@ pub fn insert_account(
     Ok(id)
 }
 
+/// Removes an account that a rejected multi-record operation had just reserved, so a
+/// rejection leaves authoritative state unchanged. Only an untouched account qualifies —
+/// zero balance and no ledger postings — so removal can never orphan value or history.
+/// Returns false (leaving state unchanged) when the account does not exist or has been used.
+pub(crate) fn remove_unused_account(state: &mut AppState, account: FinancialAccountId) -> bool {
+    let Some(record) = state.finance.get_account(account) else {
+        return false;
+    };
+    if record.balance() != Money::ZERO {
+        return false;
+    }
+    let referenced = state.finance.transactions().any(|transaction| {
+        transaction
+            .postings()
+            .iter()
+            .any(|posting| posting.account == account)
+    });
+    if referenced {
+        return false;
+    }
+    state.finance.remove_account(account);
+    true
+}
+
 pub struct ValidatedLedgerTransaction {
     draft: LedgerTransactionDraft,
     balances: BTreeMap<FinancialAccountId, Money>,

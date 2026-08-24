@@ -12,8 +12,8 @@ use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessDisruptionSpec, BusinessEconomicsDefinition, EnterpriseEconomicsDefinition,
     ExecutiveBriefDefinitionSpec, InvestigationWorkDefinitionSpec, LaunderingConfigSpec,
-    OperationCashProceedsDefinition, OperationDifficultyDefinition, OperationExecutionDefinition,
-    OperationExposureDefinition, OperationIntelligenceDefinition,
+    LegalConfigSpec, OperationCashProceedsDefinition, OperationDifficultyDefinition,
+    OperationExecutionDefinition, OperationExposureDefinition, OperationIntelligenceDefinition,
     OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
     RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
     RecruitmentInformationQualityDefinition, RecruitmentRelationshipDefinition,
@@ -27,7 +27,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 29;
+pub const CURRENT_CONTENT_REVISION: u32 = 30;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -52,7 +52,17 @@ pub fn build_registry() -> Registry {
     }
     register_recruitment(&mut builder);
     builder
-        .register_legal(SimDuration::from_minutes(10_080))
+        .register_legal(LegalConfigSpec {
+            // Ten campaign days of institutional inactivity before an operation-originated
+            // case is deterministically shelved.
+            cold_case_window: SimDuration::from_minutes(10_080),
+            // Three statementless interviews and investigators stop retrying a witness:
+            // enough for a reluctant witness to open up, few enough that a hostile one
+            // cannot stall a case forever.
+            witness_interview_attempt_limit: 3,
+            // One custody day before a detainee faces their informant-recruitment decision.
+            informant_decision_delay: SimDuration::from_minutes(1_440),
+        })
         .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);
     let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();

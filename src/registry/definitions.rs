@@ -563,6 +563,17 @@ impl ExecutiveBriefDefinition {
     }
 }
 #[derive(Clone, Copy, Debug)]
+pub struct LegalConfigSpec {
+    /// How long an operation-originated investigation remains institutionally active after
+    /// its last evidence/work activity before deterministic shelving.
+    pub cold_case_window: SimDuration,
+    /// How many completed interviews a case witness may sit through without producing a
+    /// statement before investigators stop scheduling further futile interviews.
+    pub witness_interview_attempt_limit: u8,
+    /// How long after detention a detainee faces their single informant-recruitment decision.
+    pub informant_decision_delay: SimDuration,
+}
+#[derive(Clone, Copy, Debug)]
 pub struct UpkeepConfigSpec {
     pub per_member_daily: Money,
     /// Resentment increment applied to each unpaid member's relationship toward their

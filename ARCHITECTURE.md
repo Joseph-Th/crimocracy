@@ -44,7 +44,7 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `opportunities/` | Provenance-backed opportunities with lifecycle | `opportunity_system` |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` |
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` |
-| `enterprises/` | Routine criminal enterprises and cycle history; delegated daily expansion for non-player organizations through canonical establishment | `enterprise_execution` (lifecycle/settlement/`apply_due_autonomous_enterprises`), `enterprise_reporting` (read-only) |
+| `enterprises/` | Routine criminal enterprises and cycle history; delegated daily expansion for non-player organizations through canonical establishment | `enterprise_execution` (lifecycle/settlement), `autonomous_expansion` (daily delegated expansion), `enterprise_reporting` (read-only) |
 | `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension | `business_economy_system` (establishment/settlement/disruption/suspension), `business_reporting` (read-only) |
 | `legal/` | Jurisdictions, patrols, investigations/evidence, arrests/custody, representation, prosecution, witnesses, informants, police response, investigator-held case knowledge | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, …) via `legal_state`; `case_knowledge` records lead-investigator activity knowledge through `intelligence_system` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) |

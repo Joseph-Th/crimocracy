@@ -764,8 +764,10 @@ pub fn apply_automatic_legal_support(
     use crate::world::{OrganizationKind as OrgKind, PolicyKind, PolicySetting};
 
     // Automatic support concludes when the matter it covers does: a representation this pass
-    // retained for a detainee who has left custody ends with `MatterConcluded`, freeing the
-    // Legal contact for the next matter instead of locking it for the rest of the campaign.
+    // retained for a detainee who has left custody ends with `MatterConcluded`, so concluded
+    // matters stop blocking contact termination. A contact may carry several concurrent
+    // matters — counsel serves multiple clients — but it cannot be terminated while any of
+    // them is still active.
     // Explicitly commanded retentions are never swept here — their matter is leadership's
     // to end, not governance's.
     let concluded: Vec<LegalRepresentationId> = state

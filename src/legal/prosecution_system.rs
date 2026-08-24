@@ -244,6 +244,9 @@ fn validate_opening_dependencies(
         .legal
         .get_arrest(draft.arrest)
         .ok_or(ProsecutionError::MissingArrest(draft.arrest))?;
+    // Custody status is deliberately not checked here: charges may be referred after a
+    // defendant's release, and the representation/custody sweeps elsewhere key off custody,
+    // not off prosecution activity. The arrest record itself is the case's factual anchor.
     // The defendant is the subject of every artifact this case produces; opening a case against
     // an inactive person would assert the office reviewed someone who no longer exists.
     let _ = state

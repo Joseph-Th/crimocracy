@@ -292,6 +292,9 @@ impl RecruitmentState {
         self.records.get(&id)
     }
 
+    // Test-only drill-down: production consumers use `latest_attempt_for` and the cooldown
+    // indexes, so this scan exists solely for focused assertions.
+    #[cfg(test)]
     pub fn attempts_for_candidate(
         &self,
         candidate: CharacterId,

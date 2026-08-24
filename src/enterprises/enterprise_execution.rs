@@ -4,7 +4,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, CharacterId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
-    IdExhaustionError, IdKind, NeighborhoodId, OrganizationId,
+    IdExhaustionError, IdKind, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -12,19 +12,16 @@ use crate::delegation::delegation_system::{
     ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
 };
 use crate::delegation::{
-    MandateAuthority, MandateStatus, ResolvedMandateAuthority, ResponsibilityFunction,
-    ResponsibilityScope,
+    MandateAuthority, ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope,
 };
 use crate::enterprises::{
     build_enterprise_record, EnterpriseCycleRecord, EnterpriseDraft, EnterpriseKind,
-    EnterpriseLocation, EnterpriseStatus, ALL_ENTERPRISE_KINDS,
+    EnterpriseLocation, EnterpriseStatus,
 };
 use crate::finance::finance_system::{
-    insert_account, validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
 };
-use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerTransactionDraft, Money,
-};
+use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
     validate_record_information, IntelligenceError, ValidatedInformation,
 };
@@ -32,10 +29,7 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
-use crate::world::territory_influence::resolve_neighborhood_influence;
-use crate::world::{
-    AutonomyLevel, BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, Rating,
-};
+use crate::world::{BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, Rating};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -275,257 +269,6 @@ pub fn validate_establish_enterprise(
     })
 }
 
-/// Daily delegated-autonomy expansion for organizations other than the player's: every active
-/// mandate whose manager holds Delegated or Broad autonomy may open one enterprise per pass
-/// inside its territorial scope, through the exact canonical establishment path a player
-/// command uses. Selection is deterministic and consumes no randomness: kinds are tried in
-/// authored registry order, locations in stable id order, so matched-seed branches observe
-/// identical rival growth unless their own actions changed rival-governed state.
-///
-/// Rival organizations without governed territory (no mandate, a Tight/Guided manager, or no
-/// usable cash and settlement accounts) simply do not expand.
-pub(crate) fn apply_due_autonomous_enterprises(
-    registry: &Registry,
-    state: &mut AppState,
-) -> Vec<EnterpriseId> {
-    if !crate::core::time::is_day_boundary(state.now()) {
-        return Vec::new();
-    }
-    let player_organization = state.player_organization();
-    let mandates: Vec<_> = state
-        .delegation()
-        .mandates()
-        .filter(|mandate| mandate.status() == MandateStatus::Active)
-        .cloned()
-        .collect();
-    let mut established = Vec::new();
-    // Records iterate in mandate-id order, so every eligible authority is evaluated in a
-    // single stable sequence.
-    for mandate in mandates {
-        let organization = mandate.organization();
-        if Some(organization) == player_organization {
-            continue;
-        }
-        // Posture gate: an outfit whose police fear runs above the authored ceiling keeps
-        // its head down for the day. Reputation therefore throttles rival growth, not just
-        // how candidates judge it.
-        let police_fear = crate::reputation::reputation_system::resolve_score(
-            registry,
-            &state.reputation,
-            organization,
-            crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
-        );
-        if police_fear > registry.reputation().expansion_police_fear_ceiling() {
-            continue;
-        }
-        let manager = mandate.manager();
-        let Some(manager_record) = state.world().get_character(manager) else {
-            continue;
-        };
-        if state.legal().active_arrest_for_character(manager).is_some()
-            || !matches!(
-                manager_record.autonomy(),
-                AutonomyLevel::Delegated | AutonomyLevel::Broad
-            )
-        {
-            continue;
-        }
-        let Some((kind, scope, location)) =
-            select_autonomous_expansion(registry, state, organization, &mandate)
-        else {
-            continue;
-        };
-        let Some((cash_account, settlement_account)) =
-            autonomous_enterprise_accounts(state, organization)
-        else {
-            continue;
-        };
-        let draft = EnterpriseDraft {
-            kind,
-            organization,
-            authority: MandateAuthority {
-                mandate: mandate.id(),
-                manager,
-                scope,
-            },
-            location,
-            supporting_businesses: BTreeSet::new(),
-            cash_account,
-            settlement_account,
-        };
-        match validate_establish_enterprise(registry, state, draft) {
-            Ok(validated) => match validated.commit(state) {
-                Ok(enterprise) => established.push(enterprise),
-                // One authority that cannot commit must not abort the rest of the pass.
-                Err(_) => continue,
-            },
-            Err(_) => continue,
-        }
-    }
-    established
-}
-
-/// Deterministic first-fit selection over authored kind order and stable location order.
-/// Returns the kind, the specific covering scope, and the location to establish at.
-fn select_autonomous_expansion(
-    registry: &Registry,
-    state: &AppState,
-    organization: OrganizationId,
-    mandate: &crate::delegation::MandateRecord,
-) -> Option<(EnterpriseKind, ResponsibilityScope, EnterpriseLocation)> {
-    // District preference is influence-aware, not id order: districts the organization
-    // already leads consolidate first, contested or empty districts follow. Ties break on
-    // neighborhood id, so the ordering stays deterministic. Tiers are computed once per
-    // mandate rather than per comparison.
-    let mut district_scopes: Vec<(u8, NeighborhoodId)> = mandate
-        .scopes()
-        .iter()
-        .filter_map(|scope| match scope {
-            ResponsibilityScope::Neighborhood(id) => Some(*id),
-            ResponsibilityScope::Business(_) | ResponsibilityScope::Function(_) => None,
-        })
-        .map(|id| {
-            let leads = resolve_neighborhood_influence(state, id)
-                .expect("mandate scopes reference live neighborhoods")
-                .economic_leader()
-                .is_some_and(|leader| leader == organization);
-            (u8::from(!leads), id)
-        })
-        .collect();
-    district_scopes.sort_unstable();
-    let district_scopes: Vec<ResponsibilityScope> = district_scopes
-        .into_iter()
-        .map(|(_, id)| ResponsibilityScope::Neighborhood(id))
-        .collect();
-    let business_scopes: Vec<ResponsibilityScope> = mandate
-        .scopes()
-        .iter()
-        .filter(|scope| matches!(scope, ResponsibilityScope::Business(_)))
-        .copied()
-        .collect();
-
-    let owned_venues: BTreeMap<BusinessId, &crate::world::BusinessRecord> = state
-        .world()
-        .businesses_owned_by_organization(organization)
-        .map(|business| (business.id(), business))
-        .collect();
-
-    for kind in ALL_ENTERPRISE_KINDS {
-        let definition = registry.get_enterprise(kind);
-        let asset_free = definition.required_business_functions().is_empty()
-            && definition.required_network_functions().is_empty();
-
-        let mut candidates: Vec<(ResponsibilityScope, EnterpriseLocation)> = Vec::new();
-        for scope in district_scopes.iter().copied() {
-            let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
-                continue;
-            };
-            // Asset-free rackets run at the district itself; venue-hosted rackets need an
-            // owned venue in the same district whose functions carry every requirement.
-            if asset_free {
-                candidates.push((scope, EnterpriseLocation::Neighborhood(neighborhood)));
-            }
-            for (business_id, business) in &owned_venues {
-                if business.neighborhood() != neighborhood
-                    || !is_valid_host_kind(definition, business)
-                {
-                    continue;
-                }
-                // The district scope covers venues inside its own neighborhood.
-                candidates.push((scope, EnterpriseLocation::Business(*business_id)));
-            }
-        }
-        for scope in &business_scopes {
-            let ResponsibilityScope::Business(business_id) = scope else {
-                continue;
-            };
-            let Some(business) = owned_venues.get(business_id) else {
-                continue;
-            };
-            if is_valid_host_kind(definition, business) {
-                candidates.push((*scope, EnterpriseLocation::Business(*business_id)));
-            }
-        }
-
-        // Skip candidates already occupied by the same kind under the exact rule the
-        // canonical establishment path enforces — including suspended rackets, so selection
-        // never proposes a draft the owner would reject.
-        let open_candidate = candidates.into_iter().find(|(_, location)| {
-            !state
-                .enterprises()
-                .enterprises_at(*location)
-                .any(|record| record.kind() == kind)
-        });
-        if let Some((covering_scope, location)) = open_candidate {
-            return Some((kind, covering_scope, location));
-        }
-    }
-    None
-}
-
-fn is_valid_host_kind(
-    definition: &EnterpriseDefinition,
-    business: &crate::world::BusinessRecord,
-) -> bool {
-    definition
-        .required_business_functions()
-        .iter()
-        .chain(definition.required_network_functions())
-        .all(|function| business.has_function(*function))
-}
-
-/// Resolves the rival's operating accounts: first org-owned street-or-concealed cash in
-/// ascending account-id order, plus a settlement account not already reserved by another
-/// enterprise or business economy. When every existing settlement account is taken, a fresh
-/// one is opened through the canonical account-insertion path so governed expansion is never
-/// silently blocked by bookkeeping exhaustion.
-fn autonomous_enterprise_accounts(
-    state: &mut AppState,
-    organization: OrganizationId,
-) -> Option<(FinancialAccountId, FinancialAccountId)> {
-    let owner = FinancialOwner::Organization(organization);
-    let mut cash = None;
-    let mut settlement = None;
-    for account in state.finance().accounts_for(owner) {
-        let id = account.id();
-        // Exhaustive per repo rule: only street-or-concealed cash funds a racket, and only
-        // an unreserved settlement account can back its cycle ledger.
-        match account.kind() {
-            AccountKind::StreetCash | AccountKind::ConcealedCash if cash.is_none() => {
-                cash = Some(id);
-            }
-            AccountKind::Settlement
-                if settlement.is_none()
-                    && state.enterprises().get_by_settlement_account(id).is_none()
-                    && state.economy().get_by_settlement_account(id).is_none() =>
-            {
-                settlement = Some(id);
-            }
-            AccountKind::StreetCash
-            | AccountKind::ConcealedCash
-            | AccountKind::Settlement
-            | AccountKind::AccountedFunds
-            | AccountKind::LegitimateOperating => {}
-        }
-    }
-    // Cash solvency is checked before any account insertion so a rival without fundable
-    // cash never accumulates orphaned settlement accounts from a skipped expansion.
-    let cash = cash?;
-    let settlement = match settlement {
-        Some(id) => id,
-        None => insert_account(
-            state,
-            FinancialAccountDraft {
-                owner,
-                kind: AccountKind::Settlement,
-            },
-        )
-        .ok()?,
-    };
-    Some((cash, settlement))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnterpriseCycleSnapshot {
     enterprise: EnterpriseId,
@@ -569,18 +312,25 @@ pub struct EnterpriseCyclePlan {
 }
 
 impl EnterpriseCyclePlan {
+    // Test-only drill-down: production consumers read the committed cycle records, not the
+    // intermediate plan, so these accessors exist solely for focused assertions.
+    #[cfg(test)]
     pub fn gross_revenue(&self) -> Money {
         self.economics.gross_revenue
     }
+    #[cfg(test)]
     pub fn operating_cost(&self) -> Money {
         self.economics.operating_cost
     }
+    #[cfg(test)]
     pub fn net_cash(&self) -> Money {
         self.economics.net_cash
     }
+    #[cfg(test)]
     pub fn investigation_heat(&self) -> Money {
         self.economics.investigation_heat
     }
+    #[cfg(test)]
     pub fn attention(&self) -> AttentionClass {
         self.economics.attention
     }
@@ -730,9 +480,15 @@ fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limi
         .enterprises
         .get_enterprise(enterprise)
         .and_then(|record| record.loss_streak_anchor());
+    let newest_first: Vec<_> = state
+        .enterprises
+        .cycles_for(enterprise)
+        .rev()
+        .take(usize::from(limit))
+        .collect();
     crate::finance::helpers::count_trailing_losing_cycles(
-        &state.enterprises.cycles_for(enterprise).collect::<Vec<_>>(),
-        |cycle| (cycle.occurred_at(), cycle.id()),
+        &newest_first,
+        |cycle| cycle.occurred_at(),
         |cycle| cycle.net_cash(),
         anchor,
         limit,
