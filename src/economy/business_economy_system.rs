@@ -714,6 +714,30 @@ pub(crate) fn resolve_business_gross_potential(
     )
 }
 
+/// Earning power after any active sabotage-disruption horizon — the same degraded gross a
+/// cycle settles on. Laundering plausibility reads this so a degraded front can only hide
+/// volume its visibly reduced books could still plausibly explain.
+pub(crate) fn resolve_business_current_gross(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<Money, BusinessEconomyError> {
+    let normal = resolve_business_gross_potential(registry, state, business)?;
+    let disrupted = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?
+        .is_disrupted(state.now());
+    if disrupted {
+        return resolve_disrupted_gross(
+            business,
+            normal,
+            registry.business_disruption().gross_basis_points(),
+        );
+    }
+    Ok(normal)
+}
+
 fn validate_business(
     state: &AppState,
     business: BusinessId,

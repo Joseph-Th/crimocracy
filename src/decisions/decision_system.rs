@@ -155,6 +155,18 @@ struct PoliceResponseDecisionDependency {
     expected_version: u32,
 }
 
+/// Auto-pause only applies to decisions the player is responsible for resolving: a decision
+/// addressed to some other organization must not pause the simulation based on the player's
+/// own attention preferences. Shared by every decision-request commit path.
+fn requests_player_attention_pause(
+    state: &AppState,
+    recipient: OrganizationId,
+    attention: AttentionClass,
+) -> bool {
+    state.player_organization() == Some(recipient)
+        && state.attention_settings().is_auto_pause_enabled(attention)
+}
+
 #[derive(Debug)]
 pub struct ValidatedDecisionRequest {
     draft: DecisionRequestDraft,
@@ -190,13 +202,8 @@ impl ValidatedDecisionRequest {
             });
         }
         self.revalidate_police_response(state)?;
-        // Auto-pause only applies to decisions the player is responsible for resolving: a decision
-        // addressed to some other organization should not pause the simulation based on the
-        // player's own attention preferences.
-        let requests_pause = state.player_organization() == Some(self.recipient)
-            && state
-                .attention_settings()
-                .is_auto_pause_enabled(self.draft.attention);
+        let requests_pause =
+            requests_player_attention_pause(state, self.recipient, self.draft.attention);
         let id = state.ids.next_decision_request()?;
         state
             .decisions
@@ -378,10 +385,8 @@ impl ValidatedRecruitmentApprovalRequest {
         // the proposal revalidates its own personnel state at commit.
         self.proposal.revalidate_state(state)?;
 
-        let requests_pause = state.player_organization() == Some(self.recipient)
-            && state
-                .attention_settings()
-                .is_auto_pause_enabled(self.draft.attention);
+        let requests_pause =
+            requests_player_attention_pause(state, self.recipient, self.draft.attention);
         let id = state.ids.next_decision_request()?;
         state
             .decisions

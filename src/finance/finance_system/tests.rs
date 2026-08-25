@@ -11,6 +11,7 @@ use crate::delegation::{
     BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
     ResponsibilityScope,
 };
+use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
@@ -1009,7 +1010,38 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
 #[test]
 fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
     let registry = build_registry();
-    let fixture = make_laundering_fixture();
+    let mut fixture = make_laundering_fixture();
+    // Seed more street cash than any plausible capacity so the rejection proves the
+    // plausibility ceiling, not an empty source (the empty-source case has its own test).
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "seed street cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-10_000_00),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(10_000_00),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seed transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("seed transfer should commit");
     let gross_potential =
         resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
             .expect("gross potential should resolve");
@@ -1074,4 +1106,164 @@ fn laundering_requires_a_street_cash_source_account() {
         error,
         LaunderingError::InvalidStreetAccountKind(_)
     ));
+}
+
+/// A source that does not actually hold the requested cash must be rejected: debiting a
+/// phantom balance would mint accounted funds out of nothing.
+#[test]
+fn laundering_more_than_the_street_balance_is_rejected_without_minting_funds() {
+    let registry = build_registry();
+    let fixture = make_laundering_fixture();
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.street)
+            .expect("street account")
+            .balance(),
+        Money::ZERO,
+        "fixture leaves the street account empty"
+    );
+
+    let before_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    let error = match validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(1_000),
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("laundering beyond the street balance must be rejected"),
+    };
+    match error {
+        LaunderingError::InsufficientStreetCash {
+            account,
+            balance_cents,
+            requested_cents,
+        } => {
+            assert_eq!(account, fixture.street);
+            assert_eq!(balance_cents, 0);
+            assert_eq!(requested_cents, 1_000);
+        }
+        other => panic!("expected InsufficientStreetCash, found {other}"),
+    }
+    let after_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    assert_eq!(before_balances, after_balances);
+}
+
+/// Plausibility tracks the front's current earning power: a sabotage-disrupted front earns
+/// the authored degraded fraction, so its plausible laundering capacity shrinks with it.
+#[test]
+fn disrupted_front_capacity_shrinks_with_degraded_books() {
+    use crate::economy::business_economy_system::{
+        resolve_business_current_gross, validate_disrupt_business_economy,
+    };
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    // Seed ample street cash up front so capacity rejections prove the plausibility ceiling.
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "seed street cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-10_000_00),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(10_000_00),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seed transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("seed transfer should commit");
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("disruption should commit");
+
+    let current_gross = resolve_business_current_gross(&registry, &fixture.state, fixture.business)
+        .expect("disrupted gross should resolve");
+    let degraded_capacity = crate::finance::helpers::resolve_basis_point_share(
+        current_gross,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("degraded capacity should fit money");
+    // The disruption must actually bite: degraded books support strictly less volume than
+    // the front's healthy gross potential would.
+    let healthy_gross =
+        resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
+            .expect("healthy gross should resolve");
+    let healthy_capacity = crate::finance::helpers::resolve_basis_point_share(
+        healthy_gross,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("healthy capacity should fit money");
+    assert!(
+        degraded_capacity.cents() > 0 && degraded_capacity < healthy_capacity,
+        "fixture expects a nontrivial degraded capacity below the healthy one"
+    );
+
+    // One cent beyond the degraded capacity is rejected even though the same volume would
+    // have fit the front's healthy books.
+    let error = match validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(degraded_capacity.cents() + 1),
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("over-degraded-capacity laundering must be rejected"),
+    };
+    assert!(matches!(error, LaunderingError::CapacityExceeded { .. }));
+
+    // And exactly the degraded capacity still launders through the canonical path.
+    validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: degraded_capacity,
+        },
+    )
+    .expect("exactly-degraded-capacity laundering should validate")
+    .commit(&mut fixture.state)
+    .expect("exactly-degraded-capacity laundering should commit");
+    validate_invariants(&fixture.state);
 }

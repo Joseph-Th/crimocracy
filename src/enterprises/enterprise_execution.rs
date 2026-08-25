@@ -170,6 +170,19 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.authority,
             self.draft.location,
         )?;
+        // One racket of a kind per spot is re-checked at commit: a second token validated
+        // before an identical establishment committed (or held across one) must reject here
+        // rather than double-book the location.
+        if state
+            .enterprises()
+            .enterprises_at(self.draft.location)
+            .any(|record| record.kind() == self.draft.kind)
+        {
+            return Err(EnterpriseError::DuplicateEnterpriseAtLocation {
+                kind: self.draft.kind,
+                location: self.draft.location,
+            });
+        }
         if let Some((business_id, expected)) = self.host_business_version {
             // The host passed venue validation at validate time; any change of ownership or
             // function bumps the business version, so re-checking the pinned version is enough.
@@ -418,6 +431,10 @@ pub fn decide_enterprise_cycle(
         Some(record.id()),
     )?;
     let neighborhood = resolve_location_profile(state, record.location())?;
+    let district = resolve_location_neighborhood(state, record.location())?;
+    // Sustained originated casework in the racket's district is resolved once per cycle:
+    // the shared pressure signal behind both the street-heat surcharge and vice attention.
+    let active_district_cases = count_district_originated_cases(state, district);
     let manager = state
         .world
         .get_character(record.manager())
@@ -430,19 +447,16 @@ pub fn decide_enterprise_cycle(
     let gross_revenue =
         resolve_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
     let cost = resolve_operating_cost(
-        state,
-        enterprise,
         economics,
         neighborhood,
-        record.location(),
         record.supporting_businesses().len(),
+        active_district_cases,
+        enterprise,
     )?;
     let operating_cost = cost.total;
-    // Sustained originated casework in the racket's district converts into vice attention:
-    // every cycle run under an active case risks a dedicated inquiry on this racket. Clean
-    // districts never draw one, so lying low or moving the book are real counter-play.
-    let neighborhood = resolve_location_neighborhood(state, record.location())?;
-    let active_district_cases = count_district_originated_cases(state, neighborhood);
+    // Active casework converts into vice attention: every cycle run under an active case
+    // risks a dedicated inquiry on this racket. Clean districts never draw one, so lying
+    // low or moving the book are real counter-play.
     let vice_chance_basis_points = u32::from(
         definition
             .economics()
@@ -453,7 +467,7 @@ pub fn decide_enterprise_cycle(
     let draws_vice_attention = active_district_cases > 0
         && u32::from(randomness.vice_attention_roll()) < vice_chance_basis_points;
     let vice_incident = if draws_vice_attention {
-        build_vice_incident_draft(state, enterprise, record, neighborhood, state.now())?
+        build_vice_incident_draft(state, enterprise, record, district, state.now())?
     } else {
         None
     };
@@ -1378,12 +1392,11 @@ struct OperatingCostBreakdown {
 }
 
 fn resolve_operating_cost(
-    state: &crate::core::state::AppState,
-    enterprise: EnterpriseId,
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
-    location: EnterpriseLocation,
     supporting_business_count: usize,
+    active_district_cases: u32,
+    enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
     let base = economics.base_operating_cost().checked_add(weighted_rating(
         enterprise,
@@ -1391,7 +1404,7 @@ fn resolve_operating_cost(
         profile.institutions.police_presence,
     )?);
     let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let heat = resolve_investigation_heat_surcharge(state, enterprise, location, economics)?;
+    let heat = resolve_investigation_heat_surcharge(enterprise, economics, active_district_cases)?;
     let support_surcharge = economics
         .support_surcharge_per_business()
         .checked_mul(i64::try_from(supporting_business_count).expect("usize must fit i64"))
@@ -1548,24 +1561,10 @@ fn resolve_enterprise_location_name(
 }
 
 fn resolve_investigation_heat_surcharge(
-    state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
-    location: EnterpriseLocation,
     economics: &EnterpriseEconomicsDefinition,
+    active: u32,
 ) -> Result<Money, EnterpriseError> {
-    let neighborhood = match location {
-        EnterpriseLocation::Neighborhood(id) => id,
-        EnterpriseLocation::Business(business_id) => {
-            // The host business was validated as existing and active earlier in the same
-            // decide cycle, so a missing record here would mean corrupted state.
-            let business = state
-                .world
-                .get_business(business_id)
-                .expect("validated enterprise host business must exist");
-            business.neighborhood()
-        }
-    };
-    let active = count_district_originated_cases(state, neighborhood);
     if active == 0 {
         Ok(Money::ZERO)
     } else {

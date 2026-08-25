@@ -377,23 +377,27 @@ pub(crate) fn decide_operation_resolution(
         factors,
         exposure.level(),
     ));
+    // A depleted haul must narrate even when recent scores left nothing to carry home:
+    // silencing the clause would make an Achieved outcome look like an ordinary score.
+    let mut depleted_clause_written = false;
     if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&unliquidated_property_clause(
             proceeds.estimated_value().cents(),
         ));
-        if property_proceeds_plan.depleted_by_recent_take {
-            summary.push(' ');
-            summary.push_str(DEPLETED_TAKE_CLAUSE);
-        }
+    }
+    if property_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
+        summary.push(' ');
+        summary.push_str(DEPLETED_TAKE_CLAUSE);
+        depleted_clause_written = true;
     }
     if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&undeposited_cash_clause(proceeds.amount().cents()));
-        if cash_proceeds_plan.depleted_by_recent_take {
-            summary.push(' ');
-            summary.push_str(DEPLETED_TAKE_CLAUSE);
-        }
+    }
+    if cash_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
+        summary.push(' ');
+        summary.push_str(DEPLETED_TAKE_CLAUSE);
     }
     if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
     {

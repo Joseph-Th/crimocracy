@@ -71,14 +71,12 @@ pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<Pay
         .collect();
     let mut outcomes = Vec::with_capacity(organizations.len());
     for organization in organizations {
-        // An organization with no general cash economy at all has no payroll to run: its
-        // members' standing is outside the modeled economy, and charging unpayable wages here
-        // would manufacture resentment with no economic substrate behind it.
-        let funding = funding_accounts(state, organization);
-        if funding.is_empty() {
-            continue;
-        }
-        if let Some(outcome) = apply_organization_payroll(registry, state, organization, &funding) {
+        if let Some(outcome) = apply_organization_payroll(
+            registry,
+            state,
+            organization,
+            &find_funding_accounts(state, organization),
+        ) {
             outcomes.push(outcome);
         }
     }
@@ -116,7 +114,8 @@ fn apply_organization_payroll(
     // Wages are paid in full or not at all: a boss either meets payroll or the whole crew goes
     // unpaid and resentful. Funding drains the organization's general cash accounts only —
     // enterprise floats are delegated working capital under mandate authority — ordered by
-    // balance then ID so the debit split is deterministic.
+    // balance then ID so the debit split is deterministic. An organization with no funding
+    // accounts at all is simply fully short, exactly like one whose accounts hold too little.
     let available: i64 = funding
         .iter()
         .filter_map(|account| state.finance().get_account(*account))
@@ -152,7 +151,7 @@ fn apply_organization_payroll(
     if paid.cents() > 0 {
         for member in members
             .iter()
-            .map(|(member, _)| ensure_member_wage_account(state, *member))
+            .map(|(member, _)| find_or_insert_member_wage_account(state, *member))
         {
             postings.push(LedgerPosting {
                 account: member,
@@ -197,7 +196,10 @@ fn apply_organization_payroll(
 
 /// The member's personal street-cash pocket, created once on first pay and reused after;
 /// wages land where later financial-satisfaction and bribery systems can find them.
-fn ensure_member_wage_account(state: &mut AppState, member: CharacterId) -> FinancialAccountId {
+fn find_or_insert_member_wage_account(
+    state: &mut AppState,
+    member: CharacterId,
+) -> FinancialAccountId {
     let owner = FinancialOwner::Character(member);
     if let Some(existing) = state
         .finance()
@@ -217,7 +219,10 @@ fn ensure_member_wage_account(state: &mut AppState, member: CharacterId) -> Fina
     .expect("a wage account for an existing member must validate")
 }
 
-fn funding_accounts(state: &AppState, organization: OrganizationId) -> Vec<FinancialAccountId> {
+fn find_funding_accounts(
+    state: &AppState,
+    organization: OrganizationId,
+) -> Vec<FinancialAccountId> {
     let owner = FinancialOwner::Organization(organization);
     // Enterprise floats are delegated working capital governed by a manager's mandate; payroll
     // funds from the boss's general cash only. Raiding a book is an explicit governance act
@@ -264,10 +269,8 @@ fn apply_shortfall_consequences(
             .social()
             .get_relationship(*member, *supervisor)
             .map(|record| record.dimensions())
-            .unwrap_or(zero_dimensions());
-        let resentment = dimensions.resentment.value().saturating_add(increment);
-        dimensions.resentment = crate::social::RelationshipLevel::try_new(resentment)
-            .expect("clamped resentment must stay within the bounded range");
+            .unwrap_or_else(RelationshipDimensions::zero);
+        dimensions.resentment = dimensions.resentment.saturating_add(increment);
         validate_set_relationship(state, *member, *supervisor, dimensions)
             .expect("shortfall resentment between live members must validate")
             .commit(state);
@@ -312,19 +315,6 @@ fn report_payroll_shortfall(
     report
         .commit(state)
         .expect("validated payroll shortfall report must commit");
-}
-
-fn zero_dimensions() -> RelationshipDimensions {
-    let level = || crate::social::RelationshipLevel::try_new(0).expect("zero is a valid level");
-    RelationshipDimensions {
-        trust: level(),
-        respect: level(),
-        fear: level(),
-        affection: level(),
-        dependence: level(),
-        resentment: level(),
-        debt: level(),
-    }
 }
 
 #[cfg(test)]

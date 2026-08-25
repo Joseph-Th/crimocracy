@@ -8,7 +8,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
-use crate::operations::OperationStatus;
+use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
 use crate::registry::Registry;
 use crate::world::{
     BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
@@ -286,6 +286,10 @@ pub fn validate_reassign_character(
     })
 }
 
+/// Cross-domain release scan before a membership change commits: custody, prosecution,
+/// institutional contacts, informant handling, mandates, investigations, operation rosters,
+/// and direct reports each independently block reassignment. Split per concern so every new
+/// blocking rule extends exactly one named check.
 fn validate_reassignment_preconditions(
     state: &AppState,
     character: CharacterId,
@@ -313,75 +317,10 @@ fn validate_reassignment_preconditions(
     let organization_changed = organization != record.organization();
     let supervisor_changed = supervisor != record.supervisor();
     if organization_changed {
-        if let Some(case) = state
-            .legal
-            .prosecution_cases_for_lead(character)
-            .find(|case| case.status() == ProsecutionCaseStatus::Reviewing)
-        {
-            return Err(WorldError::ActiveProsecutionAssignment {
-                character,
-                case: case.id(),
-            });
-        }
-        if let Some(contact) = state.contacts.active_contacts_for_handler(character).next() {
-            return Err(WorldError::ActiveInstitutionalContactHandler {
-                character,
-                contact: contact.id(),
-            });
-        }
-        if let Some(contact) = state
-            .contacts
-            .active_contacts_for_character(character)
-            .next()
-        {
-            return Err(WorldError::ActiveInstitutionalContactAssignment {
-                character,
-                contact: contact.id(),
-            });
-        }
-        if let Some(handler) = organization {
-            if let Some(informant) = state.legal.active_informant_for(character, handler) {
-                return Err(WorldError::ActiveInformantHandlerAssignment {
-                    character,
-                    handler,
-                    informant: informant.id(),
-                });
-            }
-        }
+        validate_organization_change_release(state, character, organization)?;
     }
     if organization_changed || supervisor_changed {
-        if let Some(mandate) = state.delegation.active_for_manager(character) {
-            return Err(WorldError::ActiveMandateAssignment {
-                character,
-                mandate: mandate.id(),
-            });
-        }
-        if let Some(investigation) = state.legal.active_investigation_for_investigator(character) {
-            return Err(WorldError::ActiveInvestigationAssignment {
-                character,
-                investigation: investigation.id(),
-            });
-        }
-        for operation in state.operations.operations() {
-            match operation.status() {
-                OperationStatus::Authorized
-                | OperationStatus::InProgress
-                | OperationStatus::AwaitingDecision => {
-                    if operation.leader() == character
-                        || operation
-                            .roles()
-                            .values()
-                            .any(|participant| *participant == character)
-                    {
-                        return Err(WorldError::ActiveOperationAssignment {
-                            character,
-                            operation: operation.id(),
-                        });
-                    }
-                }
-                OperationStatus::Completed | OperationStatus::Aborted => {}
-            }
-        }
+        validate_role_change_release(state, character)?;
         if organization_changed {
             if let Some(direct_report) = state.world.direct_reports(character).next() {
                 return Err(WorldError::DirectReportAssignment {
@@ -392,6 +331,7 @@ fn validate_reassignment_preconditions(
         }
     }
 
+    // Walking the proposed supervisor chain rejects cycles the change itself would create.
     let mut cursor = supervisor;
     while let Some(current) = cursor {
         if current == character {
@@ -401,6 +341,85 @@ fn validate_reassignment_preconditions(
             .world
             .get_character(current)
             .and_then(|record| record.supervisor());
+    }
+    Ok(())
+}
+
+/// Blocks that fire only when the organization changes: prosecution leadership, contact
+/// handling (both directions), and informant registration under the prospective handler.
+fn validate_organization_change_release(
+    state: &AppState,
+    character: CharacterId,
+    organization: Option<OrganizationId>,
+) -> Result<(), WorldError> {
+    if let Some(case) = state
+        .legal
+        .prosecution_cases_for_lead(character)
+        .find(|case| case.status() == ProsecutionCaseStatus::Reviewing)
+    {
+        return Err(WorldError::ActiveProsecutionAssignment {
+            character,
+            case: case.id(),
+        });
+    }
+    if let Some(contact) = state.contacts.active_contacts_for_handler(character).next() {
+        return Err(WorldError::ActiveInstitutionalContactHandler {
+            character,
+            contact: contact.id(),
+        });
+    }
+    if let Some(contact) = state
+        .contacts
+        .active_contacts_for_character(character)
+        .next()
+    {
+        return Err(WorldError::ActiveInstitutionalContactAssignment {
+            character,
+            contact: contact.id(),
+        });
+    }
+    if let Some(handler) = organization {
+        if let Some(informant) = state.legal.active_informant_for(character, handler) {
+            return Err(WorldError::ActiveInformantHandlerAssignment {
+                character,
+                handler,
+                informant: informant.id(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Blocks that fire on any role change: held mandates and live investigation assignments.
+fn validate_role_change_release(
+    state: &AppState,
+    character: CharacterId,
+) -> Result<(), WorldError> {
+    if let Some(mandate) = state.delegation.active_for_manager(character) {
+        return Err(WorldError::ActiveMandateAssignment {
+            character,
+            mandate: mandate.id(),
+        });
+    }
+    if let Some(investigation) = state.legal.active_investigation_for_investigator(character) {
+        return Err(WorldError::ActiveInvestigationAssignment {
+            character,
+            investigation: investigation.id(),
+        });
+    }
+    for operation in state.operations.operations() {
+        if ACTIVE_ASSIGNMENT_STATUSES.contains(&operation.status())
+            && (operation.leader() == character
+                || operation
+                    .roles()
+                    .values()
+                    .any(|participant| *participant == character))
+        {
+            return Err(WorldError::ActiveOperationAssignment {
+                character,
+                operation: operation.id(),
+            });
+        }
     }
     Ok(())
 }
@@ -467,7 +486,7 @@ pub struct ValidatedBusinessOwnershipTransfer {
 
 impl ValidatedBusinessOwnershipTransfer {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessOwnershipChangeId, WorldError> {
-        let record = validate_transferable_business(state, self.business)?;
+        let record = get_transferable_business(state, self.business)?;
         if record.version() != self.expected_version {
             return Err(WorldError::StaleBusiness {
                 business: self.business,
@@ -512,7 +531,7 @@ pub fn validate_transfer_business_ownership(
     business: BusinessId,
     new_owner: BusinessOwner,
 ) -> Result<ValidatedBusinessOwnershipTransfer, WorldError> {
-    let record = validate_transferable_business(state, business)?;
+    let record = get_transferable_business(state, business)?;
     validate_business_owner(state, new_owner)?;
     validate_business_support_ownership_change(state, business, new_owner)?;
     if record.owner() == new_owner {
@@ -567,7 +586,8 @@ fn validate_business_support_ownership_change(
     Ok(())
 }
 
-fn validate_transferable_business(
+/// Keyed lookup that also proves the business record exists before a transfer touches it.
+fn get_transferable_business(
     state: &AppState,
     business: BusinessId,
 ) -> Result<&BusinessRecord, WorldError> {

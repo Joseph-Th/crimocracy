@@ -3,7 +3,7 @@
 use crate::contacts::ContactStatus;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
-use crate::core::id::CharacterId;
+use crate::core::id::{CharacterId, EvidenceId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
@@ -22,7 +22,7 @@ use crate::legal::{
     InvestigationWorkStatus, LegalRepresentationStatus, PatrolDeploymentStatus,
     PoliceResponseStatus, ProsecutionCaseResolution, ProsecutionCaseStatus, WitnessCooperation,
 };
-use crate::operations::OperationStatus;
+use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
@@ -205,7 +205,12 @@ fn validate_legal_representations(state: &AppState) -> Result<(), StateValidatio
                     .reports
                     .get_report(ended_report_id)
                     .ok_or_else(invalid)?;
-                let ended_entities = &ended_report.entries()[0].entities;
+                // Safe first-entry extraction: an empty entry list rejects here instead of
+                // panicking, and the exact single-entry contract is enforced below.
+                let Some(ended_entry) = ended_report.entries().first() else {
+                    return Err(invalid());
+                };
+                let ended_entities = &ended_entry.entities;
                 if representation.version() != 2
                     || ended_at < representation.retained_at()
                     || ended_at > state.now()
@@ -539,7 +544,38 @@ pub(crate) fn validate_developed_review_evidence(
     Ok(())
 }
 
+/// Full legal-subsystem record validation, split per aggregate so each contract stays
+/// readable on its own. Ordering mirrors the custody cluster: institutions, patrols,
+/// arrests, representation, prosecution, investigation casework, witnesses, informants,
+/// evidence provenance, then player-facing report/history integrity.
 pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateValidationError> {
+    validate_jurisdictions(state)?;
+    validate_police_responses(state)?;
+    validate_patrol_deployments(state)?;
+    validate_arrests(state)?;
+    validate_legal_representations(state)?;
+    validate_prosecution_cases(state)?;
+    validate_investigations(state)?;
+    // Derived-evidence uniqueness spans detective work and the evidence graph, so the
+    // seen-set is built here and threaded through both passes.
+    let mut derived_evidence_from_work = BTreeSet::new();
+    validate_investigation_work_records(state, &mut derived_evidence_from_work)?;
+    validate_case_witnesses(state)?;
+    let named_witness_evidence = validate_witness_statements(state)?;
+    validate_informants(state)?;
+    let informant_evidence = validate_informant_disclosures(state)?;
+    validate_evidence_records(
+        state,
+        &derived_evidence_from_work,
+        &named_witness_evidence,
+        &informant_evidence,
+    )?;
+    validate_report_holders(state)?;
+    validate_history_event_references(state)?;
+    Ok(())
+}
+
+fn validate_jurisdictions(state: &AppState) -> Result<(), StateValidationError> {
     for jurisdiction in state.legal.jurisdictions() {
         let organization = state
             .world
@@ -563,6 +599,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_police_responses(state: &AppState) -> Result<(), StateValidationError> {
     for response in state.legal.police_responses() {
         let authority = state.world.get_organization(response.authority()).ok_or(
             StateValidationError::InvalidPoliceResponse {
@@ -640,6 +680,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_patrol_deployments(state: &AppState) -> Result<(), StateValidationError> {
     for deployment in state.legal.patrol_deployments() {
         let authority = state
             .world
@@ -682,19 +726,19 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_arrests(state: &AppState) -> Result<(), StateValidationError> {
     // Characters bound to any non-terminal operation, computed once for the whole arrest
     // pass: the detained-arm check below only needs membership, so rescanning the live
     // operation set per detained arrest would be quadratic in custody volume for no
     // extra coverage.
-    let booked_characters: BTreeSet<CharacterId> = [
-        OperationStatus::Authorized,
-        OperationStatus::InProgress,
-        OperationStatus::AwaitingDecision,
-    ]
-    .into_iter()
-    .flat_map(|status| state.operations.operations_with_status(status))
-    .flat_map(|operation| operation.participants())
-    .collect();
+    let booked_characters: BTreeSet<CharacterId> = ACTIVE_ASSIGNMENT_STATUSES
+        .into_iter()
+        .flat_map(|status| state.operations.operations_with_status(status))
+        .flat_map(|operation| operation.participants())
+        .collect();
 
     for arrest in state.legal.arrests() {
         let _ = state.world.get_character(arrest.character()).ok_or(
@@ -779,9 +823,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
-    validate_legal_representations(state)?;
-    validate_prosecution_cases(state)?;
+    Ok(())
+}
 
+fn validate_investigations(state: &AppState) -> Result<(), StateValidationError> {
     for investigation in state.legal.investigations() {
         let owner = state.world.get_organization(investigation.owner()).ok_or(
             StateValidationError::MissingEntity {
@@ -924,7 +969,13 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
-    let mut derived_evidence_from_work = BTreeSet::new();
+    Ok(())
+}
+
+fn validate_investigation_work_records(
+    state: &AppState,
+    derived_evidence_from_work: &mut BTreeSet<EvidenceId>,
+) -> Result<(), StateValidationError> {
     for work in state.legal.investigation_work() {
         let investigation = state
             .legal
@@ -1065,7 +1116,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
                         validate_developed_review_evidence(
                             state,
                             work,
-                            &mut derived_evidence_from_work,
+                            derived_evidence_from_work,
                         )?;
                     }
                     InvestigationWorkOutcome::Inconclusive => {
@@ -1080,6 +1131,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_case_witnesses(state: &AppState) -> Result<(), StateValidationError> {
     for witness in state.legal.case_witnesses() {
         let investigation = state
             .legal
@@ -1105,6 +1160,12 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_witness_statements(
+    state: &AppState,
+) -> Result<BTreeSet<EvidenceId>, StateValidationError> {
     let mut named_witness_evidence = BTreeSet::new();
     for statement in state.legal.witness_statements() {
         let case_witness = state
@@ -1157,6 +1218,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(named_witness_evidence)
+}
+
+fn validate_informants(state: &AppState) -> Result<(), StateValidationError> {
     for informant in state.legal.informants() {
         let character = state.world.get_character(informant.character()).ok_or(
             StateValidationError::InvalidInformant {
@@ -1204,6 +1269,12 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_informant_disclosures(
+    state: &AppState,
+) -> Result<BTreeSet<EvidenceId>, StateValidationError> {
     let mut informant_evidence = BTreeSet::new();
     for disclosure in state.legal.informant_disclosures() {
         let informant = state.legal.get_informant(disclosure.informant()).ok_or(
@@ -1257,6 +1328,15 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(informant_evidence)
+}
+
+fn validate_evidence_records(
+    state: &AppState,
+    derived_evidence_from_work: &BTreeSet<EvidenceId>,
+    named_witness_evidence: &BTreeSet<EvidenceId>,
+    informant_evidence: &BTreeSet<EvidenceId>,
+) -> Result<(), StateValidationError> {
     for evidence in state.legal.all_evidence() {
         let investigation = state
             .legal
@@ -1387,6 +1467,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_report_holders(state: &AppState) -> Result<(), StateValidationError> {
     for report in state.reports.reports() {
         if state.world.get_organization(report.recipient()).is_none() {
             return Err(StateValidationError::MissingEntity {
@@ -1443,6 +1527,10 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         }
     }
 
+    Ok(())
+}
+
+fn validate_history_event_references(state: &AppState) -> Result<(), StateValidationError> {
     for event in state.history.events() {
         if event.occurred_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {

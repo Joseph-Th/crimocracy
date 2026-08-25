@@ -2,7 +2,7 @@
 //!
 //! The canonical purchase path: an organization buys a business outright at its authored
 //! kind price, paid in full from accounted funds. Dirty street cash cannot become a
-//! storefront â€” legitimate expansion is gated on laundering throughput, so the money
+//! storefront — legitimate expansion is gated on laundering throughput, so the money
 //! loop closes: illicit proceeds are laundered into accounted wealth, and accounted
 //! wealth converts into earning capacity (and, for cash-intensive fronts, more
 //! laundering capacity). Independently owned businesses have no organizational
@@ -20,7 +20,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
 use crate::economy::{business_economy_system, BusinessEconomyDraft};
-use crate::finance::finance_system::{insert_account, validate_record_transaction, FinanceError};
+use crate::finance::finance_system::{
+    insert_account, remove_unused_account, validate_record_transaction, FinanceError,
+};
 use crate::finance::helpers::format_money_cents;
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -29,9 +31,8 @@ use crate::finance::{
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::world_system::{
-    validate_transfer_business_ownership, ValidatedBusinessOwnershipTransfer, WorldError,
-};
+use crate::world::world_system::validate_transfer_business_ownership;
+use crate::world::world_system::WorldError;
 use crate::world::BusinessOwner;
 use thiserror::Error;
 
@@ -94,14 +95,9 @@ pub struct AcquiredBusiness {
 
 #[derive(Debug)]
 pub struct ValidatedBusinessAcquisition {
-    transfer: ValidatedBusinessOwnershipTransfer,
-    /// Set when the target has never operated and commit must open its first economy over
-    /// freshly reserved accounts.
-    establish_economy: bool,
     /// Authored cycle duration for the economy commit opens; captured at validation time.
     economy_cycle_duration: crate::core::time::SimDuration,
     funding_account: FinancialAccountId,
-    operating_account: Option<FinancialAccountId>,
     price: Money,
     business: BusinessId,
     business_name: String,
@@ -113,41 +109,99 @@ impl ValidatedBusinessAcquisition {
         self,
         state: &mut AppState,
     ) -> Result<AcquiredBusiness, BusinessAcquisitionError> {
-        // Ownership moves first: every later record describes property the organization
-        // already holds. The transfer was validated against the owner snapshot up front.
-        self.transfer.commit(state)?;
-        let operating_account = if self.establish_economy {
+        // ---- Phase 1: re-validate every fallible condition against live state. --------
+        // A validated token can be held across intervening mutations, so solvency,
+        // ownership, and hosting conflicts are re-checked before anything mutates.
+        let business_record = state
+            .world
+            .get_business(self.business)
+            .ok_or(BusinessAcquisitionError::MissingBusiness(self.business))?;
+        if business_record.owner() != BusinessOwner::Independent {
+            return Err(BusinessAcquisitionError::NotIndependentlyOwned {
+                business: self.business,
+                owner: business_record.owner(),
+            });
+        }
+        let funding = state.finance.get_account(self.funding_account).ok_or(
+            BusinessAcquisitionError::MissingFundingAccount(self.funding_account),
+        )?;
+        if funding.owner() != FinancialOwner::Organization(self.organization) {
+            return Err(BusinessAcquisitionError::FundingAccountOwnerMismatch {
+                account: self.funding_account,
+                organization: self.organization,
+            });
+        }
+        if funding.kind() != AccountKind::AccountedFunds {
+            return Err(BusinessAcquisitionError::InvalidFundingAccountKind(
+                self.funding_account,
+            ));
+        }
+        if funding.balance() < self.price {
+            return Err(BusinessAcquisitionError::InsufficientFunds {
+                balance_cents: funding.balance().cents(),
+                price_cents: self.price.cents(),
+            });
+        }
+        // Hosting conflicts (active enterprise venues/supporters) reject through the same
+        // canonical read the ownership transfer enforces.
+        validate_transfer_business_ownership(
+            state,
+            self.business,
+            BusinessOwner::Organization(self.organization),
+        )?;
+        let existing_economy = state.economy.get_business_economy(self.business);
+        if existing_economy.is_some_and(|economy| {
+            economy.status() != crate::economy::BusinessOperatingStatus::Active
+        }) {
+            return Err(
+                business_economy_system::BusinessEconomyError::EconomyNotActive(self.business)
+                    .into(),
+            );
+        }
+        // The establishment decision follows live state, not the validation-time snapshot:
+        // whether the target has ever operated is re-derived here so a token held across
+        // someone else's establishment adopts the existing books instead of colliding.
+        let establish_now = existing_economy.is_none();
+
+        // ---- Phase 2: reserve fresh books when the target has never operated. --------
+        // Insertion is purely additive; if any later leg rejects, the untouched accounts
+        // are removed again so rejection leaves authoritative state unchanged.
+        let mut reserved_accounts: Vec<FinancialAccountId> = Vec::new();
+        let operating_account = if let Some(economy) = existing_economy {
+            economy.operating_account()
+        } else {
+            // Nothing authoritative has mutated before the first reservation, so it needs
+            // no rollback; only a failure while reserving the second account does.
             let operating = insert_account(
                 state,
                 FinancialAccountDraft {
                     owner: FinancialOwner::Business(self.business),
                     kind: AccountKind::LegitimateOperating,
                 },
-            )
-            .expect("a fresh operating account for an existing business must validate");
-            let settlement = insert_account(
+            )?;
+            reserved_accounts.push(operating);
+            match insert_account(
                 state,
                 FinancialAccountDraft {
                     owner: FinancialOwner::Business(self.business),
                     kind: AccountKind::Settlement,
                 },
-            )
-            .expect("a fresh settlement account for an existing business must validate");
-            business_economy_system::ValidatedBusinessEconomyEstablishment::over_accounts_to_be_reserved(
-                BusinessEconomyDraft {
-                    business: self.business,
-                    operating_account: operating,
-                    settlement_account: settlement,
-                },
-                self.economy_cycle_duration,
-            )
-            .commit(state)?;
+            ) {
+                Ok(settlement) => reserved_accounts.push(settlement),
+                Err(error) => {
+                    for account in reserved_accounts.drain(..) {
+                        remove_unused_account(state, account);
+                    }
+                    return Err(error.into());
+                }
+            }
             operating
-        } else {
-            self.operating_account
-                .expect("an operating target always carries its economy's operating account")
         };
-        validate_record_transaction(
+
+        // ---- Phase 3: pre-validate the payment leg and the report leg. ---------------
+        // Both validators are read-only, so a rejection here rolls back only the reserved
+        // accounts above and leaves every authoritative record untouched.
+        let payment = match validate_record_transaction(
             state,
             LedgerTransactionDraft {
                 occurred_at: state.now(),
@@ -167,11 +221,16 @@ impl ValidatedBusinessAcquisition {
                 ],
                 authorization: None,
             },
-        )?
-        .commit(state)?;
-        // The organization legitimately knows what it bought and what it paid: surface the
-        // acquisition through the canonical report path so the next executive brief carries it.
-        validate_record_report(
+        ) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                for account in reserved_accounts.drain(..) {
+                    remove_unused_account(state, account);
+                }
+                return Err(error.into());
+            }
+        };
+        let announcement = match validate_record_report(
             state,
             ReportDraft {
                 recipient: self.organization,
@@ -191,12 +250,54 @@ impl ValidatedBusinessAcquisition {
                     decision: None,
                 }],
             },
-        )?
-        .commit(state)?;
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                for account in reserved_accounts.drain(..) {
+                    remove_unused_account(state, account);
+                }
+                return Err(error.into());
+            }
+        };
+
+        // ---- Phase 4: commit the validated legs. --------------------------------------
+        // Every residual failure mode was excluded in phases 1-3: the transfer's conflict
+        // and staleness re-checks passed above with exclusive state access since, the fresh
+        // accounts satisfy establishment validation by construction, the payment's version
+        // pins cover accounts no interim step touched, and the report references live
+        // entities only.
+        let transfer = validate_transfer_business_ownership(
+            state,
+            self.business,
+            BusinessOwner::Organization(self.organization),
+        )
+        .expect("acquisition transfer re-validated immediately above must still validate");
+        transfer
+            .commit(state)
+            .expect("a just-revalidated ownership transfer must commit atomically");
+        if establish_now {
+            let settlement_account = reserved_accounts[1];
+            business_economy_system::ValidatedBusinessEconomyEstablishment::over_accounts_to_be_reserved(
+                BusinessEconomyDraft {
+                    business: self.business,
+                    operating_account,
+                    settlement_account,
+                },
+                self.economy_cycle_duration,
+            )
+            .commit(state)
+            .expect("establishment over freshly reserved, construction-guaranteed accounts must commit");
+        }
+        payment
+            .commit(state)
+            .expect("a payment pre-validated against untouched account versions must commit");
+        announcement
+            .commit(state)
+            .expect("a validated acquisition report about live entities must commit");
         Ok(AcquiredBusiness {
             business: self.business,
             price: self.price,
-            established_economy: self.establish_economy,
+            established_economy: establish_now,
         })
     }
 }
@@ -247,8 +348,9 @@ pub fn validate_acquire_business(
     }
     // Ownership conflicts (active enterprise hosts/supports) reject through the canonical
     // transfer path; unchanged ownership is impossible because an Independent owner never
-    // equals an Organization owner.
-    let transfer = validate_transfer_business_ownership(
+    // equals an Organization owner. Commit re-runs this read against live state, so the
+    // token itself carries no transfer snapshot.
+    validate_transfer_business_ownership(
         state,
         draft.business,
         BusinessOwner::Organization(draft.organization),
@@ -262,14 +364,11 @@ pub fn validate_acquire_business(
         );
     }
     Ok(ValidatedBusinessAcquisition {
-        transfer,
-        establish_economy: existing_economy.is_none(),
         economy_cycle_duration: registry
             .get_business(business_record.kind())
             .economics()
             .cycle(),
         funding_account: draft.funding_account,
-        operating_account: existing_economy.map(|economy| economy.operating_account()),
         price,
         business: draft.business,
         business_name: business_record.name().to_owned(),
@@ -525,6 +624,105 @@ mod tests {
                 .get_business_economy(fixture.business)
                 .is_none(),
             "a rejected acquisition opens no economy"
+        );
+        validate_invariants(&fixture.state);
+    }
+
+    /// A validated token held across other spending must not overdraw accounted funds:
+    /// commit re-checks solvency and rejects without touching ownership or books.
+    #[test]
+    fn stale_token_rejects_when_funding_drains_before_commit() {
+        let mut fixture = make_independent_fixture();
+        let price = hospitality_price(&fixture);
+        fund_accounted_from_street(&mut fixture, price.cents());
+
+        let token = validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+        )
+        .expect("a funded acquisition must validate");
+
+        // Another validated spend drains the funding account after validation.
+        let drain = validate_record_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Interleaved spend".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: fixture.accounted,
+                        amount: Money::from_cents(-price.cents()),
+                    },
+                    LedgerPosting {
+                        account: fixture.street,
+                        amount: Money::from_cents(price.cents()),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .expect("drain transfer should validate")
+        .commit(&mut fixture.state)
+        .expect("drain transfer should commit");
+        let _ = drain;
+
+        let error = token
+            .commit(&mut fixture.state)
+            .expect_err("a stale token whose funding drained must reject at commit");
+        assert_eq!(
+            error,
+            BusinessAcquisitionError::InsufficientFunds {
+                balance_cents: 0,
+                price_cents: price.cents(),
+            }
+        );
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_business(fixture.business)
+                .expect("business must persist")
+                .owner(),
+            BusinessOwner::Independent,
+            "the rejected stale purchase leaves ownership untouched"
+        );
+        assert!(
+            fixture
+                .state
+                .economy()
+                .get_business_economy(fixture.business)
+                .is_none(),
+            "the rejected stale purchase opens no economy"
+        );
+        assert!(
+            fixture
+                .state
+                .reports()
+                .reports_for(fixture.organization)
+                .find(|report| report.title() == "Business acquisition")
+                .is_none(),
+            "the rejected stale purchase publishes no report"
+        );
+        // The interleaved transfer restored both accounts to zero; nothing was minted or
+        // lost anywhere in the failed purchase.
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.street)
+                .expect("street account must persist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.accounted)
+                .expect("accounted account must persist")
+                .balance(),
+            Money::ZERO
         );
         validate_invariants(&fixture.state);
     }

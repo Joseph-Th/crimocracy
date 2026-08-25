@@ -221,6 +221,81 @@ fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
     validate_invariants(&fixture.state);
 }
 
+/// A chronically insolvent organization must clamp crew resentment at the authored rail
+/// instead of panicking once accumulated resentment leaves the bounded 0..=100 range.
+#[test]
+fn repeated_shortfalls_clamp_resentment_at_the_authored_rail() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let increment = registry.upkeep().shortfall_resentment();
+
+    // Enough consecutive unpaid days that fresh resentment crosses the authored rail;
+    // without the saturating raise the crossing day panicked on the bounded range.
+    let days_to_cross_rail =
+        u32::from(crate::social::RelationshipLevel::MAX_VALUE).div_ceil(u32::from(increment));
+    for _ in 0..days_to_cross_rail {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+        apply_daily_payroll(&registry, &mut fixture.state);
+    }
+    let at_rail = fixture
+        .state
+        .social
+        .get_relationship(fixture.member, fixture.boss)
+        .map(|record| record.dimensions().resentment.value())
+        .expect("repeated shortfalls must create a resentment edge");
+    assert_eq!(at_rail, crate::social::RelationshipLevel::MAX_VALUE);
+
+    // The day that crosses the rail clamps instead of panicking, and stays clamped after.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    apply_daily_payroll(&registry, &mut fixture.state);
+    let clamped = fixture
+        .state
+        .social
+        .get_relationship(fixture.member, fixture.boss)
+        .expect("clamped edge must persist")
+        .dimensions()
+        .resentment
+        .value();
+    assert_eq!(clamped, crate::social::RelationshipLevel::MAX_VALUE);
+    validate_invariants(&fixture.state);
+}
+
+/// An organization holding no general cash accounts at all is fully short on payroll,
+/// exactly like one whose accounts hold too little; only enterprise floats are exempt
+/// because they are delegated working capital governed by mandate authority.
+#[test]
+fn organization_without_any_funding_accounts_still_incurs_full_shortfall() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state);
+
+    let outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.organization() == fixture.organization)
+        .expect("a staffed criminal organization with no cash still owes wages");
+    assert_eq!(outcome.paid(), Money::ZERO);
+    assert_eq!(outcome.short(), outcome.owed());
+    let relationship = fixture
+        .state
+        .social
+        .get_relationship(fixture.member, fixture.boss)
+        .map(|record| record.dimensions())
+        .expect("unpaid crew resents the supervisor even with no accounts");
+    assert_eq!(
+        relationship.resentment.value(),
+        registry.upkeep().shortfall_resentment()
+    );
+    validate_invariants(&fixture.state);
+}
+
 #[test]
 fn shortfall_reports_once_to_the_player_organization_only() {
     let registry = build_registry();

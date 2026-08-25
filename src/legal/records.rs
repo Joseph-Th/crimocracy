@@ -267,10 +267,6 @@ pub struct LegalRepresentationDraft {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct LegalRepresentationIndexes {
     pub(super) by_arrest: BTreeMap<ArrestId, BTreeSet<LegalRepresentationId>>,
-    pub(super) by_defendant: BTreeMap<CharacterId, BTreeSet<LegalRepresentationId>>,
-    pub(super) by_sponsor: BTreeMap<OrganizationId, BTreeSet<LegalRepresentationId>>,
-    pub(super) by_counsel: BTreeMap<CharacterId, BTreeSet<LegalRepresentationId>>,
-    pub(super) by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
     pub(super) active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
     pub(super) active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
     /// Active automatic-policy retentions, so the per-tick custody sweep concludes only its
@@ -451,13 +447,9 @@ pub struct ProsecutionReferralDraft {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ProsecutionIndexes {
     pub(super) cases_by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
-    pub(super) cases_by_source_investigation:
-        BTreeMap<InvestigationId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
-    pub(super) cases_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionCaseId>>,
     pub(super) open_by_arrest_office: BTreeMap<(ArrestId, OrganizationId), ProsecutionCaseId>,
     pub(super) referrals_by_case: BTreeMap<ProsecutionCaseId, BTreeSet<ProsecutionReferralId>>,
-    pub(super) referrals_by_evidence: BTreeMap<EvidenceId, BTreeSet<ProsecutionReferralId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

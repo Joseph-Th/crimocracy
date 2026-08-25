@@ -367,7 +367,7 @@ pub fn validate_contact_disclosure(
         source,
         record.contact(),
         record.sponsor(),
-        resolve_information_source_kind(record.kind()),
+        information_source_kind(record.kind()),
     )?;
     Ok(ValidatedContactDisclosure {
         contact,
@@ -378,7 +378,9 @@ pub fn validate_contact_disclosure(
     })
 }
 
-pub(crate) const fn resolve_information_source_kind(kind: ContactKind) -> InformationSourceKind {
+/// Total contact-kind to information-source translation; a constant mapping, not a
+/// state-resolving lookup.
+pub(crate) const fn information_source_kind(kind: ContactKind) -> InformationSourceKind {
     match kind {
         ContactKind::Police => InformationSourceKind::PoliceContact,
         ContactKind::Legal => InformationSourceKind::Lawyer,
@@ -466,7 +468,11 @@ fn resolve_contact_kind(
 /// Whether both human endpoints of the channel are out of custody. The pending-disclosure
 /// offer surface and the disclosure commit gate share this rule so their answers can never
 /// disagree.
-fn are_channel_endpoints_available(state: &AppState, contact: &InstitutionalContactRecord) -> bool {
+/// Whether both live endpoints of the contact channel can still transact.
+fn have_channel_endpoints_available(
+    state: &AppState,
+    contact: &InstitutionalContactRecord,
+) -> bool {
     state
         .legal
         .active_arrest_for_character(contact.handler())
@@ -502,7 +508,7 @@ fn validate_disclosure_source(
 ) -> Result<(), ContactError> {
     // One shared availability rule backs both the offer surface and this commit gate, so a
     // detained handler or contact can never appear actionable and then fail here.
-    if !are_channel_endpoints_available(state, contact) {
+    if !have_channel_endpoints_available(state, contact) {
         return Err(detention_error(state, contact));
     }
     let information = state
@@ -538,7 +544,8 @@ pub fn find_pending_disclosure_sources(
     let Some(record) = state.contacts().get_contact(contact) else {
         return Vec::new();
     };
-    if record.status() != ContactStatus::Active || !are_channel_endpoints_available(state, record) {
+    if record.status() != ContactStatus::Active || !have_channel_endpoints_available(state, record)
+    {
         return Vec::new();
     }
     let topics = disclosable_topics(record.kind());

@@ -11,8 +11,11 @@ use thiserror::Error;
 pub struct RelationshipLevel(u8);
 
 impl RelationshipLevel {
+    /// Authored rail for every relationship dimension.
+    pub const MAX_VALUE: u8 = 100;
+
     pub fn try_new(value: u8) -> Result<Self, RelationshipLevelError> {
-        if value <= 100 {
+        if value <= Self::MAX_VALUE {
             Ok(Self(value))
         } else {
             Err(RelationshipLevelError { value })
@@ -20,6 +23,10 @@ impl RelationshipLevel {
     }
     pub const fn value(self) -> u8 {
         self.0
+    }
+    /// Saturating raise: increments past the authored rail hold at 100 instead of failing.
+    pub fn saturating_add(self, increment: u8) -> Self {
+        Self(self.0.saturating_add(increment).min(Self::MAX_VALUE))
     }
 }
 
@@ -48,6 +55,22 @@ pub struct RelationshipDimensions {
     pub dependence: RelationshipLevel,
     pub resentment: RelationshipLevel,
     pub debt: RelationshipLevel,
+}
+
+impl RelationshipDimensions {
+    /// All-zero baseline for a pair with no recorded history yet.
+    pub fn zero() -> Self {
+        let level = || RelationshipLevel::try_new(0).expect("zero is a valid level");
+        Self {
+            trust: level(),
+            respect: level(),
+            fear: level(),
+            affection: level(),
+            dependence: level(),
+            resentment: level(),
+            debt: level(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -106,7 +129,9 @@ impl SocialState {
     pub(crate) fn relationships(&self) -> impl Iterator<Item = &RelationshipRecord> {
         self.relationships.values()
     }
-    pub(crate) fn upsert(
+    /// In-place relationship write: updates dimensions and bumps the version, or inserts
+    /// the first record for the pair and indexes it by target.
+    pub(crate) fn set_relationship(
         &mut self,
         from: CharacterId,
         to: CharacterId,

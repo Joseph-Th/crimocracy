@@ -7,7 +7,7 @@ use crate::delegation::delegation_system::{
     ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
-use crate::economy::business_economy_system::resolve_business_gross_potential;
+use crate::economy::business_economy_system::resolve_business_current_gross;
 use crate::finance::{
     build_budget_usage, helpers::resolve_basis_point_share, AccountKind, BudgetUsageRecord,
     FinancialAccountDraft, FinancialAccountRecord, FinancialOwner, LedgerPosting,
@@ -396,6 +396,14 @@ pub enum LaunderingError {
     #[error("business {0} has no active operating economy to route laundered revenue through")]
     MissingBusinessEconomy(crate::core::id::BusinessId),
     #[error(
+        "street-cash account {account} holds {balance_cents} cents and cannot launder {requested_cents}"
+    )]
+    InsufficientStreetCash {
+        account: FinancialAccountId,
+        balance_cents: i64,
+        requested_cents: i64,
+    },
+    #[error(
     "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
   )]
     CapacityExceeded {
@@ -478,6 +486,16 @@ pub fn validate_launder_funds(
             draft.street_account,
         ));
     }
+    // The source must actually hold the cash being cleaned: debiting a phantom balance would
+    // mint accounted funds out of nothing, so laundering gates on available street cash the
+    // same way every other spend path does.
+    if street.balance().cents() < draft.amount.cents() {
+        return Err(LaunderingError::InsufficientStreetCash {
+            account: draft.street_account,
+            balance_cents: street.balance().cents(),
+            requested_cents: draft.amount.cents(),
+        });
+    }
     let accounted = state
         .finance
         .get_account(draft.accounted_account)
@@ -516,8 +534,9 @@ pub fn validate_launder_funds(
     // Plausibility: the front can hide only the authored fraction of what it legitimately
     // earns per cycle, and the budget is cumulative — a front that already absorbed volume
     // this cycle has less plausible room left, so volume requires larger or additional fronts
-    // rather than many small transfers.
-    let gross_potential = resolve_business_gross_potential(registry, state, draft.business)?;
+    // rather than many small transfers. The basis is the front's current earning power, so a
+    // sabotage-disrupted front cannot hide cash its degraded books cannot explain.
+    let gross_potential = resolve_business_current_gross(registry, state, draft.business)?;
     let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
     let capacity = resolve_basis_point_share(gross_potential, capacity_basis_points)
         .ok_or(LaunderingError::ArithmeticOverflow)?;

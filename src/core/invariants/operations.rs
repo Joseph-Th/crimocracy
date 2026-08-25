@@ -32,6 +32,32 @@ use crate::reports::ReportKind;
 use crate::world::{BusinessFunction, BusinessOwner};
 use std::collections::BTreeSet;
 
+/// The started/due instant pair every in-progress abort arm re-derives: an operation that
+/// never truly began cannot carry an in-progress abort record.
+fn resolve_abort_started_due(
+    operation: &OperationRecord,
+) -> Result<(SimTime, SimTime), StateValidationError> {
+    let (Some(started_at), Some(due_at)) = (operation.started_at(), operation.resolution_due_at())
+    else {
+        return Err(StateValidationError::InvalidOperationAbort {
+            operation: operation.id(),
+        });
+    };
+    Ok((started_at, due_at))
+}
+
+/// The earliest authored completion deadline among the persisted constraints, if any.
+fn resolve_completion_deadline(operation: &OperationRecord) -> Option<SimTime> {
+    operation
+        .constraints()
+        .iter()
+        .filter_map(|constraint| match constraint {
+            OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            OperationConstraint::RequireIntelligenceTopic(_) => None,
+        })
+        .min()
+}
+
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
     let mut operation_after_action_information = BTreeSet::new();
     let mut operation_legal_activity_information = BTreeSet::new();
@@ -390,11 +416,15 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                             });
                         }
                         // The persisted legal-activity summary is re-rendered from the same
-                        // template the commit path used, into the reused scratch buffer.
+                        // template the commit path used, into the reused scratch buffer. A
+                        // missing authority rejects with the typed error instead of trusting
+                        // investigation ownership that later passes have not yet validated.
                         let authority_name = state
                             .world
                             .get_organization(investigation.owner())
-                            .expect("validated investigation authority must exist")
+                            .ok_or(StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            })?
                             .name();
                         text_scratch.clear();
                         write_legal_activity_summary(
@@ -929,21 +959,8 @@ fn validate_operation_abort_links(
             )?;
         }
         (OperationAbortPhase::InProgress, OperationAbortCause::DeadlineMissed, Some(artifacts)) => {
-            let (Some(started_at), Some(due_at)) =
-                (operation.started_at(), operation.resolution_due_at())
-            else {
-                return Err(StateValidationError::InvalidOperationAbort {
-                    operation: operation.id(),
-                });
-            };
-            let deadline = operation
-                .constraints()
-                .iter()
-                .filter_map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
-                    OperationConstraint::RequireIntelligenceTopic(_) => None,
-                })
-                .min();
+            let (started_at, due_at) = resolve_abort_started_due(operation)?;
+            let deadline = resolve_completion_deadline(operation);
             if started_at > due_at
                 || abort.aborted_at() < started_at
                 || deadline.is_none_or(|deadline| deadline > abort.aborted_at())
@@ -963,13 +980,7 @@ fn validate_operation_abort_links(
             )?;
         }
         (OperationAbortPhase::InProgress, OperationAbortCause::AuthorityOrder, Some(artifacts)) => {
-            let (Some(started_at), Some(due_at)) =
-                (operation.started_at(), operation.resolution_due_at())
-            else {
-                return Err(StateValidationError::InvalidOperationAbort {
-                    operation: operation.id(),
-                });
-            };
+            let (started_at, due_at) = resolve_abort_started_due(operation)?;
             if started_at > due_at || abort.aborted_at() < started_at {
                 return Err(StateValidationError::InvalidOperationAbort {
                     operation: operation.id(),
@@ -1034,23 +1045,13 @@ fn validate_operation_abort_links(
             OperationAbortCause::DeadlineMissed,
             Some(artifacts),
         ) => {
-            let (Some(started_at), Some(due_at), Some(paused_at)) = (
-                operation.started_at(),
-                operation.resolution_due_at(),
-                operation.awaiting_decision_since(),
-            ) else {
+            let (started_at, due_at) = resolve_abort_started_due(operation)?;
+            let Some(paused_at) = operation.awaiting_decision_since() else {
                 return Err(StateValidationError::InvalidOperationAbort {
                     operation: operation.id(),
                 });
             };
-            let deadline = operation
-                .constraints()
-                .iter()
-                .filter_map(|constraint| match constraint {
-                    OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
-                    OperationConstraint::RequireIntelligenceTopic(_) => None,
-                })
-                .min();
+            let deadline = resolve_completion_deadline(operation);
             if started_at > due_at
                 || started_at > paused_at
                 || paused_at > abort.aborted_at()

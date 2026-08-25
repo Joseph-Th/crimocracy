@@ -165,6 +165,9 @@ impl ValidatedProsecutionCaseOpening {
         let report = self.report.commit(state)?;
         let case_id = state.ids.next_prosecution_case()?;
         let referral_id = state.ids.next_prosecution_referral()?;
+        // The referral record owns the evidence set; the case holds its own copy because
+        // supplemental referrals grow the two independently.
+        let case_evidence = self.draft.evidence.clone();
         state.legal.insert_prosecution_case(
             ProsecutionCaseRecord {
                 id: case_id,
@@ -177,7 +180,7 @@ impl ValidatedProsecutionCaseOpening {
                     lead_prosecutor: self.draft.lead_prosecutor,
                 },
                 referrals: super::ProsecutionCaseReferrals {
-                    evidence: self.draft.evidence.clone(),
+                    evidence: case_evidence,
                     initial_referral: referral_id,
                     referrals: BTreeSet::from([referral_id]),
                 },

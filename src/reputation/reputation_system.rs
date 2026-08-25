@@ -126,7 +126,7 @@ pub(crate) fn apply_operation_reputation_consequences(
         OperationObjectiveOutcome::Partial => config.partial_underworld_competence(),
         OperationObjectiveOutcome::Failed => 0,
     };
-    shifts.extend(applied_shift(
+    shifts.extend(apply_shift(
         registry,
         state,
         organization,
@@ -140,7 +140,7 @@ pub(crate) fn apply_operation_reputation_consequences(
         OperationExposureLevel::Witnessed => config.witnessed_exposure_police_fear(),
         OperationExposureLevel::Identifying => config.identifying_exposure_police_fear(),
     };
-    shifts.extend(applied_shift(
+    shifts.extend(apply_shift(
         registry,
         state,
         organization,
@@ -150,7 +150,7 @@ pub(crate) fn apply_operation_reputation_consequences(
     )?);
 
     if approach == OperationApproach::Violent {
-        shifts.extend(applied_shift(
+        shifts.extend(apply_shift(
             registry,
             state,
             organization,
@@ -180,7 +180,7 @@ pub(crate) fn apply_vice_inquiry_reputation_consequences(
         return Ok(Vec::new());
     }
     let fear = registry.reputation().vice_inquiry_police_fear();
-    Ok(applied_shift(
+    Ok(apply_shift(
         registry,
         state,
         organization,
@@ -195,7 +195,7 @@ pub(crate) fn apply_vice_inquiry_reputation_consequences(
 /// Applies one authored consequence through the canonical delta path and reports the pair
 /// only when the score actually moved. A score already clamped at a rail did not move, and
 /// reporting movement that did not happen would fabricate causal feedback about standing.
-fn applied_shift(
+fn apply_shift(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,

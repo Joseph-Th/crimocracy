@@ -28,6 +28,7 @@ use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationCommand, OperationDraft, OperationIdentity, OperationKind, OperationObjective,
     OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus, RoleKind,
+    ACTIVE_ASSIGNMENT_STATUSES,
 };
 use crate::registry::Registry;
 use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
@@ -877,21 +878,17 @@ fn find_non_terminal_extraction_targeting(
     state: &AppState,
     target_character: CharacterId,
 ) -> Option<OperationId> {
-    [
-        OperationStatus::Authorized,
-        OperationStatus::InProgress,
-        OperationStatus::AwaitingDecision,
-    ]
-    .iter()
-    .flat_map(|status| state.operations.operations_with_status(*status))
-    .filter(|operation| {
-        matches!(
-          operation.objective(),
-          OperationObjective::FreeDetainee { target } if *target == target_character
-        )
-    })
-    .map(|operation| operation.id())
-    .min()
+    ACTIVE_ASSIGNMENT_STATUSES
+        .iter()
+        .flat_map(|status| state.operations.operations_with_status(*status))
+        .filter(|operation| {
+            matches!(
+              operation.objective(),
+              OperationObjective::FreeDetainee { target } if *target == target_character
+            )
+        })
+        .map(|operation| operation.id())
+        .min()
 }
 
 /// Rejects take/disrupt objectives aimed at a business the sponsoring organization owns.

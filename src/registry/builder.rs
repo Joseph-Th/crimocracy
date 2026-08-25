@@ -78,6 +78,10 @@ pub(crate) enum RegistryBuildError {
     InvalidInvestigationWorkSupportWeight(InvestigationWorkKind),
     #[error("investigation work {0:?} variance must be in 0..=50")]
     InvalidInvestigationWorkVariance(InvestigationWorkKind),
+    #[error(
+        "investigation work {0:?} connected margin must stay inside the reachable margin space -150..=250"
+    )]
+    InvalidInvestigationWorkConnectedMargin(InvestigationWorkKind),
     #[error("operation {0:?} must have a positive execution duration")]
     InvalidOperationDuration(OperationKind),
     #[error("operation {0:?} base difficulty must be in 0..=100")]
@@ -88,6 +92,12 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationVariance(OperationKind),
     #[error("operation {0:?} outcome margins are ordered incorrectly")]
     InvalidOperationOutcomeMargins(OperationKind),
+    #[error(
+        "operation {0:?} outcome margins must stay inside the reachable margin space -480..=150"
+    )]
+    InvalidOperationOutcomeMarginRange(OperationKind),
+    #[error("operation {0:?} approach difficulty adjustments must be in -50..=50")]
+    InvalidOperationApproachAdjustment(OperationKind),
     #[error("operation {0:?} must define at least one relevant intelligence topic")]
     MissingOperationIntelligenceTopics(OperationKind),
     #[error("operation {0:?} intelligence difficulty reduction must be in 0..=50")]
@@ -227,6 +237,8 @@ pub(crate) enum RegistryBuildError {
     EnterpriseNotableVarianceOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} losing-cycle suspension threshold must be at least one cycle")]
     EnterpriseSuspensionThresholdOutOfRange(EnterpriseKind),
+    #[error("enterprise {0:?} vice-attention basis points must be in 0..=10000")]
+    EnterpriseViceAttentionOutOfRange(EnterpriseKind),
 }
 
 #[derive(Default)]
@@ -249,9 +261,6 @@ pub(crate) struct RegistryBuilder {
 }
 
 impl RegistryBuilder {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
     pub(crate) fn register_capability(
         &mut self,
         kind: CapabilityKind,
@@ -617,6 +626,15 @@ impl RegistryBuilder {
         if spec.variance_limit > 50 {
             return Err(RegistryBuildError::InvalidInvestigationWorkVariance(kind));
         }
+        // The runtime margin is capability (0..=100) + support adjustment
+        // (0..=weight, weight validated <= 100) + variance (-limit..=limit, <= 50)
+        // - difficulty (0..=100), so a connected margin outside -150..=250 can never
+        // separate outcomes: every review would resolve identically forever.
+        if !(-150..=250).contains(&spec.connected_margin) {
+            return Err(RegistryBuildError::InvalidInvestigationWorkConnectedMargin(
+                kind,
+            ));
+        }
         if self
             .investigation_work
             .insert(
@@ -681,6 +699,24 @@ impl RegistryBuilder {
         }
         if execution.difficulty.partial_margin >= execution.difficulty.achieved_margin {
             return Err(RegistryBuildError::InvalidOperationOutcomeMargins(kind));
+        }
+        // The runtime margin is weighted ability (0..=100) minus difficulty terms
+        // (base <= 100, police pressure <= 100, arrival penalty <= 100, intelligence
+        // reduction <= 50, approach adjustment within the bound checked below, time
+        // pressure <= 30) plus variance (-limit..=limit, <= 50), so margins outside
+        // -480..=150 make one outcome unreachable for every crew and target.
+        if !(-480..=150).contains(&execution.difficulty.partial_margin)
+            || !(-480..=150).contains(&execution.difficulty.achieved_margin)
+        {
+            return Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(kind));
+        }
+        if execution
+            .difficulty
+            .approach_difficulty_adjustments
+            .values()
+            .any(|adjustment| !(-50..=50).contains(adjustment))
+        {
+            return Err(RegistryBuildError::InvalidOperationApproachAdjustment(kind));
         }
         if execution.intelligence.relevant_topics.is_empty() {
             return Err(RegistryBuildError::MissingOperationIntelligenceTopics(kind));
@@ -858,6 +894,11 @@ impl RegistryBuilder {
             return Err(RegistryBuildError::EnterpriseSuspensionThresholdOutOfRange(
                 kind,
             ));
+        }
+        // The per-cycle visibility roll is a draw from 0..=9999 compared against these
+        // basis points, so anything above 10_000 would mean "an inquiry every cycle".
+        if economics.vice_attention_basis_points_per_active_case > 10_000 {
+            return Err(RegistryBuildError::EnterpriseViceAttentionOutOfRange(kind));
         }
         if self
             .enterprises

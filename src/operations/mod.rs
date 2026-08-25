@@ -217,6 +217,15 @@ pub enum OperationStatus {
     Aborted,
 }
 
+/// The live assignment statuses whose participants are booked: a character holding any of
+/// these cannot take overlapping work or enter custody. Terminal operations release their
+/// participants and are excluded from every booking scan.
+pub const ACTIVE_ASSIGNMENT_STATUSES: [OperationStatus; 3] = [
+    OperationStatus::Authorized,
+    OperationStatus::InProgress,
+    OperationStatus::AwaitingDecision,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationAbortPhase {
     BeforeStart,

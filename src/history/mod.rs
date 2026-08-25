@@ -1,4 +1,4 @@
-//! Durable entity-linked campaign history; `history_system` owns event insertion and indexing.
+//! Durable entity-linked campaign history; `history_system` owns event validation and insertion.
 
 pub mod history_system;
 

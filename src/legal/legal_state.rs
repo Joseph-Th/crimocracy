@@ -1587,30 +1587,6 @@ impl LegalState {
             .entry(record.arrest())
             .or_default()
             .insert(id);
-        self.indexes
-            .representations
-            .by_defendant
-            .entry(record.defendant())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .representations
-            .by_sponsor
-            .entry(record.sponsor())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .representations
-            .by_counsel
-            .entry(record.counsel())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .representations
-            .by_contact
-            .entry(record.contact())
-            .or_default()
-            .insert(id);
         let previous = self
             .indexes
             .representations
@@ -1712,30 +1688,10 @@ impl LegalState {
             .insert(case_id);
         self.indexes
             .prosecutions
-            .cases_by_source_investigation
-            .entry(case.source_investigation())
-            .or_default()
-            .insert(case_id);
-        self.indexes
-            .prosecutions
             .cases_by_lead
             .entry(case.lead_prosecutor())
             .or_default()
             .insert(case_id);
-        for evidence in case.evidence() {
-            self.indexes
-                .prosecutions
-                .cases_by_evidence
-                .entry(*evidence)
-                .or_default()
-                .insert(case_id);
-            self.indexes
-                .prosecutions
-                .referrals_by_evidence
-                .entry(*evidence)
-                .or_default()
-                .insert(referral_id);
-        }
         let previous_open = self
             .indexes
             .prosecutions
@@ -1763,18 +1719,6 @@ impl LegalState {
         for evidence in referral.evidence() {
             let inserted = case.referrals.evidence.insert(*evidence);
             debug_assert!(inserted, "supplemental referral must add new evidence");
-            self.indexes
-                .prosecutions
-                .cases_by_evidence
-                .entry(*evidence)
-                .or_default()
-                .insert(case_id);
-            self.indexes
-                .prosecutions
-                .referrals_by_evidence
-                .entry(*evidence)
-                .or_default()
-                .insert(referral_id);
         }
         case.referrals.referrals.insert(referral_id);
         case.version = case

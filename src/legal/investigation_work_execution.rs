@@ -763,7 +763,7 @@ fn resolve_interview_statement_draft(
 /// Schedules witness interviews for staffed active cases whose registered witnesses have not
 /// given a statement yet. Witnesses typically enter a case after the initial evidence review
 /// is already scheduled, so this runs every tick over the (small) set of active cases.
-pub fn apply_due_witness_interview_scheduling(
+pub fn apply_witness_interview_scheduling(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
@@ -782,11 +782,18 @@ pub fn apply_due_witness_interview_scheduling(
         // the lowest assigned ID. Detained investigators are skipped so an autonomous pass
         // never schedules work they could not perform; cases without an available
         // investigator wait for a later minute or the staffing pass.
-        let investigator = investigation
-            .lead_investigator()
-            .into_iter()
-            .chain(investigation.assigned_investigators().iter().copied())
-            .find(|id| state.legal.active_arrest_for_character(*id).is_none());
+        let lead = investigation.lead_investigator();
+        let investigator: Option<CharacterId> =
+            if lead.is_some_and(|lead| state.legal.active_arrest_for_character(lead).is_none()) {
+                lead
+            } else {
+                // The lead is detained or absent; fall through to the lowest assigned ID.
+                investigation
+                    .assigned_investigators()
+                    .iter()
+                    .copied()
+                    .find(|id| state.legal.active_arrest_for_character(*id).is_none())
+            };
         let Some(investigator) = investigator else {
             continue;
         };

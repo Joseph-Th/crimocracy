@@ -2,7 +2,7 @@
 
 use crate::core::id::{
     BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,
-    OperationId, OpportunityId, PoliceResponseId, RecruitmentAttemptId, ReportId,
+    OperationId, OpportunityId, OrganizationId, PoliceResponseId, RecruitmentAttemptId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
@@ -71,9 +71,110 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Simulation speed is an adapter concern. The canonical pipeline always advances one minute,
     // so normal/fast/very-fast modes call the exact same deterministic path more often.
     state.advance_clock(SimDuration::ONE_MINUTE);
-    // Opportunity expiry runs before other due work so its durable lifecycle report is available
-    // to every same-minute consumer, including the executive brief synthesized at the end.
+    // Phase order is the contract: opportunity expiry first so its durable lifecycle report is
+    // available to every same-minute consumer; then operations (start, deadline aborts, police
+    // arrivals, resolution), legal institutional work (staffing, detective work, custody,
+    // informants, representation, cold decay), economy cycles (businesses, enterprises),
+    // personnel passes (payroll, recruitment, delegated expansion), reputation (decay before
+    // consequences), and executive synthesis last so the due brief sees everything above.
     let expired_opportunities = apply_opportunity_expiry(registry, state);
+    let (started_operations, arrived_police_responses, decision_requests, resolved_operations) =
+        run_operations_phase(registry, state);
+    let staffed_investigations = apply_autonomous_investigator_staffing(state)
+        .expect("valid state should staff available investigators onto active cases");
+    let scheduled_investigation_work =
+        apply_initial_evidence_reviews(registry, state, &staffed_investigations)
+            .expect("newly staffed investigations should schedule valid initial evidence work");
+    // Witness interviews are scheduled after evidence reviews so a witness registered by an
+    // operation resolving earlier in this same minute is interviewable as soon as its case
+    // has an investigator.
+    let scheduled_witness_interviews =
+        crate::legal::investigation_work_execution::apply_witness_interview_scheduling(
+            registry, state,
+        )
+        .expect("valid state should schedule due witness interviews");
+    let resolved_investigation_work = run_investigation_work_phase(registry, state);
+    // The police institution converts accumulated case evidence into custody after detective
+    // work resolves, so an interview or forensic analysis finishing this minute is visible to
+    // the same minute's arrest decision.
+    let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
+        .expect("valid state should convert qualifying case evidence into custody");
+    // Detainee informant recruitment runs right after custody conversion: a member arrested
+    // exactly one cadence window ago faces their single recruitment decision this minute, and
+    // active informants disclose personally-held knowledge into their handler's cases.
+    let informant_recruitments =
+        crate::legal::informant_system::apply_detainee_informant_recruitment(registry, state)
+            .expect("valid state should resolve detainee informant recruitment decisions");
+    let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
+        .expect("valid state should record due informant disclosures");
+    // Automatic legal-support governance runs last in the custody cluster: it sees every
+    // arrest made this minute and retains counsel through the canonical representation path
+    // when the organization's standing policy promises it.
+    let automatic_legal_support =
+        crate::legal::legal_representation_system::apply_automatic_legal_support(state)
+            .expect("valid state should resolve automatic legal-support retention");
+    // Cold-case decay runs after detective work resolution so the case's last-activity instant is
+    // final for the minute; an authored institutional-inactivity window then shelves operation-
+    // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
+    // decay does not perturb any domain RNG sequence.
+    let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
+        .expect("valid state should resolve cold-case decay");
+    let business_cycles = run_business_cycle_phase(registry, state);
+    let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
+    // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
+    // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
+    // already in place when a rival pitches them.
+    let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
+    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state);
+    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
+    // minute governs with its current roster. Selection consumes no randomness, so matched
+    // branches observe identical rival growth unless their own actions touched rival state.
+    let autonomous_enterprises =
+        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state);
+    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
+    // Executive synthesis runs last so a due brief sees every report and decision created by
+    // operational, investigative, financial, and delegated personnel work that resolved in the
+    // same simulation minute.
+    let executive_brief = synthesize_executive_brief(registry, state);
+    validate_invariants(state);
+    TickOutcome {
+        now: state.now(),
+        started_operations,
+        arrived_police_responses,
+        decision_requests,
+        resolved_operations,
+        staffed_investigations,
+        scheduled_investigation_work,
+        scheduled_witness_interviews,
+        resolved_investigation_work,
+        evidence_arrests,
+        informant_recruitments,
+        informant_disclosures,
+        automatic_legal_support,
+        business_cycles,
+        enterprise_cycles,
+        payrolls,
+        recruitment_attempts,
+        autonomous_enterprises,
+        expired_opportunities,
+        cold_case_suspensions: cold_case_decay.suspended,
+        cold_case_closures: cold_case_decay.closed,
+        executive_brief,
+    }
+}
+
+/// Starts due authorized operations, aborts missed deadlines (through the pending decision when
+/// one exists), processes due police-response arrivals, and resolves due in-progress operations
+/// with pre-drawn deterministic variance.
+fn run_operations_phase(
+    registry: &Registry,
+    state: &mut AppState,
+) -> (
+    Vec<OperationId>,
+    Vec<PoliceResponseId>,
+    Vec<DecisionRequestOutcome>,
+    Vec<OperationId>,
+) {
     let due_authorized = find_due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
     for operation in due_authorized {
@@ -144,24 +245,24 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated operation resolution must commit atomically");
         resolved_operations.push(resolved);
     }
-    let staffed_investigations = apply_autonomous_investigator_staffing(state)
-        .expect("valid state should staff available investigators onto active cases");
-    let scheduled_investigation_work =
-        apply_initial_evidence_reviews(registry, state, &staffed_investigations)
-            .expect("newly staffed investigations should schedule valid initial evidence work");
-    // Witness interviews are scheduled after evidence reviews so a witness registered by an
-    // operation resolving earlier in this same minute is interviewable as soon as its case
-    // has an investigator.
-    let witness_interviews =
-        crate::legal::investigation_work_execution::apply_due_witness_interview_scheduling(
-            registry, state,
-        )
-        .expect("valid state should schedule due witness interviews");
-    // Detective work resolves after operation consequences so legal state created by an operation
-    // is visible to later institutional work in the same minute without bypassing evidence ownership.
-    let due_investigation_work = find_due_scheduled_investigation_work(state);
-    let mut resolved_investigation_work = Vec::with_capacity(due_investigation_work.len());
-    for work in due_investigation_work {
+    (
+        started_operations,
+        arrived_police_responses,
+        decision_requests,
+        resolved_operations,
+    )
+}
+
+/// Resolves due scheduled detective work with pre-drawn variance. Runs after operation
+/// consequences so legal state created by an operation is visible to later institutional work
+/// in the same minute without bypassing evidence ownership.
+fn run_investigation_work_phase(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Vec<InvestigationWorkId> {
+    let due_work = find_due_scheduled_investigation_work(state);
+    let mut resolved = Vec::with_capacity(due_work.len());
+    for work in due_work {
         let kind = state
             .legal()
             .get_investigation_work(work)
@@ -176,37 +277,17 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             InvestigationWorkRandomness::new(variance),
         )
         .expect("due investigation work must resolve a valid plan");
-        let resolved = validate_investigation_work_resolution_plan(registry, state, plan)
+        let committed = validate_investigation_work_resolution_plan(registry, state, plan)
             .expect("fresh investigation work resolution plan must validate")
             .commit(state)
             .expect("validated investigation work must commit atomically");
-        resolved_investigation_work.push(resolved);
+        resolved.push(committed);
     }
-    // The police institution converts accumulated case evidence into custody after detective
-    // work resolves, so an interview or forensic analysis finishing this minute is visible to
-    // the same minute's arrest decision.
-    let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
-        .expect("valid state should convert qualifying case evidence into custody");
-    // Detainee informant recruitment runs right after custody conversion: a member arrested
-    // exactly one cadence window ago faces their single recruitment decision this minute, and
-    // active informants disclose personally-held knowledge into their handler's cases.
-    let informant_recruitments =
-        crate::legal::informant_system::apply_detainee_informant_recruitment(registry, state)
-            .expect("valid state should resolve detainee informant recruitment decisions");
-    let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
-        .expect("valid state should record due informant disclosures");
-    // Automatic legal-support governance runs last in the custody cluster: it sees every
-    // arrest made this minute and retains counsel through the canonical representation path
-    // when the organization's standing policy promises it.
-    let automatic_legal_support =
-        crate::legal::legal_representation_system::apply_automatic_legal_support(state)
-            .expect("valid state should resolve automatic legal-support retention");
-    // Cold-case decay runs after detective work resolution so the case's last-activity instant is
-    // final for the minute; an authored institutional-inactivity window then shelves operation-
-    // originated cases whose owning authority has gone quiet. No random stream is consumed, so the
-    // decay does not perturb any domain RNG sequence.
-    let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
-        .expect("valid state should resolve cold-case decay");
+    resolved
+}
+
+/// Settles due business operating cycles with pre-drawn gross variance.
+fn run_business_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<BusinessCycleId> {
     let due_businesses = find_due_businesses(state);
     let mut business_cycles = Vec::with_capacity(due_businesses.len());
     for business in due_businesses {
@@ -228,6 +309,13 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated business cycle must commit atomically");
         business_cycles.push(cycle);
     }
+    business_cycles
+}
+
+/// Settles due enterprise cycles. Both draws happen unconditionally per due cycle so the
+/// enterprise stream consumes the same number of values whatever the district's case pressure
+/// turns out to be.
+fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<EnterpriseCycleId> {
     let due_enterprises = find_due_enterprises(state);
     let mut enterprise_cycles = Vec::with_capacity(due_enterprises.len());
     for enterprise in due_enterprises {
@@ -237,15 +325,15 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("due enterprise must exist")
             .kind();
         let economics = registry.get_enterprise(kind).economics();
-        // Both draws happen unconditionally per due cycle so the enterprise stream consumes
-        // the same number of values whatever the district's case pressure turns out to be.
         let variance = draw_basis_point_variance(
             state.enterprise_rng_mut(),
             economics.gross_variance_basis_points(),
         );
-        let vice_attention_roll = draw_index(state.enterprise_rng_mut(), 10_000)
-            .map(|drawn| drawn as u16)
-            .unwrap_or(0);
+        let vice_attention_roll = u16::try_from(
+            draw_index(state.enterprise_rng_mut(), 10_000)
+                .expect("vice-attention roll range is never empty"),
+        )
+        .expect("vice-attention roll fits u16");
         let plan = decide_enterprise_cycle(
             registry,
             state,
@@ -259,23 +347,24 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("validated enterprise cycle must commit atomically");
         enterprise_cycles.push(cycle);
     }
-    // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
-    // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
-    // already in place when a rival pitches them.
-    let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
-    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state);
-    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
-    // minute governs with its current roster. Selection consumes no randomness, so matched
-    // branches observe identical rival growth unless their own actions touched rival state.
-    let autonomous_enterprises =
-        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state);
-    // Reputation consequences run after payroll, recruitment, and delegated expansion —
-    // earlier in the same tick deliberately reads pre-consequence competence — but before
-    // the daily decay pass so fresh adjustments are never immediately eroded. The player
-    // organization additionally receives a Standing report per shifting operation — its own
-    // street standing is legitimate self-knowledge, surfaced through the canonical report path.
+    enterprise_cycles
+}
+
+/// Day-boundary decay runs first in the reputation cluster: yesterday's impressions fade one
+/// authored step before anything new lands, so consequences applied this minute are not
+/// immediately eroded by the same boundary's decay pass. Resolved operations feed competence/
+/// fear/exposure consequences; rackets that drew a vice inquiry this tick pay the same
+/// institutional memory as an exposed operation. The player organization reads its own standing
+/// shifts through the canonical Standing-report path — legitimate self-knowledge.
+fn apply_reputation_phase(
+    registry: &Registry,
+    state: &mut AppState,
+    resolved_operations: &[OperationId],
+    enterprise_cycles: &[EnterpriseCycleId],
+) {
+    crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
     let player_organization = state.player_organization();
-    for operation in &resolved_operations {
+    for operation in resolved_operations {
         let (organization, approach, objective_outcome, exposure_level) = {
             let record = state
                 .operations()
@@ -310,10 +399,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("player standing feedback must record through the canonical report path");
         }
     }
-    // A racket that drew a vice inquiry this tick pays the same institutional memory as an
-    // exposed operation: police fear rises (throttling delegated expansion while it decays),
-    // and the player organization reads its own standing through the canonical report path.
-    let vice_inquiry_owners: Vec<crate::core::id::OrganizationId> = enterprise_cycles
+    let vice_inquiry_owners: Vec<OrganizationId> = enterprise_cycles
         .iter()
         .filter_map(|cycle_id| {
             let cycle = state.enterprises().get_cycle(*cycle_id)?;
@@ -344,11 +430,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("player standing feedback must record through the canonical report path");
         }
     }
-    crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
-    // Executive synthesis runs last so a due brief sees every report and decision created by
-    // operational, investigative, financial, and delegated personnel work that resolved in the
-    // same simulation minute.
-    let executive_brief = state.player_organization().and_then(|recipient| {
+}
+
+/// Synthesizes the player organization's due executive brief.
+fn synthesize_executive_brief(registry: &Registry, state: &mut AppState) -> Option<ReportId> {
+    state.player_organization().and_then(|recipient| {
         is_executive_brief_due(registry, state.now()).then(|| {
             let plan = decide_executive_brief(registry, state, recipient)
                 .expect("due player executive brief must produce a valid synthesis plan");
@@ -357,32 +443,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
                 .commit(state)
                 .expect("validated executive brief must commit atomically")
         })
-    });
-    validate_invariants(state);
-    TickOutcome {
-        now: state.now(),
-        started_operations,
-        arrived_police_responses,
-        decision_requests,
-        resolved_operations,
-        staffed_investigations,
-        scheduled_investigation_work,
-        scheduled_witness_interviews: witness_interviews,
-        resolved_investigation_work,
-        evidence_arrests,
-        informant_recruitments,
-        informant_disclosures,
-        automatic_legal_support,
-        business_cycles,
-        enterprise_cycles,
-        payrolls,
-        recruitment_attempts,
-        autonomous_enterprises,
-        expired_opportunities,
-        cold_case_suspensions: cold_case_decay.suspended,
-        cold_case_closures: cold_case_decay.closed,
-        executive_brief,
-    }
+    })
 }
 
 fn draw_signed_variance(rng: &mut impl RngCore, limit: u8) -> i8 {

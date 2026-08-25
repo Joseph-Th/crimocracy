@@ -63,6 +63,9 @@ pub struct ExecutiveBriefPlan {
 }
 
 impl ExecutiveBriefPlan {
+    // Test-only drill-down: production consumers read the committed report record, not the
+    // intermediate plan.
+    #[cfg(test)]
     pub fn entries(&self) -> &[ReportEntry] {
         &self.entries
     }
@@ -204,10 +207,13 @@ fn collect_source_candidates(
                 if pending_decisions.contains(&decision) {
                     continue;
                 }
+                // A decision that is no longer pending — resolved, or gone entirely —
+                // makes its citing entry stale context rather than executive attention.
+                // Including it would fail draft validation and abort the whole synthesis.
                 if state
                     .decisions()
                     .get_decision(decision)
-                    .is_some_and(|record| {
+                    .is_none_or(|record| {
                         record.status() != crate::decisions::DecisionStatus::Pending
                     })
                 {

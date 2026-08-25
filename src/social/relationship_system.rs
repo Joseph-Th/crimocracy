@@ -21,7 +21,9 @@ pub struct ValidatedRelationship {
 
 impl ValidatedRelationship {
     pub fn commit(self, state: &mut AppState) {
-        state.social.upsert(self.from, self.to, self.dimensions);
+        state
+            .social
+            .set_relationship(self.from, self.to, self.dimensions);
     }
 }
 

@@ -37,7 +37,7 @@ pub(crate) enum SurveillanceError {
 pub(crate) struct SurveillanceIntelligencePlan {
     target: EntityRef,
     observed_at: SimTime,
-    surveiller: Option<OrganizationId>,
+    surveiller: OrganizationId,
     snapshot: SurveillanceTargetSnapshot,
     observations: Vec<SurveillanceObservation>,
 }
@@ -210,7 +210,7 @@ pub(crate) fn decide_surveillance_intelligence(
     Ok(Some(SurveillanceIntelligencePlan {
         target: *target,
         observed_at,
-        surveiller: Some(surveiller),
+        surveiller,
         snapshot,
         observations,
     }))
@@ -223,10 +223,7 @@ pub(crate) fn validate_surveillance_plan_snapshot(
     if state.now() != plan.observed_at {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
-    let surveiller = plan
-        .surveiller
-        .expect("validated surveillance plan must carry its surveiller");
-    let current = resolve_target_snapshot(state, plan.target, plan.observed_at, surveiller)?;
+    let current = resolve_target_snapshot(state, plan.target, plan.observed_at, plan.surveiller)?;
     if current != plan.snapshot {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }

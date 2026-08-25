@@ -34,7 +34,7 @@ pub const CURRENT_CONTENT_REVISION: u32 = 33;
 const MINIMUM_POLICE_RESPONSE_DELAY_MINUTES: u32 = 3;
 
 pub fn build_registry() -> Registry {
-    let mut builder = RegistryBuilder::new();
+    let mut builder = RegistryBuilder::default();
     for kind in ALL_CAPABILITY_KINDS {
         builder
             .register_capability(kind)

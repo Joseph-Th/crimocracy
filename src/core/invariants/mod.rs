@@ -558,7 +558,23 @@ fn validate_id_allocator(
     Ok(())
 }
 
+/// Registry-relative re-derivation: recomputes every authored-content-dependent value from
+/// the live registry and requires persisted state to agree. Split per domain so each
+/// re-derivation contract stays independently readable.
 pub fn validate_state_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    validate_operations_against_registry(registry, state)?;
+    validate_opportunities_against_registry(registry, state)?;
+    validate_investigation_work_against_registry(registry, state)?;
+    validate_business_cycles_against_registry(registry, state)?;
+    validate_enterprises_against_registry(registry, state)?;
+    validate_recruitment_against_registry(registry, state)?;
+    Ok(())
+}
+
+fn validate_operations_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
@@ -723,6 +739,14 @@ pub fn validate_state_against_registry(
             }
         }
     }
+
+    Ok(())
+}
+
+fn validate_opportunities_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for opportunity in state.opportunities.opportunities() {
         let context = opportunity.context().operation();
         let definition = registry.get_operation(context.operation_kind());
@@ -761,6 +785,14 @@ pub fn validate_state_against_registry(
             }
         }
     }
+
+    Ok(())
+}
+
+fn validate_investigation_work_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for work in state.legal.investigation_work() {
         let definition = registry.get_investigation_work(work.kind());
         if work.due_at() != work.scheduled_at() + definition.duration() {
@@ -811,6 +843,14 @@ pub fn validate_state_against_registry(
             }
         }
     }
+
+    Ok(())
+}
+
+fn validate_business_cycles_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for cycle in state.economy.cycles() {
         let business = state
             .world
@@ -833,6 +873,14 @@ pub fn validate_state_against_registry(
             return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
         }
     }
+
+    Ok(())
+}
+
+fn validate_enterprises_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     for enterprise in state.enterprises.enterprises() {
         let definition = registry.get_enterprise(enterprise.kind());
         let mut network_functions = BTreeSet::new();
@@ -919,7 +967,6 @@ pub fn validate_state_against_registry(
             return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
         }
     }
-    validate_recruitment_against_registry(registry, state)?;
     Ok(())
 }
 

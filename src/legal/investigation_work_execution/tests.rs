@@ -243,7 +243,7 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
 
     let limit = u32::from(registry.legal().witness_interview_attempt_limit());
     for attempt in 1..=limit {
-        let scheduled = apply_due_witness_interview_scheduling(&registry, &mut fixture.state)
+        let scheduled = apply_witness_interview_scheduling(&registry, &mut fixture.state)
             .expect("interview scheduling pass should resolve");
         assert_eq!(
             scheduled.len(),
@@ -271,7 +271,7 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
         "every completed interview counts against the budget"
     );
     assert!(
-        apply_due_witness_interview_scheduling(&registry, &mut fixture.state)
+        apply_witness_interview_scheduling(&registry, &mut fixture.state)
             .expect("exhausted scheduling pass should resolve")
             .is_empty()
     );

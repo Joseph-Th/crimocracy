@@ -1,4 +1,4 @@
-﻿//! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
+//! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -323,7 +323,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
         if policy.setting != PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated) {
             continue;
         }
-        let approach = autonomous_recruitment_approach(manager_record);
+        let approach = resolve_autonomous_recruitment_approach(manager_record);
         let mut candidates =
             find_recruitment_candidates(registry, state, organization, manager).unwrap_or_default();
         candidates.retain(|candidate| !recruited_this_pass.contains(candidate));
@@ -368,7 +368,9 @@ pub(crate) fn apply_due_autonomous_recruitment(
     attempts
 }
 
-fn autonomous_recruitment_approach(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {
+fn resolve_autonomous_recruitment_approach(
+    manager: &crate::world::CharacterRecord,
+) -> RecruitmentApproach {
     if manager.has_trait(TraitKind::Charismatic) {
         RecruitmentApproach::PersonalAppeal
     } else if manager.has_trait(TraitKind::Ambitious) || manager.has_trait(TraitKind::Proud) {
@@ -409,12 +411,13 @@ pub(crate) fn decide_recruitment_attempt(
     );
     let pressure_information_snapshot =
         candidate_pressure_information_ids(state, draft.candidate, state.now());
-    let (pressure_information, perceived_legal_pressure) = resolve_perceived_legal_pressure_at(
-        registry.recruitment(),
-        state,
-        draft.candidate,
-        state.now(),
-    );
+    let (pressure_information, perceived_legal_pressure) =
+        resolve_perceived_legal_pressure_from_ids(
+            registry.recruitment(),
+            state,
+            &pressure_information_snapshot,
+            state.now(),
+        );
     // The candidate weighs the outfit's demonstrated underworld competence, resolved through
     // the canonical reputation surface; the frozen value rides inside the plan's factors.
     let organization_competence = crate::reputation::reputation_system::resolve_score(
@@ -629,11 +632,45 @@ fn validate_recruitment_plan_with_authority(
     } else {
         None
     };
-    let history = if plan.context.outcome == RecruitmentOutcome::Accepted {
-        let candidate = state
-            .world
-            .get_character(plan.draft.candidate)
-            .expect("validated recruitment candidate must exist");
+    let history = validate_recruitment_history_event(state, &plan)?;
+    let outcome_information = validate_recruitment_outcome_information(state, &plan)?;
+    let member_report = validate_recruitment_member_report(state, &plan)?;
+    Ok(ValidatedRecruitmentAttempt {
+        plan,
+        authority,
+        delegated_guard,
+        reassignment,
+        history,
+        outcome_information,
+        member_report,
+    })
+}
+
+/// Campaign history for an accepted attempt. When the candidate is poached from another
+/// organization, history must not leak the hidden recruiting organization: the defector's
+/// former organization is told only that the member left, and the player discovers the
+/// destination through surveillance, not a global history read. So a defection event omits
+/// the destination organization entity and its name — and also the recruiter, whose
+/// membership would resolve straight back to that organization.
+fn validate_recruitment_history_event(
+    state: &AppState,
+    plan: &RecruitmentPlan,
+) -> Result<Option<ValidatedHistoryEvent>, RecruitmentError> {
+    if plan.context.outcome != RecruitmentOutcome::Accepted {
+        return Ok(None);
+    }
+    let candidate = state
+        .world
+        .get_character(plan.draft.candidate)
+        .expect("validated recruitment candidate must exist");
+    let event = if plan.context.previous_organization.is_some() {
+        HistoryEventDraft {
+            occurred_at: plan.context.occurred_at,
+            kind: HistoryEventKind::Recruitment,
+            summary: format!("{} left their former organization.", candidate.name()),
+            entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
+        }
+    } else {
         let recruiter = state
             .world
             .get_character(plan.draft.recruiter)
@@ -642,45 +679,30 @@ fn validate_recruitment_plan_with_authority(
             .world
             .get_organization(plan.draft.target_organization)
             .expect("validated target organization must exist");
-        // When the candidate is poached from another organization, campaign history must not
-        // leak the hidden recruiting organization: the defector's former organization is told
-        // only that the member left, and the player discovers the destination through
-        // surveillance, not a global history read. So a defection event omits the destination
-        // organization entity and its name — and also the recruiter, whose membership would
-        // resolve straight back to that organization.
-        if plan.context.previous_organization.is_some() {
-            Some(validate_record_event(
-                state,
-                HistoryEventDraft {
-                    occurred_at: plan.context.occurred_at,
-                    kind: HistoryEventKind::Recruitment,
-                    summary: format!("{} left their former organization.", candidate.name()),
-                    entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
-                },
-            )?)
-        } else {
-            Some(validate_record_event(
-                state,
-                HistoryEventDraft {
-                    occurred_at: plan.context.occurred_at,
-                    kind: HistoryEventKind::Recruitment,
-                    summary: format!(
-                        "{} joined {} after recruitment by {}.",
-                        candidate.name(),
-                        organization.name(),
-                        recruiter.name()
-                    ),
-                    entities: BTreeSet::from([
-                        EntityRef::Character(plan.draft.candidate),
-                        EntityRef::Character(plan.draft.recruiter),
-                        EntityRef::Organization(plan.draft.target_organization),
-                    ]),
-                },
-            )?)
+        HistoryEventDraft {
+            occurred_at: plan.context.occurred_at,
+            kind: HistoryEventKind::Recruitment,
+            summary: format!(
+                "{} joined {} after recruitment by {}.",
+                candidate.name(),
+                organization.name(),
+                recruiter.name()
+            ),
+            entities: BTreeSet::from([
+                EntityRef::Character(plan.draft.candidate),
+                EntityRef::Character(plan.draft.recruiter),
+                EntityRef::Organization(plan.draft.target_organization),
+            ]),
         }
-    } else {
-        None
     };
+    Ok(Some(validate_record_event(state, event)?))
+}
+
+/// The recruiting organization's own personnel knowledge of the attempt's result.
+fn validate_recruitment_outcome_information(
+    state: &AppState,
+    plan: &RecruitmentPlan,
+) -> Result<ValidatedInformation, RecruitmentError> {
     let candidate = state
         .world
         .get_character(plan.draft.candidate)
@@ -693,7 +715,7 @@ fn validate_recruitment_plan_with_authority(
         .world
         .get_organization(plan.draft.target_organization)
         .expect("validated target organization must exist");
-    let outcome_information = validate_record_information(
+    Ok(validate_record_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(plan.draft.target_organization),
@@ -719,14 +741,27 @@ fn validate_recruitment_plan_with_authority(
                 ),
             },
         },
-    )?;
-    let member_report = match (plan.context.outcome, plan.context.previous_organization) {
+    )?)
+}
+
+/// Player-facing report to the candidate's organization: the departure notice on an accepted
+/// defection, or the refused-approach loyalty report when membership holds. The defector case
+/// stays deliberately silent about the destination because a departing member tells nobody.
+fn validate_recruitment_member_report(
+    state: &AppState,
+    plan: &RecruitmentPlan,
+) -> Result<Option<ValidatedReport>, RecruitmentError> {
+    match (plan.context.outcome, plan.context.previous_organization) {
         (RecruitmentOutcome::Accepted, Some(previous_organization)) => {
+            let candidate = state
+                .world
+                .get_character(plan.draft.candidate)
+                .expect("validated recruitment candidate must exist");
             let previous = state
                 .world
                 .get_organization(previous_organization)
                 .expect("valid previous membership must reference an organization");
-            Some(validate_record_report(
+            Ok(Some(validate_record_report(
                 state,
                 ReportDraft {
                     recipient: previous_organization,
@@ -747,56 +782,58 @@ fn validate_recruitment_plan_with_authority(
                         decision: None,
                     }],
                 },
-            )?)
+            )?))
         }
         // A member who turns down an outside pitch reports that approach to their own
-        // leadership, including who made it: loyalty keeps the organization informed even when
-        // membership does not move. The defector case above stays deliberately silent about the
-        // destination because a departing member tells nobody.
+        // leadership, including who made it: loyalty keeps the organization informed even
+        // when membership does not move.
         (RecruitmentOutcome::Refused, Some(current_organization)) => {
+            let candidate = state
+                .world
+                .get_character(plan.draft.candidate)
+                .expect("validated recruitment candidate must exist");
+            let recruiter = state
+                .world
+                .get_character(plan.draft.recruiter)
+                .expect("validated recruiter must exist");
+            let organization = state
+                .world
+                .get_organization(plan.draft.target_organization)
+                .expect("validated target organization must exist");
             let current = state
                 .world
                 .get_organization(current_organization)
                 .expect("candidate membership must reference an existing organization");
-            Some(validate_record_report(
-        state,
-        ReportDraft {
-          recipient: current_organization,
-          kind: ReportKind::AfterAction,
-          title: "Personnel approach".to_owned(),
-          entries: vec![ReportEntry {
-            attention: AttentionClass::Notable,
-            summary: format!(
-              "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
-              candidate.name(),
-              current.name(),
-              recruiter.name(),
-              organization.name(),
-              current.name()
-            ),
-            sources: Vec::new(),
-            entities: BTreeSet::from([
-              EntityRef::Character(plan.draft.candidate),
-              EntityRef::Character(plan.draft.recruiter),
-              EntityRef::Organization(plan.draft.target_organization),
-              EntityRef::Organization(current_organization),
-            ]),
-            decision: None,
-          }],
-        },
-      )?)
+            Ok(Some(validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: current_organization,
+                    kind: ReportKind::AfterAction,
+                    title: "Personnel approach".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Notable,
+                        summary: format!(
+                            "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
+                            candidate.name(),
+                            current.name(),
+                            recruiter.name(),
+                            organization.name(),
+                            current.name()
+                        ),
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([
+                            EntityRef::Character(plan.draft.candidate),
+                            EntityRef::Character(plan.draft.recruiter),
+                            EntityRef::Organization(plan.draft.target_organization),
+                            EntityRef::Organization(current_organization),
+                        ]),
+                        decision: None,
+                    }],
+                },
+            )?))
         }
-        (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, None) => None,
-    };
-    Ok(ValidatedRecruitmentAttempt {
-        plan,
-        authority,
-        delegated_guard,
-        reassignment,
-        history,
-        outcome_information,
-        member_report,
-    })
+        (RecruitmentOutcome::Accepted, None) | (RecruitmentOutcome::Refused, None) => Ok(None),
+    }
 }
 
 pub struct ValidatedRecruitmentAttempt {
@@ -1370,11 +1407,22 @@ pub(crate) fn resolve_perceived_legal_pressure_at(
     candidate: CharacterId,
     at: SimTime,
 ) -> (Option<InformationId>, u8) {
-    // Selection runs over exactly the ID set the staleness token captures, so a fresh plan
-    // can never spuriously fail with `StalePressureKnowledge`.
-    let selected = candidate_pressure_information_ids(state, candidate, at)
-        .into_iter()
-        .filter_map(|id| state.intelligence.get_information(id))
+    let ids = candidate_pressure_information_ids(state, candidate, at);
+    resolve_perceived_legal_pressure_from_ids(definition, state, &ids, at)
+}
+
+/// Selection runs over exactly the ID set the staleness token captures, so a fresh plan can
+/// never spuriously fail with `StalePressureKnowledge`. Decide passes the set it already
+/// collected for the token; validation recomputes it and must reach the same selection.
+fn resolve_perceived_legal_pressure_from_ids(
+    definition: &RecruitmentDefinition,
+    state: &AppState,
+    pressure_information_ids: &BTreeSet<InformationId>,
+    at: SimTime,
+) -> (Option<InformationId>, u8) {
+    let selected = pressure_information_ids
+        .iter()
+        .filter_map(|id| state.intelligence.get_information(*id))
         .map(|information| {
             (
                 information.id(),

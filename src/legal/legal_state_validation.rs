@@ -23,23 +23,9 @@ impl LegalState {
                 || !self
                     .indexes
                     .prosecutions
-                    .cases_by_source_investigation
-                    .get(&case.source_investigation())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .prosecutions
                     .cases_by_lead
                     .get(&case.lead_prosecutor())
                     .is_some_and(|ids| ids.contains(&id))
-                || case.evidence().iter().any(|evidence| {
-                    !self
-                        .indexes
-                        .prosecutions
-                        .cases_by_evidence
-                        .get(evidence)
-                        .is_some_and(|ids| ids.contains(&id))
-                })
                 || case.referrals().iter().any(|referral| {
                     !self
                         .indexes
@@ -81,14 +67,6 @@ impl LegalState {
                     .referrals_by_case
                     .get(&case.id())
                     .is_some_and(|ids| ids.contains(&referral.id()))
-                || referral.evidence().iter().any(|evidence| {
-                    !self
-                        .indexes
-                        .prosecutions
-                        .referrals_by_evidence
-                        .get(evidence)
-                        .is_some_and(|ids| ids.contains(&referral.id()))
-                })
             {
                 return false;
             }
@@ -112,30 +90,6 @@ impl LegalState {
                 .by_arrest
                 .get(&record.arrest())
                 .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .representations
-                    .by_defendant
-                    .get(&record.defendant())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .representations
-                    .by_sponsor
-                    .get(&record.sponsor())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .representations
-                    .by_counsel
-                    .get(&record.counsel())
-                    .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .representations
-                    .by_contact
-                    .get(&record.contact())
-                    .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
             }
@@ -205,46 +159,6 @@ impl LegalState {
                     .legal_representations
                     .get(id)
                     .is_some_and(|record| record.arrest() == *arrest)
-            }) {
-                return false;
-            }
-        }
-        for (defendant, ids) in &self.indexes.representations.by_defendant {
-            if ids.iter().any(|id| {
-                !self
-                    .legal_representations
-                    .get(id)
-                    .is_some_and(|record| record.defendant() == *defendant)
-            }) {
-                return false;
-            }
-        }
-        for (sponsor, ids) in &self.indexes.representations.by_sponsor {
-            if ids.iter().any(|id| {
-                !self
-                    .legal_representations
-                    .get(id)
-                    .is_some_and(|record| record.sponsor() == *sponsor)
-            }) {
-                return false;
-            }
-        }
-        for (counsel, ids) in &self.indexes.representations.by_counsel {
-            if ids.iter().any(|id| {
-                !self
-                    .legal_representations
-                    .get(id)
-                    .is_some_and(|record| record.counsel() == *counsel)
-            }) {
-                return false;
-            }
-        }
-        for (contact, ids) in &self.indexes.representations.by_contact {
-            if ids.iter().any(|id| {
-                !self
-                    .legal_representations
-                    .get(id)
-                    .is_some_and(|record| record.contact() == *contact)
             }) {
                 return false;
             }

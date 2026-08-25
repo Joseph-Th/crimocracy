@@ -400,10 +400,14 @@ impl WorldState {
         self.characters.reassign(id, organization, supervisor);
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        // Forward membership plus exact-count agreement proves bidirectional index coherence
-        // for every functional index (each record owns at most one slot per index): matching
-        // entry totals rule out stale, duplicate, or foreign membership without re-walking
-        // each indexed id. Non-functional indexes keep explicit reverse walks.
+        self.characters_have_consistent_indexes() && self.businesses_have_consistent_indexes()
+    }
+
+    /// Forward membership plus exact-count agreement proves bidirectional index coherence
+    /// for every functional index (each record owns at most one slot per index): matching
+    /// entry totals rule out stale, duplicate, or foreign membership without re-walking
+    /// each indexed id. Non-functional indexes keep explicit reverse walks.
+    fn characters_have_consistent_indexes(&self) -> bool {
         let mut expected_member_entries = 0_usize;
         let mut expected_supervised_entries = 0_usize;
         for record in self.characters.records.values() {
@@ -440,16 +444,18 @@ impl WorldState {
         {
             return false;
         }
-        if self
-            .characters
+        self.characters
             .by_supervisor
             .values()
             .map(BTreeSet::len)
             .sum::<usize>()
-            != expected_supervised_entries
-        {
-            return false;
-        }
+            == expected_supervised_entries
+    }
+
+    /// Business location/ownership indexes plus a full ownership-chain replay: every version
+    /// of every business must trace through its change history to the current owner, and the
+    /// historical-owner index must equal exactly the pairs the replay derives.
+    fn businesses_have_consistent_indexes(&self) -> bool {
         let mut expected_neighborhood_entries = 0_usize;
         let mut expected_org_owner_entries = 0_usize;
         let mut expected_character_owner_entries = 0_usize;

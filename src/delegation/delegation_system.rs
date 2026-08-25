@@ -6,8 +6,8 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::delegation::{
-    build_mandate_record, BudgetAuthority, MandateAuthority, MandateDraft, MandateStatus,
-    ResolvedMandateAuthority, ResponsibilityScope,
+    build_mandate_record, BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord,
+    MandateStatus, ResolvedMandateAuthority, ResponsibilityScope,
 };
 use crate::finance::FinancialOwner;
 use crate::world::{PolicyKind, PolicySetting};
@@ -130,6 +130,16 @@ impl ValidatedMandateAssignment {
                 mandate: existing.id(),
             });
         }
+        // Content is revalidated at commit like the revision path: scope liveness, standing
+        // orders, and budget authority can all change while an assignment token is held, and
+        // a mandate persisted against a vanished scope would dangle forever.
+        validate_mandate_content(
+            state,
+            self.draft.organization,
+            &self.draft.scopes,
+            &self.draft.standing_orders,
+            self.draft.budget,
+        )?;
         let id = state.ids.next_mandate()?;
         state
             .delegation
@@ -327,14 +337,12 @@ fn validate_enterprise_scope_dependencies(
     Ok(())
 }
 
-pub fn resolve_mandate_authority(
-    state: &AppState,
-    authority: MandateAuthority,
-) -> Result<ResolvedMandateAuthority, DelegationError> {
-    let record = state
-        .delegation
-        .get_mandate(authority.mandate)
-        .ok_or(DelegationError::MissingMandate(authority.mandate))?;
+/// Authority-vs-record coherence shared by resolution and staleness re-checks so the two
+/// cannot drift: active status, manager match, and scope membership.
+fn check_authority_against_record(
+    record: &MandateRecord,
+    authority: &MandateAuthority,
+) -> Result<(), DelegationError> {
     if record.status() != MandateStatus::Active {
         return Err(DelegationError::InactiveMandate(authority.mandate));
     }
@@ -351,6 +359,18 @@ pub fn resolve_mandate_authority(
             scope: authority.scope,
         });
     }
+    Ok(())
+}
+
+pub fn resolve_mandate_authority(
+    state: &AppState,
+    authority: MandateAuthority,
+) -> Result<ResolvedMandateAuthority, DelegationError> {
+    let record = state
+        .delegation
+        .get_mandate(authority.mandate)
+        .ok_or(DelegationError::MissingMandate(authority.mandate))?;
+    check_authority_against_record(record, &authority)?;
     let manager = validate_manager(state, authority.manager, record.organization())?;
     Ok(ResolvedMandateAuthority {
         authority,
@@ -376,22 +396,7 @@ pub fn ensure_mandate_authority_current(
             found: record.version(),
         });
     }
-    if record.status() != MandateStatus::Active {
-        return Err(DelegationError::InactiveMandate(authority.mandate));
-    }
-    if record.manager() != authority.manager {
-        return Err(DelegationError::AuthorityManagerMismatch {
-            mandate: authority.mandate,
-            manager: authority.manager,
-            expected: record.manager(),
-        });
-    }
-    if !record.scopes().contains(&authority.scope) {
-        return Err(DelegationError::ScopeOutsideMandate {
-            mandate: authority.mandate,
-            scope: authority.scope,
-        });
-    }
+    check_authority_against_record(record, &authority)?;
     validate_manager_snapshot(
         state,
         authority.manager,

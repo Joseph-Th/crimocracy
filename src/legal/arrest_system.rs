@@ -9,7 +9,7 @@ use crate::core::state::AppState;
 use crate::legal::{
     ArrestDraft, ArrestRecord, ArrestStatus, InvestigationStatus, InvestigationWorkStatus,
 };
-use crate::operations::OperationStatus;
+use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
 use crate::world::OrganizationKind;
 use thiserror::Error;
 
@@ -264,11 +264,7 @@ fn validate_arrest_dependencies(
 /// than the full operation history: terminal operations release their participants.
 fn collect_booked_characters(state: &AppState) -> std::collections::BTreeSet<CharacterId> {
     let mut booked = std::collections::BTreeSet::new();
-    for status in [
-        OperationStatus::Authorized,
-        OperationStatus::InProgress,
-        OperationStatus::AwaitingDecision,
-    ] {
+    for status in ACTIVE_ASSIGNMENT_STATUSES {
         for operation in state.operations().operations_with_status(status) {
             booked.extend(operation.participants().iter().copied());
         }
@@ -295,11 +291,7 @@ fn validate_character_can_enter_custody(
     // The full-history scan this replaces visited records in ascending ID order and named
     // the first conflict, so the smallest conflicting operation ID is selected explicitly.
     let mut conflict: Option<OperationId> = None;
-    for status in [
-        OperationStatus::Authorized,
-        OperationStatus::InProgress,
-        OperationStatus::AwaitingDecision,
-    ] {
+    for status in ACTIVE_ASSIGNMENT_STATUSES {
         for operation in state.operations.operations_with_status(status) {
             let holds_booking = operation.leader() == character
                 || operation
