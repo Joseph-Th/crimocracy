@@ -236,12 +236,6 @@ impl<'registry> ValidatedOperation<'registry> {
                 now: state.now().as_minutes(),
             });
         }
-        let _ = state
-            .world
-            .get_organization(self.draft.responsible_organization)
-            .ok_or(OperationError::MissingOrganization(
-                self.draft.responsible_organization,
-            ))?;
         for (participant, expected) in &self.expected_participant_versions {
             let record = state
                 .world
@@ -287,6 +281,7 @@ impl<'registry> ValidatedOperation<'registry> {
             &participants,
             self.draft.kind,
             self.draft.scheduled_for,
+            &self.draft.constraints,
         ) {
             return Err(OperationError::ParticipantBusy {
                 character,
@@ -465,6 +460,7 @@ pub fn validate_authorize_operation<'registry>(
         &participants,
         draft.kind,
         draft.scheduled_for,
+        &draft.constraints,
     ) {
         return Err(OperationError::ParticipantBusy {
             character,
@@ -499,15 +495,22 @@ pub fn validate_authorize_operation<'registry>(
     for constraint in &draft.constraints {
         match constraint {
             crate::operations::OperationConstraint::CompleteBefore(deadline) => {
-                // The deadline must leave room for the crew to reach the entry milestone; a
-                // deadline at or before entry would resolve the operation before its modeled
-                // approach begins.
-                let earliest_resolution = draft.scheduled_for
-                    + definition
-                        .execution()
-                        .operation_entry_offset()
-                        .unwrap_or(SimDuration::from_minutes(0));
-                if *deadline <= earliest_resolution {
+                // The deadline must leave room for the crew to reach the entry milestone from
+                // the earliest minute the operation can actually begin. A plan scheduled for a
+                // future minute begins exactly on its schedule; a plan scheduled for the current
+                // minute can only begin on the next canonical tick, so anchoring on
+                // `scheduled_for` alone would admit deadlines that make every begin transition
+                // reject as missed.
+                let begin_at = if draft.scheduled_for > state.now() {
+                    draft.scheduled_for
+                } else {
+                    state.now() + SimDuration::ONE_MINUTE
+                };
+                let entry_offset = definition
+                    .execution()
+                    .operation_entry_offset()
+                    .unwrap_or(SimDuration::from_minutes(0));
+                if *deadline <= begin_at + entry_offset {
                     return Err(OperationError::DeadlineBeforeStart);
                 }
             }
@@ -554,12 +557,24 @@ fn find_busy_participant(
     participants: &BTreeSet<CharacterId>,
     requested_kind: OperationKind,
     requested_start: SimTime,
+    constraints: &[crate::operations::OperationConstraint],
 ) -> Option<(CharacterId, OperationId)> {
-    let requested_end = requested_start
+    // Mirror the begin-time window clamp: a binding deadline compresses the modeled occupancy
+    // exactly as it will compress the running operation, so a participant is not falsely
+    // reported busy over minutes the clamped operation would never hold.
+    let mut requested_end = requested_start
         + registry
             .get_operation(requested_kind)
             .execution()
             .duration();
+    for constraint in constraints {
+        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
+            continue;
+        };
+        if *deadline < requested_end {
+            requested_end = *deadline;
+        }
+    }
     participants.iter().find_map(|participant| {
         state
             .operations
@@ -1282,20 +1297,8 @@ pub struct ValidatedOperationAbort {
 
 impl ValidatedOperationAbort {
     pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
-        let mut budget = Vec::new();
-        if self.information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
-        if self.police_activity_information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
-        if self.history.is_some() {
-            budget.push((IdKind::HistoryEvent, 1));
-        }
-        if self.report.is_some() {
-            budget.push((IdKind::Report, 1));
-        }
-        state.ids.reserve_many(&budget)?;
+        // Staleness re-checks precede ID reservation: a rejected commit must leave the
+        // serialized high-water marks exactly as it found them.
         let record = state
             .operations
             .get_operation(self.operation)
@@ -1321,6 +1324,20 @@ impl ValidatedOperationAbort {
                 found: state.now(),
             });
         }
+        let mut budget = Vec::new();
+        if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.police_activity_information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.history.is_some() {
+            budget.push((IdKind::HistoryEvent, 1));
+        }
+        if self.report.is_some() {
+            budget.push((IdKind::Report, 1));
+        }
+        state.ids.reserve_many(&budget)?;
         if let OperationAbortCause::Decision(decision) = self.cause {
             if state.decisions.pending_for_operation(self.operation) != Some(decision) {
                 return Err(OperationError::InvalidAbortCause {

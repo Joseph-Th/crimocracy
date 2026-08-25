@@ -270,7 +270,10 @@ fn validate_case_and_investigator(
         .world
         .get_character(investigator_id)
         .ok_or(InvestigationWorkError::MissingInvestigator(investigator_id))?;
-    if investigation.investigator_role(investigator_id).is_none() {
+    if !investigation
+        .assigned_investigators()
+        .contains(&investigator_id)
+    {
         return Err(InvestigationWorkError::InvestigatorNotAssigned {
             investigation: investigation_id,
             investigator: investigator_id,
@@ -853,7 +856,7 @@ pub(crate) fn apply_initial_evidence_reviews(
     registry: &Registry,
     state: &mut AppState,
     staffed: &[(InvestigationId, CharacterId)],
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
+) -> Vec<InvestigationWorkId> {
     let mut scheduled = Vec::new();
     for (investigation_id, investigator) in staffed {
         if state
@@ -875,7 +878,9 @@ pub(crate) fn apply_initial_evidence_reviews(
         let Some(source) = source else {
             continue;
         };
-        let work = validate_schedule_investigation_work(
+        // An autonomous pass must not abort the tick: like witness-interview scheduling, a
+        // canonical rejection leaves this case's initial review for a later minute.
+        let Ok(work) = validate_schedule_investigation_work(
             registry,
             state,
             InvestigationWorkDraft {
@@ -884,11 +889,15 @@ pub(crate) fn apply_initial_evidence_reviews(
                 kind: InvestigationWorkKind::EvidenceReview,
                 focus: InvestigationWorkFocus::evidence(source),
             },
-        )?
-        .commit(state)?;
+        ) else {
+            continue;
+        };
+        let Ok(work) = work.commit(state) else {
+            continue;
+        };
         scheduled.push(work);
     }
-    Ok(scheduled)
+    scheduled
 }
 
 pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {

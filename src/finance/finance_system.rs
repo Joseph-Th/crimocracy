@@ -428,7 +428,10 @@ pub enum LaunderingError {
 pub struct ValidatedLaundering {
     transaction: ValidatedLedgerTransaction,
     business: crate::core::id::BusinessId,
-    laundered_amount: Money,
+    /// Pre-computed per-cycle total (`already laundered + this transfer`) validated to stay
+    /// within the front's plausibility capacity. Committing writes it as a total so the
+    /// ledger leg and the budget leg of one laundering cannot half-apply.
+    new_cycle_total: Money,
     expected_economy_version: u32,
 }
 
@@ -450,10 +453,11 @@ impl ValidatedLaundering {
         }
         let id = self.transaction.commit(state)?;
         // The transfer committed, so the front's plausibility budget shrinks by the same
-        // volume. The version check above guarantees the budget window is unchanged.
+        // volume. The version check above guarantees the budget window is unchanged, and the
+        // total was validated to fit before any mutation.
         state
             .economy
-            .record_laundered_volume(self.business, self.laundered_amount);
+            .set_laundered_this_cycle(self.business, self.new_cycle_total);
         Ok(id)
     }
 
@@ -551,6 +555,9 @@ pub fn validate_launder_funds(
             capacity_cents: remaining.cents(),
         });
     }
+    let new_cycle_total = already_laundered
+        .checked_add(draft.amount)
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
     // Fee split: the front keeps the authored cut as legitimate revenue.
     let fee = resolve_basis_point_share(draft.amount, registry.laundering().fee_basis_points())
         .ok_or(LaunderingError::ArithmeticOverflow)?;
@@ -592,7 +599,7 @@ pub fn validate_launder_funds(
     Ok(ValidatedLaundering {
         transaction,
         business: draft.business,
-        laundered_amount: draft.amount,
+        new_cycle_total,
         expected_economy_version: economy.version(),
     })
 }

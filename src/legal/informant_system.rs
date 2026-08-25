@@ -125,7 +125,6 @@ impl ValidatedInformantEstablishment {
             handler: self.draft.handler,
             status: InformantStatus::Active,
             established_at: state.now(),
-            terminated_at: None,
             version: 1,
         });
         Ok(id)
@@ -187,50 +186,6 @@ fn validate_handler(state: &AppState, handler: OrganizationId) -> Result<(), Inf
         return Err(InformantError::InvalidHandlerKind(handler));
     }
     Ok(())
-}
-
-#[derive(Debug)]
-pub struct ValidatedInformantTermination {
-    informant: InformantId,
-    expected_version: u32,
-}
-
-impl ValidatedInformantTermination {
-    pub fn commit(self, state: &mut AppState) -> Result<(), InformantError> {
-        let informant = state
-            .legal
-            .get_informant(self.informant)
-            .ok_or(InformantError::MissingInformant(self.informant))?;
-        if informant.version() != self.expected_version {
-            return Err(InformantError::StaleInformant {
-                informant: self.informant,
-                expected: self.expected_version,
-                found: informant.version(),
-            });
-        }
-        if informant.status() != InformantStatus::Active {
-            return Err(InformantError::InactiveInformant(self.informant));
-        }
-        state.legal.terminate_informant(self.informant, state.now());
-        Ok(())
-    }
-}
-
-pub fn validate_terminate_informant(
-    state: &AppState,
-    informant: InformantId,
-) -> Result<ValidatedInformantTermination, InformantError> {
-    let record = state
-        .legal
-        .get_informant(informant)
-        .ok_or(InformantError::MissingInformant(informant))?;
-    if record.status() != InformantStatus::Active {
-        return Err(InformantError::InactiveInformant(informant));
-    }
-    Ok(ValidatedInformantTermination {
-        informant,
-        expected_version: record.version(),
-    })
 }
 
 #[derive(Debug)]

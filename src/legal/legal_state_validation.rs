@@ -403,19 +403,15 @@ impl LegalState {
         }
         for informant in self.informants.values() {
             let id = informant.id();
+            if informant.status() != InformantStatus::Active {
+                return false;
+            }
             let active_index = self
                 .indexes
                 .informants
                 .active_by_character_handler
                 .get(&(informant.character(), informant.handler()));
-            match informant.status() {
-                InformantStatus::Active if active_index != Some(&id) => return false,
-                InformantStatus::Terminated if active_index == Some(&id) => return false,
-                InformantStatus::Active | InformantStatus::Terminated => {}
-            }
-            if self.indexes.informants.active.contains(&id)
-                != (informant.status() == InformantStatus::Active)
-            {
+            if active_index != Some(&id) || !self.indexes.informants.active.contains(&id) {
                 return false;
             }
         }

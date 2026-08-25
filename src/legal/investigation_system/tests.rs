@@ -13,7 +13,7 @@ use crate::legal::investigation_work_execution::{
 };
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InvestigationWorkDraft,
-    InvestigationWorkFocus, InvestigationWorkKind, InvestigatorRole,
+    InvestigationWorkFocus, InvestigationWorkKind,
 };
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character, WorldError,
@@ -106,6 +106,156 @@ fn incident_intake_cannot_forge_informant_statement() {
         0
     );
     assert!(state.legal().investigations().next().is_none());
+    validate_invariants(&state);
+}
+
+#[test]
+fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_parallel_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0E51_4E2F);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Shelf Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Shelf Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Shelf Crew Leader".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(60))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("leader fixture should validate");
+    let scheduled_for = state.now() + SimDuration::ONE_MINUTE;
+    let origin = crate::operations::operation_system::validate_authorize_operation(
+        &registry,
+        &mut state,
+        crate::operations::OperationDraft {
+            title: "Origin surveillance".to_owned(),
+            kind: crate::operations::OperationKind::Surveillance,
+            responsible_organization: criminal,
+            leader,
+            objective: crate::operations::OperationObjective::GatherInformation {
+                target: EntityRef::Organization(criminal),
+            },
+            approach: crate::operations::OperationApproach::Covert,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut state)
+    .expect("origin operation should commit");
+
+    let make_draft = |title: &str, now: SimTime| IncidentIntakeDraft {
+        owner: police,
+        title: title.to_owned(),
+        subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+        evidence: vec![crate::legal::IncidentEvidenceDraft {
+            subject: EntityRef::Operation(origin),
+            origin: Some(EntityRef::Operation(origin)),
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Weak,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: now,
+        }],
+        origin: Some(EntityRef::Operation(origin)),
+        notified_organizations: BTreeSet::from([criminal]),
+        witness: None,
+    };
+
+    let first = validate_incident_intake(&state, make_draft("First exposure inquiry", state.now()))
+        .expect("first intake should validate")
+        .commit(&mut state)
+        .expect("first intake should commit");
+    assert!(!first.resumed_shelf);
+
+    validate_transition_investigation(
+        &state,
+        first.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .expect("shelving should validate")
+    .commit(&mut state)
+    .expect("shelving should commit");
+
+    // The second exposure shares the shelf's subject matter, so it continues the existing
+    // file: same case id, fresh evidence folded into it, no parallel case opened.
+    let second =
+        validate_incident_intake(&state, make_draft("Second exposure inquiry", state.now()))
+            .expect("second intake should validate")
+            .commit(&mut state)
+            .expect("second intake should resume the shelf");
+    assert_eq!(second.investigation, first.investigation);
+    assert!(second.resumed_shelf);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(first.investigation)
+            .expect("resumed shelf should exist")
+            .evidence()
+            .len(),
+        2,
+        "the shelf carries its original and the new exposure evidence"
+    );
+    assert!(state
+        .legal()
+        .active_investigations()
+        .any(|case| case.id() == first.investigation));
+    assert_eq!(state.legal().investigations_for_owner(police).count(), 1);
+
+    // An unrelated subject never resurrects the shelf: a distinct originated matter opens
+    // its own case.
+    let unrelated = validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Unrelated inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Organization(criminal),
+                origin: None,
+                kind: EvidenceKind::Document,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::Credible,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: None,
+            notified_organizations: BTreeSet::new(),
+            witness: None,
+        },
+    )
+    .expect("unrelated intake should validate")
+    .commit(&mut state)
+    .expect("unrelated intake should open a fresh case");
+    assert!(!unrelated.resumed_shelf);
+    assert_ne!(unrelated.investigation, first.investigation);
+    validate_state(&state).expect("resumed shelf state should remain structurally valid");
+    validate_state_against_registry(&registry, &state)
+        .expect("resumed shelf state should match authored state");
     validate_invariants(&state);
 }
 
@@ -227,7 +377,7 @@ fn investigation_suspend_resume_is_versioned_persistent_and_disables_active_muta
     .expect("investigation should validate")
     .commit(&mut state)
     .expect("investigation should commit");
-    validate_assign_investigator(&state, investigation, detective, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, investigation, detective)
         .expect("lead assignment should validate")
         .commit(&mut state)
         .expect("lead assignment should commit");
@@ -288,13 +438,8 @@ fn investigation_suspend_resume_is_versioned_persistent_and_disables_active_muta
         Err(error) => error,
     };
     assert_eq!(evidence_error, InvestigationError::InactiveInvestigation);
-    let staffing_error = validate_assign_investigator(
-        &state,
-        investigation,
-        second_detective,
-        InvestigatorRole::Investigator,
-    )
-    .expect_err("suspended investigation must reject new staffing");
+    let staffing_error = validate_assign_investigator(&state, investigation, second_detective)
+        .expect_err("suspended investigation must reject new staffing");
     assert_eq!(staffing_error, InvestigationError::InactiveInvestigation);
 
     let mut restored = restore_save(
@@ -410,7 +555,7 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
     .expect("investigation should validate")
     .commit(&mut state)
     .expect("investigation should commit");
-    validate_assign_investigator(&state, investigation, detective, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, investigation, detective)
         .expect("lead assignment should validate")
         .commit(&mut state)
         .expect("lead assignment should commit");
@@ -526,7 +671,7 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
 }
 
 #[test]
-fn suspended_case_resume_revalidates_retained_staffing_after_detective_transfer() {
+fn suspending_a_case_releases_its_investigator_and_resume_restafs_from_the_free_pool() {
     let registry = build_registry();
     let mut state = AppState::new(0x5A57_AFF1);
     let police = insert_organization(
@@ -568,53 +713,56 @@ fn suspended_case_resume_revalidates_retained_staffing_after_detective_transfer(
     .expect("investigation should validate")
     .commit(&mut state)
     .expect("investigation should commit");
-    validate_assign_investigator(&state, investigation, detective, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, investigation, detective)
         .expect("lead assignment should validate")
         .commit(&mut state)
         .expect("lead assignment should commit");
+
     validate_transition_investigation(&state, investigation, InvestigationTransition::Suspend)
         .expect("suspension should validate")
         .commit(&mut state)
         .expect("suspension should commit");
 
-    validate_reassign_character(&state, detective, Some(other_police), None)
-        .expect("suspended case should not lock detective organization membership")
-        .commit(&mut state)
-        .expect("detective transfer should commit");
-    assert_eq!(
-        validate_transition_investigation(&state, investigation, InvestigationTransition::Resume,)
-            .expect_err("resume must reject retained investigator who transferred away"),
-        InvestigationError::InvestigatorOwnerMismatch {
-            investigator: detective,
-            owner: police,
-        }
-    );
-
-    validate_remove_investigator(&state, investigation, detective)
-        .expect("invalid retained staffing should be removable while suspended")
-        .commit(&mut state)
-        .expect("staffing cleanup should commit");
-    validate_transition_investigation(&state, investigation, InvestigationTransition::Resume)
-        .expect("case with cleaned staffing should resume")
-        .commit(&mut state)
-        .expect("resume after staffing cleanup should commit");
+    // Shelving releases institutional attention: the case holds no investigators, so its
+    // former lead is free to transfer while the shelf sits cold.
     assert_eq!(
         state
             .legal()
             .get_investigation(investigation)
-            .expect("resumed case should exist")
-            .status(),
-        InvestigationStatus::Active
+            .expect("suspended case should exist")
+            .assigned_investigators()
+            .len(),
+        0
     );
+    validate_reassign_character(&state, detective, Some(other_police), None)
+        .expect("released detective should be free to transfer")
+        .commit(&mut state)
+        .expect("detective transfer should commit");
+
+    validate_transition_investigation(&state, investigation, InvestigationTransition::Resume)
+        .expect("a released shelf always resumes; staffing re-applies later")
+        .commit(&mut state)
+        .expect("resume should commit");
+    let resumed = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("resumed case should exist");
+    assert_eq!(resumed.status(), InvestigationStatus::Active);
+    assert!(resumed.lead_investigator().is_none());
+    // The resumed case is back in the unstaffed index, so autonomous staffing will fill it.
+    assert!(state
+        .legal()
+        .active_investigations_without_lead()
+        .any(|case| case == investigation));
     validate_state(&state).expect("resumed case should remain structurally valid");
     validate_invariants(&state);
 }
 
 #[test]
-fn resuming_a_suspended_case_reapplies_the_one_active_case_per_investigator_rule() {
-    // Regression: assignment enforces one active case per investigator, but Resume revalidated
-    // only membership and capability, so an investigator who took a second case while this one
-    // was suspended could end up holding two active investigations.
+fn suspending_a_case_frees_its_investigator_for_other_casework() {
+    // Shelving releases institutional attention: the case's lead can take another active
+    // case while the shelf sits, and resumption does not claw the detective back — fresh
+    // staffing fills the resumed case instead.
     let registry = build_registry();
     let mut state = AppState::new(0x51E5_1A7E);
     let police = insert_organization(
@@ -638,7 +786,7 @@ fn resuming_a_suspended_case_reapplies_the_one_active_case_per_investigator_rule
     .expect("shelved investigation should validate")
     .commit(&mut state)
     .expect("shelved investigation should commit");
-    validate_assign_investigator(&state, shelved, detective, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, shelved, detective)
         .expect("lead assignment should validate")
         .commit(&mut state)
         .expect("lead assignment should commit");
@@ -658,27 +806,42 @@ fn resuming_a_suspended_case_reapplies_the_one_active_case_per_investigator_rule
     .expect("active investigation should validate")
     .commit(&mut state)
     .expect("active investigation should commit");
-    validate_assign_investigator(&state, replacement, detective, InvestigatorRole::Lead)
-        .expect("assignment onto a free investigator should validate while the other is shelved")
+    validate_assign_investigator(&state, replacement, detective)
+        .expect("a shelved case must not hold its investigator back")
         .commit(&mut state)
         .expect("second lead assignment should commit");
 
+    validate_transition_investigation(&state, shelved, InvestigationTransition::Resume)
+        .expect("resume re-engages the case without retained staffing")
+        .commit(&mut state)
+        .expect("resume should commit");
+    assert!(state
+        .legal()
+        .get_investigation(shelved)
+        .expect("resumed case should exist")
+        .lead_investigator()
+        .is_none());
+    // The one-active-case rule still binds live assignments: promoting the same detective
+    // again onto their current case's rival fails at capacity.
+    let third = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Third inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(police)]),
+        },
+    )
+    .expect("third investigation should validate")
+    .commit(&mut state)
+    .expect("third investigation should commit");
     assert_eq!(
-        validate_transition_investigation(&state, shelved, InvestigationTransition::Resume,)
-            .expect_err("resume must refuse an investigator already carrying another active case"),
+        validate_assign_investigator(&state, third, detective)
+            .expect_err("an investigator already leading another active case cannot take a third"),
         InvestigationError::InvestigatorAtCaseCapacity {
             investigator: detective,
         }
     );
-    assert_eq!(
-        state
-            .legal()
-            .get_investigation(shelved)
-            .expect("shelved case should persist unchanged after rejection")
-            .status(),
-        InvestigationStatus::Suspended
-    );
-    validate_state(&state).expect("rejected resume should preserve structural validity");
+    validate_state(&state).expect("rejected assignment should preserve structural validity");
     validate_invariants(&state);
 }
 
@@ -727,37 +890,25 @@ fn investigator_staffing_is_versioned_indexed_and_blocks_foreign_reassignment() 
     .commit(&mut state)
     .expect("investigation should commit");
 
-    validate_assign_investigator(&state, investigation, first, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, investigation, first)
         .expect("lead assignment should validate")
         .commit(&mut state)
         .expect("lead assignment should commit");
-    validate_assign_investigator(
-        &state,
-        investigation,
-        second,
-        InvestigatorRole::Investigator,
-    )
-    .expect("supporting assignment should validate")
-    .commit(&mut state)
-    .expect("supporting assignment should commit");
-    validate_assign_investigator(&state, investigation, second, InvestigatorRole::Lead)
-        .expect("lead promotion should validate")
-        .commit(&mut state)
-        .expect("lead promotion should commit");
+    assert_eq!(
+        validate_assign_investigator(&state, investigation, second)
+            .expect_err("an active case has a single lead seat while its current lead is assigned"),
+        InvestigationError::LeadSeatFilled {
+            investigation,
+            lead: first,
+        }
+    );
 
     let record = state
         .legal()
         .get_investigation(investigation)
         .expect("investigation should exist");
-    assert_eq!(record.lead_investigator(), Some(second));
-    assert_eq!(
-        record.investigator_role(first),
-        Some(InvestigatorRole::Investigator)
-    );
-    assert_eq!(
-        record.investigator_role(second),
-        Some(InvestigatorRole::Lead)
-    );
+    assert_eq!(record.lead_investigator(), Some(first));
+    assert_eq!(record.assigned_investigators().len(), 1);
     assert_eq!(
         state
             .legal()
@@ -776,7 +927,7 @@ fn investigator_staffing_is_versioned_indexed_and_blocks_foreign_reassignment() 
         .legal()
         .get_investigation(investigation)
         .expect("restored investigation should exist");
-    assert_eq!(restored_case.lead_investigator(), Some(second));
+    assert_eq!(restored_case.lead_investigator(), Some(first));
     assert_eq!(
         restored
             .legal()
@@ -796,10 +947,12 @@ fn investigator_staffing_is_versioned_indexed_and_blocks_foreign_reassignment() 
         }
     );
 
-    validate_remove_investigator(&state, investigation, first)
-        .expect("investigator release should validate")
+    // Shelving releases the seat: the detective becomes free to transfer, exactly as a cold
+    // shelf holds no institutional attention.
+    validate_transition_investigation(&state, investigation, InvestigationTransition::Suspend)
+        .expect("suspension should validate")
         .commit(&mut state)
-        .expect("investigator release should commit");
+        .expect("suspension should commit");
     validate_reassign_character(&state, first, Some(other_police), None)
         .expect("released investigator should be free to transfer")
         .commit(&mut state)
@@ -846,9 +999,8 @@ fn investigator_assignment_token_rejects_case_changes_after_validation() {
     .expect("investigation should validate")
     .commit(&mut state)
     .expect("investigation should commit");
-    let assignment =
-        validate_assign_investigator(&state, investigation, detective, InvestigatorRole::Lead)
-            .expect("assignment should validate against initial case version");
+    let assignment = validate_assign_investigator(&state, investigation, detective)
+        .expect("assignment should validate against initial case version");
 
     validate_add_evidence(
         &state,

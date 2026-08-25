@@ -531,3 +531,212 @@ fn active_operation_responsibility_blocks_custody() {
     validate_state(&fixture.state).expect("state after rejected arrest should validate");
     validate_invariants(&fixture.state);
 }
+
+#[test]
+fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
+    use crate::core::entity::EntityRef;
+    use crate::core::simulation::run_tick;
+    use crate::legal::investigation_system::{
+        validate_assign_investigator, validate_incident_intake,
+    };
+    use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+    use crate::legal::{
+        IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationWorkDraft, InvestigationWorkFocus,
+        InvestigationWorkKind,
+    };
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
+    use crate::world::world_system::{insert_business, insert_character, insert_neighborhood};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
+        NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
+        NeighborhoodProfile, Rating,
+    };
+
+    let mut fixture = fixture();
+    let crew = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .and_then(|record| record.organization())
+        .expect("suspect should hold membership");
+    let leader = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unbooked Crew Leader".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("leader fixture should validate");
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Forensic Detective".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(90).expect("fixture rating should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective fixture should validate");
+    let neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Corroboration Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(50).expect("fixture rating should validate"),
+                    commercial_activity: Rating::try_new(50)
+                        .expect("fixture rating should validate"),
+                    illicit_demand: Rating::try_new(50).expect("fixture rating should validate"),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(50).expect("fixture rating should validate"),
+                },
+            },
+        },
+    )
+    .expect("neighborhood should validate");
+    let business = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Corroboration Front".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("business should validate");
+    // The suspect holds no operation booking: a different member leads the score.
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Someone else's score".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(business),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: crate::core::time::SimTime::ZERO,
+        },
+    )
+    .expect("operation should authorize")
+    .commit(&mut fixture.state)
+    .expect("operation should commit");
+    // An operation-originated case with exactly ONE independent strong item on the suspect.
+    let outcome = validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: fixture.police,
+            title: "Single-source inquiry".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Operation(operation),
+                EntityRef::Character(fixture.suspect),
+            ]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Character(fixture.suspect),
+                origin: Some(EntityRef::Operation(operation)),
+                kind: EvidenceKind::Fingerprint,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Operation(operation)),
+            notified_organizations: BTreeSet::from([crew]),
+            witness: None,
+        },
+    )
+    .expect("originated case should validate")
+    .commit(&mut fixture.state)
+    .expect("originated case should commit");
+    let case = outcome.investigation;
+    let source = *outcome
+        .evidence
+        .first()
+        .expect("intake carries its evidence");
+    validate_assign_investigator(&fixture.state, case, detective)
+        .expect("case staffing should validate")
+        .commit(&mut fixture.state)
+        .expect("case staffing should commit");
+
+    // Develop the source: the forensic derivative clones its subject and strength.
+    let work = validate_schedule_investigation_work(
+        &fixture.registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: case,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(source),
+        },
+    )
+    .expect("reviewable source should schedule")
+    .commit(&mut fixture.state)
+    .expect("review should commit");
+    loop {
+        let outcome = run_tick(&fixture.registry, &mut fixture.state);
+        if outcome.resolved_investigation_work.contains(&work) {
+            break;
+        }
+    }
+    assert!(
+        fixture
+            .state
+            .legal()
+            .work_for_investigation(case)
+            .any(|entry| entry
+                .resolution()
+                .is_some_and(|resolution| resolution.derived_evidence().is_some())),
+        "the review must have produced a forensic derivative"
+    );
+
+    // One independent item plus its own derivative is still one fact: no custody.
+    assert!(
+        apply_autonomous_evidence_arrests(&mut fixture.state)
+            .expect("autonomous arrest pass should resolve")
+            .is_empty(),
+        "a derived analysis must not corroborate its own source"
+    );
+
+    // A second INDEPENDENT strong item completes the corroboration bar and custody follows.
+    let second = add_character_evidence(&mut fixture.state, fixture.police, case, fixture.suspect);
+    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+        .expect("autonomous arrest pass should resolve");
+    assert_eq!(arrests.len(), 1);
+    let record = fixture
+        .state
+        .legal()
+        .get_arrest(arrests[0])
+        .expect("arrest record should persist");
+    assert_eq!(record.character(), fixture.suspect);
+    assert_eq!(
+        record.evidence(),
+        &BTreeSet::from([source, second]),
+        "only independent items carry the arrest"
+    );
+    validate_state(&fixture.state).expect("custody state should remain valid");
+    validate_invariants(&fixture.state);
+}

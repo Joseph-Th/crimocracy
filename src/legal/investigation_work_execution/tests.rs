@@ -9,9 +9,8 @@ use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_assign_investigator, validate_open_investigation,
-    validate_remove_investigator, InvestigationError,
 };
-use crate::legal::{EvidenceDraft, InvestigationDraft, InvestigationWorkFocus, InvestigatorRole};
+use crate::legal::{EvidenceDraft, InvestigationDraft, InvestigationWorkFocus};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,7 +120,7 @@ fn make_fixture(
     .expect("investigation fixture should validate")
     .commit(&mut state)
     .expect("investigation fixture should commit");
-    validate_assign_investigator(&state, investigation, investigator, InvestigatorRole::Lead)
+    validate_assign_investigator(&state, investigation, investigator)
         .expect("investigator assignment should validate")
         .commit(&mut state)
         .expect("investigator assignment should commit");
@@ -393,7 +392,7 @@ fn evidence_review_develops_case_owned_evidence_without_inventing_subjects() {
 }
 
 #[test]
-fn scheduling_is_versioned_deduplicated_and_blocks_investigator_release() {
+fn scheduling_is_versioned_and_deduplicated_per_focus() {
     let registry = build_registry();
     let mut fixture = make_fixture(
         90,
@@ -401,9 +400,6 @@ fn scheduling_is_versioned_deduplicated_and_blocks_investigator_release() {
         EvidenceReliability::Credible,
         Admissibility::Admissible,
     );
-    let stale_removal =
-        validate_remove_investigator(&fixture.state, fixture.investigation, fixture.investigator)
-            .expect("investigator should initially be releasable");
     let stale_schedule = validate_schedule_investigation_work(
         &registry,
         &fixture.state,
@@ -436,18 +432,6 @@ fn scheduling_is_versioned_deduplicated_and_blocks_investigator_release() {
     .expect("fresh schedule should validate after case change")
     .commit(&mut fixture.state)
     .expect("fresh schedule should commit");
-    assert!(matches!(
-        stale_removal.commit(&mut fixture.state),
-        Err(InvestigationError::StaleInvestigation { .. })
-    ));
-    assert_eq!(
-        validate_remove_investigator(&fixture.state, fixture.investigation, fixture.investigator,)
-            .expect_err("scheduled work must block investigator release"),
-        InvestigationError::ScheduledInvestigationWork {
-            investigator: fixture.investigator,
-            work,
-        }
-    );
     assert_eq!(
         validate_schedule_investigation_work(
             &registry,
@@ -538,15 +522,10 @@ fn save_round_trip_preserves_due_work_and_deterministic_resolution() {
     .expect("post-restore investigation should validate")
     .commit(&mut restored)
     .expect("post-restore investigation should commit");
-    validate_assign_investigator(
-        &restored,
-        second_investigation,
-        fixture.second_investigator,
-        InvestigatorRole::Lead,
-    )
-    .expect("post-restore investigator assignment should validate")
-    .commit(&mut restored)
-    .expect("post-restore investigator assignment should commit");
+    validate_assign_investigator(&restored, second_investigation, fixture.second_investigator)
+        .expect("post-restore investigator assignment should validate")
+        .commit(&mut restored)
+        .expect("post-restore investigator assignment should commit");
     add_evidence(
         &mut restored,
         TestEvidenceDraft {

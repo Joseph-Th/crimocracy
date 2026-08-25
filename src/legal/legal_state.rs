@@ -20,12 +20,11 @@ use crate::legal::records::{
     Admissibility, ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
     InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
-    InvestigationWorkResolution, InvestigationWorkStatus, InvestigatorRole, JurisdictionRecord,
-    LegalIndexes, LegalRepresentationEndReason, LegalRepresentationOrigin,
-    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentRecord,
-    PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord, PoliceResponseStatus,
-    ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
-    ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
+    InvestigationWorkResolution, InvestigationWorkStatus, JurisdictionRecord, LegalIndexes,
+    LegalRepresentationEndReason, LegalRepresentationOrigin, LegalRepresentationRecord,
+    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
+    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
+    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -745,36 +744,6 @@ impl LegalState {
             "Index Uniqueness: duplicate informant ID inserted"
         );
     }
-    pub(crate) fn terminate_informant(&mut self, id: InformantId, terminated_at: SimTime) {
-        let (character, handler) = {
-            let record = self
-                .informants
-                .get_mut(&id)
-                .expect("validated informant disappeared before termination commit");
-            record.status = InformantStatus::Terminated;
-            record.terminated_at = Some(terminated_at);
-            record.version = record
-                .version
-                .checked_add(1)
-                .expect("informant version counter exhausted");
-            (record.character(), record.handler())
-        };
-        let removed = self
-            .indexes
-            .informants
-            .active_by_character_handler
-            .remove(&(character, handler));
-        debug_assert_eq!(
-            removed,
-            Some(id),
-            "Derived Data Consistency: active informant index changed before termination"
-        );
-        let removed_active = self.indexes.informants.active.remove(&id);
-        debug_assert!(
-            removed_active,
-            "Derived Data Consistency: terminated informant was not indexed as active"
-        );
-    }
     pub(crate) fn insert_informant_disclosure(
         &mut self,
         evidence: EvidenceRecord,
@@ -1135,6 +1104,28 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
+        // Shelving or closing a case releases its investigators: a case nobody works holds no
+        // institutional attention, so its detectives are free for other casework and a resumed
+        // case re-enters the unstaffed index and is staffed again from available detectives.
+        if status != InvestigationStatus::Active {
+            for released in std::mem::take(&mut investigation.assigned_investigators) {
+                if let Some(cases) = self
+                    .indexes
+                    .investigations
+                    .investigations_by_investigator
+                    .get_mut(&released)
+                {
+                    cases.remove(&investigation_id);
+                    if cases.is_empty() {
+                        self.indexes
+                            .investigations
+                            .investigations_by_investigator
+                            .remove(&released);
+                    }
+                }
+            }
+            investigation.lead_investigator = None;
+        }
         let needs_lead = investigation.status == InvestigationStatus::Active
             && investigation.lead_investigator.is_none();
         if needs_lead {
@@ -1199,97 +1190,34 @@ impl LegalState {
             ),
         }
     }
-    pub(crate) fn set_investigator_role(
+    /// Promotes an investigator to the case's lead seat. Staffing is single-seat: every
+    /// canonical producer assigns exactly one lead, and support-investigator bookkeeping does
+    /// not exist, so the seat is only ever filled, never demoted in place.
+    pub(crate) fn set_lead_investigator(
         &mut self,
         investigation_id: InvestigationId,
         investigator: CharacterId,
-        role: InvestigatorRole,
     ) {
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before staffing commit");
         investigation.assigned_investigators.insert(investigator);
-        match role {
-            InvestigatorRole::Lead => investigation.lead_investigator = Some(investigator),
-            InvestigatorRole::Investigator => {
-                if investigation.lead_investigator == Some(investigator) {
-                    investigation.lead_investigator = None;
-                }
-            }
-        }
+        investigation.lead_investigator = Some(investigator);
         investigation.version = investigation
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        let needs_lead = investigation.status == InvestigationStatus::Active
-            && investigation.lead_investigator.is_none();
-        if needs_lead {
-            self.indexes
-                .investigations
-                .active_without_lead
-                .insert(investigation_id);
-        } else {
-            self.indexes
-                .investigations
-                .active_without_lead
-                .remove(&investigation_id);
-        }
+        self.indexes
+            .investigations
+            .active_without_lead
+            .remove(&investigation_id);
         self.indexes
             .investigations
             .investigations_by_investigator
             .entry(investigator)
             .or_default()
             .insert(investigation_id);
-    }
-    pub(crate) fn remove_investigator(
-        &mut self,
-        investigation_id: InvestigationId,
-        investigator: CharacterId,
-    ) {
-        let investigation = self
-            .investigations
-            .get_mut(&investigation_id)
-            .expect("validated investigation disappeared before staffing commit");
-        let removed = investigation.assigned_investigators.remove(&investigator);
-        debug_assert!(
-            removed,
-            "validated investigator assignment disappeared before commit"
-        );
-        if investigation.lead_investigator == Some(investigator) {
-            investigation.lead_investigator = None;
-        }
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
-        let needs_lead = investigation.status == InvestigationStatus::Active
-            && investigation.lead_investigator.is_none();
-        if needs_lead {
-            self.indexes
-                .investigations
-                .active_without_lead
-                .insert(investigation_id);
-        } else {
-            self.indexes
-                .investigations
-                .active_without_lead
-                .remove(&investigation_id);
-        }
-        if let Some(investigations) = self
-            .indexes
-            .investigations
-            .investigations_by_investigator
-            .get_mut(&investigator)
-        {
-            investigations.remove(&investigation_id);
-            if investigations.is_empty() {
-                self.indexes
-                    .investigations
-                    .investigations_by_investigator
-                    .remove(&investigator);
-            }
-        }
     }
     pub(crate) fn set_jurisdiction(&mut self, record: JurisdictionRecord) {
         let organization = record.organization();

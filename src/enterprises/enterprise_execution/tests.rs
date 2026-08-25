@@ -237,6 +237,148 @@ fn establish_alcohol_distribution(
 }
 
 #[test]
+fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
+    // Regression: the persisted notability rule includes drawn vice attention, but the
+    // registry-relative invariant re-derivation omitted that disjunct — so a settlement
+    // whose only notability trigger was a successful visibility roll committed Notable and
+    // then failed every later save/load against the authored content.
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+    };
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Vice Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    validate_set_jurisdiction(
+        &fixture.state,
+        JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([neighborhood]),
+            case_intake_priority: rating(80),
+        },
+    )
+    .expect("jurisdiction fixture should validate")
+    .commit(&mut fixture.state)
+    .expect("jurisdiction fixture should commit");
+    // Sustained district casework: one active originated case targeting the racket sits
+    // across BOTH settlements, so the street-heat surcharge is identical in each.
+    let _standing_inquiry = validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Standing vice inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Enterprise(enterprise)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Enterprise(enterprise),
+                origin: Some(EntityRef::Enterprise(enterprise)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Enterprise(enterprise)),
+            notified_organizations: BTreeSet::from([fixture.organization]),
+            witness: None,
+        },
+    )
+    .expect("standing vice inquiry should validate")
+    .commit(&mut fixture.state)
+    .expect("standing vice inquiry should commit");
+
+    // First settlement under sustained casework, roll misses: notable through first-time
+    // street heat only.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let first = validate_enterprise_cycle_plan(
+        &fixture.state,
+        decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect("first due cycle should resolve"),
+    )
+    .expect("first cycle plan should validate")
+    .commit(&mut fixture.state)
+    .expect("first cycle should settle");
+    let first_record = fixture
+        .state
+        .enterprises()
+        .get_cycle(first)
+        .expect("first cycle should exist");
+    assert!(!first_record.drew_vice_attention());
+
+    // Second settlement, same case pressure, roll hits: the drawn vice inquiry is the ONLY
+    // fresh notability trigger — variance is zero, heat is unchanged, and the book earns.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let second = validate_enterprise_cycle_plan(
+        &fixture.state,
+        decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, 0),
+        )
+        .expect("second due cycle should resolve"),
+    )
+    .expect("second cycle plan should validate")
+    .commit(&mut fixture.state)
+    .expect("second cycle should settle");
+    let second_heat = fixture
+        .state
+        .enterprises()
+        .get_cycle(second)
+        .expect("second cycle should exist")
+        .investigation_heat();
+    let second_record = fixture
+        .state
+        .enterprises()
+        .get_cycle(second)
+        .expect("second cycle should exist");
+    let first_heat = fixture
+        .state
+        .enterprises()
+        .get_cycle(first)
+        .expect("first cycle should exist")
+        .investigation_heat();
+    assert!(second_record.drew_vice_attention());
+    assert_eq!(second_heat, first_heat);
+    assert!(second_record.net_cash() >= Money::ZERO);
+    assert_eq!(
+        second_record.attention(),
+        crate::core::attention::AttentionClass::Notable
+    );
+
+    // The persisted artifact must satisfy the authored-content validator that every save and
+    // load runs — the exact check the missing disjunct used to fail.
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("a vice-drawn notable cycle must stay registry-valid");
+    let bytes =
+        bincode::serialize(&build_save(&registry, &fixture.state).expect("save should build"))
+            .expect("save should serialize");
+    let restored = restore_save(
+        &registry,
+        bincode::deserialize::<SaveEnvelope>(&bytes).expect("save should deserialize"),
+    )
+    .expect("vice-drawn state should restore");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -1107,6 +1249,85 @@ fn active_distribution_network_locks_business_ownership_and_resume_revalidates_v
     validate_state(&fixture.state).expect("restored distribution network should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("restored distribution network should satisfy authored content");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn resume_commit_rejects_a_host_venue_that_changed_after_validation() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+    };
+    let venue = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Resumption Social Club".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .expect("host venue fixture should validate");
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization: fixture.organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("business-hosted gambling should establish")
+    .commit(&mut fixture.state)
+    .expect("business-hosted gambling should commit");
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active venue racket should suspend")
+        .commit(&mut fixture.state)
+        .expect("suspension should commit");
+
+    // A resume token validated while the organization still owned the venue must not
+    // reactivate the racket after the venue changed hands: the host version pin stales it.
+    let stale_resume = validate_resume_enterprise(&registry, &fixture.state, enterprise)
+        .expect("owned venue should initially validate for resume");
+    validate_transfer_business_ownership(&fixture.state, venue, BusinessOwner::Independent)
+        .expect("suspended enterprise should release the host lock")
+        .commit(&mut fixture.state)
+        .expect("venue sale should commit while suspended");
+    assert_eq!(
+        stale_resume
+            .commit(&mut fixture.state)
+            .expect_err("a sold venue must stale the prior resume token"),
+        EnterpriseError::StaleHostBusiness {
+            business: venue,
+            expected: 1,
+            found: 2,
+        }
+    );
+    let fresh_error = match validate_resume_enterprise(&registry, &fixture.state, enterprise) {
+        Ok(_) => panic!("a foreign-owned venue must not host a resumed racket"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        fresh_error,
+        EnterpriseError::HostBusinessOwnershipMismatch {
+            business: venue,
+            owner: BusinessOwner::Independent,
+            organization: fixture.organization,
+        }
+    );
+    validate_state(&fixture.state).expect("rejected resume should leave valid state");
     validate_invariants(&fixture.state);
 }
 

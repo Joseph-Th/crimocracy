@@ -1030,9 +1030,9 @@ fn validate_investigation_work_records(
                 if work.version() != 1
                     || work.resolution().is_some()
                     || investigation.status() != InvestigationStatus::Active
-                    || investigation
-                        .investigator_role(work.investigator())
-                        .is_none()
+                    || !investigation
+                        .assigned_investigators()
+                        .contains(&work.investigator())
                     || investigator.organization() != Some(investigation.owner())
                     || investigator
                         .capability(CapabilityKind::Investigation)
@@ -1243,29 +1243,12 @@ fn validate_informants(state: &AppState) -> Result<(), StateValidationError> {
                 informant: informant.id(),
             });
         }
-        match informant.status() {
-            InformantStatus::Active => {
-                if informant.terminated_at().is_some()
-                    || character.organization() == Some(informant.handler())
-                {
-                    return Err(StateValidationError::InvalidInformant {
-                        informant: informant.id(),
-                    });
-                }
-            }
-            InformantStatus::Terminated => {
-                let terminated_at =
-                    informant
-                        .terminated_at()
-                        .ok_or(StateValidationError::InvalidInformant {
-                            informant: informant.id(),
-                        })?;
-                if terminated_at < informant.established_at() || terminated_at > state.now() {
-                    return Err(StateValidationError::InvalidInformant {
-                        informant: informant.id(),
-                    });
-                }
-            }
+        if informant.status() != InformantStatus::Active
+            || character.organization() == Some(informant.handler())
+        {
+            return Err(StateValidationError::InvalidInformant {
+                informant: informant.id(),
+            });
         }
     }
 
@@ -1299,16 +1282,12 @@ fn validate_informant_disclosures(
                 disclosure: disclosure.id(),
             },
         )?;
-        let after_termination = informant
-            .terminated_at()
-            .is_some_and(|terminated_at| disclosure.disclosed_at() > terminated_at);
         if investigation.owner() != informant.handler()
             || information.holder() != KnowledgeHolder::Character(informant.character())
             || information.recorded_at() > disclosure.disclosed_at()
             || disclosure.disclosed_at() < informant.established_at()
             || disclosure.disclosed_at() < investigation.opened_at()
             || disclosure.disclosed_at() > state.now()
-            || after_termination
             || !informant_evidence.insert(disclosure.evidence())
             || evidence.investigation() != disclosure.investigation()
             || evidence.custodian() != informant.handler()

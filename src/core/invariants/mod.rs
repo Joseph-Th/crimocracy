@@ -931,12 +931,12 @@ fn validate_enterprises_against_registry(
         let economics = registry.get_enterprise(enterprise.kind()).economics();
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
         // Notability must agree with the production rule in `enterprise_execution`: a notable
-        // variance, a net-losing settlement, or street heat that appeared or changed since the
-        // previous settlement makes the manager's cycle report player-visible. A sustained
-        // identical surcharge is a known cost and settles as routine. Heat is read from the
-        // committed cycles rather than recomputed, because the investigations that produced it
-        // may since have closed; it must still be a whole number of the authored per-case
-        // surcharge.
+        // variance, a net-losing settlement, a drawn vice inquiry, or street heat that appeared
+        // or changed since the previous settlement makes the manager's cycle report
+        // player-visible. A sustained identical surcharge is a known cost and settles as
+        // routine. Heat is read from the committed cycles rather than recomputed, because the
+        // investigations that produced it may since have closed; it must still be a whole
+        // number of the authored per-case surcharge.
         let per_case = economics.heat_surcharge_per_active_case().cents();
         if cycle.investigation_heat().cents() < 0
             || (per_case == 0 && cycle.investigation_heat().cents() != 0)
@@ -956,6 +956,7 @@ fn validate_enterprises_against_registry(
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
             || heat_reportable
             || cycle.net_cash() < crate::finance::Money::ZERO
+            || cycle.drew_vice_attention()
         {
             AttentionClass::Notable
         } else {

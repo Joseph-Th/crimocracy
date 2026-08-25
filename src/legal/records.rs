@@ -452,12 +452,6 @@ pub(super) struct ProsecutionIndexes {
     pub(super) referrals_by_case: BTreeMap<ProsecutionCaseId, BTreeSet<ProsecutionReferralId>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum InvestigatorRole {
-    Lead,
-    Investigator,
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ArrestIndexes {
     pub(super) by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
@@ -832,7 +826,6 @@ pub struct WitnessStatementDraft {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InformantStatus {
     Active,
-    Terminated,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -842,7 +835,6 @@ pub struct InformantRecord {
     pub(super) handler: OrganizationId,
     pub(super) status: InformantStatus,
     pub(super) established_at: SimTime,
-    pub(super) terminated_at: Option<SimTime>,
     pub(super) version: u32,
 }
 
@@ -865,10 +857,6 @@ impl InformantRecord {
 
     pub fn established_at(&self) -> SimTime {
         self.established_at
-    }
-
-    pub fn terminated_at(&self) -> Option<SimTime> {
-        self.terminated_at
     }
 
     pub fn version(&self) -> u32 {
@@ -956,15 +944,6 @@ impl InvestigationRecord {
     }
     pub fn assigned_investigators(&self) -> &BTreeSet<CharacterId> {
         &self.assigned_investigators
-    }
-    pub fn investigator_role(&self, investigator: CharacterId) -> Option<InvestigatorRole> {
-        if self.lead_investigator == Some(investigator) {
-            Some(InvestigatorRole::Lead)
-        } else if self.assigned_investigators.contains(&investigator) {
-            Some(InvestigatorRole::Investigator)
-        } else {
-            None
-        }
     }
     pub fn subjects(&self) -> &BTreeSet<EntityRef> {
         &self.subjects

@@ -916,6 +916,10 @@ pub struct ValidatedEnterpriseStatusChange {
     cycle_duration: Option<SimDuration>,
     authority: Option<ResolvedMandateAuthority>,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
+    /// Venue version pinned at validation for a resumption at a business location. A token
+    /// held across a venue sale or refit must stale exactly like the cycle path's host pin:
+    // ownership and required functions live on the business record, so its version guards both.
+    host_business_version: Option<(BusinessId, u32)>,
 }
 
 impl ValidatedEnterpriseStatusChange {
@@ -940,6 +944,19 @@ impl ValidatedEnterpriseStatusChange {
                 record.location(),
             )?;
             validate_supporting_business_versions(state, &self.supporting_business_versions)?;
+            if let Some((business_id, expected)) = self.host_business_version {
+                let business = state
+                    .world
+                    .get_business(business_id)
+                    .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+                if business.version() != expected {
+                    return Err(EnterpriseError::StaleHostBusiness {
+                        business: business_id,
+                        expected,
+                        found: business.version(),
+                    });
+                }
+            }
             validate_supporting_businesses(
                 state,
                 record.organization(),
@@ -993,6 +1010,7 @@ pub fn validate_suspend_enterprise(
         cycle_duration: None,
         authority: None,
         supporting_business_versions: BTreeMap::new(),
+        host_business_version: None,
     })
 }
 
@@ -1036,6 +1054,16 @@ pub fn validate_resume_enterprise(
     let cycle_duration = definition.economics().cycle();
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, record.supporting_businesses())?;
+    let host_business_version = match record.location() {
+        EnterpriseLocation::Business(business_id) => {
+            let business = state
+                .world
+                .get_business(business_id)
+                .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+            Some((business_id, business.version()))
+        }
+        EnterpriseLocation::Neighborhood(_) => None,
+    };
     Ok(ValidatedEnterpriseStatusChange {
         enterprise,
         expected_version: record.version(),
@@ -1043,6 +1071,7 @@ pub fn validate_resume_enterprise(
         cycle_duration: Some(cycle_duration),
         authority: Some(authority),
         supporting_business_versions,
+        host_business_version,
     })
 }
 

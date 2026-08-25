@@ -350,18 +350,16 @@ impl EconomyState {
             .expect("business economy version counter exhausted");
     }
 
-    /// Records laundered street-cash volume absorbed by this front in its current cycle. The
-    /// economy owner keeps the running total so laundering plausibility stays a per-cycle
-    /// budget rather than a per-transfer allowance.
-    pub(crate) fn record_laundered_volume(&mut self, business: BusinessId, amount: Money) {
+    /// Writes the laundered street-cash volume absorbed by this front in its current cycle.
+    /// The economy owner keeps the running total so laundering plausibility stays a per-cycle
+    /// budget rather than a per-transfer allowance; callers pass a pre-validated total so the
+    /// write is total and cannot half-apply behind a ledger commit.
+    pub(crate) fn set_laundered_this_cycle(&mut self, business: BusinessId, total: Money) {
         let record = self
             .businesses
             .get_mut(&business)
             .expect("validated front business economy disappeared before laundering commit");
-        record.laundered_this_cycle = record
-            .laundered_this_cycle
-            .checked_add(amount)
-            .expect("laundered-volume accumulator overflowed");
+        record.laundered_this_cycle = total;
         record.version = record
             .version
             .checked_add(1)

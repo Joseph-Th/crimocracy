@@ -202,7 +202,17 @@ fn staffing_records_lead_held_active_case_knowledge() {
     let investigation = open_operation_case(&mut fixture.state);
 
     // Before staffing there is no institutional knower and no knowledge record.
-    assert!(record_lead_case_activity_knowledge(&mut fixture.state, investigation).is_none());
+    assert_eq!(
+        fixture
+            .state
+            .intelligence()
+            .information_for_holder_by_topic(
+                KnowledgeHolder::Character(fixture.detective),
+                InformationTopic::LegalActivity,
+            )
+            .count(),
+        0
+    );
 
     let staffed = apply_autonomous_investigator_staffing(&mut fixture.state)
         .expect("staffing pass must succeed");

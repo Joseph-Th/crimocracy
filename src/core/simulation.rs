@@ -83,8 +83,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
     let scheduled_investigation_work =
-        apply_initial_evidence_reviews(registry, state, &staffed_investigations)
-            .expect("newly staffed investigations should schedule valid initial evidence work");
+        apply_initial_evidence_reviews(registry, state, &staffed_investigations);
     // Witness interviews are scheduled after evidence reviews so a witness registered by an
     // operation resolving earlier in this same minute is interviewable as soon as its case
     // has an investigator.

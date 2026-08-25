@@ -443,6 +443,14 @@ pub fn apply_autonomous_evidence_arrests(
             {
                 continue;
             }
+            // Corroboration means independent facts: a forensic analysis derived from case
+            // evidence restates its source's subject and strength, so counting both would let
+            // one underlying fact satisfy the two-item bar by itself. Derivatives still
+            // strengthen the institution's hand through improved reliability and later
+            // informant or witness work; they just cannot be their own second witness.
+            if !evidence.derived_from().is_empty() {
+                continue;
+            }
             has_strong |= matches!(
                 evidence.strength(),
                 crate::legal::EvidenceStrength::Strong | crate::legal::EvidenceStrength::Direct

@@ -135,6 +135,48 @@ fn make_test_draft(
 }
 
 #[test]
+fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() {
+    // A plan scheduled for the current minute begins on the next canonical tick, so a
+    // deadline anchored to the schedule alone (deadline == scheduled_for + entry_offset + 1)
+    // used to authorize cleanly and then panic the tick when begin re-derived the same rule
+    // one minute later. The gate must anchor on the earliest possible begin instead.
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let crew = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Crew Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("crew fixture should validate");
+    let mut draft = make_test_draft(organization, leader, target);
+    // Burglary carries an authored 10-minute entry offset and requires an entry specialist.
+    draft.kind = OperationKind::Burglary;
+    draft.objective = OperationObjective::AcquireProperty { target };
+    draft.roles = BTreeMap::from([
+        (RoleKind::Coordinator, leader),
+        (RoleKind::EntrySpecialist, crew),
+    ]);
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+        SimTime::from_minutes(11),
+    )];
+    let error = validate_authorize_operation(&registry, &state, draft.clone())
+        .expect_err("a deadline that only fits a begin at the schedule minute must be rejected");
+    assert_eq!(error, OperationError::DeadlineBeforeStart);
+
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+        SimTime::from_minutes(12),
+    )];
+    validate_authorize_operation(&registry, &state, draft)
+        .expect("one spare minute above entry offset admits the guaranteed next-tick begin");
+}
+
+#[test]
 fn operation_rejects_take_targets_owned_by_the_sponsoring_organization() {
     let (registry, state, organization, leader, target) = make_test_operation_state();
     let mut state = state;

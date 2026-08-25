@@ -324,7 +324,7 @@ fn disclosure_token_rejects_case_change_without_partial_mutation() {
 }
 
 #[test]
-fn termination_is_versioned_and_save_round_trip_preserves_history() {
+fn informant_relationship_is_versioned_and_save_round_trip_preserves_history() {
     let registry = build_registry();
     let mut fixture = fixture();
     let informant = validate_establish_informant(
@@ -350,42 +350,27 @@ fn termination_is_versioned_and_save_round_trip_preserves_history() {
     .commit(&mut fixture.state)
     .expect("disclosure should commit");
 
-    let stale_termination = validate_terminate_informant(&fixture.state, informant)
-        .expect("termination should validate");
-    validate_terminate_informant(&fixture.state, informant)
-        .expect("second termination token should validate against same version")
-        .commit(&mut fixture.state)
-        .expect("first committed termination should succeed");
+    // The active relationship is exclusive: a second establishment for the same pair is
+    // rejected while the first one lives.
     assert!(matches!(
-        stale_termination.commit(&mut fixture.state),
-        Err(InformantError::StaleInformant { .. })
+        validate_establish_informant(
+            &fixture.state,
+            InformantDraft {
+                character: fixture.member,
+                handler: fixture.police,
+            },
+        ),
+        Err(InformantError::AlreadyActive { .. })
     ));
-    assert!(fixture
-        .state
-        .legal()
-        .active_informant_for(fixture.member, fixture.police)
-        .is_none());
     assert_eq!(
         fixture
             .state
             .legal()
             .get_informant(informant)
-            .expect("historical relationship should persist")
+            .expect("active relationship should persist")
             .status(),
-        InformantStatus::Terminated
+        InformantStatus::Active
     );
-
-    let replacement = validate_establish_informant(
-        &fixture.state,
-        InformantDraft {
-            character: fixture.member,
-            handler: fixture.police,
-        },
-    )
-    .expect("terminated relationship should permit later re-establishment")
-    .commit(&mut fixture.state)
-    .expect("replacement relationship should commit");
-    assert_ne!(replacement, informant);
 
     let envelope = build_save(&registry, &fixture.state).expect("informant state should save");
     let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
@@ -396,11 +381,10 @@ fn termination_is_versioned_and_save_round_trip_preserves_history() {
         restored
             .legal()
             .get_informant(informant)
-            .expect("terminated relationship should survive save")
+            .expect("relationship should survive save")
             .status(),
-        InformantStatus::Terminated
+        InformantStatus::Active
     );
-    assert!(restored.legal().get_informant(replacement).is_some());
     assert_eq!(
         restored
             .legal()
@@ -606,11 +590,17 @@ fn per_tick_scan_indexes_track_lifecycle_transitions() {
         .expect("release should commit");
     assert!(fixture.state.legal().detained_arrests().next().is_none());
 
-    validate_terminate_informant(&fixture.state, informant)
-        .expect("termination should validate")
-        .commit(&mut fixture.state)
-        .expect("termination should commit");
-    assert!(fixture.state.legal().active_informants().next().is_none());
+    // The informant relationship outlives the custody that produced it: an active source
+    // stays on the scan surface until a modeled handler decision ends it.
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_informants()
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![informant]
+    );
     validate_state(&fixture.state).expect("post-transition state should validate");
     validate_invariants(&fixture.state);
 }

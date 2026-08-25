@@ -10,7 +10,7 @@ use crate::core::time::{SimDuration, SimTime};
 use crate::legal::{
     CaseWitnessRecord, EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity,
     EvidenceRecord, IncidentIntakeDraft, InvestigationDraft, InvestigationRecord,
-    InvestigationStatus, InvestigatorRole,
+    InvestigationStatus,
 };
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
@@ -44,24 +44,13 @@ pub enum InvestigationError {
     },
     #[error("character {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
-    #[error("character {investigator} already has role {role:?} on investigation {investigation}")]
-    AlreadyAssignedRole {
+    #[error("investigation {investigation} already has {lead} as its lead")]
+    LeadSeatFilled {
         investigation: InvestigationId,
-        investigator: CharacterId,
-        role: InvestigatorRole,
+        lead: CharacterId,
     },
     #[error("character {investigator} already leads an active investigation and cannot take another active case")]
     InvestigatorAtCaseCapacity { investigator: CharacterId },
-    #[error("character {investigator} is not assigned to investigation {investigation}")]
-    InvestigatorNotAssigned {
-        investigation: InvestigationId,
-        investigator: CharacterId,
-    },
-    #[error("character {investigator} owns scheduled investigation work {work}")]
-    ScheduledInvestigationWork {
-        investigator: CharacterId,
-        work: InvestigationWorkId,
-    },
     #[error("investigation {investigation} changed after validation; expected version {expected}, found {found}")]
     StaleInvestigation {
         investigation: InvestigationId,
@@ -114,6 +103,8 @@ pub enum InvestigationError {
     },
     #[error("character {character} is a subject of this case and cannot be its named witness")]
     WitnessIsCaseSubject { character: CharacterId },
+    #[error("lead case-activity knowledge could not be recorded: {0}")]
+    CaseKnowledge(#[from] crate::intelligence::intelligence_system::IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
@@ -215,20 +206,30 @@ impl ValidatedInvestigationTransition {
             });
         }
         validate_investigation_transition_dependencies(state, self.investigation, self.transition)?;
-        let status = match self.transition {
+        let next_status = match self.transition {
             InvestigationTransition::Suspend => InvestigationStatus::Suspended,
             InvestigationTransition::Resume => InvestigationStatus::Active,
             InvestigationTransition::Close => InvestigationStatus::Closed,
         };
+        // The lead's refreshed knowledge is prepared before any mutation so a failure leaves
+        // the case untouched; committing it after the status write keeps one canonical record.
+        let knowledge = match investigation.lead_investigator() {
+            Some(lead) => crate::legal::case_knowledge::prepare_case_activity_knowledge(
+                state,
+                self.investigation,
+                crate::legal::case_knowledge::activity_for_status(next_status),
+                lead,
+            )?,
+            None => None,
+        };
         state
             .legal
-            .set_investigation_status(self.investigation, status, state.now());
-        // The lead investigator personally knows their own case was shelved, resumed, or
-        // closed — the same refresh the cold-decay pass performs for its own transitions.
-        crate::legal::case_knowledge::record_lead_case_activity_knowledge(
-            state,
-            self.investigation,
-        );
+            .set_investigation_status(self.investigation, next_status, state.now());
+        if let Some(knowledge) = knowledge {
+            knowledge
+                .commit(state)
+                .map_err(InvestigationError::CaseKnowledge)?;
+        }
         Ok(())
     }
 }
@@ -309,44 +310,9 @@ fn validate_investigation_transition_dependencies(
         let _ = state.world.get_organization(investigation.owner()).ok_or(
             InvestigationError::MissingOrganization(investigation.owner()),
         )?;
-        for investigator_id in investigation.assigned_investigators() {
-            let investigator = state
-                .world
-                .get_character(*investigator_id)
-                .ok_or(InvestigationError::MissingCharacter(*investigator_id))?;
-            if let Some(arrest) = state.legal.active_arrest_for_character(*investigator_id) {
-                return Err(InvestigationError::DetainedInvestigator {
-                    investigator: *investigator_id,
-                    arrest: arrest.id(),
-                });
-            }
-            if investigator.organization() != Some(investigation.owner()) {
-                return Err(InvestigationError::InvestigatorOwnerMismatch {
-                    investigator: *investigator_id,
-                    owner: investigation.owner(),
-                });
-            }
-            if investigator
-                .capability(CapabilityKind::Investigation)
-                .is_none()
-            {
-                return Err(InvestigationError::MissingInvestigationCapability(
-                    *investigator_id,
-                ));
-            }
-            // Resuming re-applies the one-active-case rule: an investigator who took a
-            // different active case while this one was suspended cannot hold both, exactly as
-            // fresh assignment would refuse them.
-            if state
-                .legal
-                .active_investigation_for_investigator(*investigator_id)
-                .is_some_and(|active| active.id() != investigation_id)
-            {
-                return Err(InvestigationError::InvestigatorAtCaseCapacity {
-                    investigator: *investigator_id,
-                });
-            }
-        }
+        // No per-investigator checks are needed: shelving released the case's investigators,
+        // so resumption re-enters the unstaffed index and fresh staffing re-applies the
+        // one-active-case rule when the institution next works the case.
     }
     Ok(())
 }
@@ -361,8 +327,8 @@ fn validate_investigation_transition_dependencies(
 /// whose exposure opened them) are eligible: institution-authored casework keeps its lifecycle
 /// until an explicit staff decision. A case whose evidence identified a concrete character is a
 /// real, actionable lead and is never auto-shelved.
-/// The owned authority keeps the sitting case history intact so a later operation exposure in the
-/// same jurisdiction can resume the same shelf rather than starting from silence.
+/// Shelving releases the case's investigators, and a later incident sharing the shelf's subject
+/// matter resumes the same file (`find_resumable_shelf`) rather than starting from silence.
 pub(crate) fn apply_cold_case_decay(
     state: &mut AppState,
     cold_case_window: SimDuration,
@@ -455,7 +421,6 @@ pub struct ColdCaseDecayOutcome {
 pub struct ValidatedInvestigatorAssignment {
     investigation: InvestigationId,
     investigator: CharacterId,
-    role: InvestigatorRole,
     expected_investigation_version: u32,
     expected_investigator_version: u32,
 }
@@ -488,31 +453,35 @@ impl ValidatedInvestigatorAssignment {
             state,
             self.investigation,
             self.investigator,
-            self.role,
+        )?;
+        // Taking the lead seat is a material case-activity fact: the new lead personally
+        // knows the case is active. Prepared before mutation; committed after the role write.
+        let knowledge = crate::legal::case_knowledge::prepare_case_activity_knowledge(
+            state,
+            self.investigation,
+            crate::legal::case_knowledge::CaseActivityStatus::Active,
+            self.investigator,
         )?;
         state
             .legal
-            .set_investigator_role(self.investigation, self.investigator, self.role);
-        // Only a change of the lead seat is a material case-activity fact: promoting a new
-        // lead refreshes their personal knowledge, while a plain investigator assignment
-        // leaves the existing lead's record exactly as current as it was.
-        if self.role == InvestigatorRole::Lead {
-            crate::legal::case_knowledge::record_lead_case_activity_knowledge(
-                state,
-                self.investigation,
-            );
+            .set_lead_investigator(self.investigation, self.investigator);
+        if let Some(knowledge) = knowledge {
+            knowledge
+                .commit(state)
+                .map_err(InvestigationError::CaseKnowledge)?;
         }
         Ok(())
     }
 }
 
+/// Assigns an investigator as the lead of an active case. Staffing is single-seat: every
+/// canonical producer promotes one lead, and support-investigator bookkeeping does not exist.
 pub fn validate_assign_investigator(
     state: &AppState,
     investigation: InvestigationId,
     investigator: CharacterId,
-    role: InvestigatorRole,
 ) -> Result<ValidatedInvestigatorAssignment, InvestigationError> {
-    validate_investigator_assignment_dependencies(state, investigation, investigator, role)?;
+    validate_investigator_assignment_dependencies(state, investigation, investigator)?;
     let investigation_record = state
         .legal
         .get_investigation(investigation)
@@ -524,7 +493,6 @@ pub fn validate_assign_investigator(
     Ok(ValidatedInvestigatorAssignment {
         investigation,
         investigator,
-        role,
         expected_investigation_version: investigation_record.version(),
         expected_investigator_version: investigator_record.version(),
     })
@@ -593,12 +561,8 @@ pub(crate) fn apply_autonomous_investigator_staffing(
 
         // An autonomous staffing pass must not abort the tick: a case whose best candidate
         // fails canonical validation stays unstaffed for a later minute, like cold-case decay.
-        let Ok(assignment) = validate_assign_investigator(
-            state,
-            investigation_id,
-            investigator,
-            InvestigatorRole::Lead,
-        ) else {
+        let Ok(assignment) = validate_assign_investigator(state, investigation_id, investigator)
+        else {
             continue;
         };
         if assignment.commit(state).is_err() {
@@ -615,7 +579,6 @@ fn validate_investigator_assignment_dependencies(
     state: &AppState,
     investigation_id: InvestigationId,
     investigator_id: CharacterId,
-    role: InvestigatorRole,
 ) -> Result<(), InvestigationError> {
     let investigation = state
         .legal
@@ -641,7 +604,7 @@ fn validate_investigator_assignment_dependencies(
         });
     }
     // One active case per investigator: an investigator already assigned to another active
-    // investigation cannot take a second active case. The same case is exempt so a support
+    // investigation cannot take a second active case. The same case is exempt so an
     // investigator can be promoted to lead of the case they already staff.
     if state
         .legal
@@ -660,92 +623,12 @@ fn validate_investigator_assignment_dependencies(
             investigator_id,
         ));
     }
-    if investigation.investigator_role(investigator_id) == Some(role) {
-        return Err(InvestigationError::AlreadyAssignedRole {
+    // Single-seat staffing: a canonical producer fills an empty lead seat; replacing a lead
+    // is not an assignment operation.
+    if let Some(current) = investigation.lead_investigator() {
+        return Err(InvestigationError::LeadSeatFilled {
             investigation: investigation_id,
-            investigator: investigator_id,
-            role,
-        });
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub struct ValidatedInvestigatorRemoval {
-    investigation: InvestigationId,
-    investigator: CharacterId,
-    expected_investigation_version: u32,
-}
-
-impl ValidatedInvestigatorRemoval {
-    pub fn commit(self, state: &mut AppState) -> Result<(), InvestigationError> {
-        let investigation = state
-            .legal
-            .get_investigation(self.investigation)
-            .ok_or(InvestigationError::MissingInvestigation(self.investigation))?;
-        if investigation.version() != self.expected_investigation_version {
-            return Err(InvestigationError::StaleInvestigation {
-                investigation: self.investigation,
-                expected: self.expected_investigation_version,
-                found: investigation.version(),
-            });
-        }
-        if investigation.investigator_role(self.investigator).is_none() {
-            return Err(InvestigationError::InvestigatorNotAssigned {
-                investigation: self.investigation,
-                investigator: self.investigator,
-            });
-        }
-        validate_no_scheduled_investigation_work(state, self.investigation, self.investigator)?;
-        state
-            .legal
-            .remove_investigator(self.investigation, self.investigator);
-        Ok(())
-    }
-}
-
-pub fn validate_remove_investigator(
-    state: &AppState,
-    investigation: InvestigationId,
-    investigator: CharacterId,
-) -> Result<ValidatedInvestigatorRemoval, InvestigationError> {
-    let investigation_record = state
-        .legal
-        .get_investigation(investigation)
-        .ok_or(InvestigationError::MissingInvestigation(investigation))?;
-    if investigation_record
-        .investigator_role(investigator)
-        .is_none()
-    {
-        return Err(InvestigationError::InvestigatorNotAssigned {
-            investigation,
-            investigator,
-        });
-    }
-    validate_no_scheduled_investigation_work(state, investigation, investigator)?;
-    Ok(ValidatedInvestigatorRemoval {
-        investigation,
-        investigator,
-        expected_investigation_version: investigation_record.version(),
-    })
-}
-
-fn validate_no_scheduled_investigation_work(
-    state: &AppState,
-    investigation: InvestigationId,
-    investigator: CharacterId,
-) -> Result<(), InvestigationError> {
-    if let Some(work) = state
-        .legal
-        .work_for_investigator(investigator)
-        .find(|work| {
-            work.investigation() == investigation
-                && work.status() == crate::legal::InvestigationWorkStatus::Scheduled
-        })
-    {
-        return Err(InvestigationError::ScheduledInvestigationWork {
-            investigator,
-            work: work.id(),
+            lead: current,
         });
     }
     Ok(())
@@ -867,12 +750,19 @@ fn validate_evidence_draft(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncidentIntakeOutcome {
     pub investigation: InvestigationId,
+    /// Whether this intake folded into an existing suspended shelf instead of opening a
+    /// fresh case; observers distinguish continued casework from brand-new attention.
+    pub resumed_shelf: bool,
     pub evidence: Vec<EvidenceId>,
     pub case_witness: Option<crate::core::id::CaseWitnessId>,
 }
 
 pub struct ValidatedIncidentIntake {
     draft: IncidentIntakeDraft,
+    /// The suspended originated shelf (and its pinned version) this intake continues, found
+    /// at validation time and re-checked at commit so a stale token cannot resurrect a shelf
+    /// whose state moved on.
+    resuming: Option<(InvestigationId, u32)>,
 }
 
 impl ValidatedIncidentIntake {
@@ -889,30 +779,55 @@ impl ValidatedIncidentIntake {
         state: &mut AppState,
     ) -> Result<IncidentIntakeOutcome, InvestigationError> {
         validate_incident_intake_dependencies(state, &self.draft)?;
-        state.ids.reserve_many(&[
-            (IdKind::Investigation, 1),
-            (IdKind::Evidence, self.evidence_count()),
-            (IdKind::CaseWitness, u32::from(self.draft.witness.is_some())),
-        ])?;
-        let investigation = state.ids.next_investigation()?;
+        let mut budget = Vec::with_capacity(3);
+        if self.resuming.is_none() {
+            budget.push((IdKind::Investigation, 1));
+        }
+        budget.push((IdKind::Evidence, self.evidence_count()));
+        budget.push((IdKind::CaseWitness, u32::from(self.draft.witness.is_some())));
+        state.ids.reserve_many(&budget)?;
         // The draft is consumed by this commit, so its subject set moves into the record
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);
-        state.legal.insert_investigation(InvestigationRecord {
-            id: investigation,
-            owner: self.draft.owner,
-            title: self.draft.title,
-            status: InvestigationStatus::Active,
-            lead_investigator: None,
-            assigned_investigators: Default::default(),
-            subjects,
-            evidence: Default::default(),
-            opened_at: state.now(),
-            origin: self.draft.origin,
-            notified_organizations: self.draft.notified_organizations,
-            last_activity_at: state.now(),
-            version: 1,
-        });
+        let investigation = match self.resuming {
+            Some((shelf, expected_version)) => {
+                let record = state
+                    .legal
+                    .get_investigation(shelf)
+                    .ok_or(InvestigationError::MissingInvestigation(shelf))?;
+                if record.version() != expected_version {
+                    return Err(InvestigationError::StaleInvestigation {
+                        investigation: shelf,
+                        expected: expected_version,
+                        found: record.version(),
+                    });
+                }
+                // Canonical resume: revalidates the lifecycle gate and refreshes the lead's
+                // personal knowledge through the shared transition path.
+                validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?
+                    .commit(state)?;
+                shelf
+            }
+            None => {
+                let investigation = state.ids.next_investigation()?;
+                state.legal.insert_investigation(InvestigationRecord {
+                    id: investigation,
+                    owner: self.draft.owner,
+                    title: self.draft.title,
+                    status: InvestigationStatus::Active,
+                    lead_investigator: None,
+                    assigned_investigators: Default::default(),
+                    subjects,
+                    evidence: Default::default(),
+                    opened_at: state.now(),
+                    origin: self.draft.origin,
+                    notified_organizations: self.draft.notified_organizations,
+                    last_activity_at: state.now(),
+                    version: 1,
+                });
+                investigation
+            }
+        };
         let case_witness = if let Some(witness) = self.draft.witness {
             let id = state.ids.next_case_witness()?;
             state.legal.insert_case_witness(
@@ -962,6 +877,7 @@ impl ValidatedIncidentIntake {
         }
         Ok(IncidentIntakeOutcome {
             investigation,
+            resumed_shelf: self.resuming.is_some(),
             evidence: evidence_ids,
             case_witness,
         })
@@ -973,7 +889,32 @@ pub fn validate_incident_intake(
     draft: IncidentIntakeDraft,
 ) -> Result<ValidatedIncidentIntake, InvestigationError> {
     validate_incident_intake_dependencies(state, &draft)?;
-    Ok(ValidatedIncidentIntake { draft })
+    let resuming = find_resumable_shelf(state, &draft);
+    Ok(ValidatedIncidentIntake { draft, resuming })
+}
+
+/// Finds the owner's suspended originated shelf sharing subject matter with the draft, so a
+/// later incident continues the existing case file instead of opening a parallel one while
+/// the old shelf sits cold holding nothing. The lowest case id wins deterministically when
+/// several shelves match. Institution-authored cases (no origination link) keep their explicit
+/// lifecycle and are never auto-resumed.
+fn find_resumable_shelf(
+    state: &AppState,
+    draft: &IncidentIntakeDraft,
+) -> Option<(InvestigationId, u32)> {
+    state
+        .legal
+        .investigations_for_owner(draft.owner)
+        .filter(|record| record.status() == InvestigationStatus::Suspended)
+        .filter(|record| record.origin().is_some())
+        .filter(|record| {
+            record
+                .subjects()
+                .iter()
+                .any(|subject| draft.subjects.contains(subject))
+        })
+        .map(|record| (record.id(), record.version()))
+        .min()
 }
 
 fn validate_incident_intake_dependencies(

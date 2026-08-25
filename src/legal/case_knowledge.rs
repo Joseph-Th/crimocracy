@@ -10,9 +10,10 @@
 //! anchoring keeps free-text case titles from spoofing the parse.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{InformationId, InvestigationId};
+use crate::core::id::CharacterId;
+use crate::core::id::InvestigationId;
 use crate::core::state::AppState;
-use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::intelligence_system::{validate_record_information, ValidatedInformation};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
@@ -29,14 +30,6 @@ pub enum CaseActivityStatus {
 }
 
 impl CaseActivityStatus {
-    fn from_status(status: InvestigationStatus) -> Option<Self> {
-        match status {
-            InvestigationStatus::Active => Some(Self::Active),
-            InvestigationStatus::Suspended => Some(Self::Shelved),
-            InvestigationStatus::Closed => Some(Self::Closed),
-        }
-    }
-
     /// Fixed summary prefix carrying the activity signal. The marker is anchored to the very
     /// start of the summary so free-text case titles embedded later can never impersonate or
     /// shadow it. Every producer of case-activity summaries — lead-investigator knowledge and
@@ -94,28 +87,31 @@ impl CaseActivityStatus {
     }
 }
 
-/// Records (or refreshes) the lead investigator's personal knowledge of a case's activity.
-/// Returns `None` when the case has no lead to hold the knowledge; an unstaffed case has no
-/// institutional knower yet. A fresh material state of the same case produces a fresh information
-/// record, so a contact channel can disclose each new development exactly once.
-pub(crate) fn record_lead_case_activity_knowledge(
-    state: &mut AppState,
+/// Builds (but does not commit) the validated refresh of a case lead's personal knowledge of
+/// their case's activity. The caller names the incoming status and the seat holder so a
+/// lifecycle transition or staffing commit can prepare the knowledge before mutating anything
+/// and only then commit it, keeping one canonical path per record. Returns `None` when the
+/// case's authority is not law enforcement; an unstaffed authority has no institutional
+/// knower to hold the knowledge. A fresh material state of the same case produces a fresh
+/// information record, so a contact channel can disclose each new development exactly once.
+pub(crate) fn prepare_case_activity_knowledge(
+    state: &AppState,
     investigation: InvestigationId,
-) -> Option<InformationId> {
-    let record = state.legal.get_investigation(investigation)?;
-    let lead = record.lead_investigator()?;
-    let status = CaseActivityStatus::from_status(record.status())?;
+    activity: CaseActivityStatus,
+    lead: CharacterId,
+) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
+{
+    let Some(record) = state.legal.get_investigation(investigation) else {
+        return Ok(None);
+    };
     let owner = record.owner();
-    let authority_kind = state.world.get_organization(owner).map(|org| org.kind());
-    if authority_kind != Some(OrganizationKind::LawEnforcement) {
-        return None;
+    let Some(organization) = state.world.get_organization(owner) else {
+        return Ok(None);
+    };
+    if organization.kind() != OrganizationKind::LawEnforcement {
+        return Ok(None);
     }
-    let authority_name = state
-        .world
-        .get_organization(owner)
-        .expect("checked organization must exist")
-        .name()
-        .to_owned();
+    let authority_name = organization.name().to_owned();
     let case_title = record.title().to_owned();
     let subject = EntityRef::Organization(owner);
     let draft = InformationDraft {
@@ -127,12 +123,19 @@ pub(crate) fn record_lead_case_activity_knowledge(
         observed_at: state.now(),
         reliability: Reliability::DirectAccess,
         specificity: Specificity::Specific,
-        summary: status.summary(&authority_name, &case_title),
+        summary: activity.summary(&authority_name, &case_title),
     };
-    validate_record_information(state, draft)
-        .ok()?
-        .commit(state)
-        .ok()
+    validate_record_information(state, draft).map(Some)
+}
+
+/// Convenience mapping for callers that hold an `InvestigationStatus` (for example the
+/// lifecycle transition path) and need the matching activity signal.
+pub(crate) fn activity_for_status(status: InvestigationStatus) -> CaseActivityStatus {
+    match status {
+        InvestigationStatus::Active => CaseActivityStatus::Active,
+        InvestigationStatus::Suspended => CaseActivityStatus::Shelved,
+        InvestigationStatus::Closed => CaseActivityStatus::Closed,
+    }
 }
 
 #[cfg(test)]
