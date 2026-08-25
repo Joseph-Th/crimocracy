@@ -226,6 +226,14 @@ impl IntelligenceState {
         );
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        // Forward direction plus exact-count agreement replaces per-entry reverse walks:
+        // every record is verified present under its own key(s), and because ids are unique
+        // and each record occupies at most one slot per key, the indexed entry totals can
+        // equal the expected totals only when no stale, duplicate, or foreign entry exists.
+        let mut expected_holder_entries = 0_usize;
+        let mut expected_holder_topic_entries = 0_usize;
+        let mut expected_subject_entries = 0_usize;
+        let mut expected_source_entries = 0_usize;
         for record in self.records.values() {
             if !self
                 .by_holder
@@ -248,7 +256,8 @@ impl IntelligenceState {
             {
                 return false;
             }
-            for source in record.derived_from() {
+            let derived_from = record.derived_from();
+            for source in derived_from {
                 if !self
                     .derived_by_source
                     .get(source)
@@ -257,39 +266,31 @@ impl IntelligenceState {
                     return false;
                 }
             }
+            expected_holder_entries += 1;
+            expected_holder_topic_entries += 1;
+            expected_subject_entries += 1;
+            expected_source_entries += derived_from.len();
         }
-        for ((holder, topic), ids) in &self.by_holder_topic {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.holder() == *holder && record.topic() == *topic)
-                {
-                    return false;
-                }
-            }
+        let indexed_holder_entries: usize = self.by_holder.values().map(BTreeSet::len).sum();
+        if indexed_holder_entries != expected_holder_entries {
+            return false;
         }
-        for (holder, ids) in &self.by_holder {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.holder() == *holder)
-                {
-                    return false;
-                }
-            }
+        let indexed_holder_topic_entries: usize =
+            self.by_holder_topic.values().map(BTreeSet::len).sum();
+        if indexed_holder_topic_entries != expected_holder_topic_entries {
+            return false;
         }
-        for (subject, ids) in &self.by_subject {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.subject() == *subject)
-                {
-                    return false;
-                }
-            }
+        let indexed_subject_entries: usize = self.by_subject.values().map(BTreeSet::len).sum();
+        if indexed_subject_entries != expected_subject_entries {
+            return false;
+        }
+        // Provenance sources must themselves exist, and each reverse entry must name a real
+        // derivation edge; this index is not a partition of the records (a source may have
+        // no derivations), so it keeps an explicit reverse walk.
+        let indexed_source_entries: usize =
+            self.derived_by_source.values().map(BTreeSet::len).sum();
+        if indexed_source_entries != expected_source_entries {
+            return false;
         }
         for (source, ids) in &self.derived_by_source {
             if !self.records.contains_key(source) {

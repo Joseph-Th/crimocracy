@@ -510,6 +510,16 @@ impl OperationState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        // Forward direction plus exact-count agreement replaces per-entry reverse walks:
+        // ids are unique and every index is a function of its record, so matching entry
+        // totals prove no stale, duplicate, or foreign index membership survives.
+        let mut expected_by_organization = 0_usize;
+        let mut expected_by_status = 0_usize;
+        let mut expected_active = 0_usize;
+        let mut expected_authorized = 0_usize;
+        let mut expected_in_progress = 0_usize;
+        let mut expected_takes = 0_usize;
+        let mut expected_discovered_links = 0_usize;
         for record in self.records.values() {
             if !self
                 .by_organization
@@ -552,12 +562,27 @@ impl OperationState {
             if resolution_indexed != (record.status() == OperationStatus::InProgress) {
                 return false;
             }
+            expected_by_organization += 1;
+            expected_by_status += 1;
+            if !matches!(
+                record.status(),
+                OperationStatus::Completed | OperationStatus::Aborted
+            ) {
+                expected_active += 1;
+            }
+            if record.status() == OperationStatus::Authorized {
+                expected_authorized += 1;
+            }
+            if record.status() == OperationStatus::InProgress {
+                expected_in_progress += 1;
+            }
             if let Some(resolution) = record.resolution() {
                 for information in resolution.discovered_information() {
                     if self.by_discovered_information.get(information) != Some(&record.id()) {
                         return false;
                     }
                 }
+                expected_discovered_links += resolution.discovered_information().len();
                 // Recency-depletion index membership must match exactly: a completed
                 // successful business take is indexed; everything else is not.
                 let taken_business = record.objective().taken_business();
@@ -573,71 +598,49 @@ impl OperationState {
                 if indexed != should_index {
                     return false;
                 }
-            }
-        }
-        for (organization, ids) in &self.by_organization {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.responsible_organization() == *organization)
-                {
-                    return false;
+                if should_index {
+                    expected_takes += 1;
                 }
             }
         }
-        for (information, operation) in &self.by_discovered_information {
-            if !self.records.get(operation).is_some_and(|record| {
-                record.resolution().is_some_and(|resolution| {
-                    resolution.discovered_information().contains(information)
-                })
-            }) {
-                return false;
-            }
+        let indexed_by_organization: usize = self.by_organization.values().map(BTreeSet::len).sum();
+        if indexed_by_organization != expected_by_organization {
+            return false;
         }
-        for (status, ids) in &self.by_status {
-            for id in ids {
-                if !self
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.status() == *status)
-                {
-                    return false;
-                }
-            }
+        let indexed_by_status: usize = self.by_status.values().map(BTreeSet::len).sum();
+        if indexed_by_status != expected_by_status {
+            return false;
         }
-        for (organization, ids) in &self.active_by_organization {
-            for id in ids {
-                if !self.records.get(id).is_some_and(|record| {
-                    record.responsible_organization() == *organization
-                        && !matches!(
-                            record.status(),
-                            OperationStatus::Completed | OperationStatus::Aborted
-                        )
-                }) {
-                    return false;
-                }
-            }
+        let indexed_active: usize = self
+            .active_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_active != expected_active {
+            return false;
         }
-        for (time, ids) in &self.authorized_by_start {
-            for id in ids {
-                if !self.records.get(id).is_some_and(|record| {
-                    record.status() == OperationStatus::Authorized
-                        && record.scheduled_for() == *time
-                }) {
-                    return false;
-                }
-            }
+        if self.by_discovered_information.len() != expected_discovered_links {
+            return false;
         }
-        for (time, ids) in &self.in_progress_by_resolution_due {
-            for id in ids {
-                if !self.records.get(id).is_some_and(|record| {
-                    record.status() == OperationStatus::InProgress
-                        && record.resolution_due_at() == Some(*time)
-                }) {
-                    return false;
-                }
-            }
+        let indexed_takes: usize = self
+            .successful_takes_by_business
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_takes != expected_takes {
+            return false;
+        }
+        let indexed_authorized: usize = self.authorized_by_start.values().map(BTreeSet::len).sum();
+        if indexed_authorized != expected_authorized {
+            return false;
+        }
+        let indexed_in_progress: usize = self
+            .in_progress_by_resolution_due
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_in_progress != expected_in_progress {
+            return false;
         }
         true
     }

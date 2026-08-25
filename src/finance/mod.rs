@@ -297,73 +297,57 @@ impl FinanceState {
         );
     }
 
-    pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for account in self.accounts.values() {
-            if !self
-                .accounts_by_owner
-                .get(&account.owner())
-                .is_some_and(|ids| ids.contains(&account.id()))
-            {
-                return false;
-            }
-        }
-        for (owner, ids) in &self.accounts_by_owner {
-            for id in ids {
-                if !self
-                    .accounts
-                    .get(id)
-                    .is_some_and(|account| account.owner() == *owner)
-                {
-                    return false;
-                }
-            }
-        }
-        let mut referenced_accounts = BTreeSet::new();
-        for transaction in self.transactions.values() {
-            for posting in transaction.postings() {
-                if !self.posted_accounts.contains(&posting.account) {
-                    return false;
-                }
-                referenced_accounts.insert(posting.account);
-            }
-            if let Some(usage) = transaction.budget_usage() {
-                if !self
-                    .transactions_by_mandate
-                    .get(&usage.mandate())
-                    .is_some_and(|ids| ids.contains(&transaction.id()))
-                {
-                    return false;
-                }
-            }
-        }
-        for (mandate, ids) in &self.transactions_by_mandate {
-            for id in ids {
-                if !self.transactions.get(id).is_some_and(|transaction| {
-                    transaction
-                        .budget_usage()
-                        .is_some_and(|usage| usage.mandate() == *mandate)
-                }) {
-                    return false;
-                }
-            }
-        }
-        if referenced_accounts != self.posted_accounts {
-            return false;
-        }
-        true
+    /// Forward index check for one account's owner membership; the fused finance audit in
+    /// `core::invariants` walks accounts once and calls this per record.
+    pub(crate) fn account_is_indexed_for_owner(
+        &self,
+        id: FinancialAccountId,
+        owner: FinancialOwner,
+    ) -> bool {
+        self.accounts_by_owner
+            .get(&owner)
+            .is_some_and(|ids| ids.contains(&id))
     }
 
-    pub(crate) fn has_consistent_balances(&self) -> bool {
-        let mut derived = BTreeMap::new();
-        for transaction in self.transactions.values() {
-            for posting in transaction.postings() {
-                let current = derived.entry(posting.account).or_insert(Money::ZERO);
-                let Some(next) = current.checked_add(posting.amount) else {
-                    return false;
-                };
-                *current = next;
-            }
-        }
+    /// Total entries across the per-owner account index; compared against the account count
+    /// by the fused finance audit to prove no stale or duplicate membership.
+    pub(crate) fn indexed_account_entries(&self) -> usize {
+        self.accounts_by_owner.values().map(BTreeSet::len).sum()
+    }
+
+    pub(crate) fn posted_accounts_contain(&self, account: FinancialAccountId) -> bool {
+        self.posted_accounts.contains(&account)
+    }
+
+    pub(crate) fn posted_accounts_snapshot(&self) -> &BTreeSet<FinancialAccountId> {
+        &self.posted_accounts
+    }
+
+    pub(crate) fn transaction_is_indexed_for_mandate(
+        &self,
+        transaction: LedgerTransactionId,
+        mandate: MandateId,
+    ) -> bool {
+        self.transactions_by_mandate
+            .get(&mandate)
+            .is_some_and(|ids| ids.contains(&transaction))
+    }
+
+    /// Total entries across the per-mandate transaction index; compared against the count of
+    /// budget-backed transactions by the fused finance audit.
+    pub(crate) fn indexed_mandate_entries(&self) -> usize {
+        self.transactions_by_mandate
+            .values()
+            .map(BTreeSet::len)
+            .sum()
+    }
+
+    /// Balance-agreement half of the fused finance audit: stored balances must equal the
+    /// caller's single-pass derivation from the full ledger (missing accounts derive zero).
+    pub(crate) fn balances_agree_with(
+        &self,
+        derived: &BTreeMap<FinancialAccountId, Money>,
+    ) -> bool {
         self.accounts.values().all(|account| {
             derived.get(&account.id()).copied().unwrap_or(Money::ZERO) == account.balance()
         })

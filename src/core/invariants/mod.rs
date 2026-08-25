@@ -926,7 +926,6 @@ pub fn validate_state_against_registry(
 fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
     let checks = [
         ("world", state.world.has_consistent_indexes()),
-        ("finance", state.finance.has_consistent_indexes()),
         ("social", state.social.has_consistent_indexes()),
         ("intelligence", state.intelligence.has_consistent_indexes()),
         ("contacts", state.contacts.has_consistent_indexes()),
@@ -948,7 +947,20 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
             return Err(StateValidationError::IndexInconsistency { subsystem });
         }
     }
+    validate_finance_indexes_and_ledger(state)?;
+    Ok(())
+}
 
+/// Finance ownership, ledger, and balance coherence in ONE pass over the append-only
+/// transaction history: every per-transaction index-membership, posting, arithmetic, and
+/// budget-authority check runs while the referenced-account set and derived balances are
+/// accumulated, so per-tick validation walks campaign-length history once instead of once
+/// per concern.
+fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateValidationError> {
+    // Forward membership plus exact-count agreement proves bidirectional index coherence:
+    // ids are unique and each account or transaction occupies at most one slot per key, so
+    // matching entry totals rule out stale, duplicate, or foreign index entries.
+    let mut account_count = 0_usize;
     for account in state.finance.accounts() {
         let owner = account.owner().entity();
         if !is_entity_present(state, owner) {
@@ -957,7 +969,28 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
                 entity: owner,
             });
         }
+        if !state
+            .finance
+            .account_is_indexed_for_owner(account.id(), account.owner())
+        {
+            return Err(StateValidationError::IndexInconsistency {
+                subsystem: "finance",
+            });
+        }
+        account_count += 1;
     }
+    if state.finance.indexed_account_entries() != account_count {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "finance",
+        });
+    }
+
+    let mut derived_balances: std::collections::BTreeMap<
+        crate::core::id::FinancialAccountId,
+        crate::finance::Money,
+    > = std::collections::BTreeMap::new();
+    let mut referenced_accounts = BTreeSet::new();
+    let mut expected_mandate_entries = 0_usize;
     for transaction in state.finance.transactions() {
         if transaction.occurred_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
@@ -972,11 +1005,26 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
                     entity: EntityRef::FinancialAccount(posting.account),
                 });
             }
+            if !state.finance.posted_accounts_contain(posting.account) {
+                return Err(StateValidationError::IndexInconsistency {
+                    subsystem: "finance",
+                });
+            }
+            referenced_accounts.insert(posting.account);
             net_cents = net_cents.checked_add(posting.amount.cents()).ok_or(
                 StateValidationError::LedgerArithmeticOverflow {
                     transaction: transaction.id(),
                 },
             )?;
+            let balance = derived_balances
+                .entry(posting.account)
+                .or_insert(crate::finance::Money::ZERO);
+            let Some(next) = balance.checked_add(posting.amount) else {
+                // Overflow while deriving a balance is a balance-coherence failure; the
+                // ledger's own arithmetic was already checked above per transaction.
+                return Err(StateValidationError::FinancialBalanceMismatch);
+            };
+            *balance = next;
         }
         if net_cents != 0 {
             return Err(StateValidationError::UnbalancedLedgerTransaction {
@@ -985,6 +1033,15 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
             });
         }
         if let Some(usage) = transaction.budget_usage() {
+            expected_mandate_entries += 1;
+            if !state
+                .finance
+                .transaction_is_indexed_for_mandate(transaction.id(), usage.mandate())
+            {
+                return Err(StateValidationError::IndexInconsistency {
+                    subsystem: "finance",
+                });
+            }
             let mandate = state.delegation.get_mandate(usage.mandate()).ok_or(
                 StateValidationError::MissingEntity {
                     context: "ledger budget mandate",
@@ -1026,7 +1083,17 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
             }
         }
     }
-    if !state.finance.has_consistent_balances() {
+    if referenced_accounts != *state.finance.posted_accounts_snapshot() {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "finance",
+        });
+    }
+    if state.finance.indexed_mandate_entries() != expected_mandate_entries {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "finance",
+        });
+    }
+    if !state.finance.balances_agree_with(&derived_balances) {
         return Err(StateValidationError::FinancialBalanceMismatch);
     }
     Ok(())

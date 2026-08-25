@@ -400,6 +400,12 @@ impl WorldState {
         self.characters.reassign(id, organization, supervisor);
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        // Forward membership plus exact-count agreement proves bidirectional index coherence
+        // for every functional index (each record owns at most one slot per index): matching
+        // entry totals rule out stale, duplicate, or foreign membership without re-walking
+        // each indexed id. Non-functional indexes keep explicit reverse walks.
+        let mut expected_member_entries = 0_usize;
+        let mut expected_supervised_entries = 0_usize;
         for record in self.characters.records.values() {
             if let Some(organization) = record.organization() {
                 if !self
@@ -410,6 +416,7 @@ impl WorldState {
                 {
                     return false;
                 }
+                expected_member_entries += 1;
             }
             if let Some(supervisor) = record.supervisor() {
                 if !self
@@ -420,32 +427,35 @@ impl WorldState {
                 {
                     return false;
                 }
+                expected_supervised_entries += 1;
             }
         }
-        for (organization, ids) in &self.characters.by_organization {
-            for id in ids {
-                if !self
-                    .characters
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.organization() == Some(*organization))
-                {
-                    return false;
-                }
-            }
+        if self
+            .characters
+            .by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_member_entries
+        {
+            return false;
         }
-        for (supervisor, ids) in &self.characters.by_supervisor {
-            for id in ids {
-                if !self
-                    .characters
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.supervisor() == Some(*supervisor))
-                {
-                    return false;
-                }
-            }
+        if self
+            .characters
+            .by_supervisor
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_supervised_entries
+        {
+            return false;
         }
+        let mut expected_neighborhood_entries = 0_usize;
+        let mut expected_org_owner_entries = 0_usize;
+        let mut expected_character_owner_entries = 0_usize;
+        // Historical org-ownership pairs seen while replaying each business's ownership
+        // chain; compared against the historical-owner index at the end.
+        let mut expected_historical_pairs: BTreeSet<(OrganizationId, BusinessId)> = BTreeSet::new();
         for record in self.businesses.records.values() {
             if !self
                 .businesses
@@ -455,24 +465,30 @@ impl WorldState {
             {
                 return false;
             }
-            if let BusinessOwner::Organization(organization) = record.owner() {
-                if !self
-                    .businesses
-                    .by_organization_owner
-                    .get(&organization)
-                    .is_some_and(|ids| ids.contains(&record.id()))
-                {
-                    return false;
+            expected_neighborhood_entries += 1;
+            match record.owner() {
+                BusinessOwner::Independent => {}
+                BusinessOwner::Organization(organization) => {
+                    if !self
+                        .businesses
+                        .by_organization_owner
+                        .get(&organization)
+                        .is_some_and(|ids| ids.contains(&record.id()))
+                    {
+                        return false;
+                    }
+                    expected_org_owner_entries += 1;
                 }
-            }
-            if let BusinessOwner::Character(character) = record.owner() {
-                if !self
-                    .businesses
-                    .by_character_owner
-                    .get(&character)
-                    .is_some_and(|ids| ids.contains(&record.id()))
-                {
-                    return false;
+                BusinessOwner::Character(character) => {
+                    if !self
+                        .businesses
+                        .by_character_owner
+                        .get(&character)
+                        .is_some_and(|ids| ids.contains(&record.id()))
+                    {
+                        return false;
+                    }
+                    expected_character_owner_entries += 1;
                 }
             }
             if record.version() == 0 {
@@ -500,21 +516,8 @@ impl WorldState {
                 {
                     return false;
                 }
-                match change.new_owner() {
-                    BusinessOwner::Independent => {}
-                    BusinessOwner::Organization(organization) => {
-                        if !self
-                            .businesses
-                            .by_historical_organization_owner
-                            .get(&organization)
-                            .is_some_and(|ids| ids.contains(&record.id()))
-                        {
-                            return false;
-                        }
-                    }
-                    // Historical character ownership is derivable from `ownership_changes`
-                    // and carries no maintained projection.
-                    BusinessOwner::Character(_) => {}
+                if let BusinessOwner::Organization(organization) = change.new_owner() {
+                    expected_historical_pairs.insert((organization, record.id()));
                 }
                 previous_owner = Some(change.new_owner());
                 previous_time = Some(change.changed_at());
@@ -523,70 +526,56 @@ impl WorldState {
                 return false;
             }
         }
-        for (neighborhood, ids) in &self.businesses.by_neighborhood {
-            for id in ids {
-                if !self
-                    .businesses
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.neighborhood() == *neighborhood)
-                {
-                    return false;
-                }
-            }
+        if self
+            .businesses
+            .by_neighborhood
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_neighborhood_entries
+        {
+            return false;
         }
-        for (organization, ids) in &self.businesses.by_organization_owner {
-            for id in ids {
-                if !self.businesses.records.get(id).is_some_and(|record| {
-                    record.owner() == BusinessOwner::Organization(*organization)
-                }) {
-                    return false;
-                }
-            }
+        if self
+            .businesses
+            .by_organization_owner
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_org_owner_entries
+        {
+            return false;
         }
-        for (character, ids) in &self.businesses.by_character_owner {
-            for id in ids {
-                if !self
-                    .businesses
-                    .records
-                    .get(id)
-                    .is_some_and(|record| record.owner() == BusinessOwner::Character(*character))
-                {
-                    return false;
-                }
-            }
+        if self
+            .businesses
+            .by_character_owner
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_character_owner_entries
+        {
+            return false;
+        }
+        // The historical-owner index is not a function of the current record, so its keys
+        // must equal exactly the ownership pairs the replay derived.
+        let indexed_historical_entries: usize = self
+            .businesses
+            .by_historical_organization_owner
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_historical_entries != expected_historical_pairs.len() {
+            return false;
         }
         for (organization, ids) in &self.businesses.by_historical_organization_owner {
             for id in ids {
-                let Some(record) = self.businesses.records.get(id) else {
-                    return false;
-                };
-                let found = (1..=record.version()).any(|version| {
-                    self.businesses
-                        .ownership_change_by_business_version
-                        .get(&(*id, version))
-                        .and_then(|change_id| self.businesses.ownership_changes.get(change_id))
-                        .is_some_and(|change| {
-                            change.new_owner() == BusinessOwner::Organization(*organization)
-                        })
-                });
-                if !found {
+                if !expected_historical_pairs.contains(&(*organization, *id)) {
                     return false;
                 }
             }
         }
-        for (key, id) in &self.businesses.ownership_change_by_business_version {
-            if !self
-                .businesses
-                .ownership_changes
-                .get(id)
-                .is_some_and(|change| {
-                    (change.business(), change.resulting_business_version()) == *key
-                })
-            {
-                return false;
-            }
-        }
+        // Every ownership change is indexed under its own (business, version) key; entry
+        // counts agreeing prove no foreign key exists.
         for change in self.businesses.ownership_changes.values() {
             if self
                 .businesses
@@ -597,6 +586,11 @@ impl WorldState {
             {
                 return false;
             }
+        }
+        if self.businesses.ownership_change_by_business_version.len()
+            != self.businesses.ownership_changes.len()
+        {
+            return false;
         }
         true
     }
