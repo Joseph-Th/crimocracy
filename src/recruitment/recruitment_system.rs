@@ -8,6 +8,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::decisions::decision_system::{
+    validate_request_recruitment_approval, validate_resolve_decision,
+};
 use crate::delegation::delegation_system::{
     ensure_mandate_authority_current, resolve_mandate_authority, resolve_policy_for_manager,
     DelegationError, PolicySource, ResolvedPolicy,
@@ -182,6 +185,13 @@ pub(crate) struct ValidatedRecruitmentProposal {
 }
 
 impl ValidatedRecruitmentProposal {
+    /// The pitch outcome this proposal already resolved deterministically. Leadership
+    /// approval decisions use it to decline pitches the organization's own assessment says
+    /// will not land, without a second scoring pass.
+    pub(crate) fn proposed_outcome(&self) -> RecruitmentOutcome {
+        self.plan.context.outcome
+    }
+
     pub(crate) fn revalidate_state(&self, state: &AppState) -> Result<(), RecruitmentError> {
         validate_plan_state_snapshot(state, &self.plan)?;
         if self.plan.context.outcome == RecruitmentOutcome::Accepted {
@@ -275,10 +285,20 @@ pub fn find_recruitment_candidates(
 /// Autonomous recruitment pass: applies due delegated recruitment attempts for every
 /// personnel-scoped mandate whose manager runs on delegated autonomy. Mutates state through
 /// canonical validated commits, hence `apply_` rather than a read-only `resolve_`.
+/// One autonomous-recruitment pass's surfaced work: pitches actually made (delegated or
+/// leadership-approved) and durable approval requests raised for the organization's decision
+/// surface. Player-organization requests stay pending until resolved; non-player requests
+/// resolve inside the same pass through the pre-resolved pitch assessment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutonomousRecruitmentOutcome {
+    pub attempts: Vec<RecruitmentAttemptId>,
+    pub approval_requests: Vec<crate::core::id::DecisionRequestId>,
+}
+
 pub(crate) fn apply_due_autonomous_recruitment(
     registry: &Registry,
     state: &mut AppState,
-) -> Vec<RecruitmentAttemptId> {
+) -> AutonomousRecruitmentOutcome {
     let cadence = u64::from(
         registry
             .recruitment()
@@ -286,7 +306,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
             .as_minutes(),
     );
     if state.now() == SimTime::ZERO || !state.now().as_minutes().is_multiple_of(cadence) {
-        return Vec::new();
+        return AutonomousRecruitmentOutcome::default();
     }
 
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
@@ -295,7 +315,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
         .active_for_scope(personnel_scope)
         .map(|mandate| (mandate.id(), mandate.organization(), mandate.manager()))
         .collect();
-    let mut attempts = Vec::new();
+    let mut outcome = AutonomousRecruitmentOutcome::default();
     // Candidates recruited earlier in this same pass are off-limits to later mandates: without
     // this guard one minute could bounce a character between organizations with zero dwell time.
     let mut recruited_this_pass = std::collections::BTreeSet::new();
@@ -320,52 +340,132 @@ pub(crate) fn apply_due_autonomous_recruitment(
                 Ok(policy) => policy,
                 Err(_) => continue,
             };
-        if policy.setting != PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated) {
-            continue;
-        }
-        let approach = resolve_autonomous_recruitment_approach(manager_record);
         let mut candidates =
             find_recruitment_candidates(registry, state, organization, manager).unwrap_or_default();
         candidates.retain(|candidate| !recruited_this_pass.contains(candidate));
-        if candidates.is_empty() {
-            continue;
-        }
-        let candidate = {
-            // Stabilize order before the RNG draw so determinism does not depend on BTree
-            // iteration quirks; the drawn index must address the sorted candidate list.
-            candidates.sort_unstable();
-            let index =
-                draw_candidate_index(state.recruitment_rng_mut(), candidates.len()).unwrap_or(0);
-            candidates[index]
-        };
+        // Stabilize order before selection so neither channel's choice depends on BTree
+        // iteration quirks.
+        candidates.sort_unstable();
         let authority = MandateAuthority {
             mandate,
             manager,
             scope: personnel_scope,
         };
-        let attempt = match validate_delegated_recruitment_attempt(
-            registry,
-            state,
-            authority,
-            RecruitmentDraft {
-                target_organization: organization,
-                recruiter: manager,
-                candidate,
-                approach,
-            },
-        ) {
-            Ok(validated) => match validated.commit(state) {
-                Ok(attempt) => {
-                    recruited_this_pass.insert(candidate);
-                    attempt
+        match policy.setting {
+            PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated) => {
+                let Some(_) = candidates.first() else {
+                    continue;
+                };
+                let approach = resolve_autonomous_recruitment_approach(manager_record);
+                // The draw must address the sorted candidate list; an empty list never draws.
+                let index = draw_candidate_index(state.recruitment_rng_mut(), candidates.len())
+                    .unwrap_or(0);
+                let candidate = candidates[index];
+                let attempt = match validate_delegated_recruitment_attempt(
+                    registry,
+                    state,
+                    authority,
+                    RecruitmentDraft {
+                        target_organization: organization,
+                        recruiter: manager,
+                        candidate,
+                        approach,
+                    },
+                ) {
+                    Ok(validated) => match validated.commit(state) {
+                        Ok(attempt) => attempt,
+                        Err(_) => continue,
+                    },
+                    Err(_) => continue,
+                };
+                recruited_this_pass.insert(candidate);
+                outcome.attempts.push(attempt);
+            }
+            PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval) => {
+                // A pending request already covers a pair; raising another would only be
+                // rejected as a duplicate.
+                candidates.retain(|candidate| {
+                    state
+                        .decisions()
+                        .pending_for_recruitment_approval(organization, *candidate)
+                        .is_none()
+                });
+                // Leadership review is a governance act, not a luck draw: the request covers
+                // the most senior candidate id and consumes no randomness.
+                let Some(&candidate) = candidates.first() else {
+                    continue;
+                };
+                let summary = approval_request_summary(state, manager, candidate);
+                let Ok(request) = validate_request_recruitment_approval(
+                    registry,
+                    state,
+                    crate::decisions::RecruitmentApprovalRequestDraft {
+                        authority,
+                        target_organization: organization,
+                        recruiter: manager,
+                        candidate,
+                        approach: resolve_autonomous_recruitment_approach(manager_record),
+                        attention: crate::core::attention::AttentionClass::Exception,
+                        summary,
+                    },
+                ) else {
+                    continue;
+                };
+                // A non-player organization resolves its own queue in the same breath:
+                // approve pitches whose pre-resolved assessment says they land, decline the
+                // rest. The player's own requests wait on the player.
+                let response = if request.proposed_outcome() == RecruitmentOutcome::Accepted {
+                    crate::decisions::DecisionResponse::Approve
+                } else {
+                    crate::decisions::DecisionResponse::Reject
+                };
+                let Ok(committed) = request.commit(state) else {
+                    continue;
+                };
+                outcome.approval_requests.push(committed.decision);
+                if state.player_organization() != Some(organization) {
+                    let resolution = match validate_resolve_decision(
+                        registry,
+                        state,
+                        committed.decision,
+                        organization,
+                        response,
+                    )
+                    .and_then(|validated| validated.commit(state))
+                    {
+                        Ok(resolution) => resolution,
+                        Err(_) => continue,
+                    };
+                    if let Some(attempt) = resolution.recruitment_attempt {
+                        recruited_this_pass.insert(candidate);
+                        outcome.attempts.push(attempt);
+                    }
                 }
-                Err(_) => continue,
-            },
-            Err(_) => continue,
-        };
-        attempts.push(attempt);
+            }
+            // Legal-support governance is a different pass entirely; this mandate's
+            // recruitment work simply has nothing to do under that setting.
+            PolicySetting::AssociateLegalSupport(_) => {}
+        }
     }
-    attempts
+    outcome
+}
+
+fn approval_request_summary(
+    state: &AppState,
+    recruiter: CharacterId,
+    candidate: CharacterId,
+) -> String {
+    let recruiter_name = state
+        .world()
+        .get_character(recruiter)
+        .map(|record| record.name().to_owned())
+        .unwrap_or_else(|| "A manager".to_owned());
+    let candidate_name = state
+        .world()
+        .get_character(candidate)
+        .map(|record| record.name().to_owned())
+        .unwrap_or_else(|| "a prospect".to_owned());
+    format!("{recruiter_name} seeks approval to bring {candidate_name} into the organization.")
 }
 
 fn resolve_autonomous_recruitment_approach(
@@ -550,6 +650,16 @@ pub fn validate_delegated_recruitment_attempt(
             manager: authority.manager,
             policy: approval,
         });
+    }
+    // One exclusive route per (organization, candidate): while an approval request sits
+    // pending, the delegated channel must not race it — an attempt landing first would
+    // strand the request against a candidate who is already a member, permanently blocking
+    // the pair's executive channel too.
+    if let Some(pending) = state
+        .decisions()
+        .pending_for_recruitment_approval(draft.target_organization, draft.candidate)
+    {
+        return Err(RecruitmentError::PendingRecruitmentApproval { decision: pending });
     }
     let persisted_authority = RecruitmentAuthority::Delegated {
         mandate: authority.mandate,

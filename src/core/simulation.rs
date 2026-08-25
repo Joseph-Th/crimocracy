@@ -60,6 +60,9 @@ pub struct TickOutcome {
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
+    /// Approval requests raised this tick by RequireApproval managers. Player-organization
+    /// requests stay pending on the decision surface; others resolved within the pass.
+    pub recruitment_approval_requests: Vec<crate::core::id::DecisionRequestId>,
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
@@ -124,7 +127,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
     // already in place when a rival pitches them.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
-    let recruitment_attempts = apply_due_autonomous_recruitment(registry, state);
+    let recruitment = apply_due_autonomous_recruitment(registry, state);
+    let recruitment_attempts = recruitment.attempts;
+    let recruitment_approval_requests = recruitment.approval_requests;
     // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
     // minute governs with its current roster. Selection consumes no randomness, so matched
     // branches observe identical rival growth unless their own actions touched rival state.
@@ -154,6 +159,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         enterprise_cycles,
         payrolls,
         recruitment_attempts,
+        recruitment_approval_requests,
         autonomous_enterprises,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay.suspended,

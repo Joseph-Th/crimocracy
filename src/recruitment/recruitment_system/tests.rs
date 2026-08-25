@@ -281,9 +281,14 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
-    assert!(apply_due_autonomous_recruitment(&registry, &mut fixture.state).is_empty());
+    assert!(
+        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+            .attempts
+            .is_empty()
+    );
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
-    let attempts = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    let attempts = outcome.attempts;
     assert_eq!(attempts.len(), 1);
     let attempt = fixture
         .state
@@ -303,7 +308,11 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
             ..
         } if found_mandate == mandate && manager == fixture.recruiter
     ));
-    assert!(apply_due_autonomous_recruitment(&registry, &mut fixture.state).is_empty());
+    assert!(
+        apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+            .attempts
+            .is_empty()
+    );
     validate_state(&fixture.state).expect("autonomous recruitment state should validate");
     validate_invariants(&fixture.state);
 }
@@ -1270,4 +1279,157 @@ fn save_round_trip_preserves_recruitment_history_and_drive_authorship() {
         .is_some());
     validate_state(&restored).expect("restored recruitment state should validate");
     validate_invariants(&restored);
+}
+
+#[test]
+fn require_approval_manager_autonomously_raises_and_leadership_resolves_its_own_request() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    // A non-player organization resolves its own queue in-pass: the pitch the assessment
+    // says will land is approved and executed with the ApprovedDecision authority.
+    assert_eq!(outcome.approval_requests.len(), 1);
+    assert_eq!(outcome.attempts.len(), 1);
+    let decision = fixture
+        .state
+        .decisions()
+        .get_decision(outcome.approval_requests[0])
+        .expect("approval decision should persist");
+    assert_eq!(decision.status(), DecisionStatus::Resolved);
+    assert_eq!(
+        decision
+            .resolution()
+            .expect("auto-resolved request carries a resolution")
+            .response(),
+        DecisionResponse::Approve
+    );
+    let record = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("approved autonomous attempt should persist");
+    assert_eq!(record.outcome(), RecruitmentOutcome::Accepted);
+    assert!(matches!(
+        record.authority(),
+        RecruitmentAuthority::ApprovedDecision {
+            policy: ApprovalPolicy::RequireApproval,
+            ..
+        }
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.target),
+        "the approved pitch moves the member"
+    );
+    validate_state(&fixture.state).expect("autonomous approval state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn player_organization_approval_requests_wait_for_the_player() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    // The recruiting organization is the player's: its manager must raise a durable
+    // request and wait, never resolve it autonomously.
+    fixture.state.set_player_organization(fixture.target);
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    assert!(outcome.attempts.is_empty());
+    assert_eq!(outcome.approval_requests.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        Some(outcome.approval_requests[0]),
+        "the player's own queue stays pending"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("pending request state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn delegated_channel_cannot_race_a_pending_recruitment_approval() {
+    use crate::delegation::delegation_system::{validate_revise_mandate, MandateRevisionDraft};
+
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager requests authority to recruit a rival associate."
+                .to_owned(),
+        },
+    )
+    .expect("approval-required recruitment proposal should validate")
+    .commit(&mut fixture.state)
+    .expect("approval request should commit");
+
+    // Leadership loosens the standing order while the request is still open: the manager
+    // may now recruit autonomously in general, but this candidate's pending approval keeps
+    // the pair exclusive across channels.
+    validate_revise_mandate(
+        &fixture.state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("mandate revision should validate")
+    .commit(&mut fixture.state)
+    .expect("mandate revision should commit");
+
+    let error = match validate_delegated_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        personnel_authority(&fixture, mandate),
+        protection_draft(&fixture),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("a pending approval must block the delegated channel"),
+    };
+    assert_eq!(
+        error,
+        RecruitmentError::PendingRecruitmentApproval {
+            decision: request.decision
+        }
+    );
+    validate_state(&fixture.state).expect("rejected race should preserve valid state");
 }

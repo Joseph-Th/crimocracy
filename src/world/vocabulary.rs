@@ -130,7 +130,6 @@ pub const ALL_POLICY_KINDS: [PolicyKind; 2] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ApprovalPolicy {
     RequireApproval,
-    WithinBudget,
     Delegated,
 }
 

@@ -367,6 +367,13 @@ pub struct ValidatedRecruitmentApprovalRequest {
 }
 
 impl ValidatedRecruitmentApprovalRequest {
+    /// The pre-resolved pitch outcome carried by this request. An autonomous leadership pass
+    /// approves pitches whose outcome is already `Accepted` and declines the rest, so a
+    /// non-player organization resolves its own approval queue deterministically.
+    pub fn proposed_outcome(&self) -> crate::recruitment::RecruitmentOutcome {
+        self.proposal.proposed_outcome()
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<DecisionRequestOutcome, DecisionError> {
         let context = match self.draft.context {
             DecisionContext::RecruitmentApproval(context) => context,
