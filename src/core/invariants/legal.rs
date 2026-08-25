@@ -14,12 +14,13 @@ use crate::intelligence::{
 use crate::legal::informant_system::{informant_reliability, informant_strength};
 use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
+use crate::legal::prosecution_system::write_resolution_summary;
 use crate::legal::witness_system::{resolve_witness_reliability, resolve_witness_strength};
 use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
     InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
     InvestigationWorkStatus, LegalRepresentationStatus, PatrolDeploymentStatus,
-    PoliceResponseStatus, ProsecutionCaseStatus, WitnessCooperation,
+    PoliceResponseStatus, ProsecutionCaseResolution, ProsecutionCaseStatus, WitnessCooperation,
 };
 use crate::operations::OperationStatus;
 use crate::reports::ReportKind;
@@ -257,6 +258,8 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
     let mut seen_referrals = BTreeSet::new();
     let mut seen_information = BTreeSet::new();
     let mut seen_reports = BTreeSet::new();
+    // Reused render target for persisted resolution summaries in this release-safe pass.
+    let mut text_scratch = String::new();
     for case in state.legal.prosecution_cases() {
         let invalid_case = || StateValidationError::InvalidProsecutionCase { case: case.id() };
         let arrest = state
@@ -344,28 +347,30 @@ fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationErr
                     .reports
                     .get_report(report_id)
                     .ok_or_else(invalid_case)?;
-                let (expected_title, expected_summary) =
-                    if case.status() == ProsecutionCaseStatus::Declined {
-                        (
-                            "Prosecution declined",
-                            format!(
-                                "{} declined prosecution of {} after review by {}.",
-                                office.name(),
-                                defendant.name(),
-                                lead.name()
-                            ),
-                        )
-                    } else {
-                        (
-                            "Prosecution review closed",
-                            format!(
-                                "{} closed its prosecution review of {} after review by {}.",
-                                office.name(),
-                                defendant.name(),
-                                lead.name()
-                            ),
-                        )
-                    };
+                // The enclosing match arm guarantees a resolved status; map it to the same
+                // resolution variant the commit path rendered from.
+                let (expected_title, resolution) = match case.status() {
+                    ProsecutionCaseStatus::Declined => {
+                        ("Prosecution declined", ProsecutionCaseResolution::Declined)
+                    }
+                    ProsecutionCaseStatus::Closed => (
+                        "Prosecution review closed",
+                        ProsecutionCaseResolution::Closed,
+                    ),
+                    ProsecutionCaseStatus::Reviewing => {
+                        unreachable!("resolved prosecution cases are never under review")
+                    }
+                };
+                text_scratch.clear();
+                write_resolution_summary(
+                    &mut text_scratch,
+                    resolution,
+                    office.name(),
+                    defendant.name(),
+                    lead.name(),
+                )
+                .expect("String buffer writes are infallible");
+                let expected_summary = text_scratch.as_str();
                 if resolved_at < case.opened_at()
                     || resolved_at > state.now()
                     || state

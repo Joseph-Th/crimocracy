@@ -955,7 +955,9 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
 /// transaction history: every per-transaction index-membership, posting, arithmetic, and
 /// budget-authority check runs while the referenced-account set and derived balances are
 /// accumulated, so per-tick validation walks campaign-length history once instead of once
-/// per concern.
+/// per concern. Posting-level membership and balance accumulation use dense vectors keyed
+/// by raw account id (ids are allocated monotonically), keeping the hottest loop free of
+/// ordered-map traversals without weakening any check.
 fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateValidationError> {
     // Forward membership plus exact-count agreement proves bidirectional index coherence:
     // ids are unique and each account or transaction occupies at most one slot per key, so
@@ -985,11 +987,20 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         });
     }
 
-    let mut derived_balances: std::collections::BTreeMap<
-        crate::core::id::FinancialAccountId,
-        crate::finance::Money,
-    > = std::collections::BTreeMap::new();
-    let mut referenced_accounts = BTreeSet::new();
+    // Dense scratch keyed by raw account id; sized by the largest persisted account so any
+    // posting beyond it is the missing-entity rejection below rather than an allocation.
+    let highest_account = state
+        .finance
+        .account_id_bounds()
+        .map_or(0, |(_, highest)| highest) as usize;
+    let mut account_present = vec![false; highest_account + 1];
+    let mut derived_balance_cents = vec![0_i64; highest_account + 1];
+    let mut seen_posted = vec![false; highest_account + 1];
+    let mut seen_posted_count = 0_usize;
+    for account in state.finance.accounts() {
+        account_present[account.id().raw() as usize] = true;
+    }
+
     let mut expected_mandate_entries = 0_usize;
     for transaction in state.finance.transactions() {
         if transaction.occurred_at() > state.now() {
@@ -999,32 +1010,26 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         }
         let mut net_cents = 0_i64;
         for posting in transaction.postings() {
-            if state.finance.get_account(posting.account).is_none() {
+            let raw = posting.account.raw() as usize;
+            if raw >= account_present.len() || !account_present[raw] {
                 return Err(StateValidationError::MissingEntity {
                     context: "ledger posting account",
                     entity: EntityRef::FinancialAccount(posting.account),
                 });
             }
-            if !state.finance.posted_accounts_contain(posting.account) {
-                return Err(StateValidationError::IndexInconsistency {
-                    subsystem: "finance",
-                });
-            }
-            referenced_accounts.insert(posting.account);
             net_cents = net_cents.checked_add(posting.amount.cents()).ok_or(
                 StateValidationError::LedgerArithmeticOverflow {
                     transaction: transaction.id(),
                 },
             )?;
-            let balance = derived_balances
-                .entry(posting.account)
-                .or_insert(crate::finance::Money::ZERO);
-            let Some(next) = balance.checked_add(posting.amount) else {
-                // Overflow while deriving a balance is a balance-coherence failure; the
-                // ledger's own arithmetic was already checked above per transaction.
-                return Err(StateValidationError::FinancialBalanceMismatch);
-            };
-            *balance = next;
+            derived_balance_cents[raw] = derived_balance_cents[raw]
+                .checked_add(posting.amount.cents())
+                .ok_or(StateValidationError::FinancialBalanceMismatch)?;
+            // Distinct-account tally for the exact posted-index set comparison below.
+            if !seen_posted[raw] {
+                seen_posted[raw] = true;
+                seen_posted_count += 1;
+            }
         }
         if net_cents != 0 {
             return Err(StateValidationError::UnbalancedLedgerTransaction {
@@ -1083,7 +1088,15 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
             }
         }
     }
-    if referenced_accounts != *state.finance.posted_accounts_snapshot() {
+    // Exact set agreement between accounts referenced by postings and the maintained
+    // posted-accounts index: every indexed id must have been seen, and equal distinct
+    // totals rule out any seen-but-unindexed reference.
+    let posted_snapshot = state.finance.posted_accounts_snapshot();
+    let snapshot_all_seen = posted_snapshot.iter().all(|id| {
+        let raw = id.raw() as usize;
+        raw < seen_posted.len() && seen_posted[raw]
+    });
+    if seen_posted_count != posted_snapshot.len() || !snapshot_all_seen {
         return Err(StateValidationError::IndexInconsistency {
             subsystem: "finance",
         });
@@ -1093,7 +1106,10 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
             subsystem: "finance",
         });
     }
-    if !state.finance.balances_agree_with(&derived_balances) {
+    if !state
+        .finance
+        .balances_agree_with_derived_cents(&derived_balance_cents)
+    {
         return Err(StateValidationError::FinancialBalanceMismatch);
     }
     Ok(())

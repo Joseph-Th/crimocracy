@@ -725,6 +725,28 @@ fn validate_resolution_dependencies(
     Ok(case)
 }
 
+/// Renders the canonical resolution summary text for a terminal prosecution case; one
+/// template source shared by the commit path and the invariant pass's scratch-buffer
+/// re-render. The report titles are plain literals owned by the match arms above.
+pub(crate) fn write_resolution_summary(
+    out: &mut impl std::fmt::Write,
+    resolution: ProsecutionCaseResolution,
+    office_name: &str,
+    defendant_name: &str,
+    lead_name: &str,
+) -> std::fmt::Result {
+    match resolution {
+        ProsecutionCaseResolution::Declined => write!(
+            out,
+            "{office_name} declined prosecution of {defendant_name} after review by {lead_name}."
+        ),
+        ProsecutionCaseResolution::Closed => write!(
+            out,
+            "{office_name} closed its prosecution review of {defendant_name} after review by {lead_name}."
+        ),
+    }
+}
+
 fn validate_resolution_artifacts(
     state: &AppState,
     case: &ProsecutionCaseRecord,
@@ -746,22 +768,20 @@ fn validate_resolution_artifacts(
         .get_character(case.lead_prosecutor())
         .expect("validated lead prosecutor must exist")
         .name();
-    let (title, summary) = match resolution {
-        ProsecutionCaseResolution::Declined => (
-            "Prosecution declined",
-            format!(
-                "{} declined prosecution of {} after review by {}.",
-                office_name, defendant_name, lead_name
-            ),
-        ),
-        ProsecutionCaseResolution::Closed => (
-            "Prosecution review closed",
-            format!(
-                "{} closed its prosecution review of {} after review by {}.",
-                office_name, defendant_name, lead_name
-            ),
-        ),
+    let title = match resolution {
+        ProsecutionCaseResolution::Declined => "Prosecution declined",
+        ProsecutionCaseResolution::Closed => "Prosecution review closed",
     };
+    let mut summary_buffer = String::new();
+    write_resolution_summary(
+        &mut summary_buffer,
+        resolution,
+        office_name,
+        defendant_name,
+        lead_name,
+    )
+    .expect("String buffer writes are infallible");
+    let summary = summary_buffer;
     let information = validate_record_information(
         state,
         InformationDraft {

@@ -315,10 +315,6 @@ impl FinanceState {
         self.accounts_by_owner.values().map(BTreeSet::len).sum()
     }
 
-    pub(crate) fn posted_accounts_contain(&self, account: FinancialAccountId) -> bool {
-        self.posted_accounts.contains(&account)
-    }
-
     pub(crate) fn posted_accounts_snapshot(&self) -> &BTreeSet<FinancialAccountId> {
         &self.posted_accounts
     }
@@ -343,13 +339,15 @@ impl FinanceState {
     }
 
     /// Balance-agreement half of the fused finance audit: stored balances must equal the
-    /// caller's single-pass derivation from the full ledger (missing accounts derive zero).
-    pub(crate) fn balances_agree_with(
-        &self,
-        derived: &BTreeMap<FinancialAccountId, Money>,
-    ) -> bool {
+    /// caller's single-pass derivation from the full ledger, indexed densely by raw account
+    /// id (missing slots derive zero).
+    pub(crate) fn balances_agree_with_derived_cents(&self, derived_cents: &[i64]) -> bool {
         self.accounts.values().all(|account| {
-            derived.get(&account.id()).copied().unwrap_or(Money::ZERO) == account.balance()
+            derived_cents
+                .get(account.id().raw() as usize)
+                .copied()
+                .unwrap_or(0)
+                == account.balance().cents()
         })
     }
 }

@@ -236,10 +236,7 @@ pub fn validate_dispose_property(
         state,
         LedgerTransactionDraft {
             occurred_at: state.now(),
-            memo: format!(
-                "Property liquidation for {} through {}",
-                draft.operation, draft.venue
-            ),
+            memo: liquidation_memo(draft.operation, draft.venue),
             postings: vec![
                 LedgerPosting {
                     account: draft.cash_account,
@@ -423,17 +420,59 @@ pub(crate) fn resolve_property_liquidation_value(
     Ok(Money::from_cents(cents))
 }
 
+/// Renders the canonical liquidation ledger memo; one template source shared by the commit
+/// path and the invariant pass's scratch-buffer re-render.
+pub(crate) fn write_liquidation_memo(
+    out: &mut impl std::fmt::Write,
+    operation: crate::core::id::OperationId,
+    venue: crate::core::id::BusinessId,
+) -> std::fmt::Result {
+    write!(out, "Property liquidation for {operation} through {venue}")
+}
+
+fn liquidation_memo(
+    operation: crate::core::id::OperationId,
+    venue: crate::core::id::BusinessId,
+) -> String {
+    let mut memo = String::new();
+    write_liquidation_memo(&mut memo, operation, venue)
+        .expect("String buffer writes are infallible");
+    memo
+}
+
 pub(crate) fn build_disposition_summary(
     operation_title: &str,
     venue_name: &str,
     estimated_value: Money,
     realized_value: Money,
 ) -> String {
-    format!(
-    "Property from {operation_title} was liquidated through {venue_name} for {} from an estimated held value of {}.",
-    crate::finance::helpers::format_money_cents(realized_value.cents()),
-    crate::finance::helpers::format_money_cents(estimated_value.cents())
-  )
+    let mut summary = String::new();
+    write_disposition_summary(
+        &mut summary,
+        operation_title,
+        venue_name,
+        estimated_value,
+        realized_value,
+    )
+    .expect("String buffer writes are infallible");
+    summary
+}
+
+/// Renders the canonical disposition summary text; one template source shared by the commit
+/// path and the invariant pass's scratch-buffer re-render.
+pub(crate) fn write_disposition_summary(
+    out: &mut impl std::fmt::Write,
+    operation_title: &str,
+    venue_name: &str,
+    estimated_value: Money,
+    realized_value: Money,
+) -> std::fmt::Result {
+    write!(
+        out,
+        "Property from {operation_title} was liquidated through {venue_name} for {} from an estimated held value of {}.",
+        crate::finance::helpers::format_money_cents(realized_value.cents()),
+        crate::finance::helpers::format_money_cents(estimated_value.cents())
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -478,7 +517,7 @@ pub fn validate_deposit_operation_cash(
         state,
         LedgerTransactionDraft {
             occurred_at: state.now(),
-            memo: format!("Cash deposit for {}", draft.operation),
+            memo: deposit_memo(draft.operation),
             postings: vec![
                 LedgerPosting {
                     account: draft.cash_account,
@@ -617,8 +656,37 @@ fn resolve_disposable_cash(
 }
 
 pub(crate) fn build_deposit_summary(operation_title: &str, amount: Money) -> String {
-    format!(
+    let mut summary = String::new();
+    write_deposit_summary(&mut summary, operation_title, amount)
+        .expect("String buffer writes are infallible");
+    summary
+}
+
+/// Renders the canonical deposit summary text; one template source shared by the commit
+/// path and the invariant pass's scratch-buffer re-render.
+pub(crate) fn write_deposit_summary(
+    out: &mut impl std::fmt::Write,
+    operation_title: &str,
+    amount: Money,
+) -> std::fmt::Result {
+    write!(
+        out,
         "Cash from {operation_title} was deposited for {}.",
         crate::finance::helpers::format_money_cents(amount.cents())
     )
+}
+
+/// Renders the canonical deposit ledger memo; one template source shared by the commit path
+/// and the invariant pass's scratch-buffer re-render.
+pub(crate) fn write_deposit_memo(
+    out: &mut impl std::fmt::Write,
+    operation: crate::core::id::OperationId,
+) -> std::fmt::Result {
+    write!(out, "Cash deposit for {operation}")
+}
+
+fn deposit_memo(operation: crate::core::id::OperationId) -> String {
+    let mut memo = String::new();
+    write_deposit_memo(&mut memo, operation).expect("String buffer writes are infallible");
+    memo
 }

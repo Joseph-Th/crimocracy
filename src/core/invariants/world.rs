@@ -49,6 +49,9 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
         }
     }
 
+    // One reused visitation set serves every character's ancestor walk; clearing between
+    // characters keeps the cycle detection identical without allocating per record.
+    let mut visited = BTreeSet::new();
     for character in state.world.characters() {
         if let Some(organization) = character.organization() {
             if state.world.get_organization(organization).is_none() {
@@ -72,7 +75,7 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
                 });
             }
         }
-        let mut visited = BTreeSet::new();
+        visited.clear();
         let mut cursor = character.supervisor();
         while let Some(current) = cursor {
             if current == character.id() || !visited.insert(current) {

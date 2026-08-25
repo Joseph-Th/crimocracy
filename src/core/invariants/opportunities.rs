@@ -13,6 +13,9 @@ use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 
 pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValidationError> {
+    // Reused target-coverage set across opportunities; clearing keeps the exact-set
+    // comparison identical without allocating per record.
+    let mut covered_targets = BTreeSet::<EntityRef>::new();
     for opportunity in state.opportunities.opportunities() {
         let organization = state
             .world
@@ -36,7 +39,6 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
             });
         }
 
-        let mut covered_targets = BTreeSet::new();
         for target in context.targets() {
             if !is_entity_present(state, *target) {
                 return Err(StateValidationError::InvalidOpportunity {
@@ -44,6 +46,7 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                 });
             }
         }
+        covered_targets.clear();
         for source in opportunity.source_information() {
             let information = state.intelligence.get_information(*source).ok_or(
                 StateValidationError::InvalidOpportunity {
@@ -80,7 +83,7 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                     .iter()
                     .all(|target| entities.contains(target))
         };
-        let expected_sources: Vec<_> = opportunity.source_information().iter().copied().collect();
+        let expected_sources = opportunity.source_information();
         if report.recipient() != opportunity.organization()
             || report.kind() != ReportKind::Opportunity
             || report.generated_at() != opportunity.discovered_at()
@@ -88,7 +91,12 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
             || !report.entries().first().is_some_and(|entry| {
                 entry.attention == AttentionClass::Notable
                     && entry.summary == opportunity.summary()
-                    && entry.sources == expected_sources
+                    && entry.sources.len() == expected_sources.len()
+                    && entry
+                        .sources
+                        .iter()
+                        .zip(expected_sources.iter())
+                        .all(|(source, expected)| source == expected)
                     && expected_entities_contains(&entry.entities)
                     && entry.decision.is_none()
             })
@@ -143,7 +151,12 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
                                 == crate::opportunities::opportunity_system::expiry_report_summary(
                                     opportunity.summary(),
                                 )
-                            && entry.sources == expected_sources
+                            && entry.sources.len() == expected_sources.len()
+                            && entry
+                                .sources
+                                .iter()
+                                .zip(expected_sources.iter())
+                                .all(|(source, expected)| source == expected)
                             && expected_entities_contains(&entry.entities)
                             && entry.decision.is_none()
                     })

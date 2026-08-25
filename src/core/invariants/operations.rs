@@ -13,11 +13,13 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::operations::operation_execution::build_legal_activity_summary;
+use crate::operations::operation_execution::write_legal_activity_summary;
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
 };
-use crate::operations::property_disposition::build_disposition_summary;
+use crate::operations::property_disposition::{
+    write_deposit_memo, write_deposit_summary, write_disposition_summary, write_liquidation_memo,
+};
 use crate::operations::surveillance_integration::{
     is_supported_surveillance_target, is_valid_persisted_surveillance_information,
 };
@@ -39,6 +41,11 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
     let mut property_disposition_transactions = BTreeSet::new();
     let mut property_disposition_information = BTreeSet::new();
     let mut property_disposition_reports = BTreeSet::new();
+    // Reused render target for persisted summary/memo text; avoids a fresh allocation
+    // per completed record in this release-safe pass.
+    let mut text_scratch = String::new();
+    // Reused signature set for surveillance discovery validation across operations.
+    let mut actual_signatures = BTreeSet::new();
     for operation in state.operations.operations() {
         let leader = state.world.get_character(operation.leader()).ok_or(
             StateValidationError::MissingEntity {
@@ -282,6 +289,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     &mut property_disposition_transactions,
                     &mut property_disposition_information,
                     &mut property_disposition_reports,
+                    &mut text_scratch,
                 )?;
                 validate_operation_property_disposition(
                     state,
@@ -290,6 +298,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     &mut property_disposition_transactions,
                     &mut property_disposition_information,
                     &mut property_disposition_reports,
+                    &mut text_scratch,
                 )?;
                 let information = state
                     .intelligence
@@ -375,13 +384,26 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                             || legal_information.recorded_at() != resolution.resolved_at()
                             || legal_information.reliability() != Reliability::GenerallyReliable
                             || legal_information.specificity() != Specificity::Specific
-                            || legal_information.summary()
-                                != build_legal_activity_summary(
-                                    state,
-                                    operation,
-                                    investigation.owner(),
-                                )
                         {
+                            return Err(StateValidationError::InvalidOperationLegalActivity {
+                                operation: operation.id(),
+                            });
+                        }
+                        // The persisted legal-activity summary is re-rendered from the same
+                        // template the commit path used, into the reused scratch buffer.
+                        let authority_name = state
+                            .world
+                            .get_organization(investigation.owner())
+                            .expect("validated investigation authority must exist")
+                            .name();
+                        text_scratch.clear();
+                        write_legal_activity_summary(
+                            &mut text_scratch,
+                            operation.title(),
+                            authority_name,
+                        )
+                        .expect("String buffer writes are infallible");
+                        if legal_information.summary() != text_scratch.as_str() {
                             return Err(StateValidationError::InvalidOperationLegalActivity {
                                 operation: operation.id(),
                             });
@@ -421,6 +443,7 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                     operation,
                     resolution,
                     &mut operation_discovered_information,
+                    &mut actual_signatures,
                 )?;
                 validate_operation_exposure_links(state, operation, resolution)?;
             }
@@ -470,6 +493,7 @@ fn validate_operation_property_disposition(
     transactions: &mut BTreeSet<LedgerTransactionId>,
     information_ids: &mut BTreeSet<InformationId>,
     reports: &mut BTreeSet<ReportId>,
+    text_scratch: &mut String,
 ) -> Result<(), StateValidationError> {
     let Some(disposition) = operation.property_disposition() else {
         return Ok(());
@@ -560,13 +584,11 @@ fn validate_operation_property_disposition(
     let has_settlement_posting = transaction.postings().iter().any(|posting| {
         posting.account == disposition.settlement_account() && posting.amount == negative_value
     });
+    text_scratch.clear();
+    write_liquidation_memo(text_scratch, operation.id(), disposition.venue())
+        .expect("String buffer writes are infallible");
     if transaction.occurred_at() != disposition.disposed_at()
-        || transaction.memo()
-            != format!(
-                "Property liquidation for {} through {}",
-                operation.id(),
-                disposition.venue()
-            )
+        || transaction.memo() != text_scratch.as_str()
         || transaction.postings().len() != 2
         || !has_cash_posting
         || !has_settlement_posting
@@ -575,14 +597,19 @@ fn validate_operation_property_disposition(
         return Err(invalid());
     }
 
-    // The disposition summary is rebuilt once per record and compared against both the
-    // persisted information and the persisted report entry.
-    let expected_summary = build_disposition_summary(
+    // The disposition summary is re-rendered once per record from the same template the
+    // commit path used and compared against both the persisted information and the
+    // persisted report entry.
+    text_scratch.clear();
+    write_disposition_summary(
+        text_scratch,
         operation.title(),
         venue.name(),
         proceeds.estimated_value(),
         disposition.realized_value(),
-    );
+    )
+    .expect("String buffer writes are infallible");
+    let expected_summary = text_scratch.as_str();
     let information = state
         .intelligence
         .get_information(disposition.information())
@@ -637,9 +664,8 @@ fn validate_operation_cash_disposition(
     transactions: &mut BTreeSet<LedgerTransactionId>,
     information_ids: &mut BTreeSet<InformationId>,
     reports: &mut BTreeSet<ReportId>,
+    text_scratch: &mut String,
 ) -> Result<(), StateValidationError> {
-    use crate::operations::property_disposition::build_deposit_summary;
-
     let Some(disposition) = operation.cash_disposition() else {
         return Ok(());
     };
@@ -695,8 +721,10 @@ fn validate_operation_cash_disposition(
     let has_settlement_posting = transaction.postings().iter().any(|posting| {
         posting.account == disposition.settlement_account() && posting.amount == negative_value
     });
+    text_scratch.clear();
+    write_deposit_memo(text_scratch, operation.id()).expect("String buffer writes are infallible");
     if transaction.occurred_at() != disposition.disposed_at()
-        || transaction.memo() != format!("Cash deposit for {}", operation.id())
+        || transaction.memo() != text_scratch.as_str()
         || transaction.postings().len() != 2
         || !has_cash_posting
         || !has_settlement_posting
@@ -705,7 +733,10 @@ fn validate_operation_cash_disposition(
         return Err(invalid());
     }
 
-    let summary = build_deposit_summary(operation.title(), proceeds.amount());
+    text_scratch.clear();
+    write_deposit_summary(text_scratch, operation.title(), proceeds.amount())
+        .expect("String buffer writes are infallible");
+    let summary = text_scratch.as_str();
     let information = state
         .intelligence
         .get_information(disposition.information())
@@ -756,7 +787,9 @@ fn validate_operation_discoveries(
     operation: &crate::operations::OperationRecord,
     resolution: &crate::operations::OperationResolutionRecord,
     discovered_information: &mut BTreeSet<InformationId>,
+    actual_signatures: &mut BTreeSet<(InformationTopic, EntityRef)>,
 ) -> Result<(), StateValidationError> {
+    actual_signatures.clear();
     match operation.kind() {
         OperationKind::Surveillance => {
             let OperationObjective::GatherInformation { target } = operation.objective() else {
@@ -807,7 +840,6 @@ fn validate_operation_discoveries(
         }
     }
 
-    let mut actual_signatures = BTreeSet::new();
     for information_id in resolution.discovered_information() {
         let information = state.intelligence.get_information(*information_id).ok_or(
             StateValidationError::InvalidOperationDiscovery {
@@ -831,7 +863,7 @@ fn validate_operation_discoveries(
     // The resolution record froze the signatures this surveillance actually produced; the
     // discovered intelligence records must match that set exactly.
     if operation.kind() == OperationKind::Surveillance
-        && resolution.surveillance_signatures() != &actual_signatures
+        && resolution.surveillance_signatures() != actual_signatures
     {
         return Err(StateValidationError::InvalidOperationDiscovery {
             operation: operation.id(),
