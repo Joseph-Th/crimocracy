@@ -6,8 +6,12 @@
 # ~23-31s to rebuild+link tests (see Cargo.toml profile notes for measured tuning).
 # Cold builds are dominated by rustc.
 #
-# Incremental compilation is pinned OFF here (and disabled in [profile.dev]):
-# on this crate the incremental cache costs more than it saves.
+# Incremental is measurably slower for the dev-profile everyday loop, but
+# measurably faster for the single-binary harness profile ([profile.harness]
+# sets incremental = true). The pin is therefore scoped per stage below:
+# dev-profile stages force CARGO_INCREMENTAL=0 so an inherited variable cannot
+# re-enable dev incremental; harness-profile stages clear it so the profile's
+# own setting governs.
 #
 # Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
@@ -47,10 +51,6 @@ param(
     [switch]$NoFmt,
     [switch]$Detail
 )
-
-# Incremental is measurably slower on this crate; never let an inherited
-# CARGO_INCREMENTAL=1 silently re-enable it inside this gate.
-$env:CARGO_INCREMENTAL = "0"
 
 # Support -Verbose (common parameter) as alias for -Detail without collision.
 if (-not $Detail -and $PSBoundParameters.ContainsKey('Verbose')) {
@@ -119,8 +119,12 @@ function Invoke-CargoStage {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [bool]$AllowJobs = $true,
+        # Harness-profile stages run under [profile.harness] (incremental there
+        # is a measured win), so the dev pin must be cleared for them.
+        [switch]$HarnessProfile,
         [switch]$ShowOutputOnPass
     )
+    if ($HarnessProfile) { Clear-DevIncrementalPin } else { Set-DevIncrementalPin }
     $displayName = if ($Name.Length -gt 28) { $Name.Substring(0, 28) } else { $Name.PadRight(28) }
     Write-Host "  $displayName " -NoNewline -ForegroundColor Cyan
     $cargoArgs = $Arguments
@@ -153,10 +157,34 @@ function Invoke-CargoStage {
         $trimmed = $output.Trim()
         if ($trimmed) { Write-Host $trimmed -ForegroundColor DarkGray }
     }
+    $script:GateStagesPassed++
     Write-Host "ok   $timing" -ForegroundColor Green
 }
 
+function Skip-Stage {
+    param([Parameter(Mandatory = $true)][string]$Name, [string]$Reason)
+    $displayName = if ($Name.Length -gt 28) { $Name.Substring(0, 28) } else { $Name.PadRight(28) }
+    Write-Host "  $displayName SKIP ($Reason)" -ForegroundColor Yellow
+    $script:GateStagesSkipped++
+}
+
 # ── header ───────────────────────────────────────────────────────────────────
+
+# Dev-profile stages must never let an inherited CARGO_INCREMENTAL=1 re-enable
+# dev incremental; harness-profile stages need the variable unset so the
+# [profile.harness] incremental setting applies.
+function Set-DevIncrementalPin {
+    $env:CARGO_INCREMENTAL = "0"
+}
+
+function Clear-DevIncrementalPin {
+    Remove-Item Env:\CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+}
+
+# Gate bookkeeping: Invoke-CargoStage counts every passing stage; explicit SKIP
+# branches increment the skipped count so the summary stays honest.
+$script:GateStagesPassed = 0
+$script:GateStagesSkipped = 0
 
 $gitBranch = ""
 try { $gitBranch = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim() } catch {}
@@ -208,7 +236,7 @@ if ($Fast) {
         Assert-SmokeContractSelectable
         Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
     } else {
-        Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "test_mixed_scenario_soak_preserves_invariants")
+        Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
     }
     $gate.Stop()
     Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  $lane" -ForegroundColor Green
@@ -223,7 +251,7 @@ $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
 Write-Host "FULL GATE  (fmt -> tests -> harness units -> harness smoke -> harness full -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
 if ($NoFmt) {
-    Write-Host "  fmt --check                 SKIP (--NoFmt)" -ForegroundColor Yellow
+    Skip-Stage -Name "fmt --check" -Reason "--NoFmt"
 } else {
     Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
 }
@@ -239,17 +267,19 @@ Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", 
 
 # Full mode exercises every narrative, probe, and cross-branch contract that smoke mode
 # skips; a single-sample run costs seconds and has caught contract drift the gate
-# previously could not see. It runs on [profile.harness] (dev semantics, opt-level 1):
-# warm runtime ~1.7s vs ~17s at dev's opt-level 0.
-Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1")
+# previously could not see. It runs on [profile.harness] (dev semantics, opt-level 1,
+# incremental = true): warm full-mode runtime ~1-2s, and after a library edit the
+# profile's incremental cache cuts the rebuild from ~75s to ~10-20s.
+Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1") -HarnessProfile
 
 if ($NoClippy) {
-    Write-Host "  clippy (lib+harness)        SKIP (--NoClippy)" -ForegroundColor Yellow
+    Skip-Stage -Name "clippy (lib+harness)" -Reason "--NoClippy"
 } else {
     Invoke-CargoStage "clippy (lib+harness)" @("clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings")
 }
 
 $gate.Stop()
 Write-Host ""
-Write-Host "GATE PASS  6/6  in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
+$skippedNote = if ($script:GateStagesSkipped -gt 0) { ", $($script:GateStagesSkipped) skipped by flag" } else { "" }
+Write-Host "GATE PASS  $($script:GateStagesPassed) stages$skippedNote in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
 Write-Host "  tip: use -Fast for iteration, -Filter <name> for one test, -Jobs N on a hot machine" -ForegroundColor DarkGray

@@ -25,7 +25,9 @@ bincode = "1.3.3"
 #   rebuild+link tests  ~23-31s
 # Measured alternatives that LOST:
 #   incremental = true          check 44s, test rebuild up to 187s (cache
-#                               encode/decode costs exceed reuse here)
+#                               encode/decode costs exceed reuse here; the
+#                               single-binary harness profile below re-measures
+#                               the same setting and wins there instead)
 #   debug = "line-tables-only"  ~+30s per rebuild; panic messages keep file/line
 #                               via the Location API without debuginfo, only
 #                               RUST_BACKTRACE source lines degrade
@@ -53,6 +55,17 @@ overflow-checks = true
 [profile.harness]
 inherits = "dev"
 opt-level = 1
+# Incremental wins outright here — the mirror image of [profile.dev]. This
+# profile builds exactly one small binary (the gameplay-harness example), so
+# the one-time cache encode is cheap while every post-edit rebuild reuses the
+# untouched modules' optimized object code. Measured `cargo harness-rush`
+# rebuild after a small library edit, warm cache: 75s -> 9-16s; smoke and
+# full-mode output stayed byte-identical and warm full-mode runtime unchanged.
+# The cache costs ~0.5 GB under target\harness\incremental. Note that an
+# inherited CARGO_INCREMENTAL=0 forces this off (the variable overrides the
+# profile in both directions), which is why verify.ps1 and watch.ps1 scope
+# their dev-stage pin and clear the variable around harness-profile stages.
+incremental = true
 
 # Third-party code compiles optimized in every dev-derived profile. Dependencies
 # rebuild only when the lockfile changes, so the everyday edit loop pays nothing,

@@ -1,9 +1,10 @@
 # watch.ps1 -- zero-touch targeted iteration loop for a solo developer.
 #
-# Watches repository sources (*.rs and Cargo.toml, target\ ignored) for saves
+# Watches repository sources (*.rs, *.toml, *.md; target\ ignored) for saves
 # and reruns one focused lane, so you edit-and-save instead of retyping
 # commands. Each run reuses cargo's warm cache; only the lane you chose is
-# ever built.
+# ever built. Markdown is watched because tests/documentation_contracts.rs
+# compiles the authority documents in via include_str!.
 #
 # Usage:
 #   powershell -NoProfile -File scripts\watch.ps1                  # fast lib tests (soak excluded)
@@ -25,7 +26,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
-$env:CARGO_INCREMENTAL = "0"
 
 # ── resolve the lane once ────────────────────────────────────────────────────
 
@@ -39,6 +39,8 @@ $title = if ($Filter) {
     "fast lib tests (soak excluded)"
 }
 
+# Soak-class tests carry the "soak" substring by convention; fast lanes skip
+# them with a substring filter so renames cannot silently un-exclude them.
 $cargoArgs = if ($Filter) {
     @("test", "--locked", "--lib", "--quiet", $Filter)
 } elseif ($Harness) {
@@ -47,11 +49,16 @@ $cargoArgs = if ($Filter) {
 } elseif ($Check) {
     @("check", "--locked", "--quiet", "--lib", "--example", "gameplay_harness")
 } else {
-    @("test", "--locked", "--lib", "--quiet", "--", "--skip",
-        "test_mixed_scenario_soak_preserves_invariants")
+    @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
 }
 
 function Invoke-Lane {
+    # Dev-profile lanes must never let an inherited CARGO_INCREMENTAL=1
+    # re-enable dev incremental; the harness smoke contract also runs on the
+    # dev profile (it is an example test binary), so only clear the pin when a
+    # lane explicitly needs the [profile.harness] setting to govern. None of
+    # the watch lanes do, so the pin stays on for all of them.
+    $env:CARGO_INCREMENTAL = "0"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $output = & cargo @cargoArgs 2>&1 | Out-String
     $exit = $LASTEXITCODE
@@ -76,7 +83,7 @@ $watcher.InternalBufferSize = 65536
 
 $onChange = {
     $path = $Event.SourceEventArgs.FullPath
-    if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml)$') {
+    if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml|md)$') {
         $global:WatchPending = $true
     }
 }
