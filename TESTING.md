@@ -13,7 +13,9 @@ Use the narrowest proof that covers the change:
 | Harness filter | `cargo harness -- --mode smoke --strategy rush` or `cargo harness-press` | `.\scripts\verify.cmd -Fast -Harness` |
 | Persistence, invariants, or cross-domain behavior | Focused owner test or load/continuation diagnosis | `.\scripts\verify.cmd` (broad gate) |
 
-The two columns are not a required sequence. Use focused feedback while the implementation is moving or when isolating a failure; when the change is ready for its completion lane, go directly to that lane if it already compiles and exercises the same owner coverage.
+The columns are not a required sequence. Use focused feedback while iterating or isolating a failure; go directly to the completion lane once it compiles and exercises the same owner coverage.
+
+## Test rules
 
 Tests prove observable production behavior: calculations, transitions, transactions, invariants, serialization, deterministic continuation, and failure paths.
 
@@ -23,13 +25,13 @@ Tests prove observable production behavior: calculations, transitions, transacti
 - Use explicit seeds and stable ordering. Do not hunt for a passing seed.
 - Keep content-count, CRUD, or smokes only when they protect a real contract.
 
-Ordinary tests live with their owning module under `#[cfg(test)]`. Name tests after behavior. Use `make_test_*` for local fixtures and the idempotent `*_for_test` pattern when extending the shared production registry. Soak-class tests carry the substring `soak` in their name and are excluded from fast lanes with `--skip soak`, so renames cannot silently un-exclude them; the invariant soak is stress evidence, not a replacement for focused behavioral tests.
+Ordinary tests live with their owning module under `#[cfg(test)]`, named after behavior. Use `make_test_*` for local fixtures and the idempotent `*_for_test` pattern when extending the shared production registry. Soak-class tests carry the substring `soak` and are excluded from fast lanes with `--skip soak`, so renames cannot silently un-exclude them; the invariant soak is stress evidence, not a replacement for focused behavioral tests.
 
 ## Local verification
 
 Verification is local and for solo iteration. Hosted CI and GitHub Actions are not authorities.
 
-### Fast lanes (use while coding)
+### Fast lanes
 
 | Need | Command | Warm |
 | --- | --- | --- |
@@ -37,16 +39,21 @@ Verification is local and for solo iteration. Hosted CI and GitHub Actions are n
 | Type-check harness | `cargo check-harness` | ~1s |
 | Lib tests (no soak) | `cargo test-fast` | ~0.7s |
 | One test / module | `cargo test-focused <filter>` | ~0.5s |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run warm cost of the chosen lane |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run cost of the chosen lane |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s |
 | Full-mode comparison batch | `cargo harness-full --samples 8` | ~5s |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s |
 | Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s |
 | Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s |
 
-`cargo check-fast` and `cargo test-focused` are the inner loop. `scripts/watch.ps1` is the hands-free form of that loop: it reruns one focused lane on every save and never builds more than that lane. `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
+`cargo check-fast` and `cargo test-focused` are the inner loop; `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
 
-All `harness*` aliases execute on `[profile.harness]` (`target\harness\`): dev semantics with `opt-level = 1`, so runs are ~10x faster than dev-profile execution while library iteration caches stay untouched in `target\debug\`. After a library edit, the first harness command pays an optimized lib rebuild (~75s cold or after a profile/cache change); with the profile's warm incremental cache (`incremental = true`, measured byte-identical output) that drops to ~10-20s. Example-only edits recompile in ~2-3s and never rebuild the lib. Dependencies compile at `opt-level 3` in every dev-derived profile (`[profile.dev.package."*"]`): they rebuild only on lockfile changes, so iteration pays nothing, and warm harness runs measure ~10% faster with byte-identical artifacts. The incremental cache costs ~0.5 GB under `target\harness\`; an inherited `CARGO_INCREMENTAL=0` disables it (the variable overrides the profile), which is why the scripts scope their pin per stage.
+Harness rebuild cost model:
+
+- All `harness*` aliases run on `[profile.harness]` (`target\harness\`): dev semantics at `opt-level 1`, never disturbing library caches in `target\debug\`.
+- Example-only edits recompile in ~2-3s. A library edit pays one optimized lib rebuild: ~75s cold or after a profile/cache change, ~10-20s warm.
+- Dependencies compile at `opt-level 3` in every dev-derived profile and rebuild only on lockfile changes.
+- The scripts pin `CARGO_INCREMENTAL=0` per stage, so an inherited value cannot override the profiles.
 
 ### Broad completion gate
 
@@ -55,57 +62,81 @@ All `harness*` aliases execute on `[profile.harness]` (`target\harness\`): dev s
 .\scripts\verify.cmd -Jobs 2
 ```
 
-The gate runs fail-fast in order:
+Fail-fast stages, in order:
 
 1. `cargo fmt --check`
 2. `cargo test --locked --lib --tests --quiet`
-3. Harness unit tests (`cargo test --locked --quiet --example gameplay_harness --lib`): the example's own options-parsing and financial-branch contract tests, which the lib+integration stage never compiles
-4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed, `--quiet` + captured output)
-5. Gameplay-harness full mode with one sample on `[profile.harness]` (`--mode full --samples 1`): exercises the narrative arcs, probes, and cross-branch contracts that smoke mode skips, in seconds
+3. Harness unit tests (`cargo test --locked --quiet --example gameplay_harness --lib`): the example's own options-parsing and financial-branch contract tests, which stage 2 never compiles
+4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed)
+5. Gameplay-harness full mode, one sample (`--mode full --samples 1`): narrative arcs, probes, and cross-branch contracts that smoke skips
 6. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
 
-Tests run before clippy so the hot test artifacts stay reused; clippy is last so lint failure still preserves test signal.
+[`scripts/verify.ps1`](scripts/verify.ps1) owns the gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
 
-[`scripts/verify.ps1`](scripts/verify.ps1) is the owner; [`scripts/verify.cmd`](scripts/verify.cmd) is the wrapper. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
+When to run what:
 
-The broad gate is not the routine finishing step. Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work uses `.\scripts\verify.cmd -Fast -Harness`. Run the broad gate when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Do not run a fast lane and then the broad lane solely for reassurance. Use `-Jobs N` to cap parallelism, `-NoClippy` or `-NoFmt` only when those stages are known to pass. Pass `-Verbose` (alias for `-Detail`) to show cargo output on success.
+- Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work with `.\scripts\verify.cmd -Fast -Harness`.
+- Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Never rerun it after a passing fast lane merely for reassurance.
+- Run `cargo soak` or `cargo harness-full --samples 8` only when the changed contract requires that evidence.
+- When optimized compilation could change behavior, also run `cargo test-release`.
 
-Cargo profiles are tuned by measurement for this machine and crate (`debug = false`, `incremental = false`, `codegen-units = 32`); see the profile notes in [`Cargo.toml`](Cargo.toml) for the alternatives that lost — including dev-profile incremental, which lost badly here but wins on the single-binary harness profile. Harness execution has its own `[profile.harness]` (dev semantics, `opt-level = 1`, incremental): measured warm full-mode runtime is ~1-2s versus ~17s at dev's `opt-level 0`, with byte-identical output; raising `[profile.dev]` itself to `opt-level 1` was measured and lost because it doubles the everyday test rebuild (24s -> 49s). Panic messages keep file/line through the `Location` API without debuginfo; only RUST_BACKTRACE source lines degrade. A small library edit costs roughly ~7-16s to re-check and ~23-31s to rebuild+link tests (machine-load dependent); unchanged sources re-run in under a second. The verify script reports per-stage timing and a total, hides `cargo --quiet` output on success while showing full output on failure (or with `-Verbose` / `-Detail`), and scopes `CARGO_INCREMENTAL=0` to dev-profile stages so an inherited variable cannot re-enable dev incremental while `[profile.harness]` keeps its measured win. If rebuilds ever feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
-
-When optimized compilation could change behavior, run `cargo test-release` (documented in the README); it is not part of any routine gate.
+Gate flags: `-Jobs N` caps parallelism; `-NoClippy` / `-NoFmt` skip known-passing stages; `-Verbose` (`-Detail`) shows cargo output on success. Profiles are tuned by measurement for this machine and crate; the alternatives are noted in [`Cargo.toml`](Cargo.toml). If rebuilds feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
 
 ## Gameplay-harness evidence
 
-[`examples/gameplay_harness/main.rs`](examples/gameplay_harness/main.rs) evaluates bounded deterministic policy treatments through production paths.
+[`examples/gameplay_harness/main.rs`](examples/gameplay_harness/main.rs) evaluates bounded deterministic policy treatments through production paths. It is an evaluation surface, not a human-play test: it proves systemic behavior, not interface quality or comprehension.
 
 | Mode | Evidence |
 | --- | --- |
-| `smoke` | Fast canonical strategy, legal-foundation, and one-campaign-day personnel contract |
-| `full` | Narrative, matched-seed, property/legal, opportunity, and bounded sensitivity evidence |
+| `smoke` | Canonical strategies plus the legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence |
+| `full` | Narrative strategy arcs, probes, matched-seed batches, scenario sensitivity, artifacts |
 
-RUSH, PRESS, and RECON use the same seed-selected authored fixture and scenario timeline. Acting policy may use only organization/player-visible information, persisted reports/outcomes, and surfaced decision requests. Hidden investigation and evidence state is audit-only. Missing acting information or canonical rejection fails the run; missing events are observed absence.
+Commands: `cargo harness` runs smoke by default; `cargo harness-full --samples 8` runs explicit comparison; append `--artifact-dir target/my-run` to relocate artifacts.
 
-`--samples` varies simulation/world seed and bounded timing offsets, range 1..=64. Matched branches share seed, fixture, and timeline. Per-run events and `RunMetrics` are raw evidence beneath aggregates; aggregates are not universal quality scores. Persisted artifacts retain per-run seeds and raw metrics. `full` mode writes per-run JSON to `--artifact-dir` (default `target/harness-runs/`, kept separate from the `[profile.harness]` build directory) with a `summary-<seed>.json`.
+### Information boundary
 
-Structural and registry-aware validation runs at setup and observation boundaries, not on every tick. The harness checks the narrative defection-surveillance, win-back re-approach, second-wind, self-inflicted-heat follow-up, witness-counterplay, opportunity-prioritization, organizational-capacity, repeat-take depletion, district-diversification, vice-attention conversion, and cross-branch financial contracts defined by its scenarios; changing those contracts requires updating this section and the focused harness tests together. Narrative comparisons print the shared authored fixture once (matched branches observe an identical world), not once per strategy, and each narrative session closes with an organization view assembled from player-visible state (roster changes, holdings, enterprises with settled cycles, Standing-report movements). Smoke sessions observe the whole first campaign day so their recruitment counters carry real rival-attempt evidence instead of structurally zeroed personnel totals. Casing carries authored risk: a surveillance operation can draw trace-level exposure and open a case exactly like a burglary, so branch-heating evidence uses a session-wide staffed-case signal rather than the burglary's resolution record, and refused rival poaching pitches surface as player-visible loyalty reports counted as poach warnings. The primary burglary target is character-owned, so a witnessed or identifying exposure names the owner as the case's on-scene witness through canonical incident intake; institutional interviews then convert his account into testimony (audit-counted), and PRESS answers the witnessed job with one canonical WitnessPressure operation scheduled into the morning lull after the crew's own field report placed enforcement in the small hours. That counter-play has two contract-honest terminal shapes: it lands and degrades the registered cooperation any testimony is discounted by, or a police response forces a disciplined abort that leaves no second case — a failed pressure with no degradation fails the run. Batch sessions whose Identifying exposures name a character subject can therefore escalate all the way to autonomous evidence-threshold arrests of organization members, counted as `player_member_arrests` alongside the witness-chain metrics in aggregates and per-run artifacts; the acting policy never reads case internals. The legal-foundation check extends the same chain deterministically: a named cooperative witness is intimidated through canonical pressure and his cooperation must degrade. Every session also carries raw audit evidence of the governed rival world: the Rosetti organization holds home-district territory with a venue and treasury, so the daily delegated-expansion pass grows its rackets identically across matched branches unless branch actions heat the shared district (a drawn vice inquiry raises the racket owner's police fear and can throttle that outfit's expansion past the authored ceiling while it decays), observed through the `rival_home_enterprises` metric printed in readouts and aggregates — audit-only; acting policy never reads it. Player standing shifts after witnessed or successful operations surface as Notable `Standing` reports inside executive briefs; a racket drawing a dedicated vice inquiry raises its owner's police fear the same way and reads as "News of the rackets travels:" standing feedback for the player organization. The capacity probe proves overlapping assignments are rejected atomically and become available after the prior operation reaches a terminal state. The repeat-take probe proves a successful take depletes the same target inside the production recency window and recovers after it. The narrative PRESS arc proves that standing-down time becomes governance and monitoring: after the matched observation window closes, it revises its lieutenant's mandate to cover two districts, capitalizes a second-district float from idle street cash through a canonical ledger transfer, establishes a second gambling enterprise there, and polls its standing police contact once per campaign day until the channel itself carries the shelved read — the contact's case knowledge is production investigator state recorded at staffing and refreshed at shelving (`legal::case_knowledge`), never fixture-authored. The narrative RUSH arc proves failure teaches: a pre-entry police-arrival abort leaves the organization debrief-derived PoliceActivity knowledge as an abort artifact, and the rebuilt crew's second-score plan must carry that district-scoped record. The narrative RECON arc proves casing risk closes its own loop: when its surveillance draws a police case, the branch reads that case's activity through its standing institutional contact (canonical establishment, pending-disclosure query, and disclosure paths; no extra street exposure, no authored knowledge), and a session whose casing drew no case must not fabricate a read. Cross-branch financial evidence is window-honest: each branch snapshots cumulative finances at the shared campaign-day boundary before its arc extends (the PRESS arc deliberately waits out the authored cold-case window), and the contract asserts legitimate-business isolation, identical enterprise economics across unheated branches, and that an investigation-active branch never out-earns an unheated one over the same window. Narrative readouts quote the matched-window snapshot, not raw cumulative totals, when comparing branch economics. The narrative personnel loop closes both ways: after the defector trail confirms where a poached member landed, leadership makes one canonical executive win-back re-approach whose margin comes from production recruitment scoring (recruiter bond versus fresh attachment to the rival and membership resistance); a refusal surfaces its intelligence cost — the production loyalty report the recruiting organization receives naming our recruiter — and a branch without a departure attempts nothing. Every session crossing a campaign-day boundary must meet payroll through the canonical ledger path; payroll totals are raw evidence in run metrics and the financial view. Money state closes the loop the same way: liquidated proceeds are dirty cash until they pass through an owned cash-intensive front's books via canonical laundering, the front's per-cycle plausible-volume ceiling visibly rejects over-capacity requests (the remainder stays street cash), and a run-metrics contract reconciles accounted funds exactly as gross minus the front's authored fee minus anything spent on acquisitions. Clean money then has somewhere to go: the PRESS arc launders day by day until its accounted books cover the harbor venue's authored kind price, attempts the purchase while short exactly once so the legitimacy gate surfaces as canonical rejection evidence, buys the independently owned club outright through `economy::business_acquisition` (ownership transfer plus first operating economy plus full payment from accounted funds, surfaced as a Notable financial report), and only then establishes the second-district racket there — owning the venue being a production prerequisite for hosting — and proves the book is live economy by letting it settle cycles before the final financial view. Enterprise manager reports are organization-held information, so narrative narration quotes only this organization's notable cycles; street-heat surcharges surface when they appear or change rather than on every settled cycle. Vice attention closes the expansion-risk loop the same way, from both sides: every enterprise cycle rolls visibility against authored per-kind rates multiplied by active originated cases targeting the racket's district (clean districts never roll a hit), and a hit opens an enterprise-originated inquiry through canonical incident intake — the organization holds provenance-bearing legal knowledge of it (`[VICE HEAT]` narration, `vice_inquiries_drawn` metric), the district surcharge compounds per active case, rival rackets in the same district pay it too, and the inquiry shelves through the ordinary cold-case window when institutional activity stops. Focused `enterprise_execution` tests prove the hit, the compounding, the organization-facing knowledge, and the post-shelving release; the batch aggregates report how often organic hits land across seeds. Because a hit is authored probability rather than certainty, full mode also runs a dedicated vice-attention probe: it settles one clean-district control cycle (which must draw nothing), originates enough parallel district cases through canonical incident intake to push the authored per-case conversion rate to certainty, and proves the next cycle pays the compounded per-case street surcharge, opens a dedicated inquiry on the racket as an active originated case, and surfaces it as organization-held legal-activity knowledge.
+RUSH, PRESS, and RECON act on the same seed-selected authored fixture and timeline. Acting policy may use only organization/player-visible information, persisted reports and outcomes, and surfaced decision requests. Hidden investigation and evidence state is audit-only (`[DEV AUDIT]`). Missing acting information or a canonical rejection fails the run; missing events are observed absence.
 
-`cargo harness` runs smoke by default. For explicit comparison:
+`--samples N` (range 1..=64) varies simulation/world seed and bounded timing offsets. Matched branches share seed, fixture, and timeline. Per-run events and `RunMetrics` are raw evidence beneath aggregates; aggregates are not quality scores. `full` mode writes per-run JSON (seeds and raw metrics) to `--artifact-dir` (default `target/harness-runs/`) plus a `summary-<seed>.json`. Structural validation runs at setup and observation boundaries, not every tick.
 
-```text
-cargo harness-full --samples 8
-cargo harness-full -- --samples 8 --artifact-dir target/my-run
-```
+### Contracts
 
-All harness aliases run on `[profile.harness]`; see "Fast lanes" above for the rebuild cost model.
+The harness enforces the contracts below. Changing any of them requires updating this section and the focused harness tests in the same change.
+
+Narrative arcs (one shared fixture per comparison; each session closes with an organization view built from player-visible state):
+
+- **Failure teaches (RUSH)** — a pre-entry police-arrival abort leaves debrief-derived district PoliceActivity knowledge, and the rebuilt crew's second-score plan must carry it.
+- **Consequence arc (PRESS)** — a surfaced legal report seeds a precinct heat-check surveillance; standing down becomes governance: two-district mandate revision, float capitalization through a canonical ledger transfer, a second-district enterprise, and daily contact polling until the channel itself carries the shelved read. The contact's case knowledge is production investigator state (`legal::case_knowledge`), never fixture-authored.
+- **Own-heat loop (RECON)** — when its casing draws a case, the branch reads that case's activity through its standing institutional contact's canonical paths; a session whose casing drew no case must not fabricate a read.
+- **Witness chain and counter-play** — the target is character-owned, so witnessed/identifying exposure names the owner as on-scene witness through canonical intake; institutional interviews convert his account into testimony; PRESS answers with exactly one WitnessPressure operation scheduled into the morning lull its crew field report identified. Two honest terminal shapes: registered cooperation degrades, or a police response forces a disciplined abort that leaves no second case. Failed pressure without degradation fails the run. Identifying exposures can escalate to autonomous member arrests (`player_member_arrests`); acting policy never reads case internals.
+- **Personnel loop both ways** — after a departure, canonical surveillance confirms where the defector landed; leadership then makes exactly one executive win-back resolved by production recruitment scoring. Refusal surfaces the loyalty report that names our recruiter to the rival. Sessions without a departure attempt nothing.
+- **Second wind** — all branches see the reopened second-score opportunity; RUSH works it with the rebuilt crew, RECON re-recons first, PRESS lets it lapse as the price of standing down.
+- **Standing feedback** — witnessed or successful operations surface Notable `Standing` reports; a racket drawing a vice inquiry raises police fear the same way.
+- **Routine continuity** — legitimate-front economics continue identically while leadership handles exceptions.
+
+Probes:
+
+- **Opportunity prioritization** — strongest player-visible source converts; weaker expires with its report; a decoy dismisses through the canonical lifecycle.
+- **Organizational capacity** — overlapping specialist assignments reject atomically with a typed error and unchanged state; the specialist releases after the prior operation reaches terminal; mandate revision advances version.
+- **Repeat-take depletion** — an immediate re-score recovers half the take; a rested re-score returns full value.
+- **Vice-attention conversion** — organic hits are probabilistic (per-cycle authored rates multiplied by active originated district cases), so batches count them (`vice_inquiries_drawn`) and focused `enterprise_execution` tests prove hit, compounding, organization-facing knowledge, and post-shelving release; full mode additionally runs a deterministic probe: a clean-district control cycle must draw nothing, then enough parallel district cases opened through canonical incident intake push the rate to certainty, and the next cycle must pay the compounded street surcharge, open a dedicated inquiry on the racket as an active originated case, and surface it as organization-held legal knowledge.
+- **Legal foundation** — arrest → paid counsel → custody-preserving prosecution referral → terminal decline → named cooperative witness intimidated through canonical pressure with mandatory cooperation degradation.
+
+Cross-cutting contracts:
+
+- **Matched-window financial honesty** — each branch snapshots cumulative finances at the shared campaign-day boundary before its arc extends; the contract asserts identical legitimate income everywhere, identical enterprise economics across unheated branches, and that a branch with a staffed case (casing counts) never out-earns an unheated one over the same window. Readouts quote matched snapshots, not raw totals.
+- **Money states** — liquidation proceeds stay dirty street cash until laundered through an owned cash-intensive front; the front's per-cycle plausibility ceiling visibly rejects the over-capacity remainder; accounted funds reconcile exactly as gross minus the front's fee minus acquisition spend.
+- **Legitimate-wealth gate** — PRESS attempts the harbor purchase once while short (canonical rejection evidence), buys at the authored kind price through `economy::business_acquisition` (ownership transfer plus first operating economy plus full accounted payment, surfaced as a Notable report), and only then establishes the second-district racket there; ownership is the production prerequisite for hosting, and the new book settles cycles before the final financial view.
+- **Payroll** — every session crossing a campaign-day boundary meets payroll through the canonical ledger path; totals are raw evidence in metrics and the financial view.
+- **Governed rival world** — the Rosetti organization expands home rackets identically across matched branches unless branch actions heat the shared district (police fear throttles expansion while it decays); observed audit-only via `rival_home_enterprises`.
+- **Manager reports are held information** — narration quotes only this organization's notable cycles; a street-heat surcharge is reported when it appears or changes, not on every settled cycle.
+- **Casing risk symmetry** — surveillance can draw trace-level exposure and open a case exactly like a burglary, so heating signals are session-wide rather than tied to the burglary's resolution record, and refused poaching pitches surface as player-visible loyalty reports counted as poach warnings.
 
 ## Completion checklist
 
 Before handoff:
 
-- Use the narrowest focused proof beforehand only when it provided useful iteration or failure-isolation feedback.
-- Run exactly the smallest scripted completion lane that covers the changed surface: normally `.\scripts\verify.cmd -Fast`, or `.\scripts\verify.cmd -Fast -Harness` for harness work. Do not rerun an overlapping focused proof immediately before that lane merely because both commands are documented.
-- Run `.\scripts\verify.cmd` only when the changed contract requires the broad gate.
-- Run `cargo soak` or `cargo harness-full --samples 8` when the changed contract requires that evidence.
+- Run exactly the smallest scripted completion lane that covers the changed surface; do not rerun an overlapping focused proof immediately before that lane.
 - Review `git diff --check`, generated output, and the final worktree.
 
 When a test, harness mode, alias, or verification rule changes, update this document and the owning script or command definition in the same change.

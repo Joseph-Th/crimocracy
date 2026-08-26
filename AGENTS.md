@@ -15,6 +15,8 @@ For a cold agent or new checkout:
 7. Read [`TESTING.md`](TESTING.md) before changing tests, persistence, or harness behavior.
 8. Read [`GAME_DESIGN.md`](GAME_DESIGN.md) only for product-intent questions.
 
+To watch the implemented game behave end to end, run `cargo harness-full --samples 8`: it plays matched strategy branches through production paths and narrates the causal story from player-visible state only. Evidence rules are in [`TESTING.md`](TESTING.md).
+
 ## Authority map
 
 | Question | Authority |
