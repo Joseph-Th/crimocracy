@@ -202,6 +202,24 @@ impl LegalState {
             .get(&(arrest, prosecutor_office))
             .and_then(|id| self.prosecution_cases.get(id))
     }
+    pub(crate) fn has_other_open_prosecution_case(
+        &self,
+        arrest: ArrestId,
+        except: ProsecutionCaseId,
+    ) -> bool {
+        self.indexes
+            .prosecutions
+            .open_by_arrest_office
+            .iter()
+            .any(|((indexed_arrest, _), case)| *indexed_arrest == arrest && *case != except)
+    }
+    pub(crate) fn has_open_prosecution_case_for_arrest(&self, arrest: ArrestId) -> bool {
+        self.indexes
+            .prosecutions
+            .open_by_arrest_office
+            .keys()
+            .any(|(indexed_arrest, _)| *indexed_arrest == arrest)
+    }
     /// Test-only observation surface; production reads go through case-scoped getters.
     #[cfg(test)]
     pub fn prosecution_cases_for_arrest(

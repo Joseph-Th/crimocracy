@@ -7,11 +7,13 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::delegation::{MandateAuthority, ResponsibilityScope};
-use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+use crate::enterprises::enterprise_execution::{
+    validate_establish_enterprise, validate_establish_enterprise_with_openings,
+};
 use crate::enterprises::{
     EnterpriseDraft, EnterpriseKind, EnterpriseLocation, ALL_ENTERPRISE_KINDS,
 };
-use crate::finance::finance_system::insert_account;
+use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
 use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
@@ -94,10 +96,8 @@ pub(crate) fn apply_due_autonomous_enterprises(
             settlement_account,
         };
         // A free settlement account establishes directly. When every settlement account is
-        // already reserved, a fresh one is opened through the canonical insertion path so
-        // governed expansion is never silently blocked by bookkeeping exhaustion — and if
-        // the establishment is then rejected, that reservation is removed again through the
-        // canonical cleanup so a rejected expansion leaves no orphaned account behind.
+        // already reserved, plan a fresh one without mutating state and let the enterprise
+        // commit open it only after every establishment dependency is current.
         match existing_settlement {
             Some(settlement_account) => {
                 establish_autonomous_enterprise(
@@ -108,18 +108,28 @@ pub(crate) fn apply_due_autonomous_enterprises(
                 );
             }
             None => {
-                let Ok(fresh) = insert_account(
+                let Ok(openings) = validate_open_accounts(
                     state,
-                    FinancialAccountDraft {
+                    vec![FinancialAccountDraft {
                         owner: FinancialOwner::Organization(organization),
                         kind: AccountKind::Settlement,
-                    },
+                    }],
                 ) else {
                     continue;
                 };
-                if !establish_autonomous_enterprise(registry, state, draft(fresh), &mut established)
-                {
-                    crate::finance::finance_system::remove_unused_account(state, fresh);
+                let fresh = openings
+                    .account_id(0)
+                    .expect("one planned settlement account must expose one id");
+                let Ok(validated) = validate_establish_enterprise_with_openings(
+                    registry,
+                    state,
+                    draft(fresh),
+                    openings,
+                ) else {
+                    continue;
+                };
+                if let Ok(enterprise) = validated.commit(state) {
+                    established.push(enterprise);
                 }
             }
         }

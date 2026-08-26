@@ -1002,7 +1002,8 @@ impl ValidatedRecruitmentAttempt {
                 Some(
                     self.history
                         .expect("accepted recruitment must carry a history token")
-                        .commit(state)?,
+                        .commit(state)
+                        .expect("recruitment history ID was preflighted before reassignment"),
                 )
             }
             RecruitmentOutcome::Refused => {
@@ -1011,11 +1012,19 @@ impl ValidatedRecruitmentAttempt {
                 None
             }
         };
-        let outcome_information = self.outcome_information.commit(state)?;
+        let outcome_information = self
+            .outcome_information
+            .commit(state)
+            .expect("recruitment information ID was preflighted before mutation");
         if let Some(report) = self.member_report {
-            report.commit(state)?;
+            report
+                .commit(state)
+                .expect("recruitment report ID was preflighted before mutation");
         }
-        let id = state.ids.next_recruitment_attempt()?;
+        let id = state
+            .ids
+            .next_recruitment_attempt()
+            .expect("recruitment-attempt ID was preflighted before mutation");
         state
             .recruitment
             .insert(build_recruitment_record(RecruitmentRecordParts {

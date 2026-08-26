@@ -155,8 +155,14 @@ impl ValidatedOpportunityDiscovery {
             });
         }
         validate_discovery_state(state, &self.draft, self.discovered_at)?;
-        let report = self.report.commit(state)?;
-        let id = state.ids.next_opportunity()?;
+        let report = self
+            .report
+            .commit(state)
+            .expect("opportunity report ID was preflighted before mutation");
+        let id = state
+            .ids
+            .next_opportunity()
+            .expect("opportunity ID was preflighted before mutation");
         state.opportunities.insert(OpportunityRecord {
             id,
             organization: self.draft.organization,

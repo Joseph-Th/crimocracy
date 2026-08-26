@@ -522,7 +522,10 @@ impl ValidatedOperationResolution {
             u32::try_from(operation.participants().len()).expect("participant count must fit u32");
         budget.push((IdKind::Information, participant_count));
         if let Some(incident) = self.incident.as_ref() {
-            budget.push((IdKind::Investigation, 1));
+            budget.push((
+                IdKind::Investigation,
+                u32::from(incident.requires_new_investigation()),
+            ));
             budget.push((IdKind::Evidence, incident_evidence_count));
             budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
         }
@@ -555,6 +558,40 @@ impl ValidatedOperationResolution {
                 }
             }
         }
+        // Tail effects own other domains and can stale independently of the operation record.
+        // Re-check all of them before the incident or any artifact can mutate state. Nothing
+        // between this preflight and the tail commits mutates arrests, existing active witness
+        // cases, or business economies, so successful checks remain current for this commit.
+        if let Some(release) = &self.detainee_release {
+            let character = match state
+                .operations
+                .get_operation(self.plan.snapshot.operation)
+                .expect("revalidated resolution operation must still exist")
+                .objective()
+            {
+                OperationObjective::FreeDetainee { target } => *target,
+                OperationObjective::AcquireProperty { .. }
+                | OperationObjective::ObtainCash { .. }
+                | OperationObjective::Frighten { .. }
+                | OperationObjective::GatherInformation { .. }
+                | OperationObjective::DisruptBusiness { .. } => {
+                    unreachable!("only extraction resolutions carry a detainee release")
+                }
+            };
+            release.ensure_current(state).map_err(|error| {
+                OperationResolutionError::DetaineeRelease {
+                    operation: self.plan.snapshot.operation,
+                    character,
+                    error,
+                }
+            })?;
+        }
+        for intimidation in &self.witness_intimidation {
+            intimidation.ensure_current(state)?;
+        }
+        if let Some(disruption) = &self.business_disruption {
+            disruption.ensure_current(state)?;
+        }
         let incident = self
             .incident
             .map(|validated| validated.commit(state))
@@ -572,15 +609,20 @@ impl ValidatedOperationResolution {
             investigation,
             evidence,
         };
-        let legal_activity_information = match self.legal_activity_information {
-            Some(information) => Some(information.commit(state)?),
-            None => None,
-        };
+        let legal_activity_information = self.legal_activity_information.map(|information| {
+            information
+                .commit(state)
+                .expect("resolution information IDs were preflighted before mutation")
+        });
         let discovered_information = self
             .surveillance_information
             .into_iter()
-            .map(|information| information.commit(state))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .map(|information| {
+                information
+                    .commit(state)
+                    .expect("resolution information IDs were preflighted before mutation")
+            })
+            .collect::<BTreeSet<_>>();
         // The signature set is frozen from the validated plan's observations: what this
         // operation actually saw is authoritative for later validation, not a re-derivation
         // that later notification changes could silently contradict.
@@ -591,9 +633,18 @@ impl ValidatedOperationResolution {
             .as_ref()
             .map(SurveillanceIntelligencePlan::surveillance_signatures)
             .unwrap_or_default();
-        let after_action_information = self.information.commit(state)?;
-        let history_event = self.history.commit(state)?;
-        let after_action_report = self.report.commit(state)?;
+        let after_action_information = self
+            .information
+            .commit(state)
+            .expect("resolution information IDs were preflighted before mutation");
+        let history_event = self
+            .history
+            .commit(state)
+            .expect("resolution history ID was preflighted before mutation");
+        let after_action_report = self
+            .report
+            .commit(state)
+            .expect("resolution report ID was preflighted before mutation");
         state.operations.complete(
             self.plan.snapshot.operation,
             OperationResolutionRecord {
@@ -616,21 +667,29 @@ impl ValidatedOperationResolution {
         // itself has reached its terminal record; the validated release was checked against
         // the arrest version seen during plan validation.
         if let Some(release) = self.detainee_release {
-            release.commit(state)?;
+            release
+                .commit(state)
+                .expect("preflighted detainee release must remain current during resolution");
         }
         for intimidation in self.witness_intimidation {
-            intimidation.commit(state)?;
+            intimidation
+                .commit(state)
+                .expect("preflighted witness pressure must remain current during resolution");
         }
         // Sabotage damage runs last so the target's economy degrades only after the
         // operation itself has reached its terminal record.
         if let Some(disruption) = self.business_disruption {
-            disruption.commit(state)?;
+            disruption
+                .commit(state)
+                .expect("preflighted business disruption must remain current during resolution");
         }
         // Personal after-action knowledge for each participant: the crew knows what went
         // down even though the organization's own record is the org-held after-action.
         // Every draft was validated before the first mutation above.
         for information in self.participant_information {
-            information.commit(state)?;
+            information
+                .commit(state)
+                .expect("participant information IDs were preflighted before resolution mutation");
         }
         Ok(self.plan.snapshot.operation)
     }

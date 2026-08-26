@@ -16,9 +16,12 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    insert_character, insert_organization, validate_reassign_character,
+    validate_transfer_business_ownership, WorldError,
 };
-use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use crate::world::{
+    AutonomyLevel, BusinessOwner, CharacterDraft, OrganizationDraft, OrganizationKind,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn make_test_budget() -> (
@@ -198,6 +201,128 @@ fn balanced_transaction_commits_all_account_balances_atomically() {
             .balance(),
         Money::from_cents(2_500)
     );
+    validate_invariants(&state);
+}
+
+#[test]
+fn planned_account_transaction_opens_and_funds_account_atomically() {
+    let registry = build_registry();
+    let mut state = AppState::new(32);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Account Test".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let source = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("source account should validate");
+    let openings = validate_open_accounts(
+        &state,
+        vec![FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        }],
+    )
+    .expect("planned account should validate");
+    let planned = openings
+        .account_id(0)
+        .expect("one planned account must expose one id");
+
+    validate_record_transaction_with_openings(
+        &state,
+        openings,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Open funded street pocket".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: source,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: planned,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("transaction over planned account should validate")
+    .commit(&mut state)
+    .expect("planned opening and transaction should commit together");
+
+    let account = state
+        .finance()
+        .get_account(planned)
+        .expect("planned account should be opened by the transaction");
+    assert_eq!(account.owner(), owner);
+    assert_eq!(account.kind(), AccountKind::StreetCash);
+    assert_eq!(account.balance(), Money::from_cents(500));
+    validate_invariants(&state);
+}
+
+#[test]
+fn rejected_transaction_over_planned_account_consumes_no_account_id() {
+    let registry = build_registry();
+    let mut state = AppState::new(33);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Rejected Opening Test".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let before_next = state.ids.next_raw(IdKind::FinancialAccount);
+    let openings = validate_open_accounts(
+        &state,
+        vec![FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        }],
+    )
+    .expect("planned account should validate");
+    let planned = openings
+        .account_id(0)
+        .expect("one planned account must expose one id");
+
+    let error = match validate_record_transaction_with_openings(
+        &state,
+        openings,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Invalid planned opening".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: planned,
+                    amount: Money::from_cents(500),
+                },
+                LedgerPosting {
+                    account: planned,
+                    amount: Money::from_cents(-500),
+                },
+            ],
+            authorization: None,
+        },
+    ) {
+        Ok(_) => panic!("duplicate-account transaction must reject before opening anything"),
+        Err(error) => error,
+    };
+    assert_eq!(error, FinanceError::DuplicateAccount(planned));
+    assert_eq!(state.ids.next_raw(IdKind::FinancialAccount), before_next);
+    assert!(state.finance().get_account(planned).is_none());
     validate_invariants(&state);
 }
 
@@ -934,11 +1059,11 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
             postings: vec![
                 LedgerPosting {
                     account: reserve,
-                    amount: Money::from_cents(-10_000_00),
+                    amount: Money::from_cents(-1_000_000),
                 },
                 LedgerPosting {
                     account: fixture.street,
-                    amount: Money::from_cents(10_000_00),
+                    amount: Money::from_cents(1_000_000),
                 },
             ],
             authorization: None,
@@ -960,7 +1085,7 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
             .expect("capacity should fit money"),
     );
     assert!(
-        capacity.cents() < 10_000_00,
+        capacity.cents() < 1_000_000,
         "fixture expects a capacity below the seeded cash"
     );
 
@@ -1008,6 +1133,112 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
 }
 
 #[test]
+fn laundering_token_rejects_after_front_changes_owner() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Rival Front Buyer".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Fund stale laundering test".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("fixture funding should validate")
+    .commit(&mut fixture.state)
+    .expect("fixture funding should commit");
+    let token = validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(100),
+        },
+    )
+    .expect("laundering should validate while the front is owned");
+    let street_before = fixture
+        .state
+        .finance()
+        .get_account(fixture.street)
+        .expect("street account should persist")
+        .balance();
+    let accounted_before = fixture
+        .state
+        .finance()
+        .get_account(fixture.accounted)
+        .expect("accounted account should persist")
+        .balance();
+
+    validate_transfer_business_ownership(
+        &fixture.state,
+        fixture.business,
+        BusinessOwner::Organization(rival),
+    )
+    .expect("front ownership transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("front ownership transfer should commit");
+    let error = token
+        .commit(&mut fixture.state)
+        .expect_err("a laundering token cannot survive loss of the front");
+    assert!(matches!(
+        error,
+        LaunderingError::StaleBusiness {
+            business,
+            ..
+        } if business == fixture.business
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.street)
+            .expect("street account should persist")
+            .balance(),
+        street_before
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.accounted)
+            .expect("accounted account should persist")
+            .balance(),
+        accounted_before
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
     let registry = build_registry();
     let mut fixture = make_laundering_fixture();
@@ -1029,11 +1260,11 @@ fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
             postings: vec![
                 LedgerPosting {
                     account: reserve,
-                    amount: Money::from_cents(-10_000_00),
+                    amount: Money::from_cents(-1_000_000),
                 },
                 LedgerPosting {
                     account: fixture.street,
-                    amount: Money::from_cents(10_000_00),
+                    amount: Money::from_cents(1_000_000),
                 },
             ],
             authorization: None,
@@ -1145,18 +1376,17 @@ fn laundering_more_than_the_street_balance_is_rejected_without_minting_funds() {
         Err(error) => error,
         Ok(_) => panic!("laundering beyond the street balance must be rejected"),
     };
-    match error {
-        LaunderingError::InsufficientStreetCash {
-            account,
-            balance_cents,
-            requested_cents,
-        } => {
-            assert_eq!(account, fixture.street);
-            assert_eq!(balance_cents, 0);
-            assert_eq!(requested_cents, 1_000);
-        }
-        other => panic!("expected InsufficientStreetCash, found {other}"),
-    }
+    let LaunderingError::InsufficientStreetCash {
+        account,
+        balance_cents,
+        requested_cents,
+    } = error
+    else {
+        panic!("expected InsufficientStreetCash, found {error}");
+    };
+    assert_eq!(account, fixture.street);
+    assert_eq!(balance_cents, 0);
+    assert_eq!(requested_cents, 1_000);
     let after_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
         .state
         .finance()
@@ -1192,11 +1422,11 @@ fn disrupted_front_capacity_shrinks_with_degraded_books() {
             postings: vec![
                 LedgerPosting {
                     account: reserve,
-                    amount: Money::from_cents(-10_000_00),
+                    amount: Money::from_cents(-1_000_000),
                 },
                 LedgerPosting {
                     account: fixture.street,
-                    amount: Money::from_cents(10_000_00),
+                    amount: Money::from_cents(1_000_000),
                 },
             ],
             authorization: None,

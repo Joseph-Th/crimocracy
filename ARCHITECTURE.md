@@ -39,7 +39,7 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `intelligence/` | Provenance-bearing information, holder/topic indexes, lineage | `intelligence_system` (record, transfer) |
 | `reports/` | Player-facing reports, briefs, financial reports | `report_system` |
 | `history/` | Durable entity-linked campaign events | `history_system` |
-| `finance/` | Typed accounts and balanced ledger; laundering transfers | `finance_system` (all financial mutations, including `validate_launder_funds`) |
+| `finance/` | Typed accounts, allocator-neutral planned account openings, balanced ledger, laundering transfers | `finance_system` (all financial mutations, including `validate_launder_funds`) |
 | `operations/` | Operation plans, execution records, participant reservations, surveillance/police/property integrations, take economics | `operation_system` (lifecycle), `operation_execution` (deterministic resolution), and `operation_economics` (proceeds and depletion) |
 | `opportunities/` | Provenance-backed opportunities with lifecycle | `opportunity_system` |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` |
@@ -49,7 +49,7 @@ Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 | `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, …) via `legal_state`; `case_knowledge` records lead-investigator activity knowledge through `intelligence_system` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` (channels and autonomous pass); `scoring` owns the deterministic factor/margin arithmetic shared by decide paths and invariant re-derivation |
-| `reputation/` | Contextual per-audience organizational standing with baseline decay; fed by operation consequences and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface as Standing reports | `reputation_system` (`apply_reputation_delta` is the single mutation path; consequences, feedback, and decay are tick passes) |
+| `reputation/` | Contextual per-audience organizational standing with baseline decay; fed by operation consequences and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface atomically with Standing reports | `reputation_system` (`apply_reputation_delta` is the single score mutation path; consequence composition and decay are tick passes) |
 
 Adapters, the harness at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
 

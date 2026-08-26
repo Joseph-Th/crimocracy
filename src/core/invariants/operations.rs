@@ -593,6 +593,10 @@ fn validate_operation_property_disposition(
             AccountKind::StreetCash | AccountKind::ConcealedCash
         )
         || settlement.kind() != AccountKind::Settlement
+        || state
+            .enterprises
+            .get_by_settlement_account(disposition.settlement_account())
+            .is_some()
     {
         return Err(invalid());
     }
@@ -730,6 +734,10 @@ fn validate_operation_cash_disposition(
             AccountKind::StreetCash | AccountKind::ConcealedCash
         )
         || settlement.kind() != AccountKind::Settlement
+        || state
+            .enterprises
+            .get_by_settlement_account(disposition.settlement_account())
+            .is_some()
     {
         return Err(invalid());
     }

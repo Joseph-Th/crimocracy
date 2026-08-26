@@ -15,6 +15,7 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::legal::arrest_system::{validate_release_arrest, ArrestError};
 use crate::legal::{
     ProsecutionCaseDraft, ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
     ProsecutionReferralDraft, ProsecutionReferralRecord,
@@ -116,6 +117,8 @@ pub enum ProsecutionError {
     #[error(transparent)]
     Report(#[from] ReportError),
     #[error(transparent)]
+    Custody(#[from] ArrestError),
+    #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
 
@@ -161,10 +164,22 @@ impl ValidatedProsecutionCaseOpening {
             self.dependencies.prosecutor_office
         );
 
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
-        let case_id = state.ids.next_prosecution_case()?;
-        let referral_id = state.ids.next_prosecution_referral()?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("prosecution-opening information ID was preflighted before mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("prosecution-opening report ID was preflighted before mutation");
+        let case_id = state
+            .ids
+            .next_prosecution_case()
+            .expect("prosecution-case ID was preflighted before mutation");
+        let referral_id = state
+            .ids
+            .next_prosecution_referral()
+            .expect("initial prosecution-referral ID was preflighted before mutation");
         // The referral record owns the evidence set; the case holds its own copy because
         // supplemental referrals grow the two independently.
         let case_evidence = self.draft.evidence.clone();
@@ -374,9 +389,18 @@ impl ValidatedProsecutionReferral {
         let source_investigation = case.source_investigation();
         let source_authority = case.source_authority();
         let prosecutor_office = case.prosecutor_office();
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
-        let referral_id = state.ids.next_prosecution_referral()?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("supplemental-referral information ID was preflighted before mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("supplemental-referral report ID was preflighted before mutation");
+        let referral_id = state
+            .ids
+            .next_prosecution_referral()
+            .expect("supplemental prosecution-referral ID was preflighted before mutation");
         state
             .legal
             .add_prosecution_referral(ProsecutionReferralRecord {
@@ -645,8 +669,33 @@ impl ValidatedProsecutionCaseResolution {
         }
         validate_resolution_dependencies(state, self.case)?;
 
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
+        // A terminal prosecutorial review removes the legal basis this subsystem has for
+        // continuing custody. Release the originating arrest when this is the last reviewing
+        // prosecution case for it. A different office's live review keeps the arrest in force,
+        // and a defendant already released (or later arrested under another arrest) is untouched.
+        // Validate the release before the first artifact commit so a custody failure cannot leave
+        // a half-resolved prosecution case.
+        let release = if !state
+            .legal
+            .has_other_open_prosecution_case(case.arrest(), self.case)
+            && state
+                .legal
+                .active_arrest_for_character(case.defendant())
+                .is_some_and(|arrest| arrest.id() == case.arrest())
+        {
+            Some(validate_release_arrest(state, case.arrest())?)
+        } else {
+            None
+        };
+
+        let information = self
+            .information
+            .commit(state)
+            .expect("prosecution-resolution information ID was preflighted before mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("prosecution-resolution report ID was preflighted before mutation");
         state.legal.apply_prosecution_resolution(
             self.case,
             self.resolution,
@@ -654,6 +703,11 @@ impl ValidatedProsecutionCaseResolution {
             information,
             report,
         );
+        if let Some(release) = release {
+            release
+                .commit(state)
+                .expect("prevalidated prosecution custody release must remain current");
+        }
         Ok(())
     }
 }

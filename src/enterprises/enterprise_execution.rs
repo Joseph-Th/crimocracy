@@ -19,7 +19,8 @@ use crate::enterprises::{
     EnterpriseLocation, EnterpriseStatus,
 };
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+    validate_record_transaction, FinanceError, ValidatedFinancialAccountOpenings,
+    ValidatedLedgerTransaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
@@ -159,6 +160,10 @@ pub struct ValidatedEnterpriseEstablishment {
     /// The venue-hosting business's version at validation time; commit re-checks it so a
     /// host that changed hands or lost a required function between phases cannot host.
     host_business_version: Option<(BusinessId, u32)>,
+    /// Present only for atomic autonomous establishment that must open a fresh settlement
+    /// account. The account is planned read-only and opened only after every enterprise
+    /// dependency has been revalidated.
+    account_openings: Option<ValidatedFinancialAccountOpenings>,
 }
 
 impl ValidatedEnterpriseEstablishment {
@@ -208,14 +213,40 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.location,
             &self.draft.supporting_businesses,
         )?;
-        validate_enterprise_accounts(
-            state,
-            self.draft.organization,
-            self.draft.cash_account,
-            self.draft.settlement_account,
-            None,
-        )?;
-        let id = state.ids.next_enterprise()?;
+        match &self.account_openings {
+            Some(openings) => validate_enterprise_accounts_with_planned_settlement(
+                state,
+                self.draft.organization,
+                self.draft.cash_account,
+                self.draft.settlement_account,
+                openings,
+            )?,
+            None => validate_enterprise_accounts(
+                state,
+                self.draft.organization,
+                self.draft.cash_account,
+                self.draft.settlement_account,
+                None,
+            )?,
+        }
+        let id = match self.account_openings {
+            Some(openings) => {
+                state.ids.reserve_many(&[
+                    (
+                        IdKind::FinancialAccount,
+                        u32::try_from(openings.len())
+                            .expect("validated enterprise account-opening count must fit u32"),
+                    ),
+                    (IdKind::Enterprise, 1),
+                ])?;
+                openings.commit(state)?;
+                state
+                    .ids
+                    .next_enterprise()
+                    .expect("composite enterprise ID preflight must make allocation infallible")
+            }
+            None => state.ids.next_enterprise()?,
+        };
         let established_at = state.now();
         let next_cycle_at = established_at + self.cycle_duration;
         state.enterprises.insert(build_enterprise_record(
@@ -232,6 +263,33 @@ pub fn validate_establish_enterprise(
     registry: &Registry,
     state: &AppState,
     draft: EnterpriseDraft,
+) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
+    validate_establish_enterprise_with_optional_openings(registry, state, draft, None)
+}
+
+pub(crate) fn validate_establish_enterprise_with_openings(
+    registry: &Registry,
+    state: &AppState,
+    draft: EnterpriseDraft,
+    openings: ValidatedFinancialAccountOpenings,
+) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
+    if openings.len() != 1
+        || !openings.account_matches(
+            draft.settlement_account,
+            FinancialOwner::Organization(draft.organization),
+            AccountKind::Settlement,
+        )
+    {
+        return Err(EnterpriseError::MissingAccount(draft.settlement_account));
+    }
+    validate_establish_enterprise_with_optional_openings(registry, state, draft, Some(openings))
+}
+
+fn validate_establish_enterprise_with_optional_openings(
+    registry: &Registry,
+    state: &AppState,
+    draft: EnterpriseDraft,
+    account_openings: Option<ValidatedFinancialAccountOpenings>,
 ) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
     let definition = registry.get_enterprise(draft.kind);
     let authority = resolve_mandate_authority(state, draft.authority)?;
@@ -256,13 +314,22 @@ pub fn validate_establish_enterprise(
         draft.location,
         &draft.supporting_businesses,
     )?;
-    validate_enterprise_accounts(
-        state,
-        draft.organization,
-        draft.cash_account,
-        draft.settlement_account,
-        None,
-    )?;
+    match &account_openings {
+        Some(openings) => validate_enterprise_accounts_with_planned_settlement(
+            state,
+            draft.organization,
+            draft.cash_account,
+            draft.settlement_account,
+            openings,
+        )?,
+        None => validate_enterprise_accounts(
+            state,
+            draft.organization,
+            draft.cash_account,
+            draft.settlement_account,
+            None,
+        )?,
+    }
     let cycle_duration = definition.economics().cycle();
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, &draft.supporting_businesses)?;
@@ -282,6 +349,7 @@ pub fn validate_establish_enterprise(
         cycle_duration,
         supporting_business_versions,
         host_business_version,
+        account_openings,
     })
 }
 
@@ -608,6 +676,51 @@ fn ensure_manager_authority_current(
     Ok(())
 }
 
+fn validate_enterprise_accounts_with_planned_settlement(
+    state: &AppState,
+    organization: OrganizationId,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    openings: &ValidatedFinancialAccountOpenings,
+) -> Result<(), EnterpriseError> {
+    openings.ensure_current(state)?;
+    let cash = state
+        .finance
+        .get_account(cash_account)
+        .ok_or(EnterpriseError::MissingAccount(cash_account))?;
+    if cash.owner() != FinancialOwner::Organization(organization) {
+        return Err(EnterpriseError::AccountOwnerMismatch {
+            account: cash_account,
+            organization,
+        });
+    }
+    match cash.kind() {
+        AccountKind::StreetCash | AccountKind::ConcealedCash => {}
+        AccountKind::AccountedFunds
+        | AccountKind::LegitimateOperating
+        | AccountKind::Settlement => {
+            return Err(EnterpriseError::InvalidCashAccountKind(cash_account))
+        }
+    }
+    if !openings.account_matches(
+        settlement_account,
+        FinancialOwner::Organization(organization),
+        AccountKind::Settlement,
+    ) {
+        return Err(EnterpriseError::InvalidSettlementAccountKind(
+            settlement_account,
+        ));
+    }
+    debug_assert!(
+        state
+            .enterprises
+            .get_by_settlement_account(settlement_account)
+            .is_none(),
+        "a future account id cannot already back an enterprise"
+    );
+    Ok(())
+}
+
 impl ValidatedEnterpriseCycle {
     pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
         let mut budget = Vec::new();
@@ -621,8 +734,12 @@ impl ValidatedEnterpriseCycle {
             budget.push((IdKind::Information, 1));
         }
         if let Some(incident) = &self.incident {
-            budget.push((IdKind::Investigation, 1));
+            budget.push((
+                IdKind::Investigation,
+                u32::from(incident.requires_new_investigation()),
+            ));
             budget.push((IdKind::Evidence, incident.evidence_count()));
+            budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
         }
         budget.push((IdKind::EnterpriseCycle, 1));
         state.ids.reserve_many(&budget)?;
@@ -682,6 +799,9 @@ impl ValidatedEnterpriseCycle {
             self.plan.accounts.settlement_account,
             Some(record.id()),
         )?;
+        if let Some(incident) = &self.incident {
+            incident.ensure_current(state)?;
+        }
         // Settlement atomicity rests on the ID budget reserved above: every downstream commit
         // (ledger, information, cycle) consumes pre-reserved IDs and cannot fail after the
         // first one mutates state.
@@ -689,24 +809,31 @@ impl ValidatedEnterpriseCycle {
             Some(ledger) => Some(ledger.commit(state)?),
             None => None,
         };
-        let information = match self.information {
-            Some(information) => Some(information.commit(state)?),
-            None => None,
-        };
-        let vice_information = match self.vice_information {
-            Some(vice_information) => Some(vice_information.commit(state)?),
-            None => None,
-        };
-        let vice_investigation = match self.incident {
-            Some(incident) => Some(incident.commit(state)?.investigation),
-            None => None,
-        };
+        let information = self.information.map(|information| {
+            information
+                .commit(state)
+                .expect("enterprise-cycle information ID was preflighted before mutation")
+        });
+        let vice_information = self.vice_information.map(|vice_information| {
+            vice_information
+                .commit(state)
+                .expect("enterprise vice-information ID was preflighted before mutation")
+        });
+        let vice_investigation = self.incident.map(|incident| {
+            incident
+                .commit(state)
+                .expect("preflighted enterprise vice intake must remain current during settlement")
+                .investigation
+        });
         debug_assert_eq!(
             vice_information.is_some(),
             vice_investigation.is_some(),
             "a drawn vice inquiry always carries its organization-facing knowledge"
         );
-        let cycle_id = state.ids.next_enterprise_cycle()?;
+        let cycle_id = state
+            .ids
+            .next_enterprise_cycle()
+            .expect("enterprise-cycle ID was preflighted before settlement mutation");
         state.enterprises.apply_cycle(
             EnterpriseCycleRecord {
                 id: cycle_id,

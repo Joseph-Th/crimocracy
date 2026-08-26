@@ -1,11 +1,11 @@
 //! Focused tests for the daily payroll pass: funding order, member wage accounts,
-//! all-or-nothing shortfall consequences, and day-boundary cadence.
+//! proportional shortfall consequences, and day-boundary cadence.
 
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;
 use crate::core::time::{SimDuration, SimTime};
-use crate::finance::finance_system::validate_record_transaction;
+use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -180,10 +180,10 @@ fn funded_payroll_moves_wages_into_member_pockets() {
 }
 
 #[test]
-fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
+fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
-    // Treasury holds less than one wage, so payroll cannot fund at all.
+    // Even a tiny treasury is distributed across the active crew.
     credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 10);
 
     fixture
@@ -195,10 +195,16 @@ fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
         .iter()
         .find(|outcome| outcome.organization() == fixture.organization)
         .expect("a staffed criminal organization must run payroll");
-    assert_eq!(outcome.paid(), Money::ZERO);
-    assert_eq!(outcome.short(), outcome.owed());
+    assert_eq!(outcome.paid(), Money::from_cents(10));
+    assert_eq!(
+        outcome.short(),
+        outcome
+            .owed()
+            .checked_sub(Money::from_cents(10))
+            .expect("partial payment cannot exceed payroll owed")
+    );
 
-    // The unpaid member resents their supervisor through the canonical relationship path.
+    // The shorted member resents their supervisor through the canonical relationship path.
     let relationship = fixture
         .state
         .social
@@ -211,13 +217,76 @@ fn shortfall_pays_nothing_and_breeds_supervisor_resentment() {
         "fresh resentment edge carries exactly the authored increment"
     );
 
-    // No wage account was created because nothing was paid.
-    assert!(fixture
+    // The available ten cents are split evenly across the two active members.
+    let pocket = fixture
         .state
         .finance
         .accounts_for(FinancialOwner::Character(fixture.member))
-        .next()
-        .is_none());
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("a partially paid member receives a wage account");
+    assert_eq!(pocket.balance(), Money::from_cents(5));
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let per_member = registry.upkeep().per_member_daily();
+    let owed = per_member.checked_mul(2).expect("two wages must fit money");
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        owed.cents() - 1,
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .into_iter()
+        .find(|outcome| outcome.organization() == fixture.organization)
+        .expect("staffed organization must run payroll");
+
+    assert_eq!(outcome.paid(), Money::from_cents(owed.cents() - 1));
+    assert_eq!(outcome.short(), Money::from_cents(1));
+    let boss_pocket = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.boss))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("boss receives the deterministic remainder cent");
+    let member_pocket = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.member))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("member receives partial wage");
+    assert_eq!(boss_pocket.balance(), per_member);
+    assert_eq!(
+        member_pocket.balance(),
+        Money::from_cents(per_member.cents() - 1)
+    );
+    assert!(
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.boss, fixture.boss)
+            .is_none(),
+        "fully paid member does not receive a shortfall consequence"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.member, fixture.boss)
+            .expect("the one-cent-shorted member resents their supervisor")
+            .dimensions()
+            .resentment
+            .value(),
+        registry.upkeep().shortfall_resentment()
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -326,4 +395,71 @@ fn shortfall_reports_once_to_the_player_organization_only() {
     let entry = &payroll_reports[0].entries()[0];
     assert!(entry.summary.contains("went uncovered"));
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn player_shortfall_report_exhaustion_rejects_before_money_or_resentment_moves() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 10);
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("criminal organization should be eligible as the player organization");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let funding = find_funding_accounts(&fixture.state, fixture.organization);
+    let treasury_before = fixture
+        .state
+        .finance()
+        .get_account(fixture.treasury)
+        .expect("treasury should persist")
+        .balance();
+    let account_next_before = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let transaction_next_before = fixture.state.ids.next_raw(IdKind::LedgerTransaction);
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let error = apply_organization_payroll(
+        &registry,
+        &mut fixture.state,
+        fixture.organization,
+        &funding,
+    )
+    .expect_err("report exhaustion must reject before payroll mutation");
+    assert!(matches!(
+        error,
+        PayrollError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.treasury)
+            .expect("treasury should persist")
+            .balance(),
+        treasury_before
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::FinancialAccount),
+        account_next_before
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::LedgerTransaction),
+        transaction_next_before
+    );
+    assert!(fixture
+        .state
+        .social()
+        .get_relationship(fixture.member, fixture.boss)
+        .is_none());
+    assert!(fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.member))
+        .all(|account| account.kind() != AccountKind::StreetCash));
 }

@@ -183,9 +183,6 @@ pub struct FinanceState {
     /// authority checks read this O(log n) instead of rescanning the mandate's full
     /// transaction history (which grows for the life of the campaign) on every spend.
     budget_used_by_period: BTreeMap<(MandateId, SimTime, SimTime), Money>,
-    /// Every account referenced by at least one ledger posting, so guarded cleanup proves
-    /// an account unused without scanning the append-only transaction history.
-    posted_accounts: BTreeSet<FinancialAccountId>,
 }
 
 impl FinanceState {
@@ -261,12 +258,6 @@ impl FinanceState {
         self.transactions.values()
     }
 
-    /// Whether any committed ledger posting references `account`. O(log n) over the
-    /// maintained posting index instead of a scan of the full transaction history.
-    pub(crate) fn has_postings(&self, account: FinancialAccountId) -> bool {
-        self.posted_accounts.contains(&account)
-    }
-
     pub(crate) fn insert_account(&mut self, record: FinancialAccountRecord) {
         self.accounts_by_owner
             .entry(record.owner())
@@ -277,20 +268,6 @@ impl FinanceState {
             previous.is_none(),
             "Index Uniqueness: duplicate financial account ID inserted"
         );
-    }
-
-    /// Removes an untouched account and its owner-index entry atomically. Callers must
-    /// guarantee the account carries no value or history (`finance_system::
-    /// remove_unused_account` is the guarded canonical path).
-    pub(crate) fn remove_account(&mut self, id: FinancialAccountId) {
-        if let Some(record) = self.accounts.remove(&id) {
-            if let Some(ids) = self.accounts_by_owner.get_mut(&record.owner()) {
-                ids.remove(&id);
-                if ids.is_empty() {
-                    self.accounts_by_owner.remove(&record.owner());
-                }
-            }
-        }
     }
 
     pub(crate) fn apply_transaction(
@@ -325,9 +302,6 @@ impl FinanceState {
                 .expect("budget usage accumulator overflowed");
             self.budget_used_by_period.insert(key, total);
         }
-        for posting in record.postings() {
-            self.posted_accounts.insert(posting.account);
-        }
         let previous = self.transactions.insert(record.id(), record);
         debug_assert!(
             previous.is_none(),
@@ -351,10 +325,6 @@ impl FinanceState {
     /// by the fused finance audit to prove no stale or duplicate membership.
     pub(crate) fn indexed_account_entries(&self) -> usize {
         self.accounts_by_owner.values().map(BTreeSet::len).sum()
-    }
-
-    pub(crate) fn posted_accounts_snapshot(&self) -> &BTreeSet<FinancialAccountId> {
-        &self.posted_accounts
     }
 
     pub(crate) fn transaction_is_indexed_for_mandate(
@@ -390,6 +360,7 @@ impl FinanceState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinancialAccountDraft {
     pub owner: FinancialOwner,
     pub kind: AccountKind,

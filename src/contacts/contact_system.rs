@@ -335,8 +335,14 @@ impl ValidatedContactDisclosure {
         }
         validate_disclosure_source(state, record, self.source)?;
         ensure_disclosure_not_duplicate(state, self.contact, self.source)?;
-        let disclosed_information = self.information.commit(state)?;
-        let id = state.ids.next_contact_disclosure()?;
+        let disclosed_information = self
+            .information
+            .commit(state)
+            .expect("contact-disclosure information ID was preflighted before mutation");
+        let id = state
+            .ids
+            .next_contact_disclosure()
+            .expect("contact-disclosure ID was preflighted before mutation");
         state.contacts.insert_disclosure(ContactDisclosureRecord {
             id,
             contact: self.contact,

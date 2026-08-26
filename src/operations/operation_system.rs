@@ -1206,9 +1206,10 @@ fn map_police_start_planning_error(error: PoliceResponseIntegrationError) -> Ope
         }
         PoliceResponseIntegrationError::PoliceResponse(dispatch) => dispatch.into(),
         PoliceResponseIntegrationError::Decision(_)
-        | PoliceResponseIntegrationError::Intelligence(_) => {
+        | PoliceResponseIntegrationError::Intelligence(_)
+        | PoliceResponseIntegrationError::IdExhaustion(_) => {
             unreachable!(
-                "police response start planning does not validate decisions or intelligence"
+                "police response start planning does not allocate IDs or validate arrival-only decisions or intelligence"
             )
         }
     }
@@ -1296,6 +1297,23 @@ pub struct ValidatedOperationAbort {
 }
 
 impl ValidatedOperationAbort {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        let mut budget = Vec::new();
+        if self.information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.police_activity_information.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
+        if self.history.is_some() {
+            budget.push((IdKind::HistoryEvent, 1));
+        }
+        if self.report.is_some() {
+            budget.push((IdKind::Report, 1));
+        }
+        budget
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
         // Staleness re-checks precede ID reservation: a rejected commit must leave the
         // serialized high-water marks exactly as it found them.
@@ -1324,19 +1342,7 @@ impl ValidatedOperationAbort {
                 found: state.now(),
             });
         }
-        let mut budget = Vec::new();
-        if self.information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
-        if self.police_activity_information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
-        if self.history.is_some() {
-            budget.push((IdKind::HistoryEvent, 1));
-        }
-        if self.report.is_some() {
-            budget.push((IdKind::Report, 1));
-        }
+        let budget = self.id_budget();
         state.ids.reserve_many(&budget)?;
         if let OperationAbortCause::Decision(decision) = self.cause {
             if state.decisions.pending_for_operation(self.operation) != Some(decision) {
@@ -1360,13 +1366,21 @@ impl ValidatedOperationAbort {
         let artifacts = match (self.information, self.report, self.history) {
             (None, None, None) => None,
             (Some(information), Some(report), Some(history)) => {
-                let information = information.commit(state)?;
-                let police_activity_information = self
-                    .police_activity_information
-                    .map(|information| information.commit(state))
-                    .transpose()?;
-                let history_event = history.commit(state)?;
-                let report = report.commit(state)?;
+                let information = information
+                    .commit(state)
+                    .expect("operation-abort information ID was preflighted before mutation");
+                let police_activity_information =
+                    self.police_activity_information.map(|information| {
+                        information.commit(state).expect(
+                            "operation-abort police information ID was preflighted before mutation",
+                        )
+                    });
+                let history_event = history
+                    .commit(state)
+                    .expect("operation-abort history ID was preflighted before mutation");
+                let report = report
+                    .commit(state)
+                    .expect("operation-abort report ID was preflighted before mutation");
                 Some(OperationAbortArtifacts {
                     information,
                     report,

@@ -18,11 +18,12 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
+use crate::core::id::{BusinessId, FinancialAccountId, IdExhaustionError, IdKind, OrganizationId};
 use crate::core::state::AppState;
 use crate::economy::{business_economy_system, BusinessEconomyDraft};
 use crate::finance::finance_system::{
-    insert_account, remove_unused_account, validate_record_transaction, FinanceError,
+    validate_open_accounts, validate_record_transaction, validate_record_transaction_with_openings,
+    FinanceError,
 };
 use crate::finance::helpers::format_money_cents;
 use crate::finance::{
@@ -74,6 +75,8 @@ pub enum BusinessAcquisitionError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Debug)]
@@ -144,8 +147,9 @@ impl ValidatedBusinessAcquisition {
             });
         }
         // Hosting conflicts (active enterprise venues/supporters) reject through the same
-        // canonical read the ownership transfer enforces.
-        validate_transfer_business_ownership(
+        // canonical read the ownership transfer enforces. Keep the validated token so commit
+        // does not create a second validation path later in the composite operation.
+        let transfer = validate_transfer_business_ownership(
             state,
             self.business,
             BusinessOwner::Organization(self.organization),
@@ -160,74 +164,79 @@ impl ValidatedBusinessAcquisition {
             economy.status() == crate::economy::BusinessOperatingStatus::Suspended
         });
 
-        // ---- Phase 2: reserve fresh books when the target has never operated. --------
-        // Insertion is purely additive; if any later leg rejects, the untouched accounts
-        // are removed again so rejection leaves authoritative state unchanged.
-        let mut reserved_accounts: Vec<FinancialAccountId> = Vec::new();
-        let operating_account = if let Some(economy) = existing_economy {
-            economy.operating_account()
+        // ---- Phase 2: plan fresh books and pre-validate every remaining leg. ---------
+        // Fresh account IDs are predicted without consuming allocator state. The payment token
+        // owns that plan and opens the accounts only when the whole acquisition is ready to
+        // commit, so no rollback path exists and every rejection is truly state-neutral.
+        let mut fresh_account_count = 0_u32;
+        let mut establishment = None;
+        let payment = if let Some(economy) = existing_economy {
+            validate_record_transaction(
+                state,
+                acquisition_payment_draft(
+                    state,
+                    self.funding_account,
+                    economy.operating_account(),
+                    self.price,
+                    &self.business_name,
+                ),
+            )?
         } else {
-            // Nothing authoritative has mutated before the first reservation, so it needs
-            // no rollback; only a failure while reserving the second account does.
-            let operating = insert_account(
+            let openings = validate_open_accounts(
                 state,
-                FinancialAccountDraft {
-                    owner: FinancialOwner::Business(self.business),
-                    kind: AccountKind::LegitimateOperating,
-                },
-            )?;
-            reserved_accounts.push(operating);
-            match insert_account(
-                state,
-                FinancialAccountDraft {
-                    owner: FinancialOwner::Business(self.business),
-                    kind: AccountKind::Settlement,
-                },
-            ) {
-                Ok(settlement) => reserved_accounts.push(settlement),
-                Err(error) => {
-                    for account in reserved_accounts.drain(..) {
-                        remove_unused_account(state, account);
-                    }
-                    return Err(error.into());
-                }
-            }
-            operating
-        };
-
-        // ---- Phase 3: pre-validate the payment leg and the report leg. ---------------
-        // Both validators are read-only, so a rejection here rolls back only the reserved
-        // accounts above and leaves every authoritative record untouched.
-        let payment = match validate_record_transaction(
-            state,
-            LedgerTransactionDraft {
-                occurred_at: state.now(),
-                memo: format!("Business acquisition of {}", self.business_name),
-                postings: vec![
-                    LedgerPosting {
-                        account: self.funding_account,
-                        amount: self
-                            .price
-                            .checked_neg()
-                            .expect("an authored acquisition price must fit negation"),
+                vec![
+                    FinancialAccountDraft {
+                        owner: FinancialOwner::Business(self.business),
+                        kind: AccountKind::LegitimateOperating,
                     },
-                    LedgerPosting {
-                        account: operating_account,
-                        amount: self.price,
+                    FinancialAccountDraft {
+                        owner: FinancialOwner::Business(self.business),
+                        kind: AccountKind::Settlement,
                     },
                 ],
-                authorization: None,
-            },
-        ) {
-            Ok(transaction) => transaction,
-            Err(error) => {
-                for account in reserved_accounts.drain(..) {
-                    remove_unused_account(state, account);
-                }
-                return Err(error.into());
-            }
+            )?;
+            let operating_account = openings
+                .account_id(0)
+                .expect("two-account acquisition plan must expose its operating account");
+            let settlement_account = openings
+                .account_id(1)
+                .expect("two-account acquisition plan must expose its settlement account");
+            establishment = Some(
+                business_economy_system::validate_composed_business_economy_establishment(
+                    state,
+                    BusinessEconomyDraft {
+                        business: self.business,
+                        operating_account,
+                        settlement_account,
+                    },
+                    self.economy_cycle_duration,
+                    &openings,
+                )?,
+            );
+            fresh_account_count = u32::try_from(openings.len())
+                .expect("validated acquisition account count must fit u32");
+            validate_record_transaction_with_openings(
+                state,
+                openings,
+                acquisition_payment_draft(
+                    state,
+                    self.funding_account,
+                    operating_account,
+                    self.price,
+                    &self.business_name,
+                ),
+            )?
         };
-        let announcement = match validate_record_report(
+        let resume = if resumes_suspended {
+            Some(business_economy_system::validate_acquisition_resume(
+                state,
+                self.business,
+                self.economy_cycle_duration,
+            )?)
+        } else {
+            None
+        };
+        let announcement = validate_record_report(
             state,
             ReportDraft {
                 recipient: self.organization,
@@ -247,54 +256,30 @@ impl ValidatedBusinessAcquisition {
                     decision: None,
                 }],
             },
-        ) {
-            Ok(report) => report,
-            Err(error) => {
-                for account in reserved_accounts.drain(..) {
-                    remove_unused_account(state, account);
-                }
-                return Err(error.into());
-            }
-        };
+        )?;
 
-        // ---- Phase 4: commit the validated legs. --------------------------------------
-        // Every residual failure mode was excluded in phases 1-3: the transfer's conflict
-        // and staleness re-checks passed above with exclusive state access since, the fresh
-        // accounts satisfy establishment validation by construction, the payment's version
-        // pins cover accounts no interim step touched, and the report references live
-        // entities only.
-        let transfer = validate_transfer_business_ownership(
-            state,
-            self.business,
-            BusinessOwner::Organization(self.organization),
-        )
-        .expect("acquisition transfer re-validated immediately above must still validate");
+        // ---- Phase 3: reserve the complete persistent-ID budget, then commit. --------
+        // No mutation occurs before this aggregate preflight. From this point onward each
+        // fallible canonical commit is guarded by dependencies that this function alone controls.
+        state.ids.reserve_many(&[
+            (IdKind::BusinessOwnershipChange, 1),
+            (IdKind::FinancialAccount, fresh_account_count),
+            (IdKind::LedgerTransaction, 1),
+            (IdKind::Report, 1),
+        ])?;
         transfer
             .commit(state)
             .expect("a just-revalidated ownership transfer must commit atomically");
-        if establish_now {
-            let settlement_account = reserved_accounts[1];
-            business_economy_system::ValidatedBusinessEconomyEstablishment::over_accounts_to_be_reserved(
-                BusinessEconomyDraft {
-                    business: self.business,
-                    operating_account,
-                    settlement_account,
-                },
-                self.economy_cycle_duration,
-            )
-            .commit(state)
-            .expect("establishment over freshly reserved, construction-guaranteed accounts must commit");
-        } else if resumes_suspended {
-            business_economy_system::commit_acquisition_resume(
-                state,
-                self.business,
-                self.economy_cycle_duration,
-            )
-            .expect("resume re-validated immediately above must still commit");
-        }
         payment
             .commit(state)
             .expect("a payment pre-validated against untouched account versions must commit");
+        if let Some(establishment) = establishment {
+            establishment.commit_after_preflight(state);
+        } else if let Some(resume) = resume {
+            resume
+                .commit(state)
+                .expect("prevalidated acquisition resume must remain current during commit");
+        }
         announcement
             .commit(state)
             .expect("a validated acquisition report about live entities must commit");
@@ -303,6 +288,32 @@ impl ValidatedBusinessAcquisition {
             price: self.price,
             established_economy: establish_now,
         })
+    }
+}
+
+fn acquisition_payment_draft(
+    state: &AppState,
+    funding_account: FinancialAccountId,
+    operating_account: FinancialAccountId,
+    price: Money,
+    business_name: &str,
+) -> LedgerTransactionDraft {
+    LedgerTransactionDraft {
+        occurred_at: state.now(),
+        memo: format!("Business acquisition of {business_name}"),
+        postings: vec![
+            LedgerPosting {
+                account: funding_account,
+                amount: price
+                    .checked_neg()
+                    .expect("an authored acquisition price must fit negation"),
+            },
+            LedgerPosting {
+                account: operating_account,
+                amount: price,
+            },
+        ],
+        authorization: None,
     }
 }
 
@@ -380,6 +391,7 @@ pub fn validate_acquire_business(
 mod tests {
     use super::*;
     use crate::build_registry;
+    use crate::core::id::IdKind;
     use crate::core::invariants::{validate_invariants, validate_state};
     use crate::finance::finance_system::insert_account;
     use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
@@ -584,6 +596,57 @@ mod tests {
             .summary
             .contains("Pier Nine Social Club"));
 
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn acquisition_id_preflight_rejects_without_opening_books_or_consuming_account_ids() {
+        let mut fixture = make_independent_fixture();
+        let price = hospitality_price(&fixture);
+        fund_accounted_from_street(&mut fixture, price.cents());
+        let token = validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+        )
+        .expect("funded acquisition should validate");
+        let financial_next = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+        let account_count = fixture.state.finance().accounts().count();
+
+        fixture
+            .state
+            .ids
+            .set_next_raw_for_test(IdKind::Report, u32::MAX);
+        let error = token
+            .commit(&mut fixture.state)
+            .expect_err("exhausted report ids must reject before any acquisition mutation");
+        assert!(matches!(
+            error,
+            BusinessAcquisitionError::IdExhaustion(IdExhaustionError::Exhausted {
+                kind: "report",
+                ..
+            })
+        ));
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_business(fixture.business)
+                .expect("business must persist")
+                .owner(),
+            BusinessOwner::Independent
+        );
+        assert!(fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .is_none());
+        assert_eq!(fixture.state.finance().accounts().count(), account_count);
+        assert_eq!(
+            fixture.state.ids.next_raw(IdKind::FinancialAccount),
+            financial_next,
+            "failed composite preflight must not consume planned account ids"
+        );
         validate_invariants(&fixture.state);
     }
 

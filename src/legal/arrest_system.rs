@@ -304,7 +304,7 @@ pub struct ValidatedRelease {
 }
 
 impl ValidatedRelease {
-    pub fn commit(self, state: &mut AppState) -> Result<(), ArrestError> {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), ArrestError> {
         let record = state
             .legal
             .get_arrest(self.arrest)
@@ -319,6 +319,11 @@ impl ValidatedRelease {
         if record.status() != ArrestStatus::Detained {
             return Err(ArrestError::NotDetained(self.arrest));
         }
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<(), ArrestError> {
+        self.ensure_current(state)?;
         state.legal.release_arrest(self.arrest, state.now());
         Ok(())
     }

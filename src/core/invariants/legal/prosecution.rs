@@ -10,7 +10,7 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::prosecution_system::write_resolution_summary;
-use crate::legal::{ProsecutionCaseResolution, ProsecutionCaseStatus};
+use crate::legal::{ArrestStatus, ProsecutionCaseResolution, ProsecutionCaseStatus};
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
@@ -163,6 +163,16 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                     || !report.entries()[0].sources.is_empty()
                     || report.entries()[0].decision.is_some()
                     || !expected_entities_contains(&report.entries()[0].entities)
+                {
+                    return Err(invalid_case());
+                }
+                // Once every prosecutor office has ended review, this prosecution lifecycle no
+                // longer justifies keeping its originating arrest detained. Another open office
+                // may still hold the same arrest, but a fully terminal prosecution set may not.
+                if arrest.status() == ArrestStatus::Detained
+                    && !state
+                        .legal
+                        .has_open_prosecution_case_for_arrest(case.arrest())
                 {
                     return Err(invalid_case());
                 }

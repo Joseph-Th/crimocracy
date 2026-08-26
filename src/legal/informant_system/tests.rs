@@ -459,7 +459,7 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
         build_registry()
             .legal()
             .informant_decision_delay()
-            .as_minutes() as u32,
+            .as_minutes(),
     ));
     let recruited = apply_detainee_informant_recruitment(&build_registry(), &mut fixture.state)
         .expect("recruitment pass should resolve without aborting the tick");

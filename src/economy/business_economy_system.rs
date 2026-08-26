@@ -10,7 +10,8 @@ use crate::economy::{
     BusinessOperatingStatus,
 };
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+    validate_record_transaction, FinanceError, ValidatedFinancialAccountOpenings,
+    ValidatedLedgerTransaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
@@ -155,20 +156,88 @@ pub fn validate_establish_business_economy(
     })
 }
 
-impl ValidatedBusinessEconomyEstablishment {
-    /// Cross-domain composition hook (business acquisition): builds an establishment token
-    /// whose accounts are reserved only during the composing operation's own commit. The
-    /// token's [`Self::commit`] still runs the complete establishment validation against
-    /// live state, so a mis-constructed reservation rejects there.
-    pub(crate) fn over_accounts_to_be_reserved(
-        draft: BusinessEconomyDraft,
-        cycle_duration: SimDuration,
-    ) -> Self {
-        Self {
-            draft,
-            cycle_duration,
-        }
+/// Business-economy establishment validated against accounts that a composing operation has
+/// planned but not yet opened. The token deliberately does not own the opening plan because the
+/// same plan is consumed by the ledger transaction that capitalizes the new operating account.
+pub(crate) struct ValidatedComposedBusinessEconomyEstablishment {
+    draft: BusinessEconomyDraft,
+    cycle_duration: SimDuration,
+}
+
+impl ValidatedComposedBusinessEconomyEstablishment {
+    /// Commit after the composing operation has opened the previously validated accounts. No
+    /// fallible work remains here; the acquisition path owns dependency revalidation and ID
+    /// preflight before its first mutation.
+    pub(crate) fn commit_after_preflight(self, state: &mut AppState) -> BusinessId {
+        debug_assert!(
+            state.world.get_business(self.draft.business).is_some(),
+            "prevalidated composed economy must retain its business"
+        );
+        debug_assert!(
+            state
+                .economy
+                .get_business_economy(self.draft.business)
+                .is_none(),
+            "prevalidated composed economy must remain unique"
+        );
+        debug_assert!(
+            validate_accounts(
+                state,
+                self.draft.business,
+                self.draft.operating_account,
+                self.draft.settlement_account,
+                None,
+            )
+            .is_ok(),
+            "prevalidated composed economy accounts must match the opened plan"
+        );
+        let business = self.draft.business;
+        let established_at = state.now();
+        let next_cycle_at = established_at + self.cycle_duration;
+        state.economy.insert(build_business_economy_record(
+            self.draft,
+            established_at,
+            next_cycle_at,
+        ));
+        business
     }
+}
+
+pub(crate) fn validate_composed_business_economy_establishment(
+    state: &AppState,
+    draft: BusinessEconomyDraft,
+    cycle_duration: SimDuration,
+    openings: &ValidatedFinancialAccountOpenings,
+) -> Result<ValidatedComposedBusinessEconomyEstablishment, BusinessEconomyError> {
+    validate_business(state, draft.business)?;
+    if state.economy.get_business_economy(draft.business).is_some() {
+        return Err(BusinessEconomyError::ExistingBusinessEconomy(
+            draft.business,
+        ));
+    }
+    openings.ensure_current(state)?;
+    if !openings.account_matches(
+        draft.operating_account,
+        FinancialOwner::Business(draft.business),
+        AccountKind::LegitimateOperating,
+    ) {
+        return Err(BusinessEconomyError::InvalidOperatingAccountKind(
+            draft.operating_account,
+        ));
+    }
+    if !openings.account_matches(
+        draft.settlement_account,
+        FinancialOwner::Business(draft.business),
+        AccountKind::Settlement,
+    ) {
+        return Err(BusinessEconomyError::InvalidSettlementAccountKind(
+            draft.settlement_account,
+        ));
+    }
+    Ok(ValidatedComposedBusinessEconomyEstablishment {
+        draft,
+        cycle_duration,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,11 +491,15 @@ impl ValidatedBusinessCycle {
             Some(ledger) => Some(ledger.commit(state)?),
             None => None,
         };
-        let information = match self.information {
-            Some(information) => Some(information.commit(state)?),
-            None => None,
-        };
-        let cycle = state.ids.next_business_cycle()?;
+        let information = self.information.map(|information| {
+            information
+                .commit(state)
+                .expect("business-cycle information ID was preflighted before mutation")
+        });
+        let cycle = state
+            .ids
+            .next_business_cycle()
+            .expect("business-cycle ID was preflighted before settlement mutation");
         state.economy.apply_cycle(
             BusinessCycleRecord {
                 id: cycle,
@@ -671,18 +744,15 @@ pub fn validate_resume_business_economy(
     validate_resume_with_cycle_duration(state, business, cycle_duration)
 }
 
-/// Resumes suspended books as part of an acquisition commit. A chronic-loss suspension is
-/// an owner's problem while the business is independent; once a buyer capitalizes the
-/// purchase, the books reopen under new management instead of staying permanently dead.
-/// Re-validates suspension and account ownership against live state, so the acquisition's
-/// commit order (transfer → resume → payment → report) cannot resurrect active or missing
-/// books.
-pub(crate) fn commit_acquisition_resume(
-    state: &mut AppState,
+/// Acquisition composition hook: validates a suspended economy before the acquisition mutates
+/// ownership or money. The returned canonical status token can then commit after those controlled
+/// mutations without introducing a new validation path.
+pub(crate) fn validate_acquisition_resume(
+    state: &AppState,
     business: BusinessId,
     cycle_duration: SimDuration,
-) -> Result<(), BusinessEconomyError> {
-    validate_resume_with_cycle_duration(state, business, cycle_duration)?.commit(state)
+) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
+    validate_resume_with_cycle_duration(state, business, cycle_duration)
 }
 
 fn validate_resume_with_cycle_duration(
@@ -888,7 +958,7 @@ pub struct ValidatedBusinessDisruption {
 }
 
 impl ValidatedBusinessDisruption {
-    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), BusinessEconomyError> {
         if state.now() != self.expected_now {
             return Err(BusinessEconomyError::StaleDisruptionTime {
                 business: self.business,
@@ -907,6 +977,11 @@ impl ValidatedBusinessDisruption {
                 found: economy.version(),
             });
         }
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
+        self.ensure_current(state)?;
         state
             .economy
             .apply_disruption(self.business, self.disrupted_through);

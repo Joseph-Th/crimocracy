@@ -1,7 +1,9 @@
 //! Financial validation and atomic ledger commits; sibling finance state owns balances and indexes.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{FinancialAccountId, IdExhaustionError, LedgerTransactionId, MandateId};
+use crate::core::id::{
+    FinancialAccountId, IdExhaustionError, IdKind, LedgerTransactionId, MandateId,
+};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::{
     ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
@@ -26,6 +28,12 @@ pub enum FinanceError {
     MissingEntity(EntityRef),
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
+    #[error("too many financial accounts were requested in one atomic opening")]
+    AccountOpeningCountOverflow,
+    #[error(
+        "financial account allocation changed after planning; expected next raw id {expected}, found {found}"
+    )]
+    StaleAccountAllocation { expected: u32, found: u32 },
     #[error("ledger transaction must contain at least two postings")]
     TooFewPostings,
     #[error("ledger transaction repeats account {0}")]
@@ -95,25 +103,139 @@ pub fn insert_account(
     Ok(id)
 }
 
-/// Removes an account that a rejected multi-record operation had just reserved, so a
-/// rejection leaves authoritative state unchanged. Only an untouched account qualifies —
-/// zero balance and no ledger postings — so removal can never orphan value or history.
-/// Returns false (leaving state unchanged) when the account does not exist or has been used.
-pub(crate) fn remove_unused_account(state: &mut AppState, account: FinancialAccountId) -> bool {
-    let Some(record) = state.finance.get_account(account) else {
-        return false;
-    };
-    if record.balance() != Money::ZERO {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlannedFinancialAccount {
+    id: FinancialAccountId,
+    draft: FinancialAccountDraft,
+}
+
+/// Read-only reservation plan for accounts that a larger atomic finance operation will open.
+/// IDs are predicted from the allocator without consuming them; commit rejects stale plans
+/// before any mutation if another account was opened in the meantime.
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedFinancialAccountOpenings {
+    expected_next: u32,
+    accounts: Vec<PlannedFinancialAccount>,
+}
+
+impl ValidatedFinancialAccountOpenings {
+    pub(crate) fn len(&self) -> usize {
+        self.accounts.len()
     }
-    // The maintained posting index answers this in O(log n); the transaction history is
-    // append-only and grows for the life of the campaign, so scanning it here would make
-    // every rejected reservation cost O(total transactions ever).
-    if state.finance.has_postings(account) {
-        return false;
+
+    pub(crate) fn account_id(&self, index: usize) -> Option<FinancialAccountId> {
+        self.accounts.get(index).map(|account| account.id)
     }
-    state.finance.remove_account(account);
-    true
+
+    pub(crate) fn account_matches(
+        &self,
+        id: FinancialAccountId,
+        owner: FinancialOwner,
+        kind: AccountKind,
+    ) -> bool {
+        self.accounts.iter().any(|account| {
+            account.id == id && account.draft.owner == owner && account.draft.kind == kind
+        })
+    }
+
+    fn account(&self, id: FinancialAccountId) -> Option<FinancialAccountDraft> {
+        self.accounts
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| account.draft)
+    }
+
+    fn count_u32(&self) -> u32 {
+        u32::try_from(self.accounts.len())
+            .expect("validated financial account opening count must fit u32")
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), FinanceError> {
+        let found = state.ids.next_raw(IdKind::FinancialAccount);
+        if found != self.expected_next {
+            return Err(FinanceError::StaleAccountAllocation {
+                expected: self.expected_next,
+                found,
+            });
+        }
+        for account in &self.accounts {
+            if !crate::core::entity::is_entity_present(state, account.draft.owner.entity()) {
+                return Err(FinanceError::MissingEntity(account.draft.owner.entity()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Opens all planned accounts after the caller has preflighted any additional IDs needed
+    /// by its composite operation. Every fallible check occurs before the first insertion.
+    pub(crate) fn commit(
+        self,
+        state: &mut AppState,
+    ) -> Result<Vec<FinancialAccountId>, FinanceError> {
+        self.ensure_current(state)?;
+        state
+            .ids
+            .reserve(IdKind::FinancialAccount, self.count_u32())?;
+        Ok(self.commit_after_preflight(state))
+    }
+
+    fn commit_after_preflight(self, state: &mut AppState) -> Vec<FinancialAccountId> {
+        let mut opened = Vec::with_capacity(self.accounts.len());
+        for account in self.accounts {
+            let id = state
+                .ids
+                .next_financial_account()
+                .expect("validated account-opening ID preflight must make allocation infallible");
+            debug_assert_eq!(
+                id, account.id,
+                "planned financial account id must stay current"
+            );
+            state.finance.insert_account(FinancialAccountRecord {
+                id,
+                owner: account.draft.owner,
+                kind: account.draft.kind,
+                balance: Money::ZERO,
+                version: 1,
+            });
+            opened.push(id);
+        }
+        opened
+    }
+}
+
+pub(crate) fn validate_open_accounts(
+    state: &AppState,
+    drafts: Vec<FinancialAccountDraft>,
+) -> Result<ValidatedFinancialAccountOpenings, FinanceError> {
+    let count =
+        u32::try_from(drafts.len()).map_err(|_| FinanceError::AccountOpeningCountOverflow)?;
+    state.ids.reserve(IdKind::FinancialAccount, count)?;
+    for draft in &drafts {
+        if !crate::core::entity::is_entity_present(state, draft.owner.entity()) {
+            return Err(FinanceError::MissingEntity(draft.owner.entity()));
+        }
+    }
+    let expected_next = state.ids.next_raw(IdKind::FinancialAccount);
+    let accounts = drafts
+        .into_iter()
+        .enumerate()
+        .map(|(offset, draft)| {
+            let offset = u32::try_from(offset)
+                .expect("validated financial account opening offset must fit u32");
+            PlannedFinancialAccount {
+                id: FinancialAccountId::from_raw(
+                    expected_next
+                        .checked_add(offset)
+                        .expect("account-opening reservation already proved id range"),
+                ),
+                draft,
+            }
+        })
+        .collect();
+    Ok(ValidatedFinancialAccountOpenings {
+        expected_next,
+        accounts,
+    })
 }
 
 pub struct ValidatedLedgerTransaction {
@@ -122,10 +244,14 @@ pub struct ValidatedLedgerTransaction {
     expected_versions: BTreeMap<FinancialAccountId, u32>,
     budget_usage: Option<BudgetUsageRecord>,
     authority_snapshot: Option<ResolvedMandateAuthority>,
+    openings: Option<ValidatedFinancialAccountOpenings>,
 }
 
 impl ValidatedLedgerTransaction {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, FinanceError> {
+        if let Some(openings) = &self.openings {
+            openings.ensure_current(state)?;
+        }
         for (account, expected) in &self.expected_versions {
             let record = state
                 .finance
@@ -157,7 +283,21 @@ impl ValidatedLedgerTransaction {
                 });
             }
         }
-        let id = state.ids.next_ledger_transaction()?;
+        let opening_count = self
+            .openings
+            .as_ref()
+            .map_or(0, ValidatedFinancialAccountOpenings::count_u32);
+        state.ids.reserve_many(&[
+            (IdKind::FinancialAccount, opening_count),
+            (IdKind::LedgerTransaction, 1),
+        ])?;
+        if let Some(openings) = self.openings {
+            openings.commit_after_preflight(state);
+        }
+        let id = state
+            .ids
+            .next_ledger_transaction()
+            .expect("validated ledger ID preflight must make allocation infallible");
         let LedgerTransactionDraft {
             occurred_at,
             memo,
@@ -181,6 +321,23 @@ impl ValidatedLedgerTransaction {
 pub fn validate_record_transaction(
     state: &AppState,
     draft: LedgerTransactionDraft,
+) -> Result<ValidatedLedgerTransaction, FinanceError> {
+    validate_record_transaction_with_optional_openings(state, draft, None)
+}
+
+pub(crate) fn validate_record_transaction_with_openings(
+    state: &AppState,
+    openings: ValidatedFinancialAccountOpenings,
+    draft: LedgerTransactionDraft,
+) -> Result<ValidatedLedgerTransaction, FinanceError> {
+    openings.ensure_current(state)?;
+    validate_record_transaction_with_optional_openings(state, draft, Some(openings))
+}
+
+fn validate_record_transaction_with_optional_openings(
+    state: &AppState,
+    draft: LedgerTransactionDraft,
+    openings: Option<ValidatedFinancialAccountOpenings>,
 ) -> Result<ValidatedLedgerTransaction, FinanceError> {
     if draft.memo.trim().is_empty() {
         return Err(FinanceError::EmptyMemo);
@@ -209,16 +366,22 @@ pub fn validate_record_transaction(
         if net_cents > i128::from(i64::MAX) || net_cents < i128::from(i64::MIN) {
             return Err(FinanceError::PostingSumOverflow);
         }
-        let account = state
-            .finance
-            .get_account(posting.account)
-            .ok_or(FinanceError::MissingAccount(posting.account))?;
-        let next = account
-            .balance()
-            .checked_add(posting.amount)
-            .ok_or(FinanceError::BalanceOverflow(posting.account))?;
-        balances.insert(posting.account, next);
-        expected_versions.insert(posting.account, account.version());
+        if let Some(account) = state.finance.get_account(posting.account) {
+            let next = account
+                .balance()
+                .checked_add(posting.amount)
+                .ok_or(FinanceError::BalanceOverflow(posting.account))?;
+            balances.insert(posting.account, next);
+            expected_versions.insert(posting.account, account.version());
+        } else if openings
+            .as_ref()
+            .and_then(|planned| planned.account(posting.account))
+            .is_some()
+        {
+            balances.insert(posting.account, posting.amount);
+        } else {
+            return Err(FinanceError::MissingAccount(posting.account));
+        }
     }
     if net_cents != 0 {
         let diagnostic =
@@ -234,6 +397,7 @@ pub fn validate_record_transaction(
         expected_versions,
         budget_usage: budget_validation.usage,
         authority_snapshot: budget_validation.authority_snapshot,
+        openings,
     })
 }
 
@@ -386,6 +550,12 @@ pub enum LaunderingError {
     MissingBusiness(crate::core::id::BusinessId),
     #[error("business {0} is not owned by the requesting organization")]
     ForeignBusiness(crate::core::id::BusinessId),
+    #[error("business {business} changed after laundering validation")]
+    StaleBusiness {
+        business: crate::core::id::BusinessId,
+        expected: u32,
+        found: u32,
+    },
     #[error("business {0} lacks the cash-intensive function required to absorb illicit cash")]
     NotCashIntensive(crate::core::id::BusinessId),
     #[error("business {0} has no active operating economy to route laundered revenue through")]
@@ -423,6 +593,8 @@ pub enum LaunderingError {
 pub struct ValidatedLaundering {
     transaction: ValidatedLedgerTransaction,
     business: crate::core::id::BusinessId,
+    organization: crate::core::id::OrganizationId,
+    expected_business_version: u32,
     /// Pre-computed per-cycle total (`already laundered + this transfer`) validated to stay
     /// within the front's plausibility capacity. Committing writes it as a total so the
     /// ledger leg and the budget leg of one laundering cannot half-apply.
@@ -432,6 +604,20 @@ pub struct ValidatedLaundering {
 
 impl ValidatedLaundering {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, LaunderingError> {
+        let business = state
+            .world
+            .get_business(self.business)
+            .ok_or(LaunderingError::MissingBusiness(self.business))?;
+        if business.version() != self.expected_business_version {
+            return Err(LaunderingError::StaleBusiness {
+                business: self.business,
+                expected: self.expected_business_version,
+                found: business.version(),
+            });
+        }
+        if business.owner() != BusinessOwner::Organization(self.organization) {
+            return Err(LaunderingError::ForeignBusiness(self.business));
+        }
         // The capacity decision rested on the front's economy at validation time. A cycle
         // settling in between resets the plausibility budget (and a chronic-loss suspension
         // deactivates the front), so the version pin must be re-checked before anything mutates.
@@ -594,6 +780,8 @@ pub fn validate_launder_funds(
     Ok(ValidatedLaundering {
         transaction,
         business: draft.business,
+        organization: draft.organization,
+        expected_business_version: business_record.version(),
         new_cycle_total,
         expected_economy_version: economy.version(),
     })

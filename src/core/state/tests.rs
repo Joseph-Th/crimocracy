@@ -1204,18 +1204,16 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
         bincode::deserialize(&bytes).expect("save envelope should deserialize");
     let mut restored = restore_save(&registry, decoded).expect("pending save should restore");
 
-    assert_eq!(
-        restored
+    assert!(
+        !restored
             .attention_settings()
             .is_auto_pause_enabled(AttentionClass::Exception),
-        false,
         "toggled-off Exception auto-pause must survive save/load"
     );
-    assert_eq!(
-        restored
+    assert!(
+        !restored
             .attention_settings()
             .is_auto_pause_enabled(AttentionClass::Crisis),
-        false,
         "toggled-off Crisis auto-pause must survive save/load"
     );
     assert_ne!(

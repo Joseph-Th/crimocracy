@@ -368,7 +368,6 @@ fn apply_reputation_phase(
     enterprise_cycles: &[EnterpriseCycleId],
 ) {
     crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
-    let player_organization = state.player_organization();
     for operation in resolved_operations {
         let (organization, approach, objective_outcome, exposure_level) = {
             let record = state
@@ -385,7 +384,7 @@ fn apply_reputation_phase(
                 resolution.exposure().level(),
             )
         };
-        let shifts = crate::reputation::reputation_system::apply_operation_reputation_consequences(
+        crate::reputation::reputation_system::apply_operation_reputation_consequences(
             registry,
             state,
             organization,
@@ -394,15 +393,6 @@ fn apply_reputation_phase(
             exposure_level,
         )
         .expect("valid state should apply operation reputation consequences");
-        if Some(organization) == player_organization {
-            crate::reputation::reputation_system::apply_standing_feedback(
-                state,
-                organization,
-                "Word travels after the job:",
-                &shifts,
-            )
-            .expect("player standing feedback must record through the canonical report path");
-        }
     }
     let vice_inquiry_owners: Vec<OrganizationId> = enterprise_cycles
         .iter()
@@ -418,22 +408,12 @@ fn apply_reputation_phase(
         })
         .collect();
     for organization in vice_inquiry_owners {
-        let shifts =
-            crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
-                registry,
-                state,
-                organization,
-            )
-            .expect("valid state should apply vice-inquiry reputation consequences");
-        if Some(organization) == player_organization {
-            crate::reputation::reputation_system::apply_standing_feedback(
-                state,
-                organization,
-                "News of the rackets travels:",
-                &shifts,
-            )
-            .expect("player standing feedback must record through the canonical report path");
-        }
+        crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
+            registry,
+            state,
+            organization,
+        )
+        .expect("valid state should apply vice-inquiry reputation consequences");
     }
 }
 

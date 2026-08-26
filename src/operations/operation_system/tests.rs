@@ -180,14 +180,14 @@ fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() 
 fn operation_rejects_take_targets_owned_by_the_sponsoring_organization() {
     let (registry, state, organization, leader, target) = make_test_operation_state();
     let mut state = state;
-    let neighborhood = match target {
-        EntityRef::Business(id) => state
-            .world()
-            .get_business(id)
-            .expect("fixture business should exist")
-            .neighborhood(),
-        other => panic!("unexpected fixture target {other:?}"),
+    let EntityRef::Business(id) = target else {
+        panic!("unexpected fixture target {target:?}");
     };
+    let neighborhood = state
+        .world()
+        .get_business(id)
+        .expect("fixture business should exist")
+        .neighborhood();
     let front = insert_business(
         &registry,
         &mut state,

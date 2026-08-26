@@ -222,9 +222,18 @@ impl ValidatedLegalRepresentation {
         }
 
         let payment = self.payment.commit(state)?;
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
-        let id = state.ids.next_legal_representation()?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("retainer information ID was preflighted before payment mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("retainer report ID was preflighted before payment mutation");
+        let id = state
+            .ids
+            .next_legal_representation()
+            .expect("legal-representation ID was preflighted before payment mutation");
         state
             .legal
             .insert_legal_representation(LegalRepresentationRecord {
@@ -654,8 +663,14 @@ impl ValidatedLegalRepresentationEnd {
                 self.representation,
             ));
         }
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("representation-end information ID was preflighted before mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("representation-end report ID was preflighted before mutation");
         state.legal.end_legal_representation(
             self.representation,
             self.ended_at,

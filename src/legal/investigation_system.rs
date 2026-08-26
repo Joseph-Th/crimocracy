@@ -74,6 +74,13 @@ pub enum InvestigationError {
     InactiveInvestigation,
     #[error("incident intake must contain at least one evidence record")]
     NoIncidentEvidence,
+    #[error(
+        "incident intake resumable shelf changed after validation; expected {expected:?}, found {found:?}"
+    )]
+    StaleIncidentShelf {
+        expected: Option<(InvestigationId, u32)>,
+        found: Option<(InvestigationId, u32)>,
+    },
     #[error("entity {0:?} cannot originate a case")]
     InvalidCaseOrigin(EntityRef),
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]
@@ -222,13 +229,16 @@ impl ValidatedInvestigationTransition {
             )?,
             None => None,
         };
+        if knowledge.is_some() {
+            state.ids.reserve(IdKind::Information, 1)?;
+        }
         state
             .legal
             .set_investigation_status(self.investigation, next_status, state.now());
         if let Some(knowledge) = knowledge {
             knowledge
                 .commit(state)
-                .map_err(InvestigationError::CaseKnowledge)?;
+                .expect("case-activity information ID was preflighted before transition mutation");
         }
         Ok(())
     }
@@ -774,11 +784,33 @@ impl ValidatedIncidentIntake {
         self.draft.witness.is_some()
     }
 
+    pub(crate) fn requires_new_investigation(&self) -> bool {
+        self.resuming.is_none()
+    }
+
+    /// Re-checks the read-only case-routing decision without allocating or mutating. Composite
+    /// callers use this before committing unrelated state, so a shelf that appeared, resumed,
+    /// or changed after validation cannot make incident intake fail after another domain moved.
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), InvestigationError> {
+        validate_incident_intake_dependencies(state, &self.draft)?;
+        let found = find_resumable_shelf(state, &self.draft);
+        if found != self.resuming {
+            return Err(InvestigationError::StaleIncidentShelf {
+                expected: self.resuming,
+                found,
+            });
+        }
+        if let Some((shelf, _)) = self.resuming {
+            validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?;
+        }
+        Ok(())
+    }
+
     pub fn commit(
         mut self,
         state: &mut AppState,
     ) -> Result<IncidentIntakeOutcome, InvestigationError> {
-        validate_incident_intake_dependencies(state, &self.draft)?;
+        self.ensure_current(state)?;
         let mut budget = Vec::with_capacity(3);
         if self.resuming.is_none() {
             budget.push((IdKind::Investigation, 1));
@@ -790,18 +822,7 @@ impl ValidatedIncidentIntake {
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);
         let investigation = match self.resuming {
-            Some((shelf, expected_version)) => {
-                let record = state
-                    .legal
-                    .get_investigation(shelf)
-                    .ok_or(InvestigationError::MissingInvestigation(shelf))?;
-                if record.version() != expected_version {
-                    return Err(InvestigationError::StaleInvestigation {
-                        investigation: shelf,
-                        expected: expected_version,
-                        found: record.version(),
-                    });
-                }
+            Some((shelf, _)) => {
                 // Canonical resume: revalidates the lifecycle gate and refreshes the lead's
                 // personal knowledge through the shared transition path.
                 validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?
@@ -809,7 +830,10 @@ impl ValidatedIncidentIntake {
                 shelf
             }
             None => {
-                let investigation = state.ids.next_investigation()?;
+                let investigation = state
+                    .ids
+                    .next_investigation()
+                    .expect("incident investigation ID was preflighted before mutation");
                 state.legal.insert_investigation(InvestigationRecord {
                     id: investigation,
                     owner: self.draft.owner,
@@ -829,7 +853,10 @@ impl ValidatedIncidentIntake {
             }
         };
         let case_witness = if let Some(witness) = self.draft.witness {
-            let id = state.ids.next_case_witness()?;
+            let id = state
+                .ids
+                .next_case_witness()
+                .expect("incident witness ID was preflighted before mutation");
             state.legal.insert_case_witness(
                 CaseWitnessRecord {
                     id,
@@ -849,7 +876,10 @@ impl ValidatedIncidentIntake {
         };
         let mut evidence_ids = Vec::with_capacity(self.draft.evidence.len());
         for evidence in self.draft.evidence {
-            let id = state.ids.next_evidence()?;
+            let id = state
+                .ids
+                .next_evidence()
+                .expect("incident evidence IDs were preflighted before mutation");
             state.legal.insert_evidence(
                 EvidenceRecord {
                     identity: EvidenceIdentity {

@@ -458,27 +458,35 @@ fn make_exposed_operation_fixture(
         },
     )
     .expect("exposure specialist should validate");
+    let (title, objective) = if kind == OperationKind::Burglary {
+        (
+            "Observed burglary".to_owned(),
+            OperationObjective::AcquireProperty {
+                target: EntityRef::Business(business),
+            },
+        )
+    } else {
+        assert_eq!(
+            kind,
+            OperationKind::Sabotage,
+            "exposure fixture supports only scene-trace operation kinds"
+        );
+        (
+            "Observed sabotage".to_owned(),
+            OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(business),
+            },
+        )
+    };
     let operation = validate_authorize_operation(
         &registry,
         &state,
         OperationDraft {
-            title: match kind {
-                OperationKind::Burglary => "Observed burglary".to_owned(),
-                OperationKind::Sabotage => "Observed sabotage".to_owned(),
-                _ => unreachable!("exposure fixture supports only scene-trace operation kinds"),
-            },
+            title,
             kind,
             responsible_organization: organization,
             leader,
-            objective: match kind {
-                OperationKind::Burglary => OperationObjective::AcquireProperty {
-                    target: EntityRef::Business(business),
-                },
-                OperationKind::Sabotage => OperationObjective::DisruptBusiness {
-                    target: EntityRef::Business(business),
-                },
-                _ => unreachable!("exposure fixture supports only scene-trace operation kinds"),
-            },
+            objective,
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([
                 (RoleKind::Coordinator, leader),
@@ -534,12 +542,16 @@ fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
         .operations()
         .get_operation(operation)
         .expect("authorized sabotage should persist");
-    let business = match record.objective() {
-        OperationObjective::DisruptBusiness {
-            target: EntityRef::Business(business),
-        } => *business,
-        objective => unreachable!("sabotage fixture must target a business: {objective:?}"),
+    let OperationObjective::DisruptBusiness {
+        target: EntityRef::Business(business),
+    } = record.objective()
+    else {
+        panic!(
+            "sabotage fixture must target a business: {:?}",
+            record.objective()
+        );
     };
+    let business = *business;
     crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
         .expect("an active target economy should suspend")
         .commit(&mut state)
@@ -579,6 +591,96 @@ fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
     );
     validate_state(&state).expect("suspended-target sabotage state should validate");
     validate_invariants(&state);
+}
+
+#[test]
+fn stale_sabotage_tail_rejects_before_resolution_mutates_any_operation_artifact() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Sabotage, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started sabotage should persist");
+    let OperationObjective::DisruptBusiness {
+        target: EntityRef::Business(business),
+    } = record.objective()
+    else {
+        panic!(
+            "sabotage fixture must target a business: {:?}",
+            record.objective()
+        );
+    };
+    let business = *business;
+    let due_at = record
+        .resolution_due_at()
+        .expect("started sabotage must have a resolution deadline");
+    let minutes_until_due = u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+        .expect("fixture resolution delay must fit SimDuration");
+    state.advance_clock(SimDuration::from_minutes(minutes_until_due));
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::Sabotage)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored operation variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due sabotage should decide");
+    assert_ne!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed,
+        "maximal favorable execution variance must exercise the disruption tail"
+    );
+    let validated = validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("fresh sabotage resolution should validate");
+
+    // The economy can change independently after resolution validation. This deliberately
+    // stales only the tail token; the operation itself remains the exact version validated.
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("target economy should suspend")
+        .commit(&mut state)
+        .expect("target suspension should commit");
+    let id_counters_before = (
+        state.ids.next_raw(IdKind::Information),
+        state.ids.next_raw(IdKind::HistoryEvent),
+        state.ids.next_raw(IdKind::Report),
+        state.ids.next_raw(IdKind::Investigation),
+        state.ids.next_raw(IdKind::Evidence),
+    );
+    let error = validated
+        .commit(&mut state)
+        .expect_err("stale disruption must reject before resolution mutation");
+    assert!(matches!(
+        error,
+        OperationResolutionError::BusinessEconomy(BusinessEconomyError::StaleEconomy {
+            business: found,
+            ..
+        }) if found == business
+    ));
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected resolution must leave the operation live");
+    assert_eq!(record.status(), OperationStatus::InProgress);
+    assert!(record.resolution().is_none());
+    assert_eq!(
+        (
+            state.ids.next_raw(IdKind::Information),
+            state.ids.next_raw(IdKind::HistoryEvent),
+            state.ids.next_raw(IdKind::Report),
+            state.ids.next_raw(IdKind::Investigation),
+            state.ids.next_raw(IdKind::Evidence),
+        ),
+        id_counters_before,
+        "rejected tail staleness must not consume any resolution artifact IDs"
+    );
 }
 
 #[test]
@@ -891,9 +993,12 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
         .objective()
         .referenced_entities()
         .into_iter()
-        .find_map(|entity| match entity {
-            EntityRef::Business(business) => Some(business),
-            _ => None,
+        .find_map(|entity| {
+            if let EntityRef::Business(business) = entity {
+                Some(business)
+            } else {
+                None
+            }
         })
         .expect("fixture objective should reference its target business");
 
@@ -2330,6 +2435,170 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
     validate_state_against_registry(&registry, &state)
         .expect("post-entry response decision should match authored content");
     validate_invariants(&state);
+}
+
+#[test]
+fn police_arrival_decision_id_exhaustion_leaves_response_dispatched_and_operation_running() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![PatrolWindow::try_new(
+                DayMinute::try_new(0).expect("fixture minute should validate"),
+                1_440,
+                Rating::try_new(0).expect("zero patrol presence should validate"),
+            )
+            .expect("fixture patrol window should validate")],
+        },
+    )
+    .expect("zero-presence patrol should validate")
+    .commit(&mut state)
+    .expect("zero-presence patrol should commit");
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("observable operation should dispatch a response");
+    let response_due = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("response should persist")
+        .arrival_due_at();
+    let minutes_until_due = u32::try_from(response_due.as_minutes() - state.now().as_minutes())
+        .expect("fixture response delay must fit SimDuration");
+    state.advance_clock(SimDuration::from_minutes(minutes_until_due));
+    let response_version = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("response should persist")
+        .version();
+    let operation_version = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .version();
+    let information_next = state.ids.next_raw(IdKind::Information);
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::DecisionRequest, u32::MAX);
+
+    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
+        &mut state,
+    )
+    .expect_err("decision allocator exhaustion must reject the whole response arrival");
+    assert!(matches!(
+        error,
+        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
+            IdExhaustionError::Exhausted {
+                kind: "decision request",
+                ..
+            }
+        )
+    ));
+    let response = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("rejected response should persist as dispatched");
+    assert_eq!(
+        response.status(),
+        crate::legal::PoliceResponseStatus::Dispatched
+    );
+    assert_eq!(response.arrived_at(), None);
+    assert_eq!(response.version(), response_version);
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected response must retain operation");
+    assert_eq!(operation_record.status(), OperationStatus::InProgress);
+    assert_eq!(operation_record.awaiting_decision_since(), None);
+    assert_eq!(operation_record.version(), operation_version);
+    assert_eq!(state.ids.next_raw(IdKind::Information), information_next);
+    assert!(state
+        .decisions()
+        .decisions_for_operation(operation)
+        .next()
+        .is_none());
+}
+
+#[test]
+fn police_arrival_abort_artifact_exhaustion_leaves_response_dispatched_and_operation_running() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+        );
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("observable operation should dispatch a response");
+    let response_due = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("response should persist")
+        .arrival_due_at();
+    let entry_at = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.entry_at())
+        .expect("burglary fixture should have an entry milestone");
+    assert!(response_due < entry_at);
+    let minutes_until_due = u32::try_from(response_due.as_minutes() - state.now().as_minutes())
+        .expect("fixture response delay must fit SimDuration");
+    state.advance_clock(SimDuration::from_minutes(minutes_until_due));
+    let response_version = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("response should persist")
+        .version();
+    let operation_version = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .version();
+    let information_next = state.ids.next_raw(IdKind::Information);
+    let history_next = state.ids.next_raw(IdKind::HistoryEvent);
+    state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
+        &mut state,
+    )
+    .expect_err("abort report exhaustion must reject the whole response arrival");
+    assert!(matches!(
+        error,
+        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
+            IdExhaustionError::Exhausted { kind: "report", .. }
+        )
+    ));
+    let response = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("rejected response should persist as dispatched");
+    assert_eq!(
+        response.status(),
+        crate::legal::PoliceResponseStatus::Dispatched
+    );
+    assert_eq!(response.arrived_at(), None);
+    assert_eq!(response.version(), response_version);
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected response must retain operation");
+    assert_eq!(operation_record.status(), OperationStatus::InProgress);
+    assert!(operation_record.abort_record().is_none());
+    assert_eq!(operation_record.version(), operation_version);
+    assert_eq!(state.ids.next_raw(IdKind::Information), information_next);
+    assert_eq!(state.ids.next_raw(IdKind::HistoryEvent), history_next);
 }
 
 #[test]

@@ -181,7 +181,7 @@ pub struct ValidatedWitnessCooperation {
 }
 
 impl ValidatedWitnessCooperation {
-    pub fn commit(self, state: &mut AppState) -> Result<(), WitnessError> {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), WitnessError> {
         let witness = validate_witness_mutation_snapshot(
             state,
             self.case_witness,
@@ -195,6 +195,11 @@ impl ValidatedWitnessCooperation {
                 cooperation: self.cooperation,
             });
         }
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<(), WitnessError> {
+        self.ensure_current(state)?;
         state
             .legal
             .set_witness_cooperation(self.case_witness, self.cooperation, state.now());
@@ -260,8 +265,14 @@ impl ValidatedWitnessStatement {
             )
         };
 
-        let statement = state.ids.next_witness_statement()?;
-        let evidence = state.ids.next_evidence()?;
+        let statement = state
+            .ids
+            .next_witness_statement()
+            .expect("witness-statement ID was preflighted before mutation");
+        let evidence = state
+            .ids
+            .next_evidence()
+            .expect("witness-testimony evidence ID was preflighted before mutation");
         let investigation = state
             .legal
             .get_investigation(investigation_id)

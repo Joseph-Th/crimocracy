@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, FinancialAccountId, IdExhaustionError, IdKind, InformationId, LedgerTransactionId,
-    OperationId, ReportId,
+    BusinessId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind, InformationId,
+    LedgerTransactionId, OperationId, ReportId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -85,6 +85,11 @@ pub enum PropertyDispositionError {
     InvalidCashAccountKind(FinancialAccountId),
     #[error("property liquidation settlement account {0} must be a settlement account")]
     InvalidSettlementAccountKind(FinancialAccountId),
+    #[error("settlement account {account} is dedicated to enterprise {enterprise}")]
+    SettlementAccountDedicatedToEnterprise {
+        account: FinancialAccountId,
+        enterprise: EnterpriseId,
+    },
     #[error("property liquidation cash and settlement accounts must be distinct")]
     SameAccount,
     #[error("operation {0} property liquidation arithmetic overflowed")]
@@ -166,6 +171,12 @@ impl ValidatedPropertyDisposition {
             });
         }
         validate_venue(venue, organization)?;
+        validate_accounts(
+            state,
+            organization,
+            self.draft.cash_account,
+            self.draft.settlement_account,
+        )?;
         if state.now() != self.disposed_at {
             return Err(PropertyDispositionError::StaleTime {
                 expected: self.disposed_at,
@@ -174,8 +185,14 @@ impl ValidatedPropertyDisposition {
         }
 
         let transaction = self.ledger.commit(state)?;
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("property-disposition information ID was preflighted before money mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("property-disposition report ID was preflighted before money mutation");
         state.operations.set_property_disposition(
             self.draft.operation,
             OperationPropertyDispositionRecord {
@@ -371,6 +388,17 @@ fn validate_accounts(
         return Err(PropertyDispositionError::InvalidSettlementAccountKind(
             settlement_account,
         ));
+    }
+    if let Some(enterprise) = state
+        .enterprises
+        .get_by_settlement_account(settlement_account)
+    {
+        return Err(
+            PropertyDispositionError::SettlementAccountDedicatedToEnterprise {
+                account: settlement_account,
+                enterprise: enterprise.id(),
+            },
+        );
     }
     Ok(())
 }
@@ -606,6 +634,13 @@ impl ValidatedCashDisposition {
             });
         }
         resolve_disposable_cash(operation)?;
+        let organization = operation.responsible_organization();
+        validate_accounts(
+            state,
+            organization,
+            self.draft.cash_account,
+            self.draft.settlement_account,
+        )?;
         if state.now() != self.deposited_at {
             return Err(PropertyDispositionError::StaleTime {
                 expected: self.deposited_at,
@@ -614,8 +649,14 @@ impl ValidatedCashDisposition {
         }
 
         let transaction = self.ledger.commit(state)?;
-        let information = self.information.commit(state)?;
-        let report = self.report.commit(state)?;
+        let information = self
+            .information
+            .commit(state)
+            .expect("cash-disposition information ID was preflighted before money mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("cash-disposition report ID was preflighted before money mutation");
         state.operations.set_cash_disposition(
             self.draft.operation,
             OperationCashDispositionRecord {
@@ -689,4 +730,132 @@ fn deposit_memo(operation: crate::core::id::OperationId) -> String {
     let mut memo = String::new();
     write_deposit_memo(&mut memo, operation).expect("String buffer writes are infallible");
     memo
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
+    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+    use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::FinancialAccountDraft;
+    use crate::world::world_system::{insert_character, insert_neighborhood, insert_organization};
+    use crate::world::{
+        AutonomyLevel, CapabilityKind, CharacterDraft, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        OrganizationDraft, OrganizationKind, Rating,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn rating(value: u8) -> Rating {
+        Rating::try_new(value).expect("test rating must be valid")
+    }
+
+    #[test]
+    fn enterprise_settlement_account_cannot_balance_unrelated_operation_disposition() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xD15A_1931);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Disposition Account Test".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("organization fixture should validate");
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Disposition Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(50),
+                        commercial_activity: rating(50),
+                        illicit_demand: rating(50),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(30),
+                    },
+                },
+            },
+        )
+        .expect("neighborhood fixture should validate");
+        let manager = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Disposition Manager".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("manager fixture should validate");
+        let scope = ResponsibilityScope::Neighborhood(neighborhood);
+        let mandate = validate_assign_mandate(
+            &state,
+            MandateDraft {
+                organization,
+                manager,
+                scopes: BTreeSet::from([scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .expect("mandate fixture should validate")
+        .commit(&mut state)
+        .expect("mandate fixture should commit");
+        let cash = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .expect("cash fixture should validate");
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .expect("settlement fixture should validate");
+        let enterprise = validate_establish_enterprise(
+            &registry,
+            &state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Protection,
+                organization,
+                authority: MandateAuthority {
+                    mandate,
+                    manager,
+                    scope,
+                },
+                location: EnterpriseLocation::Neighborhood(neighborhood),
+                supporting_businesses: BTreeSet::new(),
+                cash_account: cash,
+                settlement_account: settlement,
+            },
+        )
+        .expect("enterprise fixture should validate")
+        .commit(&mut state)
+        .expect("enterprise fixture should commit");
+
+        assert_eq!(
+            validate_accounts(&state, organization, cash, settlement),
+            Err(
+                PropertyDispositionError::SettlementAccountDedicatedToEnterprise {
+                    account: settlement,
+                    enterprise,
+                }
+            )
+        );
+    }
 }

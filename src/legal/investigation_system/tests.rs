@@ -27,6 +27,78 @@ fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("test rating must be valid")
 }
 
+#[test]
+fn investigation_transition_id_exhaustion_leaves_case_unchanged() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1D_5AFE);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Transition Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Transition Target".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Atomic Lead", 80);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Atomic transition inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    validate_assign_investigator(&state, investigation, detective)
+        .expect("lead assignment should validate")
+        .commit(&mut state)
+        .expect("lead assignment should commit");
+    let before = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist")
+        .clone();
+    let transition =
+        validate_transition_investigation(&state, investigation, InvestigationTransition::Suspend)
+            .expect("suspension should validate before allocator exhaustion");
+
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX);
+    let error = transition
+        .commit(&mut state)
+        .expect_err("information ID exhaustion must reject the whole transition");
+    assert!(matches!(
+        error,
+        InvestigationError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "information",
+            ..
+        })
+    ));
+    let after = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist");
+    assert_eq!(after.status(), before.status());
+    assert_eq!(after.version(), before.version());
+    assert_eq!(
+        after.assigned_investigators(),
+        before.assigned_investigators()
+    );
+}
+
 fn insert_test_investigator(
     state: &mut AppState,
     organization: OrganizationId,
@@ -147,7 +219,7 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
     let scheduled_for = state.now() + SimDuration::ONE_MINUTE;
     let origin = crate::operations::operation_system::validate_authorize_operation(
         &registry,
-        &mut state,
+        &state,
         crate::operations::OperationDraft {
             title: "Origin surveillance".to_owned(),
             kind: crate::operations::OperationKind::Surveillance,
@@ -201,13 +273,60 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
     .commit(&mut state)
     .expect("shelving should commit");
 
+    // A validated intake pins which suspended shelf it will resume. If that shelf cycles
+    // through another lifecycle change before commit, the stale token must not append evidence
+    // under assumptions that no longer describe the case.
+    let stale_intake =
+        validate_incident_intake(&state, make_draft("Stale exposure inquiry", state.now()))
+            .expect("shelf continuation should initially validate");
+    validate_transition_investigation(&state, first.investigation, InvestigationTransition::Resume)
+        .expect("shelf should resume")
+        .commit(&mut state)
+        .expect("resume should commit");
+    validate_transition_investigation(
+        &state,
+        first.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .expect("resumed shelf should suspend again")
+    .commit(&mut state)
+    .expect("second suspension should commit");
+    let stale_error = stale_intake
+        .commit(&mut state)
+        .expect_err("incident intake must reject a shelf whose version changed");
+    assert!(matches!(
+        stale_error,
+        InvestigationError::StaleIncidentShelf {
+            expected: Some((expected, _)),
+            found: Some((found, _)),
+        } if expected == first.investigation && found == first.investigation
+    ));
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(first.investigation)
+            .expect("stale rejection must retain the shelf")
+            .evidence()
+            .len(),
+        1,
+        "stale intake cannot append evidence before rejecting"
+    );
+
     // The second exposure shares the shelf's subject matter, so it continues the existing
-    // file: same case id, fresh evidence folded into it, no parallel case opened.
+    // file: same case id, fresh evidence folded into it, no parallel case opened. Exhausting
+    // the new-investigation ID space must not block a path that does not allocate one.
+    let next_investigation = state.ids.next_raw(IdKind::Investigation);
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Investigation, u32::MAX);
     let second =
         validate_incident_intake(&state, make_draft("Second exposure inquiry", state.now()))
             .expect("second intake should validate")
             .commit(&mut state)
             .expect("second intake should resume the shelf");
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Investigation, next_investigation);
     assert_eq!(second.investigation, first.investigation);
     assert!(second.resumed_shelf);
     assert_eq!(

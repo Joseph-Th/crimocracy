@@ -1774,19 +1774,20 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
         .get_enterprise(third_day[0])
         .expect("day-three enterprise should persist");
     assert_eq!(third.kind(), EnterpriseKind::Gambling);
-    match third.location() {
-        EnterpriseLocation::Business(host) => {
-            let host_name = fixture
-                .state
-                .world()
-                .get_business(host)
-                .expect("hosted venue should exist")
-                .name()
-                .to_owned();
-            assert_eq!(host_name, "Rival Card Room");
-        }
-        other => panic!("gambling must host at the venue, got {other:?}"),
-    }
+    let EnterpriseLocation::Business(host) = third.location() else {
+        panic!(
+            "gambling must host at the venue, got {:?}",
+            third.location()
+        );
+    };
+    let host_name = fixture
+        .state
+        .world()
+        .get_business(host)
+        .expect("hosted venue should exist")
+        .name()
+        .to_owned();
+    assert_eq!(host_name, "Rival Card Room");
 
     // Each establishment reserved its own exclusive settlement account.
     assert_ne!(first_kind.2, third.settlement_account());

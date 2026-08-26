@@ -1045,8 +1045,6 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         .map_or(0, |(_, highest)| highest) as usize;
     let mut account_present = vec![false; highest_account + 1];
     let mut derived_balance_cents = vec![0_i64; highest_account + 1];
-    let mut seen_posted = vec![false; highest_account + 1];
-    let mut seen_posted_count = 0_usize;
     for account in state.finance.accounts() {
         account_present[account.id().raw() as usize] = true;
     }
@@ -1083,11 +1081,6 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
             derived_balance_cents[raw] = derived_balance_cents[raw]
                 .checked_add(posting.amount.cents())
                 .ok_or(StateValidationError::FinancialBalanceMismatch)?;
-            // Distinct-account tally for the exact posted-index set comparison below.
-            if !seen_posted[raw] {
-                seen_posted[raw] = true;
-                seen_posted_count += 1;
-            }
         }
         if net_cents != 0 {
             return Err(StateValidationError::UnbalancedLedgerTransaction {
@@ -1154,19 +1147,6 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
                 },
             )?;
         }
-    }
-    // Exact set agreement between accounts referenced by postings and the maintained
-    // posted-accounts index: every indexed id must have been seen, and equal distinct
-    // totals rule out any seen-but-unindexed reference.
-    let posted_snapshot = state.finance.posted_accounts_snapshot();
-    let snapshot_all_seen = posted_snapshot.iter().all(|id| {
-        let raw = id.raw() as usize;
-        raw < seen_posted.len() && seen_posted[raw]
-    });
-    if seen_posted_count != posted_snapshot.len() || !snapshot_all_seen {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "finance",
-        });
     }
     if state.finance.indexed_mandate_entries() != expected_mandate_entries {
         return Err(StateValidationError::IndexInconsistency {

@@ -1,7 +1,7 @@
 //! Operation-facing police dispatch planning and deterministic response-arrival processing.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{OperationId, PoliceResponseId};
+use crate::core::id::{IdExhaustionError, IdKind, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
@@ -39,6 +39,8 @@ pub(crate) enum PoliceResponseIntegrationError {
     Decision(#[from] DecisionError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +196,24 @@ pub(crate) fn apply_due_police_response_arrivals(
         } else {
             None
         };
+
+        // One arrival is a cross-domain transaction: legal response status, operation abort or
+        // leadership decision, and every participant's first-hand police-pressure knowledge must
+        // appear together. Reserve the complete persistent-ID budget before marking the response
+        // Arrived so allocator exhaustion cannot strand a partially processed arrival.
+        let mut budget = abort
+            .as_ref()
+            .map_or_else(Vec::new, |abort| abort.id_budget());
+        if decision.is_some() {
+            budget.push((IdKind::DecisionRequest, 1));
+        }
+        let participant_information = u32::try_from(participant_pressure.len())
+            .expect("operation participant count must fit u32");
+        if participant_information > 0 {
+            budget.push((IdKind::Information, participant_information));
+        }
+        state.ids.reserve_many(&budget)?;
+
         arrival.commit(state)?;
         if let Some(abort) = abort {
             abort
@@ -209,7 +229,7 @@ pub(crate) fn apply_due_police_response_arrivals(
         for information in participant_pressure {
             information
                 .commit(state)
-                .expect("police pressure information should commit");
+                .expect("police-pressure information IDs were preflighted before arrival mutation");
         }
         arrived.push(response_id);
     }

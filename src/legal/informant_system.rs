@@ -241,8 +241,14 @@ impl ValidatedInformantDisclosure {
         let reliability = informant_reliability(information.reliability());
         let disclosed_at = state.now();
 
-        let evidence_id = state.ids.next_evidence()?;
-        let disclosure_id = state.ids.next_informant_disclosure()?;
+        let evidence_id = state
+            .ids
+            .next_evidence()
+            .expect("informant evidence ID was preflighted before mutation");
+        let disclosure_id = state
+            .ids
+            .next_informant_disclosure()
+            .expect("informant-disclosure ID was preflighted before mutation");
         let evidence = EvidenceRecord {
             identity: EvidenceIdentity {
                 id: evidence_id,

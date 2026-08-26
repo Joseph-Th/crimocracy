@@ -392,6 +392,30 @@ fn open_case_is_unique_per_office_but_other_prosecutor_office_may_receive_referr
             .count(),
         2
     );
+    validate_decline_prosecution_case(&fixture.state, first)
+        .expect("one office may end review while another remains open")
+        .commit(&mut fixture.state)
+        .expect("first office decline should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.defendant)
+            .is_some_and(|arrest| arrest.id() == fixture.arrest),
+        "another office's live prosecution review must keep the originating arrest detained"
+    );
+    validate_decline_prosecution_case(&fixture.state, second)
+        .expect("last office may end review")
+        .commit(&mut fixture.state)
+        .expect("last office decline should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.defendant)
+            .is_none(),
+        "ending the final prosecution review must release the originating detention"
+    );
     validate_state(&fixture.state).expect("multiple-office referral state should validate");
     validate_invariants(&fixture.state);
 }
@@ -449,6 +473,20 @@ fn declining_case_releases_lead_assignment_and_ends_referral_access() {
         .legal()
         .open_prosecution_case_for(fixture.arrest, fixture.office)
         .is_none());
+    assert!(fixture
+        .state
+        .legal()
+        .active_arrest_for_character(fixture.defendant)
+        .is_none());
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(fixture.arrest)
+            .expect("originating arrest should persist as history")
+            .status(),
+        crate::legal::ArrestStatus::Released
+    );
 
     let supplement_error = match validate_supplement_prosecution_case(
         &fixture.state,
@@ -509,6 +547,14 @@ fn closed_case_survives_save_and_allows_later_reconsideration() {
         .legal()
         .open_prosecution_case_for(fixture.arrest, fixture.office)
         .is_none());
+    assert_eq!(
+        restored
+            .legal()
+            .get_arrest(fixture.arrest)
+            .expect("originating arrest should persist through save")
+            .status(),
+        crate::legal::ArrestStatus::Released
+    );
 
     let second = validate_open_prosecution_case(&restored, opening_draft(&fixture))
         .expect("terminal case should permit later reconsideration")

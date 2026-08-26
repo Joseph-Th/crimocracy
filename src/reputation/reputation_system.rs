@@ -2,21 +2,25 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::OrganizationId;
+use crate::core::id::{IdExhaustionError, IdKind, OrganizationId};
 use crate::core::state::AppState;
 use crate::operations::{OperationApproach, OperationExposureLevel, OperationObjectiveOutcome};
 use crate::registry::Registry;
-use crate::reports::report_system::validate_record_report;
+use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::reputation::{AudienceKind, ReputationDimension, ReputationRecord, ReputationState};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ReputationError {
     #[error("organization {0} does not exist or is inactive")]
     MissingOrganization(OrganizationId),
+    #[error(transparent)]
+    Report(#[from] ReportError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
 }
 
 /// The single canonical reputation mutation: applies one clamped delta to one dimension of
@@ -98,9 +102,9 @@ pub struct AppliedStandingShift {
 
 /// Deterministic consequence pass over an operation that reached terminal resolution this
 /// tick. Success builds underworld competence; witnessed exposure raises police fear;
-/// violent approaches raise business fear. Every adjustment flows through the single
-/// canonical delta path, so clamping and sparse-record rules hold for all producers.
-/// Returns exactly what moved so callers can surface feedback through their own channels.
+/// violent approaches raise business fear. The exact clamped shifts and any required player
+/// feedback report are planned before mutation, so a report-allocation failure cannot leave
+/// player standing changed without its causal artifact.
 pub(crate) fn apply_operation_reputation_consequences(
     registry: &Registry,
     state: &mut AppState,
@@ -126,47 +130,53 @@ pub(crate) fn apply_operation_reputation_consequences(
         OperationObjectiveOutcome::Partial => config.partial_underworld_competence(),
         OperationObjectiveOutcome::Failed => 0,
     };
-    shifts.extend(apply_shift(
+    shifts.extend(resolve_shift(
         registry,
         state,
         organization,
         AudienceKind::Underworld,
         ReputationDimension::Competence,
         competence_delta,
-    )?);
+    ));
 
     let police_fear = match exposure_level {
         OperationExposureLevel::None | OperationExposureLevel::Trace => 0,
         OperationExposureLevel::Witnessed => config.witnessed_exposure_police_fear(),
         OperationExposureLevel::Identifying => config.identifying_exposure_police_fear(),
     };
-    shifts.extend(apply_shift(
+    shifts.extend(resolve_shift(
         registry,
         state,
         organization,
         AudienceKind::Police,
         ReputationDimension::Fear,
         police_fear,
-    )?);
+    ));
 
     if approach == OperationApproach::Violent {
-        shifts.extend(apply_shift(
+        shifts.extend(resolve_shift(
             registry,
             state,
             organization,
             AudienceKind::Businesses,
             ReputationDimension::Fear,
             config.violent_businesses_fear(),
-        )?);
+        ));
     }
-    Ok(shifts)
+    commit_consequence_shifts(
+        registry,
+        state,
+        organization,
+        "Word travels after the job:",
+        shifts,
+    )
 }
 
 /// Deterministic consequence pass over a racket that drew a dedicated vice inquiry this
 /// tick. A case built on the racket itself is at least as alarming to its owner as being
 /// witnessed on a job: police fear rises through the single canonical delta path, which
-/// throttles delegated expansion while it decays. Returns exactly what moved so callers can
-/// surface feedback through their own channels.
+/// throttles delegated expansion while it decays. Player feedback is committed atomically
+/// with the shift through the same composition helper as operation consequences.
 pub(crate) fn apply_vice_inquiry_reputation_consequences(
     registry: &Registry,
     state: &mut AppState,
@@ -180,45 +190,54 @@ pub(crate) fn apply_vice_inquiry_reputation_consequences(
         return Ok(Vec::new());
     }
     let fear = registry.reputation().vice_inquiry_police_fear();
-    Ok(apply_shift(
+    let shifts = resolve_shift(
         registry,
         state,
         organization,
         AudienceKind::Police,
         ReputationDimension::Fear,
         fear,
-    )?
+    )
     .into_iter()
-    .collect())
+    .collect();
+    commit_consequence_shifts(
+        registry,
+        state,
+        organization,
+        "News of the rackets travels:",
+        shifts,
+    )
 }
 
-/// Applies one authored consequence through the canonical delta path and reports the pair
-/// only when the score actually moved. A score already clamped at a rail did not move, and
-/// reporting movement that did not happen would fabricate causal feedback about standing.
-fn apply_shift(
+/// Resolves one authored consequence without mutation and returns it only when the score
+/// would actually move. A score already clamped at a rail did not move, and reporting
+/// movement that did not happen would fabricate causal feedback about standing.
+fn resolve_shift(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     organization: OrganizationId,
     audience: AudienceKind,
     dimension: ReputationDimension,
     delta: i8,
-) -> Result<Option<AppliedStandingShift>, ReputationError> {
+) -> Option<AppliedStandingShift> {
     if delta == 0 {
-        return Ok(None);
+        return None;
     }
-    let previous = resolve_score(
+    let current = resolve_score(
         registry,
         &state.reputation,
         organization,
         audience,
         dimension,
     );
-    let next = apply_delta(registry, state, organization, audience, dimension, delta)?;
-    Ok((next != previous).then_some(AppliedStandingShift {
+    let proposed = i32::from(current) + i32::from(delta);
+    let next = u8::try_from(proposed.clamp(0, 100))
+        .expect("clamped reputation arithmetic stays inside the score range");
+    (next != current).then_some(AppliedStandingShift {
         audience,
         dimension,
         delta,
-    }))
+    })
 }
 
 /// Player-facing labels for the standing audiences, exhaustive so a new audience must be
@@ -245,24 +264,52 @@ fn dimension_label(dimension: ReputationDimension) -> &'static str {
     }
 }
 
-/// Player-facing causality for standing shifts ([`GAME_DESIGN.md`] §53.1): the
-/// organization legitimately knows how its own street standing moved after its own
-/// activity, so each shift becomes a Notable entry in a canonical Standing report —
-/// which the executive brief then surfaces. `lead_in` names the kind of activity that
-/// moved the impression (a job, a racket drawing heat). Rival organizations never
-/// receive these.
-pub(crate) fn apply_standing_feedback(
+/// Commits a resolved consequence set. For the player organization the Standing report is
+/// validated and its ID budget is reserved before the first reputation write, making the
+/// standing changes and their player-facing causality one atomic semantic operation. Rival
+/// organizations move silently because their street standing is not free player information.
+fn commit_consequence_shifts(
+    registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,
     lead_in: &str,
-    shifts: &[AppliedStandingShift],
-) -> Result<(), crate::reports::report_system::ReportError> {
-    // Structural privacy rule: only the player organization receives its own standing
-    // feedback. Rival impressions move silently; their street standing is not free
-    // information just because the simulation tracks it.
-    if shifts.is_empty() || state.player_organization() != Some(organization) {
-        return Ok(());
+    shifts: Vec<AppliedStandingShift>,
+) -> Result<Vec<AppliedStandingShift>, ReputationError> {
+    let feedback = if shifts.is_empty() || state.player_organization() != Some(organization) {
+        None
+    } else {
+        let report = validate_standing_feedback_report(state, organization, lead_in, &shifts)?;
+        state.ids.reserve(IdKind::Report, 1)?;
+        Some(report)
+    };
+    for shift in &shifts {
+        apply_delta(
+            registry,
+            state,
+            organization,
+            shift.audience,
+            shift.dimension,
+            shift.delta,
+        )
+        .expect("resolved standing shift organization was validated before mutation");
     }
+    if let Some(report) = feedback {
+        report
+            .commit(state)
+            .expect("standing report ID was preflighted before reputation mutation");
+    }
+    Ok(shifts)
+}
+
+/// Builds player-facing causality for a resolved standing shift set. `lead_in` names the
+/// activity that moved the impression (a job or a racket drawing heat).
+fn validate_standing_feedback_report(
+    state: &AppState,
+    organization: OrganizationId,
+    lead_in: &str,
+    shifts: &[AppliedStandingShift],
+) -> Result<ValidatedReport, ReportError> {
+    debug_assert!(!shifts.is_empty());
     let mut summary = String::from(lead_in);
     for (index, shift) in shifts.iter().enumerate() {
         // Hand-written prose per produced pair where it adds nuance; every other pair reads
@@ -321,9 +368,7 @@ pub(crate) fn apply_standing_feedback(
                 decision: None,
             }],
         },
-    )?
-    .commit(state)?;
-    Ok(())
+    )
 }
 
 /// Day-boundary decay: every touched impression drifts one authored step toward the
@@ -559,7 +604,9 @@ mod tests {
                     registry.reputation().baseline()
                         + registry.reputation().violent_businesses_fear() as u8
                 ),
-                other => panic!("violent success must not touch {other:?}"),
+                AudienceKind::Residents | AudienceKind::Political | AudienceKind::Press => {
+                    panic!("violent success must not touch {:?}", record.audience())
+                }
             }
         }
         validate_invariants(&state);
@@ -843,24 +890,15 @@ mod tests {
     fn player_standing_shifts_surface_as_notable_standing_reports() {
         let (registry, mut state, organization) = make_state_with_player();
 
-        apply_standing_feedback(
+        apply_operation_reputation_consequences(
+            &registry,
             &mut state,
             organization,
-            "Word travels after the job:",
-            &[
-                AppliedStandingShift {
-                    audience: AudienceKind::Underworld,
-                    dimension: ReputationDimension::Competence,
-                    delta: registry.reputation().achieved_underworld_competence(),
-                },
-                AppliedStandingShift {
-                    audience: AudienceKind::Police,
-                    dimension: ReputationDimension::Fear,
-                    delta: registry.reputation().identifying_exposure_police_fear(),
-                },
-            ],
+            OperationApproach::Covert,
+            OperationObjectiveOutcome::Achieved,
+            OperationExposureLevel::Identifying,
         )
-        .expect("standing feedback should record");
+        .expect("standing consequences and feedback should commit");
 
         assert_eq!(standing_reports(&state, organization), 1);
         let report = state
@@ -895,24 +933,6 @@ mod tests {
             OperationExposureLevel::Witnessed,
         )
         .expect("consequences should apply");
-        apply_standing_feedback(
-            &mut state,
-            organization,
-            "Word travels after the job:",
-            &[
-                AppliedStandingShift {
-                    audience: AudienceKind::Underworld,
-                    dimension: ReputationDimension::Competence,
-                    delta: 3,
-                },
-                AppliedStandingShift {
-                    audience: AudienceKind::Police,
-                    dimension: ReputationDimension::Fear,
-                    delta: 4,
-                },
-            ],
-        )
-        .expect("feedback recording itself should succeed");
 
         // The reputation moved, but no Standing report exists: this organization is not
         // the player, and rival street standing is not free information.
@@ -923,11 +943,40 @@ mod tests {
 
     #[test]
     fn shifts_that_move_nothing_produce_no_feedback() {
-        let (_, mut state, organization) = make_state_with_player();
-        apply_standing_feedback(&mut state, organization, "Word travels after the job:", &[])
-            .expect("empty feedback is a no-op");
+        let (registry, mut state, organization) = make_state_with_player();
+        apply_operation_reputation_consequences(
+            &registry,
+            &mut state,
+            organization,
+            OperationApproach::Covert,
+            OperationObjectiveOutcome::Failed,
+            OperationExposureLevel::None,
+        )
+        .expect("zero-shift consequence pass should be a no-op");
         assert_eq!(standing_reports(&state, organization), 0);
         validate_invariants(&state);
+    }
+
+    #[test]
+    fn player_feedback_id_exhaustion_leaves_reputation_unchanged() {
+        let (registry, mut state, organization) = make_state_with_player();
+        state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+        let error = apply_operation_reputation_consequences(
+            &registry,
+            &mut state,
+            organization,
+            OperationApproach::Violent,
+            OperationObjectiveOutcome::Achieved,
+            OperationExposureLevel::Identifying,
+        )
+        .expect_err("feedback allocation failure must reject the whole consequence set");
+        assert!(matches!(
+            error,
+            ReputationError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
+        ));
+        assert_eq!(state.reputation.len(), 0);
+        assert_eq!(standing_reports(&state, organization), 0);
     }
 
     #[test]
@@ -984,16 +1033,8 @@ mod tests {
     fn player_racket_vice_heat_surfaces_as_standing_report() {
         let (registry, mut state, organization) = make_state_with_player();
 
-        let shifts =
-            apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
-                .expect("vice-inquiry consequences should apply");
-        apply_standing_feedback(
-            &mut state,
-            organization,
-            "News of the rackets travels:",
-            &shifts,
-        )
-        .expect("standing feedback should record");
+        apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+            .expect("vice-inquiry consequences and feedback should apply");
 
         assert_eq!(standing_reports(&state, organization), 1);
         let report = state
