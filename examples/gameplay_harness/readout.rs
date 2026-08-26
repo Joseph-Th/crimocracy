@@ -177,13 +177,20 @@ pub fn print_starting_player_view(scenario: &Scenario) {
                 .to_owned(),
         )
     };
+    let police_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.police)
+        .expect("police organization must exist")
+        .name()
+        .to_owned();
     let detective = scenario
         .state
         .world()
         .get_character(scenario.detective)
         .expect("detective must exist");
     println!(
-        "[STATE] {} is available to Central Precinct with Investigation {}.",
+        "[STATE] {} is available to {police_name} with Investigation {}.",
         detective.name(),
         detective
             .capability(CapabilityKind::Investigation)
@@ -191,7 +198,7 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .value(),
     );
     println!(
-        "[STATE] {handler_name} keeps a standing Police-channel contact with {contact_name} inside Central Precinct; a quiet word costs no street exposure."
+        "[STATE] {handler_name} keeps a standing Police-channel contact with {contact_name} inside {police_name}; a quiet word costs no street exposure."
     );
     let replacement = scenario
         .state

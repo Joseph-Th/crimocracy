@@ -81,11 +81,15 @@ pub fn observe_tick(
         }
     }
 
-    // A cold-case shelf is an institutional beat, not player-visible news: the organization
-    // learns it through its own channels (precinct surveillance or the police contact). The
-    // narrative prints it only as a hidden-state audit marker.
+    // A cold-case shelf or closure is an institutional beat, not player-visible news: the
+    // organization learns it through its own channels (precinct surveillance or the police
+    // contact). The narrative prints it only as a hidden-state audit marker. Both endings
+    // exist in production - quiet cases decay cold, and cases that escalate into custody can
+    // close outright - so the observation records whichever institutional truth arrived.
     if let Some(case) = scenario.investigation {
-        if outcome.cold_case_suspensions.contains(&case) {
+        let shelved = outcome.cold_case_suspensions.contains(&case);
+        let closed = outcome.cold_case_closures.contains(&case);
+        if shelved || closed {
             metrics.case_cold_minute = Some(outcome.now.as_minutes());
             if narrative {
                 let owner = scenario
@@ -100,10 +104,10 @@ pub fn observe_tick(
                     .get_organization(owner)
                     .expect("case owner must persist")
                     .name();
+                let ending = if closed { "closed" } else { "shelved" };
                 println!(
-                    "[DEV AUDIT] {}: {} shelved the case (hidden institutional beat; the organization learns this through its own channels).",
+                    "[DEV AUDIT] {}: {owner_name} {ending} the case (hidden institutional beat; the organization learns this through its own channels).",
                     stamp(outcome.now.as_minutes()),
-                    owner_name
                 );
             }
         }

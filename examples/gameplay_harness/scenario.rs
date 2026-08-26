@@ -777,6 +777,8 @@ pub fn build_scenario(
         investigation: None,
         variation,
         timeline,
+        seed,
+        wait_slack_minutes: operation_wait_slack_minutes(registry),
     };
     validate_harness_state(scenario.registry, &scenario.state)?;
     Ok(scenario)
@@ -1006,18 +1008,56 @@ pub fn establish_harbor_expansion(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
-    const EXPANSION_FLOAT_CENTS: i64 = 40_000;
+    // Authored float target for the second book, clamped to what the canal till actually holds
+    // above its working-capital floor: a lean early run must not reject the capitalization
+    // transfer, so the beat moves whatever idle cash exists instead of asserting an amount.
+    const EXPANSION_FLOAT_TARGET_CENTS: i64 = 40_000;
     let canal_cash = scenario
         .state
         .enterprises()
         .get_enterprise(scenario.enterprise)
         .expect("canal enterprise must persist")
         .cash_account();
+    let canal_balance = scenario
+        .state
+        .finance()
+        .get_account(canal_cash)
+        .expect("canal float account must persist")
+        .balance()
+        .cents();
+    let expansion_float_cents =
+        EXPANSION_FLOAT_TARGET_CENTS.min((canal_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0));
+    if expansion_float_cents <= 0 {
+        return Err(
+            "harbor expansion requires idle canal street cash above the working floor".into(),
+        );
+    }
     let neighborhood_name = scenario
         .state
         .world()
         .get_neighborhood(scenario.neighborhood)
         .expect("canal neighborhood must persist")
+        .name()
+        .to_owned();
+    let expansion_neighborhood_name = scenario
+        .state
+        .world()
+        .get_neighborhood(scenario.expansion_neighborhood)
+        .expect("expansion neighborhood must persist")
+        .name()
+        .to_owned();
+    let expansion_venue_name = scenario
+        .state
+        .world()
+        .get_business(scenario.expansion_front)
+        .expect("expansion venue must persist")
+        .name()
+        .to_owned();
+    let police_name = scenario
+        .state
+        .world()
+        .get_organization(scenario.police)
+        .expect("police organization must persist")
         .name()
         .to_owned();
     let lieutenant_name = scenario
@@ -1043,19 +1083,25 @@ pub fn establish_harbor_expansion(
         },
     )?
     .commit(&mut scenario.state)?;
+    let mandate_version = scenario
+        .state
+        .delegation()
+        .get_mandate(scenario.lieutenant_mandate)
+        .map(|record| record.version())
+        .expect("revised mandate must persist");
     validate_record_transaction(
         &scenario.state,
         LedgerTransactionDraft {
             occurred_at: scenario.state.now(),
-            memo: "Capitalize the Harbor District book".to_owned(),
+            memo: "Capitalize the second-district book".to_owned(),
             postings: vec![
                 LedgerPosting {
                     account: canal_cash,
-                    amount: Money::from_cents(-EXPANSION_FLOAT_CENTS),
+                    amount: Money::from_cents(-expansion_float_cents),
                 },
                 LedgerPosting {
                     account: scenario.expansion_cash,
-                    amount: Money::from_cents(EXPANSION_FLOAT_CENTS),
+                    amount: Money::from_cents(expansion_float_cents),
                 },
             ],
             authorization: None,
@@ -1084,17 +1130,17 @@ pub fn establish_harbor_expansion(
     metrics.expansion_established = true;
     if narrative {
         println!(
-            "[DECIDE]  The club is ours. Revise {lieutenant_name}'s mandate to cover both districts, capitalize a harbor float from idle gambling cash, and open a second book in Harbor District."
+            "[DECIDE]  The venue is ours. Revise {lieutenant_name}'s mandate to cover both districts, capitalize a float from idle gambling cash, and open a second book in {expansion_neighborhood_name}."
         );
         println!(
-            "[DELEGATE] {lieutenant_name} now holds an expanded two-district mandate (v2); routine authority over the new enterprise is delegated.",
+            "[DELEGATE] {lieutenant_name} now holds an expanded two-district mandate (v{mandate_version}); routine authority over the new enterprise is delegated.",
         );
         println!(
-            "[EXPAND]   Gambling enterprise established at Pier Nine Social Club (Harbor District) with a {} float.",
-            format_cents(EXPANSION_FLOAT_CENTS)
+            "[EXPAND]   Gambling enterprise established at {expansion_venue_name} ({expansion_neighborhood_name}) with a {} float.",
+            format_cents(expansion_float_cents)
         );
         println!(
-            "[NARRATION] Harbor District sits outside Central Precinct's jurisdiction: the open case that taxes the {neighborhood_name} racket cannot reach this one."
+            "[NARRATION] {expansion_neighborhood_name} sits outside {police_name}'s jurisdiction: the open case that taxes the {neighborhood_name} racket cannot reach this one."
         );
     }
     Ok(())

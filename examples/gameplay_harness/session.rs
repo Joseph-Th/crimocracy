@@ -766,13 +766,15 @@ pub fn play_session_with_fixture_view(
             );
         }
         // The lull anchor is player-visible reasoning: the crew's own field report places the
-        // heavy enforcement in the small hours, so leadership schedules the quiet word a bit
-        // over an hour after the case opened, inside the first morning gap, and still before
-        // an institutional interview would typically be worked.
+        // heavy enforcement in the small hours, so leadership schedules the quiet word inside
+        // the first morning gap after the case opened and still before an institutional
+        // interview would typically be worked. The exact offset is evaluation-owned variation
+        // derived from the run seed, not a game rule.
         let case_open_minute = metrics
             .case_open_minute
             .expect("witness-pressure arc requires the surfaced case-open minute");
-        let pressure_at = SimTime::from_minutes(case_open_minute + 70);
+        let pressure_delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
+        let pressure_at = SimTime::from_minutes(case_open_minute + pressure_delay);
         let witness = scenario.target_owner;
         pending_witness_pressure = Some(authorize_witness_pressure(
             &mut scenario,
@@ -819,8 +821,9 @@ pub fn play_session_with_fixture_view(
                 "[DECIDE]  A case is open and the crew's field report is back. Hold back on further street work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
             );
             println!(
-                "[DECIDE]  Watch {police_name} itself at {}, about one hour after the case opened, to read whether detectives are still actively working the matter.",
-                format_minute_of_day(heat_check_at.as_minutes())
+                "[DECIDE]  Watch {police_name} itself at {}, {} minutes after the case opened, to read whether detectives are still actively working the matter.",
+                format_minute_of_day(heat_check_at.as_minutes()),
+                heat_check_delay
             );
         }
         metrics.counterintelligence_scheduled_at = Some(heat_check_at.as_minutes());
@@ -934,49 +937,83 @@ pub fn play_session_with_fixture_view(
             let mut laundry_days = 0_u32;
             let mut last_absorbed: Option<i64> = None;
             let mut poll_days = 0_u32;
+            let mut final_purchase_beat = false;
             let mut day_at = scenario.state.now();
+            // The books decide the shape of the wait: a street-cash till can be swept day by
+            // day toward the second-district purchase, while a concealed till cannot route
+            // through a front's ledgers at all, so that world stands down on survival alone.
+            // The float's kind is fixed at establishment, so one read settles it.
+            let canal_float_kind_street = scenario
+                .state
+                .finance()
+                .get_account(
+                    scenario
+                        .state
+                        .enterprises()
+                        .get_enterprise(scenario.enterprise)
+                        .expect("canal enterprise must persist")
+                        .cash_account(),
+                )
+                .is_some_and(|account| {
+                    account.kind() == crimocracy::finance::AccountKind::StreetCash
+                });
+            let till_concealed = !canal_float_kind_street;
+            metrics.enterprise_till_concealed = Some(till_concealed);
+            if narrative && till_concealed {
+                println!(
+                    "[DECIDE]  The racket's till sits in concealed cash, and hidden money cannot touch {}'s ledgers without exposing it. With no clean money to build on, leadership holds to one job this arc: outlast the case.",
+                    scenario
+                        .state
+                        .world()
+                        .get_business(scenario.front)
+                        .expect("laundering front must persist")
+                        .name(),
+                );
+            }
             for _ in 0..40 {
                 if scenario.state.now() < day_at {
                     run_until(&mut scenario, day_at, narrative, &mut metrics)?;
                 }
-                let canal_enterprise = scenario
+                let canal_float = scenario
                     .state
                     .enterprises()
                     .get_enterprise(scenario.enterprise)
-                    .expect("canal enterprise must persist");
-                let canal_float = canal_enterprise.cash_account();
-                let float_is_street_cash = scenario
-                    .state
-                    .finance()
-                    .get_account(canal_float)
-                    .is_some_and(|account| {
-                        account.kind() == crimocracy::finance::AccountKind::StreetCash
-                    });
+                    .expect("canal enterprise must persist")
+                    .cash_account();
                 let first_laundry = laundry_days == 0;
-                if float_is_street_cash {
-                    let float_balance = scenario
+                if !till_concealed {
+                    // Sweep the racket's street-cash float each day. Cycle settlements flow
+                    // gross in and costs out through the paired settlement account, so the
+                    // float needs no positive reserve; the family treasury stays reserved
+                    // for wages. A concealed till cannot route through a front's ledgers at
+                    // all, which is why concealed-till worlds stand down on survival alone.
+                    if narrative && first_laundry {
+                        println!(
+                            "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
+                        );
+                    }
+                    let launderable = scenario
                         .state
                         .finance()
                         .get_account(canal_float)
-                        .expect("enterprise float account must persist")
-                        .balance()
-                        .cents();
-                    let launderable = (float_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0);
-                    if narrative && first_laundry && launderable > 0 {
-                        println!(
-                            "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers each day until the books can carry the harbor purchase."
-                        );
+                        .map(|account| account.balance().cents())
+                        .unwrap_or_default()
+                        .max(0);
+                    let mut day_absorbed: Option<i64> = None;
+                    if launderable > 0 {
+                        if let Some(gross) = launder_through_front(
+                            &mut scenario,
+                            narrative && first_laundry,
+                            &mut metrics,
+                            canal_float,
+                            launderable,
+                        )? {
+                            day_absorbed = Some(gross);
+                        }
                     }
-                    let absorbed = launder_through_front(
-                        &mut scenario,
-                        narrative && first_laundry,
-                        &mut metrics,
-                        canal_float,
-                        launderable,
-                    )?;
                     laundry_days += 1;
-                    if narrative && !first_laundry && absorbed != last_absorbed {
-                        match absorbed {
+                    if narrative && !first_laundry && day_absorbed != last_absorbed {
+                        match day_absorbed {
                             Some(gross) => println!(
                                 "[LAUNDER] The front's daily absorbable volume moved to {}.",
                                 format_cents(gross)
@@ -986,21 +1023,13 @@ pub fn play_session_with_fixture_view(
                             ),
                         }
                     }
-                    last_absorbed = absorbed;
-                } else if narrative && first_laundry {
-                    println!(
-                        "[LAUNDER] The club's take sits in concealed cash this cycle; it stays off {}'s books.",
-                        scenario
-                            .state
-                            .world()
-                            .get_business(scenario.front)
-                            .expect("laundering front must persist")
-                            .name(),
-                    );
+                    last_absorbed = day_absorbed;
                 }
                 // The diversification purchase: gated on accounted funds by production
-                // validation, so the beat simply retries each day until the books qualify.
-                if !metrics.front_acquired
+                // validation, so a street-till world simply retries each day until the books
+                // qualify. A concealed-till world never has clean money to attempt with.
+                if !till_concealed
+                    && !metrics.front_acquired
                     && acquire_harbor_front(&mut scenario, narrative, &mut metrics)?
                 {
                     establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
@@ -1034,8 +1063,12 @@ pub fn play_session_with_fixture_view(
                 }
                 // Daily heartbeat while the wait continues: one line carrying the channel's
                 // read (or why it was not asked) and the clean-money progress, instead of
-                // repeating full contact prose every simulated day.
-                if narrative && laundry_days > 1 && metrics.cold_case_confirmed.is_none() {
+                // repeating full contact prose every simulated day. Concealed-till worlds
+                // have no laundry counter, so their pulse keys on the wait itself.
+                if narrative
+                    && (laundry_days > 1 || till_concealed)
+                    && metrics.cold_case_confirmed.is_none()
+                {
                     let accounted = scenario
                         .state
                         .finance()
@@ -1056,8 +1089,22 @@ pub fn play_session_with_fixture_view(
                         format_cents(accounted.cents()),
                     );
                 }
-                if metrics.cold_case_confirmed == Some(true) && metrics.front_acquired {
-                    break;
+                // Once the channel carries the cooled read, one more beat gives the books a
+                // final chance to clear the price; if they never could, the arc honestly
+                // ends in survival instead of grinding wages into shortfall.
+                if metrics.cold_case_confirmed == Some(true) {
+                    if metrics.front_acquired || till_concealed {
+                        break;
+                    }
+                    if final_purchase_beat {
+                        if narrative {
+                            println!(
+                                "[DECIDE]  The case is cooled but the books never carried the price; diversification waits for another season."
+                            );
+                        }
+                        break;
+                    }
+                    final_purchase_beat = true;
                 }
                 day_at = day_at
                     + SimDuration::from_minutes(
@@ -1613,7 +1660,7 @@ pub fn run_until_operation_terminal(
     // authored content instead of a hard-coded constant that could go stale.
     let guard_anchor = record.scheduled_for().max(started_at);
     let deadline = guard_anchor
-        + SimDuration::from_minutes(authored_duration_minutes + OPERATION_WAIT_SLACK_MINUTES);
+        + SimDuration::from_minutes(authored_duration_minutes + scenario.wait_slack_minutes.max(1));
     loop {
         let status = scenario
             .state
@@ -1703,28 +1750,34 @@ pub fn run_defector_trail(
         .expect("player organization must persist")
         .name()
         .to_owned();
-    let first_rival_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.rival)
-        .expect("rival organization must persist")
-        .name()
-        .to_owned();
     if narrative {
         let departed_at = metrics
             .defection_minute
             .map(|minute| format!(" at minute {minute}"))
             .unwrap_or_default();
         println!(
-            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces; start with {first_rival_name}."
+            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces."
         );
     }
-    // The fixture has two named rivals; watch each one through the player's own surveillance. At
-    // most one rival is the true destination, so the trail confirms where the member landed while
-    // still showing absence everywhere else through the same canonical channel.
+    // The fixture has two named rivals; watch each one through the player's own surveillance.
+    // The starting choice rotates by seed so the evidence exercises both orders; at most one
+    // rival is the true destination, so the trail confirms where the member landed while still
+    // showing absence everywhere else through the same canonical channel.
     let known_rivals = [scenario.rival, scenario.second_rival];
+    let start_index = bounded_policy_choice(scenario.seed, 0x0DEF, 2) as usize;
+    let watch_order = [known_rivals[start_index], known_rivals[1 - start_index]];
+    if narrative {
+        let first_watched = scenario
+            .state
+            .world()
+            .get_organization(watch_order[0])
+            .expect("first watched rival must persist")
+            .name()
+            .to_owned();
+        println!("[DECIDE]  Start the watch with {first_watched}.");
+    }
     let mut resurfaced_at: Option<OrganizationId> = None;
-    for rival in known_rivals {
+    for rival in watch_order {
         let rival_name = scenario
             .state
             .world()
@@ -1859,9 +1912,16 @@ pub fn run_win_back_attempt(
         .expect("rival organization must persist")
         .name()
         .to_owned();
+    // The pitch's approach is evaluation-owned variation derived from the run seed: both
+    // executive channels are live production vocabulary, and the contract accepts either
+    // outcome, so rotating the approach exercises more of the scoring surface organically.
+    let approach = match bounded_policy_choice(scenario.seed, 0x5EED, 2) {
+        0 => RecruitmentApproach::PersonalAppeal,
+        _ => RecruitmentApproach::FinancialOpportunity,
+    };
     if narrative {
         println!(
-            "[DECIDE]  {boss_name} makes one personal appeal to {defector_name}: come home to {player_name}."
+            "[DECIDE]  {boss_name} makes one {approach:?} pitch to {defector_name}: come home to {player_name}."
         );
     }
     let attempt_at = scenario.state.now();
@@ -1872,7 +1932,7 @@ pub fn run_win_back_attempt(
             target_organization: scenario.player,
             recruiter: scenario.boss,
             candidate: defector,
-            approach: RecruitmentApproach::PersonalAppeal,
+            approach,
         },
     )?
     .commit(&mut scenario.state)?;
@@ -1887,7 +1947,7 @@ pub fn run_win_back_attempt(
     metrics.win_back_margin = Some(record.margin());
     if narrative {
         println!(
-            "[NARRATION] The {:?} pitch resolved at margin {}: {boss_name}'s old bond pulls one way; {defector_name}'s fresh attachment to {}'s protection and ordinary membership resistance pull the other.",
+            "[NARRATION] The {:?} pitch resolved at margin {}: {boss_name}'s old bond pulls one way; {defector_name}'s fresh attachment to {} and ordinary membership resistance pull the other.",
             record.approach(),
             record.margin(),
             rival_name,

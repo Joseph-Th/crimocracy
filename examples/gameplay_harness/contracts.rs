@@ -144,8 +144,9 @@ pub fn validate_strategy_evidence(
 
 /// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
 /// reads that the case is hot, then polls its standing police contact until the channel itself
-/// carries the shelved read - the contact's knowledge being production investigator state, not
-/// hidden case access.
+/// carries the cooled read - the contact's knowledge being production investigator state, not
+/// hidden case access. The institution may end the case either way production rules allow:
+/// quiet cases decay cold, and cases escalated into custody can close outright.
 pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
@@ -161,7 +162,7 @@ pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), Harnes
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
-            evidence: "the surfaced case must cool through the authored cold window and the player's standing police contact must confirm the shelf through a canonical disclosure",
+            evidence: "the surfaced case must end through an institutional ending (cold shelf or closure) and the player's standing police contact must confirm it through a canonical disclosure",
         })
     }
 }
@@ -293,28 +294,53 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
     })
 }
 
-/// Full-mode narrative PRESS sessions must convert the standing-down wait into wealth and
-/// governance: the branch launders day by day until its accounted books cover the venue's
-/// authored price, buys the independent harbor club outright through the canonical
-/// acquisition path (a short book must first surface as a canonical rejection), revises
-/// its mandate, capitalizes a second-district float from idle street cash, and opens a
-/// diversified enterprise that the hot home-district case cannot tax. The harbor book
-/// must also have actually earned by session end, proving the expansion is live economy,
-/// not a paper establishment.
+/// Full-mode narrative PRESS must complete the standing-down arc. The primary comparison
+/// set anchors the strict legitimate-wealth demonstration deterministically: launder day by
+/// day until the accounted books cover the venue's authored price, buy the independent
+/// harbor club outright through the canonical acquisition path (a short book must first
+/// surface as a canonical rejection), revise the mandate, capitalize a second-district
+/// float, and open a diversified enterprise the hot home case cannot tax, with positive
+/// harbor earnings by session end. Rotated sets run the same production paths on worlds
+/// whose authored economics may legitimately stall conversion (a concealed till, or a
+/// young racket whose heat-taxed float never accumulates); there the contract requires an
+/// honest ending - the cooled read confirmed through the contact channel, and if a purchase
+/// did happen, the full chain behind it.
 pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
     }
+    let concealed_till = metrics.enterprise_till_concealed == Some(true);
     let acquisition_complete = metrics.front_acquired
         && metrics.acquisition_price_cents.is_some_and(|price| price > 0)
         && metrics.acquisition_spent_cents == metrics.acquisition_price_cents.unwrap_or_default()
         // The legitimacy gate must be visible: the branch attempted the purchase before
         // its accounted books could cover the authored price at least once.
         && metrics.acquisition_rejections > 0;
-    if acquisition_complete
+    let diversified = acquisition_complete
         && metrics.expansion_established
-        && metrics.expansion_net_cents.is_some_and(|net| net > 0)
-    {
+        && metrics.expansion_net_cents.is_some_and(|net| net > 0);
+    let survived = metrics.cold_case_confirmed == Some(true) && !metrics.front_acquired;
+    if !metrics.primary_narrative_set {
+        if (diversified || survived || (metrics.front_acquired && metrics.expansion_established))
+            && metrics.cold_case_confirmed == Some(true)
+        {
+            return Ok(());
+        }
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "the rotated standing-down wait must end honestly: the cooled read confirmed, with either the survival ending or a consistent diversification chain",
+        });
+    }
+    if concealed_till {
+        if survived {
+            return Ok(());
+        }
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "a concealed-till standing-down wait must end in survival: the shelved read confirmed through the contact channel and no purchase attempted, because hidden money cannot be cleaned",
+        });
+    }
+    if diversified {
         Ok(())
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {

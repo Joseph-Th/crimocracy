@@ -10,6 +10,7 @@ use crimocracy::finance::AccountKind;
 use crimocracy::intelligence::{InformationTopic, Reliability, Specificity};
 use crimocracy::operations::{
     OperationAbortCause, OperationAbortPhase, OperationKind, OperationObjectiveOutcome,
+    ALL_OPERATION_KINDS,
 };
 use crimocracy::registry::Registry;
 use crimocracy::social::RelationshipLevel;
@@ -21,11 +22,45 @@ pub const DEFAULT_BATCH_SAMPLES: u64 = 3;
 pub const MAX_BATCH_SAMPLES: u64 = 64;
 pub const DEFAULT_SEED: u64 = 0x1933_0514;
 pub const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
-/// Minutes of slack added to each operation's authored duration to form the terminal-wait guard,
-/// staying registry-derived instead of a hard-coded window that could go stale as authors add
-/// longer operations. The guard uses the per-operation duration plus this slack, which is sized
-/// to cover police arrival variance and decision deferral for the longest authored operation.
-pub const OPERATION_WAIT_SLACK_MINUTES: u32 = 240;
+/// Narrative comparisons rotate across this many adjacent seeds, covering every authored
+/// fixture variation while matched branches inside one seed still share one world.
+pub const NARRATIVE_SEED_ROTATION: u64 = 3;
+
+/// Bounded deterministic policy choice for evaluation-owned variation. This is not a game
+/// rule: it keeps controlled treatments from replaying one exact decision sequence forever
+/// while staying fully determined by the run seed. The splitmix-style finalizer avalanches
+/// all bits, so adjacent seeds diverge in every choice rather than only in high bits.
+pub fn bounded_policy_choice(seed: u64, salt: u64, choices: u64) -> u64 {
+    if choices == 0 {
+        return 0;
+    }
+    let mut mixed = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(salt.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^= mixed >> 31;
+    mixed % choices
+}
+
+/// Longest authored operation duration plus a fixed margin, so the terminal-wait guard in
+/// [`crate::session`] tracks authored content instead of a constant that could go stale as
+/// authors add longer operations.
+pub fn operation_wait_slack_minutes(registry: &Registry) -> u32 {
+    ALL_OPERATION_KINDS
+        .iter()
+        .map(|kind| {
+            registry
+                .get_operation(*kind)
+                .execution()
+                .duration()
+                .as_minutes()
+        })
+        .max()
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessMode {
@@ -512,6 +547,12 @@ pub struct Scenario<'registry> {
     pub investigation: Option<crimocracy::core::id::InvestigationId>,
     pub variation: FixtureVariation,
     pub timeline: ScenarioTimeline,
+    /// The run seed this scenario was built from: evaluation-owned policy variation (timing
+    /// offsets, approach choices, watch order) derives from it, never from hidden game state.
+    pub seed: u64,
+    /// Registry-derived slack for the terminal-wait guard: the longest authored operation
+    /// duration, so the guard tracks content instead of a hard-coded constant.
+    pub wait_slack_minutes: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -616,6 +657,15 @@ pub struct RunMetrics {
     // legally hot.
     pub expansion_enterprise: Option<EnterpriseId>,
     pub expansion_established: bool,
+    /// Whether this session ran in the primary narrative comparison set. The strict
+    /// legitimate-wealth demonstration is anchored there so every full run proves the
+    /// chain deterministically; rotated sets accept whatever ending their authored
+    /// economy honestly produced.
+    pub primary_narrative_set: bool,
+    /// Whether this session's racket float is authored as concealed cash. Concealed money
+    /// cannot route through a front's ledgers, so a concealed-till PRESS world legitimately
+    /// ends its standing-down wait in survival rather than clean-money diversification.
+    pub enterprise_till_concealed: Option<bool>,
     pub expansion_net_cents: Option<i64>,
     /// True once the branch purchased the harbor venue through the canonical acquisition
     /// path: ownership moved, and accounted funds paid the authored price in full.

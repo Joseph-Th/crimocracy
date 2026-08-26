@@ -134,68 +134,109 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!(
         "Observation windows: narrative sessions run for two simulated days; matched batches run for one day to keep sensitivity evidence bounded.\n"
     );
-    println!("Narrative comparison uses seed {seed:#x}.\n");
+    println!(
+        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent seeds so every authored fixture variation gets exercised; matched branches inside one seed share one world.\n"
+    );
 
-    println!("--- CONTROLLED SESSION: RUSH ---");
-    let rush = play_session(
-        &registry,
-        Strategy::Rush,
-        ScenarioProfile::NightTrap,
-        seed,
-        true,
-        true,
-    )?;
-    println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
-    let press = play_session_with_fixture_view(
-        &registry,
-        Strategy::Press,
-        ScenarioProfile::NightTrap,
-        seed,
-        true,
-        true,
-        false,
-    )?;
-    println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
-    let recon = play_session_with_fixture_view(
-        &registry,
-        Strategy::Recon,
-        ScenarioProfile::NightTrap,
-        seed,
-        true,
-        true,
-        false,
-    )?;
+    let mut narrative_sets: Vec<(u64, RunMetrics, RunMetrics, RunMetrics)> =
+        Vec::with_capacity(NARRATIVE_SEED_ROTATION as usize);
+    for offset in 0..NARRATIVE_SEED_ROTATION {
+        let narrative_seed = seed.wrapping_add(offset);
+        let deep_readout = offset == 0;
+        println!(
+            "\n=== NARRATIVE COMPARISON SET {} of {NARRATIVE_SEED_ROTATION}: seed {narrative_seed:#x} ===",
+            offset + 1
+        );
+        println!("\n--- CONTROLLED SESSION: RUSH ---");
+        let mut rush = play_session(
+            &registry,
+            Strategy::Rush,
+            ScenarioProfile::NightTrap,
+            narrative_seed,
+            true,
+            true,
+        )?;
+        println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
+        let mut press = play_session_with_fixture_view(
+            &registry,
+            Strategy::Press,
+            ScenarioProfile::NightTrap,
+            narrative_seed,
+            true,
+            true,
+            false,
+        )?;
+        println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
+        let mut recon = play_session_with_fixture_view(
+            &registry,
+            Strategy::Recon,
+            ScenarioProfile::NightTrap,
+            narrative_seed,
+            true,
+            true,
+            false,
+        )?;
+        if deep_readout {
+            rush.primary_narrative_set = true;
+            press.primary_narrative_set = true;
+            recon.primary_narrative_set = true;
+        }
 
-    println!("\n--- SAME-SCENARIO READOUT ---");
-    validate_run_metrics(&rush, true)?;
-    validate_run_metrics(&press, true)?;
-    validate_run_metrics(&recon, true)?;
-    validate_night_trap_evidence(&rush)?;
-    validate_night_trap_evidence(&press)?;
-    validate_night_trap_evidence(&recon)?;
-    validate_press_consequence_arc(&press)?;
-    validate_press_witness_counterplay(&press)?;
-    validate_press_expansion_evidence(&press)?;
-    validate_defector_trail_evidence(&rush)?;
-    validate_defector_trail_evidence(&press)?;
-    validate_defector_trail_evidence(&recon)?;
-    validate_win_back_evidence(&rush)?;
-    validate_win_back_evidence(&press)?;
-    validate_win_back_evidence(&recon)?;
-    validate_second_act_evidence(&rush)?;
-    validate_second_act_evidence(&press)?;
-    validate_second_act_evidence(&recon)?;
-    print_metrics(&rush);
-    print_metrics(&press);
-    print_metrics(&recon);
+        println!("\n--- SAME-SCENARIO READOUT (seed {narrative_seed:#x}) ---");
+        validate_run_metrics(&rush, true)?;
+        validate_run_metrics(&press, true)?;
+        validate_run_metrics(&recon, true)?;
+        validate_night_trap_evidence(&rush)?;
+        validate_night_trap_evidence(&press)?;
+        validate_night_trap_evidence(&recon)?;
+        validate_press_consequence_arc(&press)?;
+        validate_press_witness_counterplay(&press)?;
+        validate_press_expansion_evidence(&press)?;
+        validate_defector_trail_evidence(&rush)?;
+        validate_defector_trail_evidence(&press)?;
+        validate_defector_trail_evidence(&recon)?;
+        validate_win_back_evidence(&rush)?;
+        validate_win_back_evidence(&press)?;
+        validate_win_back_evidence(&recon)?;
+        validate_second_act_evidence(&rush)?;
+        validate_second_act_evidence(&press)?;
+        validate_second_act_evidence(&recon)?;
+        validate_branch_financial_isolation(&rush, &press, &recon)?;
+        println!(
+            "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects."
+        );
+        if deep_readout {
+            print_metrics(&rush);
+            print_metrics(&press);
+            print_metrics(&recon);
+        } else {
+            for metrics in [&rush, &press, &recon] {
+                println!(
+                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act 2 worked {}",
+                    metrics.strategy.expect("strategy must be set").label(),
+                    terminal_label(metrics),
+                    metrics.police_arrived,
+                    metrics.session_case_staffed,
+                    metrics.player_personnel_departures,
+                    metrics.win_back_accepted,
+                    metrics.second_burglary.is_some(),
+                );
+            }
+        }
+        narrative_sets.push((narrative_seed, rush, press, recon));
+    }
+
+    let (_, rush, press, recon) = narrative_sets
+        .first()
+        .expect("at least one narrative set must run");
+    let rush = rush.clone();
+    let press = press.clone();
+    let recon = recon.clone();
+
     println!("\n--- VICE HEAT PROBE ---");
     // Reaching the readout proves the vice-attention chain: the probe fails the run otherwise.
     run_vice_attention_probe(&registry, seed)?;
     print_experience_readout(&rush, &press, &recon, true);
-    validate_branch_financial_isolation(&rush, &press, &recon)?;
-    println!(
-        "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects: PRESS paid the Canal District heat surcharge while hot, and its post-window Harbor District expansion earned surcharge-free income outside Central Precinct's jurisdiction."
-    );
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
     run_opportunity_portfolio_probe(&registry, seed)?;
@@ -285,11 +326,11 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
-        run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
+        bounded_policy_choice, choose_safe_start_from_patrol_report, parse_options,
+        parse_patrol_windows, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
         validate_branch_financial_isolation, validate_press_witness_counterplay, FixtureVariation,
         HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions, RunMetrics,
-        ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED,
+        ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED, NARRATIVE_SEED_ROTATION,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::operations::OperationObjectiveOutcome;
@@ -515,6 +556,32 @@ mod tests {
             clockwork.neighborhood_economy(),
             quiet.neighborhood_economy(),
         );
+    }
+
+    #[test]
+    fn narrative_seed_rotation_covers_every_authored_variation() {
+        let variations: std::collections::BTreeSet<_> = (0..NARRATIVE_SEED_ROTATION)
+            .map(|offset| FixtureVariation::from_seed(DEFAULT_SEED.wrapping_add(offset)))
+            .collect();
+        assert_eq!(
+            variations.len() as u64,
+            NARRATIVE_SEED_ROTATION,
+            "the narrative rotation must exercise every authored fixture variation"
+        );
+    }
+
+    #[test]
+    fn policy_choice_avalanches_across_adjacent_seeds_and_salts() {
+        // Adjacent seeds must not replay one decision sequence: over a window of eight
+        // seeds both binary outcomes must appear, and different salts must not agree.
+        let outcomes: Vec<u64> = (0..8)
+            .map(|offset| bounded_policy_choice(DEFAULT_SEED + offset, 0x5EED, 2))
+            .collect();
+        assert!(outcomes.contains(&0) && outcomes.contains(&1));
+        let other_salt: Vec<u64> = (0..8)
+            .map(|offset| bounded_policy_choice(DEFAULT_SEED + offset, 0x0DEF, 2))
+            .collect();
+        assert_ne!(outcomes, other_salt);
     }
 
     #[test]
