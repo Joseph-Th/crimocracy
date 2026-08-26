@@ -283,13 +283,15 @@ pub fn observe_tick(
                 attempt.outcome(),
             );
             println!(
-                "[DEV AUDIT] Recruitment factors: drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, perceived legal pressure {}, membership resistance {}, trait adjustment {}.",
+                "[DEV AUDIT] Recruitment factors: recruiter influence {}, drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, perceived legal pressure {}, membership resistance {}, organization competence {}, trait adjustment {}.",
+                attempt.factors().recruiter_influence(),
                 attempt.factors().drive_alignment(),
                 attempt.factors().relationship_support(),
                 attempt.factors().incumbent_attachment(),
                 attempt.factors().incumbent_resentment(),
                 attempt.factors().perceived_legal_pressure(),
                 attempt.factors().membership_resistance(),
+                attempt.factors().organization_competence(),
                 attempt.factors().trait_adjustment(),
             );
             narrate_recruitment_causality(scenario, metrics, attempt, candidate);
@@ -472,13 +474,45 @@ pub fn observe_tick(
                 resolution.exposure().level(),
             );
         }
-        if !outcome.business_cycles.is_empty() || !outcome.enterprise_cycles.is_empty() {
-            println!(
-                "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s).",
-                stamp(outcome.now.as_minutes()),
-                outcome.business_cycles.len(),
-                outcome.enterprise_cycles.len(),
-            );
+        if !outcome.business_cycles.is_empty()
+            || !outcome.enterprise_cycles.is_empty()
+            || outcome.executive_brief.is_some()
+        {
+            // Routine world beats stay quiet unless something above routine attention
+            // happened: repeating identical all-quiet lines every simulated day buries the
+            // actual story beats. Notable cycle reports print below; brief contents appear in
+            // the closing recap.
+            let player_notable_cycle = outcome.enterprise_cycles.iter().any(|cycle_id| {
+                scenario
+                    .state
+                    .enterprises()
+                    .get_cycle(*cycle_id)
+                    .is_some_and(|cycle| {
+                        cycle.attention() == AttentionClass::Notable
+                            && scenario
+                                .state
+                                .enterprises()
+                                .get_enterprise(cycle.enterprise())
+                                .is_some_and(|record| record.organization() == scenario.player)
+                    })
+            });
+            let brief_deserves_attention = outcome
+                .executive_brief
+                .and_then(|report| scenario.state.reports().get_report(report))
+                .is_some_and(|report| {
+                    report
+                        .entries()
+                        .iter()
+                        .any(|entry| !matches!(entry.attention, AttentionClass::Routine))
+                });
+            if player_notable_cycle || brief_deserves_attention {
+                println!(
+                    "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s); daily brief delivered.",
+                    stamp(outcome.now.as_minutes()),
+                    outcome.business_cycles.len(),
+                    outcome.enterprise_cycles.len(),
+                );
+            }
         }
         // A notable cycle carries its manager's report as organization-held information; the
         // narrative surfaces it so heat-driven cost pressure is legible when it happens. Only
@@ -526,19 +560,6 @@ pub fn observe_tick(
                     vice_summary,
                 );
             }
-        }
-        if let Some(report) = outcome.executive_brief {
-            let report = scenario
-                .state
-                .reports()
-                .get_report(report)
-                .expect("executive brief must persist");
-            println!(
-                "[BRIEF GENERATED] {}: executive brief with {} player-visible entr{}; full brief appears in the final recap.",
-                stamp(outcome.now.as_minutes()),
-                report.entries().len(),
-                if report.entries().len() == 1 { "y" } else { "ies" },
-            );
         }
     }
     if tick_changed_observable_state(outcome) {

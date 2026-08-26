@@ -353,7 +353,7 @@ pub fn print_final_case_audit(scenario: &Scenario, burglary: OperationId) {
 }
 
 /// The closing counterpart to the starting player view: what the organization actually looks
-/// like after the session, assembled only from state a boss can see — roster, mandates,
+/// like after the session, assembled only from state a boss can see - roster, mandates,
 /// holdings, and the reports the organization received. Hidden case state stays in the audit
 /// lines above.
 pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics) {
@@ -877,7 +877,12 @@ pub fn optional_minute(value: Option<u64>) -> String {
     value.map_or_else(|| "-".to_owned(), |minute| format!("{minute}m"))
 }
 
-pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &RunMetrics) {
+pub fn print_experience_readout(
+    rush: &RunMetrics,
+    press: &RunMetrics,
+    recon: &RunMetrics,
+    vice_demonstrated: bool,
+) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
         "The core fantasy tested here is: learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
@@ -959,7 +964,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
     print_loop_checkpoint(
         "own heat",
         recon.self_heat_case_opened && recon.self_heat_case_active == Some(true),
-        "casing carries risk both ways: after the organization's own surveillance draws a case, it reads that case through its standing police contact — no extra street exposure, provenance-bearing disclosure",
+        "casing carries risk both ways: after the organization's own surveillance draws a case, it reads that case through its standing police contact - no extra street exposure, provenance-bearing disclosure",
     );
     print_loop_checkpoint(
         "witness chain",
@@ -971,7 +976,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
     print_loop_checkpoint(
         "counterplay",
         press.witness_pressure_attempted,
-        "the organization can answer a witness with one canonical pressure operation — it lands and discounts his cooperation, or a police response forces a disciplined walk-away with no second case",
+        "the organization can answer a witness with one canonical pressure operation - it lands and discounts his cooperation, or a police response forces a disciplined walk-away with no second case",
     );
     print_loop_checkpoint(
         "discipline cost",
@@ -1082,11 +1087,12 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
     print_loop_checkpoint(
         "legit wealth",
         wealth_loop_shown,
-        "accounted wealth converts into an owned legitimate asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket — the money loop closes",
+        "accounted wealth converts into an owned legitimate asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
     );
-    let any_vice = [rush, press, recon]
-        .iter()
-        .any(|run| run.vice_inquiries_drawn > 0);
+    let any_vice = vice_demonstrated
+        || [rush, press, recon]
+            .iter()
+            .any(|run| run.vice_inquiries_drawn > 0);
     print_loop_checkpoint(
         "vice heat",
         any_vice,
@@ -1101,7 +1107,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         terminal_label(rush),
     );
     println!(
-        "  - Information risk: RECON's own casing can be made — surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}; the branch then reads that self-inflicted case through its police contact rather than more street work (own-heat read: {:?}).",
+        "  - Information risk: RECON's own casing can be made - surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}; the branch then reads that self-inflicted case through its police contact rather than more street work (own-heat read: {:?}).",
         if recon.session_case_staffed && !recon.investigation_created {
             "; this fixture's recon run drew exactly that kind of case from its own surveillance"
         } else {
@@ -1146,7 +1152,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
-        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed — not desire — limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
+        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed - not desire - limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
         optional_cents(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections
@@ -1154,7 +1160,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         optional_dollars(press.acquisition_price_cents),
     );
     println!(
-        "  - Visibility leverage: the branches drew {} vice inquiries this comparison. Every cycle a racket runs under active district casework risks a dedicated inquiry on the racket itself, taxing every book in that district — including rivals' — until the case shelves; going dark or moving districts are the honest counters.",
+        "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Going dark or moving districts are the honest counters.",
         rush.vice_inquiries_drawn + press.vice_inquiries_drawn + recon.vice_inquiries_drawn,
     );
     println!("Current experience gaps exposed by this fixture:");
@@ -1165,7 +1171,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
     );
     println!(
-        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways — surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
+        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways - surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
     );
     println!(
         "  - The delegation pillar now carries real weight in the narrative arc: PRESS must own its second-district venue before anything can be established there, so the arc runs acquisition -> mandate revision -> enterprise establishment through canonical paths. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."

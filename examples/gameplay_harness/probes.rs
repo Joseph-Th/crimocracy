@@ -12,7 +12,9 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crimocracy::intelligence::InformationTopic;
+use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
+use crimocracy::legal::investigation_system::validate_incident_intake;
+use crimocracy::legal::jurisdiction_system::resolve_case_intake_authority;
 use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
 use crimocracy::legal::prosecution_system::{
     validate_decline_prosecution_case, validate_open_prosecution_case,
@@ -20,8 +22,8 @@ use crimocracy::legal::prosecution_system::{
 use crimocracy::legal::witness_system::validate_register_case_witness;
 use crimocracy::legal::{
     Admissibility, ArrestDraft, CaseWitnessDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
-    EvidenceStrength, InvestigationDraft, LegalRepresentationDraft, ProsecutionCaseDraft,
-    WitnessCooperation,
+    EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
+    LegalRepresentationDraft, ProsecutionCaseDraft, WitnessCooperation,
 };
 use crimocracy::operations::operation_system::{validate_authorize_operation, OperationError};
 use crimocracy::operations::{
@@ -206,6 +208,202 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         format_cents(third_take)
     );
     validate_harness_state(registry, &scenario.state)?;
+    Ok(())
+}
+
+/// Proves the vice-attention consequence loop end to end through production paths, the way a
+/// boss experiences it: a racket run in a clean district never draws a dedicated inquiry; a
+/// district under sustained originated casework first taxes every cycle with a compounding
+/// street-heat surcharge, and then converts into a vice inquiry opened on the racket itself,
+/// delivered to the organization as provenance-bearing legal knowledge. The casework is
+/// originated through the canonical incident-intake path; the conversion itself is authored
+/// per-cycle visibility math, so the probe originates enough parallel cases to push the
+/// authored chance to certainty instead of asserting a lucky roll.
+pub fn run_vice_attention_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let enterprise_id = scenario.enterprise;
+    let target = scenario.target;
+    let neighborhood = scenario.neighborhood;
+    let enterprise_name = scenario
+        .state
+        .enterprises()
+        .get_enterprise(enterprise_id)
+        .map(|record| enterprise_label(&scenario, record.id()))
+        .expect("probe enterprise must persist");
+    let mut metrics = RunMetrics {
+        strategy: Some(Strategy::Recon),
+        variation: Some(scenario.variation),
+        ..RunMetrics::default()
+    };
+
+    // Control cycle: with no active originated casework targeting the district, the visibility
+    // roll is unspent by construction - a clean district can never fabricate attention.
+    let next_cycle_at = scenario
+        .state
+        .enterprises()
+        .get_enterprise(enterprise_id)
+        .and_then(|record| record.next_cycle_at())
+        .ok_or("vice-probe enterprise must have a scheduled first cycle")?;
+    run_until(&mut scenario, next_cycle_at, false, &mut metrics)?;
+    let control_cycle = scenario
+        .state
+        .enterprises()
+        .cycles_for(enterprise_id)
+        .last()
+        .expect("control cycle must settle");
+    if control_cycle.drew_vice_attention() || control_cycle.investigation_heat() != Money::ZERO {
+        return Err("clean-district control cycle drew attention; the vice contract requires clean districts to stay clean".into());
+    }
+    println!(
+        "[VICE CONTROL] {}: {} settled a clean-district cycle (net {}) with no street surcharge and no inquiry.",
+        stamp(control_cycle.occurred_at().as_minutes()),
+        enterprise_name,
+        format_cents(control_cycle.net_cash().cents()),
+    );
+
+    // Originate enough parallel district cases through canonical intake that the authored
+    // per-case conversion rate reaches certainty on the racket's next cycle.
+    let per_case_bp = u32::from(
+        registry
+            .get_enterprise(
+                scenario
+                    .state
+                    .enterprises()
+                    .get_enterprise(enterprise_id)
+                    .expect("probe enterprise must persist")
+                    .kind(),
+            )
+            .economics()
+            .vice_attention_basis_points_per_active_case(),
+    );
+    let needed_cases = 10_000_u32.div_ceil(per_case_bp);
+    let authority = resolve_case_intake_authority(&scenario.state, neighborhood)
+        .ok_or("the scenario district must have a case-intake authority")?;
+    for index in 0..needed_cases {
+        validate_incident_intake(
+            &scenario.state,
+            IncidentIntakeDraft {
+                owner: authority,
+                title: format!(
+                    "Street incident {index} near {}",
+                    scenario.variation.target_name()
+                ),
+                subjects: BTreeSet::from([EntityRef::Business(target)]),
+                evidence: vec![IncidentEvidenceDraft {
+                    subject: EntityRef::Business(target),
+                    origin: None,
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: scenario.state.now(),
+                }],
+                origin: Some(EntityRef::Enterprise(enterprise_id)),
+                // An originated case must surface to the organization whose activity opened
+                // it - the same production rule a real vice inquiry follows.
+                notified_organizations: BTreeSet::from([scenario.player]),
+                witness: None,
+            },
+        )?
+        .commit(&mut scenario.state)?;
+    }
+    let surcharge_per_case = registry
+        .get_enterprise(
+            scenario
+                .state
+                .enterprises()
+                .get_enterprise(enterprise_id)
+                .expect("probe enterprise must persist")
+                .kind(),
+        )
+        .economics()
+        .heat_surcharge_per_active_case()
+        .cents();
+    println!(
+        "[VICE HEAT] {} originated case(s) now target the racket's district; the next cycle pays {} of compounded street heat.",
+        needed_cases,
+        format_cents(surcharge_per_case * i64::from(needed_cases)),
+    );
+
+    // The heated cycle: the surcharge compounds per active case and the visibility roll is
+    // guaranteed, so this settlement must open the inquiry and surface organization knowledge.
+    let heated_cycle_at = scenario
+        .state
+        .enterprises()
+        .get_enterprise(enterprise_id)
+        .and_then(|record| record.next_cycle_at())
+        .ok_or("heated probe enterprise must remain scheduled")?;
+    run_until(&mut scenario, heated_cycle_at, false, &mut metrics)?;
+    let heated_cycle = scenario
+        .state
+        .enterprises()
+        .cycles_for(enterprise_id)
+        .last()
+        .expect("heated cycle must settle");
+    if !heated_cycle.drew_vice_attention() {
+        return Err(format!(
+            "sustained casework at certainty did not draw a vice inquiry: {} active case(s), roll margin {}bp/case",
+            needed_cases, per_case_bp
+        )
+        .into());
+    }
+    if heated_cycle.investigation_heat().cents() != surcharge_per_case * i64::from(needed_cases) {
+        return Err(format!(
+            "heated cycle surcharge {} did not compound the authored per-case rate over {needed_cases} case(s)",
+            format_cents(heated_cycle.investigation_heat().cents()),
+        )
+        .into());
+    }
+    let inquiry_knowledge = scenario
+        .state
+        .intelligence()
+        .information_for_holder_by_topic(
+            KnowledgeHolder::Organization(scenario.player),
+            InformationTopic::LegalActivity,
+        )
+        .find(|information| information.subject() == EntityRef::Enterprise(enterprise_id))
+        .map(|record| record.summary().to_owned());
+    let Some(inquiry_knowledge) = inquiry_knowledge else {
+        return Err(
+            "a drawn vice inquiry must surface as organization-held legal-activity knowledge"
+                .into(),
+        );
+    };
+    let manager_report = heated_cycle
+        .information()
+        .and_then(|information| scenario.state.intelligence().get_information(information))
+        .map(|record| record.summary().to_owned())
+        .unwrap_or_else(|| "cycle report missing".to_owned());
+    println!(
+        "[VICE DRAW] {}: the racket's cycle under sustained casework paid {} of street heat (net {}) and drew a dedicated inquiry.",
+        stamp(heated_cycle.occurred_at().as_minutes()),
+        format_cents(heated_cycle.investigation_heat().cents()),
+        format_cents(heated_cycle.net_cash().cents()),
+    );
+    println!("[ENTERPRISE] {manager_report}");
+    println!("[VICE HEAT]  {inquiry_knowledge}");
+    // The inquiry itself must be real institutional state owned by the intake authority,
+    // linked back to the racket as an originated case.
+    let inquiry_on_racket = scenario
+        .state
+        .legal()
+        .investigations_for_owner(authority)
+        .any(|investigation| {
+            investigation.status() == crimocracy::legal::InvestigationStatus::Active
+                && investigation.origin() == Some(EntityRef::Enterprise(enterprise_id))
+                && investigation
+                    .subjects()
+                    .contains(&EntityRef::Enterprise(enterprise_id))
+        });
+    if !inquiry_on_racket {
+        return Err(
+            "a drawn vice inquiry must exist as an active originated case on the racket".into(),
+        );
+    }
+    validate_harness_state(registry, &scenario.state)?;
+    println!(
+        "[VICE PASS] clean districts stay clean; sustained casework taxes cycles, then opens a dedicated inquiry the organization hears about through its own manager."
+    );
     Ok(())
 }
 
@@ -463,7 +661,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
 
     // Witness-counterplay segment: the case names a cooperative on-scene witness, leadership
     // runs one canonical WitnessPressure operation against him, and production rules degrade
-    // his registered cooperation — the discount any later testimony is weighed by.
+    // his registered cooperation - the discount any later testimony is weighed by.
     let shopkeeper = insert_character(
         &mut state,
         CharacterDraft {

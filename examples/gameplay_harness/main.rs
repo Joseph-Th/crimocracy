@@ -188,7 +188,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     print_metrics(&rush);
     print_metrics(&press);
     print_metrics(&recon);
-    print_experience_readout(&rush, &press, &recon);
+    println!("\n--- VICE HEAT PROBE ---");
+    // Reaching the readout proves the vice-attention chain: the probe fails the run otherwise.
+    run_vice_attention_probe(&registry, seed)?;
+    print_experience_readout(&rush, &press, &recon, true);
     validate_branch_financial_isolation(&rush, &press, &recon)?;
     println!(
         "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects: PRESS paid the Canal District heat surcharge while hot, and its post-window Harbor District expansion earned surcharge-free income outside Central Precinct's jurisdiction."
@@ -283,10 +286,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
-        run_opportunity_portfolio_probe, run_smoke, validate_branch_financial_isolation,
-        validate_press_witness_counterplay, FixtureVariation, HarnessCliError,
-        HarnessContractError, HarnessMode, HarnessOptions, RunMetrics, ScenarioProfile,
-        ScenarioTimeline, Strategy, DEFAULT_SEED,
+        run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
+        validate_branch_financial_isolation, validate_press_witness_counterplay, FixtureVariation,
+        HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions, RunMetrics,
+        ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::operations::OperationObjectiveOutcome;
@@ -485,6 +488,12 @@ mod tests {
     fn portfolio_probe_requires_explicit_opportunity_prioritization() {
         run_opportunity_portfolio_probe(&crimocracy::build_registry(), DEFAULT_SEED)
             .expect("portfolio probe should preserve selected and expired opportunities");
+    }
+
+    #[test]
+    fn vice_heat_probe_proves_clean_districts_stay_clean_and_casework_converts() {
+        run_vice_attention_probe(&crimocracy::build_registry(), DEFAULT_SEED)
+            .expect("vice-attention probe should prove the sustained-casework conversion chain");
     }
 
     #[test]

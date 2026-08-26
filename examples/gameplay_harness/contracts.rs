@@ -48,8 +48,8 @@ pub fn validate_run_metrics(
         });
     }
     // The money state contract: whatever the organization routed through its front's books
-    // must reconcile exactly — accounted funds are gross minus the front's authored fee,
-    // minus anything already spent on legitimate acquisitions — and a branch that
+    // must reconcile exactly - accounted funds are gross minus the front's authored fee,
+    // minus anything already spent on legitimate acquisitions - and a branch that
     // liquidated stolen property must have laundered those proceeds rather than leaving
     // organizational value in exposed street cash.
     if let Some(balance) = metrics.accounted_balance_cents {
@@ -144,7 +144,7 @@ pub fn validate_strategy_evidence(
 
 /// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
 /// reads that the case is hot, then polls its standing police contact until the channel itself
-/// carries the shelved read — the contact's knowledge being production investigator state, not
+/// carries the shelved read - the contact's knowledge being production investigator state, not
 /// hidden case access.
 pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
@@ -194,9 +194,9 @@ pub fn validate_defector_trail_evidence(metrics: &RunMetrics) -> Result<(), Harn
 
 /// Full-mode narrative sessions must close the personnel loop end to end: whenever a departure
 /// actually happened and the defector trail confirmed a landing spot, leadership must make the
-/// one canonical executive re-approach. A refused re-approach must surface its intelligence cost
-/// — the production loyalty report the rival receives naming our recruiter. A session without a
-/// departure must not fabricate a win-back.
+/// one canonical executive re-approach. A refused re-approach must surface its intelligence
+/// cost (the production loyalty report the rival receives naming our recruiter). A session
+/// without a departure must not fabricate a win-back.
 pub fn validate_win_back_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     let strategy = metrics
         .strategy

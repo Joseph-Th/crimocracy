@@ -1,4 +1,4 @@
-﻿//! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
+//! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
 
 use crimocracy::contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft};
 use crimocracy::core::entity::EntityRef;
@@ -900,7 +900,7 @@ pub fn authorize_burglary(
 /// a quiet Frighten operation against the on-scene witness. Production resolution degrades
 /// the witness's registered cooperation on every active case run by another authority, which
 /// discounts any testimony they later give. The organization sends the lieutenant who actually
-/// carries the intimidation capability — leadership coordination alone does not frighten anyone.
+/// carries the intimidation capability - leadership coordination alone does not frighten anyone.
 pub fn authorize_witness_pressure(
     scenario: &mut Scenario,
     witness: CharacterId,
@@ -1103,7 +1103,7 @@ pub fn establish_harbor_expansion(
 /// The PRESS diversification purchase: the harbor club starts independently owned, and
 /// hosting a racket requires owning the venue, so the branch must buy it outright through
 /// the canonical acquisition path. The purchase is gated on accounted funds by production
-/// validation — street cash cannot buy legitimacy — so while the books are short, the
+/// validation - street cash cannot buy legitimacy - so while the books are short, the
 /// attempt is recorded (once) as player-visible rejection evidence and retried on a later
 /// day. Returns true once the club belongs to the organization.
 pub fn acquire_harbor_front(

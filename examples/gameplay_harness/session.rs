@@ -33,14 +33,15 @@ use crate::*;
 
 /// The standing police-contact channel, used the way a player uses it: ask the handler what the
 /// contact can tell us, then hear one fresh item through the canonical disclosure path. Returns
-/// the parsed case-activity sightline when the disclosure carried one. The acting policy never
-/// enumerates hidden knowledge — `find_pending_disclosure_sources` exposes only what the channel
-/// itself offers, and everything the organization learns arrives as a derived information record.
+/// the parsed case-activity sightline plus the disclosed summary so callers can quote a changed
+/// read even on days they suppress full narration. The acting policy never enumerates hidden
+/// knowledge - `find_pending_disclosure_sources` exposes only what the channel itself offers,
+/// and everything the organization learns arrives as a derived information record.
 pub fn read_police_contact(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
-) -> Result<Option<bool>, Box<dyn Error>> {
+) -> Result<Option<(bool, String)>, Box<dyn Error>> {
     let sources = find_pending_disclosure_sources(&scenario.state, scenario.police_contact);
     let Some(source) = sources.into_iter().find(|source| {
         scenario
@@ -85,6 +86,7 @@ pub fn read_police_contact(
         .get_information(disclosed)
         .expect("disclosed contact information must persist");
     let read = observe_authority_case_sightline_summary(record.summary());
+    let summary = record.summary().to_owned();
     if narrative {
         println!(
             "[LEARN]   {:?} / {:?}: {}",
@@ -93,7 +95,7 @@ pub fn read_police_contact(
             record.summary()
         );
     }
-    Ok(read)
+    Ok(read.map(|sightline| (sightline, summary)))
 }
 
 /// Working capital the racket's till keeps while its take is being laundered day by day.
@@ -101,8 +103,8 @@ pub const LAUNDERING_FLOAT_FLOOR_CENTS: i64 = 5_000;
 
 /// Runs street cash through an owned cash-intensive front's books via the canonical
 /// laundering path. The organization asks for the full amount first; a capacity rejection is
-/// player-visible accounting information — the front's books can only plausibly absorb an
-/// authored share of its legitimate volume per cycle — so the beat launders what fits and
+/// player-visible accounting information - the front's books can only plausibly absorb an
+/// authored share of its legitimate volume per cycle - so the beat launders what fits and
 /// leaves the rest where it sits. Returns the committed gross amount, if any.
 pub fn launder_through_front(
     scenario: &mut Scenario,
@@ -237,7 +239,7 @@ fn capture_witness_pressure_outcome(
     }
     if record.status() == OperationStatus::Aborted && narrative {
         println!(
-            "[DECIDE]  A response was coming; the crew walked away. Quiet work in a watched district is not free — leadership leaves the witness alone rather than risk another case."
+            "[DECIDE]  A response was coming; the crew walked away. Quiet work in a watched district is not free - leadership leaves the witness alone rather than risk another case."
         );
     }
     if let Some(investigation) = scenario.investigation {
@@ -706,7 +708,7 @@ pub fn play_session_with_fixture_view(
 
     // Audit facts about the witness chain, captured from production records the way every
     // other audit metric is: whether the case named its on-scene witness at intake. Acting
-    // policy never reads this — the organization only knows the job "was witnessed" from its
+    // policy never reads this - the organization only knows the job "was witnessed" from its
     // own after-action report.
     if let Some(investigation) = scenario.investigation {
         metrics.case_witness_registered = scenario
@@ -721,7 +723,7 @@ pub fn play_session_with_fixture_view(
     // chain honestly when no narrative beat runs.
 
     // The Press answer to a witnessed job is not only patience: leadership leans once on the
-    // shop's owner — public knowledge who that is. But not at three in the morning: the crew
+    // shop's owner - public knowledge who that is. But not at three in the morning: the crew
     // itself just reported how fast Central Precinct moves in this district overnight, so the
     // quiet word waits for the first morning lull after the case opens. It carries its own
     // exposure risk like any street work.
@@ -807,9 +809,9 @@ pub fn play_session_with_fixture_view(
             .expect("press consequence arc requires the surfaced case-open minute");
         let cold_window_for_heat_check =
             scenario.registry.legal().cold_case_window().as_minutes() as u64;
-        // Heat check lands well inside the authored cold window: ~1/36th of the window
-        // (â‰ˆ60m for the current 2160m window) bounded to [30,90] so it never drifts outside
-        // if authors tune the window.
+        // Heat check lands well inside the authored cold window (about 1/36th of it, bounded
+        // to [30,90] minutes) so the read always precedes any possible shelf no matter how
+        // authors tune the window.
         let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
         let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay);
         if narrative {
@@ -862,8 +864,8 @@ pub fn play_session_with_fixture_view(
         }
         // The narrative session stands down but does not go deaf: once per campaign day the
         // organization asks its precinct contact what the institution knows. The lead
-        // detective's own knowledge is production state — recorded when he took the case and
-        // refreshed when the authority shelves it — so each new development arrives as a fresh,
+        // detective's own knowledge is production state - recorded when he took the case and
+        // refreshed when the authority shelves it - so each new development arrives as a fresh,
         // disclosable record through the canonical channel. Batch sessions observe one day and
         // stop while the case is still hot, keeping the matched financial window intact.
         if narrative {
@@ -878,7 +880,7 @@ pub fn play_session_with_fixture_view(
                 .registry
                 .get_investigation_work(InvestigationWorkKind::EvidenceReview)
                 .duration();
-            let mut poll_at = SimTime::from_minutes(
+            let poll_at = SimTime::from_minutes(
                 case_open_minute
                     + u64::from(cold_case_window.as_minutes())
                     + u64::from(longest_work.as_minutes()),
@@ -902,7 +904,7 @@ pub fn play_session_with_fixture_view(
             // sitting on idle capital. Each day the organization launders the racket's take
             // through its front's books, and as soon as those accounted funds cover the
             // venue's authored price it buys the independent harbor club outright through
-            // the canonical acquisition path — dirty money cannot buy legitimacy, so the
+            // the canonical acquisition path - dirty money cannot buy legitimacy, so the
             // clean-money war chest gates the diversification. Owning the venue is what
             // lets the delegated expansion establish a second racket there, outside Central
             // Precinct's jurisdiction. Real agency during the wait, not a time skip.
@@ -921,15 +923,21 @@ pub fn play_session_with_fixture_view(
             }
             // Bounded daily loop: the authored cold-case decay guarantees a deterministic
             // shelf, and laundering accumulates accounted funds at the front's authored
-            // pace, so both waits terminate. Each beat launders the racket's till (keeping
-            // a working-capital floor), attempts the purchase once the books can cover it,
-            // expands on success, and polls the precinct channel once per campaign day.
+            // pace, so both waits terminate. Every campaign day launders the racket's till
+            // (keeping a working-capital floor) and retries the purchase once the books can
+            // cover it; the precinct channel is only asked once the shelf could have landed.
             // A till authored as concealed cash stays exactly that: hidden money cannot
             // route through the front's ledgers without exposing it, so the beat leaves
-            // it parked and launders only what sits in street cash.
+            // it parked and launders only what sits in street cash. Narration follows
+            // report discipline: full detail on the first beat and on every change, a
+            // one-line heartbeat otherwise.
+            let mut laundry_days = 0_u32;
+            let mut last_absorbed: Option<i64> = None;
+            let mut poll_days = 0_u32;
+            let mut day_at = scenario.state.now();
             for _ in 0..40 {
-                if scenario.state.now() < poll_at {
-                    run_until(&mut scenario, poll_at, narrative, &mut metrics)?;
+                if scenario.state.now() < day_at {
+                    run_until(&mut scenario, day_at, narrative, &mut metrics)?;
                 }
                 let canal_enterprise = scenario
                     .state
@@ -944,6 +952,7 @@ pub fn play_session_with_fixture_view(
                     .is_some_and(|account| {
                         account.kind() == crimocracy::finance::AccountKind::StreetCash
                     });
+                let first_laundry = laundry_days == 0;
                 if float_is_street_cash {
                     let float_balance = scenario
                         .state
@@ -953,19 +962,32 @@ pub fn play_session_with_fixture_view(
                         .balance()
                         .cents();
                     let launderable = (float_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0);
-                    if narrative && launderable > 0 {
+                    if narrative && first_laundry && launderable > 0 {
                         println!(
-                            "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers today."
+                            "[DECIDE]  Quiet streets are for the books: put what the club can carry through its ledgers each day until the books can carry the harbor purchase."
                         );
                     }
-                    launder_through_front(
+                    let absorbed = launder_through_front(
                         &mut scenario,
-                        narrative,
+                        narrative && first_laundry,
                         &mut metrics,
                         canal_float,
                         launderable,
                     )?;
-                } else if narrative {
+                    laundry_days += 1;
+                    if narrative && !first_laundry && absorbed != last_absorbed {
+                        match absorbed {
+                            Some(gross) => println!(
+                                "[LAUNDER] The front's daily absorbable volume moved to {}.",
+                                format_cents(gross)
+                            ),
+                            None => println!(
+                                "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
+                            ),
+                        }
+                    }
+                    last_absorbed = absorbed;
+                } else if narrative && first_laundry {
                     println!(
                         "[LAUNDER] The club's take sits in concealed cash this cycle; it stays off {}'s books.",
                         scenario
@@ -984,29 +1006,60 @@ pub fn play_session_with_fixture_view(
                     establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
                     if narrative {
                         println!(
-                            "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only — has anything moved on the case?"
+                            "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
                         );
                     }
                 }
-                let read = read_police_contact(&mut scenario, narrative, &mut metrics)?;
-                match read {
-                    Some(false) => {
+                // The precinct channel is only asked once the shelf could have landed; before
+                // that there is nothing fresh for it to say.
+                let read = if scenario.state.now() >= poll_at {
+                    let first_poll = poll_days == 0;
+                    let read =
+                        read_police_contact(&mut scenario, narrative && first_poll, &mut metrics)?;
+                    poll_days += 1;
+                    read
+                } else {
+                    None
+                };
+                match &read {
+                    Some((false, summary)) => {
                         metrics.cold_case_confirmed = Some(true);
+                        println!("[LEARN]   The channel's read: {summary}");
                         println!(
                             "[CONSEQUENCE RESOLVED] The channel confirms the precinct shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
                         );
                     }
-                    Some(true) => {
-                        println!(
-                            "[VERIFY]  The channel says detectives are still actively developing the case; keep the district dark."
-                        );
-                    }
+                    Some((true, _)) => {}
                     None => {}
+                }
+                // Daily heartbeat while the wait continues: one line carrying the channel's
+                // read (or why it was not asked) and the clean-money progress, instead of
+                // repeating full contact prose every simulated day.
+                if narrative && laundry_days > 1 && metrics.cold_case_confirmed.is_none() {
+                    let accounted = scenario
+                        .state
+                        .finance()
+                        .get_account(scenario.accounted_funds)
+                        .expect("accounted-funds account must persist")
+                        .balance();
+                    let channel_line = match read {
+                        Some((true, _)) => {
+                            "the channel still reads the case as actively developing"
+                        }
+                        _ => "the channel has nothing fresh to share yet",
+                    };
+                    println!(
+                        "[WAIT] {}: {}; {} laundry day(s) so far, accounted books at {}.",
+                        stamp(scenario.state.now().as_minutes()),
+                        channel_line,
+                        laundry_days,
+                        format_cents(accounted.cents()),
+                    );
                 }
                 if metrics.cold_case_confirmed == Some(true) && metrics.front_acquired {
                     break;
                 }
-                poll_at = poll_at
+                day_at = day_at
                     + SimDuration::from_minutes(
                         u32::try_from(campaign_day_minutes)
                             .expect("authored campaign day must fit the duration type"),
@@ -1372,8 +1425,8 @@ pub fn run_second_act(
             // Close the self-inflicted-heat loop through the contact channel: the after-action
             // on the casing reported an opened case, so leadership asks its precinct channel
             // what detectives are doing rather than surveilling the precinct again. The
-            // detective's knowledge of his own case is production state — recorded when he took
-            // the case as lead — and the acting decision, disclosure, and everything the
+            // detective's knowledge of his own case is production state - recorded when he took
+            // the case as lead - and the acting decision, disclosure, and everything the
             // organization learns flow through the canonical contact and information paths.
             if let Some(_investigation) = self_heat_investigation {
                 let neighborhood_name = scenario
@@ -1395,7 +1448,8 @@ pub fn run_second_act(
                         "[DECIDE]  The after-action on our own casing says it drew attention: {police_name} opened a case out of that surveillance. Before anything else touches {neighborhood_name}, leadership uses the channel it keeps inside the precinct."
                     );
                 }
-                metrics.self_heat_case_active = read_police_contact(scenario, narrative, metrics)?;
+                metrics.self_heat_case_active = read_police_contact(scenario, narrative, metrics)?
+                    .map(|(sightline, _)| sightline);
                 if narrative {
                     match metrics.self_heat_case_active {
                         Some(true) => println!(
@@ -1764,7 +1818,7 @@ pub fn run_defector_trail(
 }
 
 /// The player's answer to a confirmed defector: one personal re-approach through the canonical
-/// executive recruitment path. Nothing here reads hidden state — the pitch resolves through the
+/// executive recruitment path. Nothing here reads hidden state - the pitch resolves through the
 /// same production scoring the rival's poaching used (recruiter bond versus fresh attachment to
 /// the new organization, plus membership resistance). A refusal carries a real intelligence cost:
 /// production rules deliver a loyalty report to the rival naming our recruiter, so reaching out
@@ -1839,12 +1893,15 @@ pub fn run_win_back_attempt(
             rival_name,
         );
         println!(
-            "[DEV AUDIT] Win-back factors: drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, membership resistance {}, trait adjustment {}.",
+            "[DEV AUDIT] Win-back factors: recruiter influence {}, drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, perceived legal pressure {}, membership resistance {}, organization competence {}, trait adjustment {}.",
+            record.factors().recruiter_influence(),
             record.factors().drive_alignment(),
             record.factors().relationship_support(),
             record.factors().incumbent_attachment(),
             record.factors().incumbent_resentment(),
+            record.factors().perceived_legal_pressure(),
             record.factors().membership_resistance(),
+            record.factors().organization_competence(),
             record.factors().trait_adjustment(),
         );
     }
@@ -1862,14 +1919,14 @@ pub fn run_win_back_attempt(
         );
         if narrative {
             println!(
-                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again — and both organizations now know exactly how much his loyalty is worth."
+                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again - and both organizations now know exactly how much his loyalty is worth."
             );
         }
         return Ok(());
     }
     // Refusal cost: the production loyalty-report path tells the candidate's current
-    // organization who tried to recruit them. Audit-only here — the acting policy never reads
-    // rival reports — but the narration may explain the mechanism because it follows from the
+    // organization who tried to recruit them. Audit-only here - the acting policy never reads
+    // rival reports - but the narration may explain the mechanism because it follows from the
     // player-visible refusal itself.
     let leaked = scenario
         .state
@@ -1890,7 +1947,7 @@ pub fn run_win_back_attempt(
             );
         }
         println!(
-            "[WIN BACK]  {defector_name} stayed with {rival_name}. The door closed politely — and {player_name} paid for the knock with a piece of its own cover."
+            "[WIN BACK]  {defector_name} stayed with {rival_name}. The door closed politely - and {player_name} paid for the knock with a piece of its own cover."
         );
     }
     Ok(())
