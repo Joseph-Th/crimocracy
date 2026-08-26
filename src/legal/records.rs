@@ -266,7 +266,6 @@ pub struct LegalRepresentationDraft {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct LegalRepresentationIndexes {
-    pub(super) by_arrest: BTreeMap<ArrestId, BTreeSet<LegalRepresentationId>>,
     pub(super) active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
     pub(super) active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
     /// Active automatic-policy retentions, so the per-tick custody sweep concludes only its
@@ -446,7 +445,6 @@ pub struct ProsecutionReferralDraft {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ProsecutionIndexes {
-    pub(super) cases_by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
     pub(super) cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
     pub(super) open_by_arrest_office: BTreeMap<(ArrestId, OrganizationId), ProsecutionCaseId>,
     pub(super) referrals_by_case: BTreeMap<ProsecutionCaseId, BTreeSet<ProsecutionReferralId>>,
@@ -454,7 +452,6 @@ pub(super) struct ProsecutionIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ArrestIndexes {
-    pub(super) by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
     pub(super) by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
     pub(super) active_by_character: BTreeMap<CharacterId, ArrestId>,
     /// Every currently detained arrest, so per-tick custody passes (informant recruitment,
@@ -1346,8 +1343,6 @@ pub(super) struct InvestigationIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct EvidenceIndexes {
-    pub(super) evidence_by_origin: BTreeMap<EntityRef, BTreeSet<EvidenceId>>,
-    pub(super) evidence_by_kind: BTreeMap<EvidenceKind, BTreeSet<EvidenceId>>,
     pub(super) derived_evidence_by_source: BTreeMap<EvidenceId, BTreeSet<EvidenceId>>,
 }
 
@@ -1367,11 +1362,8 @@ pub(super) struct WitnessIndexes {
 pub(super) struct InformantIndexes {
     pub(super) active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
     /// Every active informant relationship by id, so the disclosure pass iterates working
-    /// informants instead of the full terminated-and-active history.
+    /// informants instead of scanning the full history.
     pub(super) active: BTreeSet<InformantId>,
-    pub(super) disclosures_by_informant: BTreeMap<InformantId, BTreeSet<InformantDisclosureId>>,
-    pub(super) disclosure_by_evidence: BTreeMap<EvidenceId, InformantDisclosureId>,
-    pub(super) disclosures_by_information: BTreeMap<InformationId, BTreeSet<InformantDisclosureId>>,
     pub(super) disclosure_by_case_information:
         BTreeMap<(InvestigationId, InformationId), InformantDisclosureId>,
 }

@@ -17,15 +17,9 @@ impl LegalState {
             if !self
                 .indexes
                 .prosecutions
-                .cases_by_arrest
-                .get(&case.arrest())
+                .cases_by_lead
+                .get(&case.lead_prosecutor())
                 .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .prosecutions
-                    .cases_by_lead
-                    .get(&case.lead_prosecutor())
-                    .is_some_and(|ids| ids.contains(&id))
                 || case.referrals().iter().any(|referral| {
                     !self
                         .indexes
@@ -84,15 +78,6 @@ impl LegalState {
     fn has_consistent_legal_representation_indexes(&self) -> bool {
         for record in self.legal_representations.values() {
             let id = record.id();
-            if !self
-                .indexes
-                .representations
-                .by_arrest
-                .get(&record.arrest())
-                .is_some_and(|ids| ids.contains(&id))
-            {
-                return false;
-            }
             let arrest_active = self
                 .indexes
                 .representations
@@ -153,16 +138,6 @@ impl LegalState {
                 return false;
             }
         }
-        for (arrest, ids) in &self.indexes.representations.by_arrest {
-            if ids.iter().any(|id| {
-                !self
-                    .legal_representations
-                    .get(id)
-                    .is_some_and(|record| record.arrest() == *arrest)
-            }) {
-                return false;
-            }
-        }
         true
     }
     fn has_consistent_arrest_indexes(&self) -> bool {
@@ -171,15 +146,9 @@ impl LegalState {
             if !self
                 .indexes
                 .arrests
-                .by_character
-                .get(&arrest.character())
+                .by_investigation
+                .get(&arrest.investigation())
                 .is_some_and(|ids| ids.contains(&id))
-                || !self
-                    .indexes
-                    .arrests
-                    .by_investigation
-                    .get(&arrest.investigation())
-                    .is_some_and(|ids| ids.contains(&id))
             {
                 return false;
             }
@@ -196,16 +165,6 @@ impl LegalState {
             if self.indexes.arrests.detained.contains(&id)
                 != (arrest.status() == ArrestStatus::Detained)
             {
-                return false;
-            }
-        }
-        for (character, ids) in &self.indexes.arrests.by_character {
-            if ids.iter().any(|id| {
-                !self
-                    .arrests
-                    .get(id)
-                    .is_some_and(|record| record.character() == *character)
-            }) {
                 return false;
             }
         }
@@ -435,24 +394,6 @@ impl LegalState {
         for disclosure in self.informant_disclosures.values() {
             if !self.informants.contains_key(&disclosure.informant())
                 || !self.evidence.contains_key(&disclosure.evidence())
-                || !self
-                    .indexes
-                    .informants
-                    .disclosures_by_informant
-                    .get(&disclosure.informant())
-                    .is_some_and(|ids| ids.contains(&disclosure.id()))
-                || self
-                    .indexes
-                    .informants
-                    .disclosure_by_evidence
-                    .get(&disclosure.evidence())
-                    != Some(&disclosure.id())
-                || !self
-                    .indexes
-                    .informants
-                    .disclosures_by_information
-                    .get(&disclosure.source_information())
-                    .is_some_and(|ids| ids.contains(&disclosure.id()))
                 || self
                     .indexes
                     .informants
@@ -461,37 +402,6 @@ impl LegalState {
                     != Some(&disclosure.id())
             {
                 return false;
-            }
-        }
-        for (informant, ids) in &self.indexes.informants.disclosures_by_informant {
-            for id in ids {
-                if !self
-                    .informant_disclosures
-                    .get(id)
-                    .is_some_and(|record| record.informant() == *informant)
-                {
-                    return false;
-                }
-            }
-        }
-        for (evidence, disclosure) in &self.indexes.informants.disclosure_by_evidence {
-            if !self
-                .informant_disclosures
-                .get(disclosure)
-                .is_some_and(|record| record.evidence() == *evidence)
-            {
-                return false;
-            }
-        }
-        for (information, ids) in &self.indexes.informants.disclosures_by_information {
-            for id in ids {
-                if !self
-                    .informant_disclosures
-                    .get(id)
-                    .is_some_and(|record| record.source_information() == *information)
-                {
-                    return false;
-                }
             }
         }
         for (key, disclosure) in &self.indexes.informants.disclosure_by_case_information {
@@ -621,26 +531,6 @@ impl LegalState {
             {
                 return false;
             }
-            if let Some(origin) = evidence.origin() {
-                if !self
-                    .indexes
-                    .evidence
-                    .evidence_by_origin
-                    .get(&origin)
-                    .is_some_and(|ids| ids.contains(&evidence.id()))
-                {
-                    return false;
-                }
-            }
-            if !self
-                .indexes
-                .evidence
-                .evidence_by_kind
-                .get(&evidence.kind())
-                .is_some_and(|ids| ids.contains(&evidence.id()))
-            {
-                return false;
-            }
             for source in evidence.derived_from() {
                 if !self
                     .indexes
@@ -648,17 +538,6 @@ impl LegalState {
                     .derived_evidence_by_source
                     .get(source)
                     .is_some_and(|ids| ids.contains(&evidence.id()))
-                {
-                    return false;
-                }
-            }
-        }
-        for (origin, ids) in &self.indexes.evidence.evidence_by_origin {
-            for id in ids {
-                if !self
-                    .evidence
-                    .get(id)
-                    .is_some_and(|record| record.origin() == Some(*origin))
                 {
                     return false;
                 }
@@ -752,17 +631,6 @@ impl LegalState {
                     && (work.investigation(), work.kind(), work.focus()) == *key
             }) {
                 return false;
-            }
-        }
-        for (kind, ids) in &self.indexes.evidence.evidence_by_kind {
-            for id in ids {
-                if !self
-                    .evidence
-                    .get(id)
-                    .is_some_and(|record| record.kind() == *kind)
-                {
-                    return false;
-                }
             }
         }
         for (investigator, ids) in &self.indexes.investigations.investigations_by_investigator {

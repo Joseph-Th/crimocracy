@@ -10,10 +10,11 @@
 //! operating books.
 //!
 //! Commit composes three canonical paths in one validated step: world ownership
-//! transfer, business-economy establishment when the target has never operated, and a
-//! balanced ledger payment. Every fallible condition is validated before any mutation;
-//! the records constructed during commit reference freshly reserved accounts whose kinds
-//! and owners are guaranteed by construction.
+//! transfer, business-economy establishment when the target has never operated (or
+//! resumption when chronic losses left its books suspended), and a balanced ledger
+//! payment. Every fallible condition is validated before any mutation; the records
+//! constructed during commit reference freshly reserved accounts whose kinds and owners
+//! are guaranteed by construction.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -150,18 +151,14 @@ impl ValidatedBusinessAcquisition {
             BusinessOwner::Organization(self.organization),
         )?;
         let existing_economy = state.economy.get_business_economy(self.business);
-        if existing_economy.is_some_and(|economy| {
-            economy.status() != crate::economy::BusinessOperatingStatus::Active
-        }) {
-            return Err(
-                business_economy_system::BusinessEconomyError::EconomyNotActive(self.business)
-                    .into(),
-            );
-        }
-        // The establishment decision follows live state, not the validation-time snapshot:
-        // whether the target has ever operated is re-derived here so a token held across
-        // someone else's establishment adopts the existing books instead of colliding.
+        // The establishment/resumption decisions follow live state, not the validation-time
+        // snapshot: whether the target has never operated or sits suspended is re-derived
+        // here so a token held across someone else's establishment adopts the existing books
+        // instead of colliding, and a suspension that lifted in between is not re-applied.
         let establish_now = existing_economy.is_none();
+        let resumes_suspended = existing_economy.as_ref().is_some_and(|economy| {
+            economy.status() == crate::economy::BusinessOperatingStatus::Suspended
+        });
 
         // ---- Phase 2: reserve fresh books when the target has never operated. --------
         // Insertion is purely additive; if any later leg rejects, the untouched accounts
@@ -287,6 +284,13 @@ impl ValidatedBusinessAcquisition {
             )
             .commit(state)
             .expect("establishment over freshly reserved, construction-guaranteed accounts must commit");
+        } else if resumes_suspended {
+            business_economy_system::commit_acquisition_resume(
+                state,
+                self.business,
+                self.economy_cycle_duration,
+            )
+            .expect("resume re-validated immediately above must still commit");
         }
         payment
             .commit(state)
@@ -355,14 +359,10 @@ pub fn validate_acquire_business(
         draft.business,
         BusinessOwner::Organization(draft.organization),
     )?;
-    let existing_economy = state.economy.get_business_economy(draft.business);
-    if existing_economy
-        .is_some_and(|economy| economy.status() != crate::economy::BusinessOperatingStatus::Active)
-    {
-        return Err(
-            business_economy_system::BusinessEconomyError::EconomyNotActive(draft.business).into(),
-        );
-    }
+    // Suspended books do not block a purchase: chronic losses suspend an independent
+    // business automatically, and with no organizational counterparty to resume them the
+    // books would otherwise stay dead forever. The buyer capitalizes the purchase into a
+    // going concern — commit resumes suspended books right after the ownership transfer.
     Ok(ValidatedBusinessAcquisition {
         economy_cycle_duration: registry
             .get_business(business_record.kind())
@@ -380,7 +380,7 @@ pub fn validate_acquire_business(
 mod tests {
     use super::*;
     use crate::build_registry;
-    use crate::core::invariants::validate_invariants;
+    use crate::core::invariants::{validate_invariants, validate_state};
     use crate::finance::finance_system::insert_account;
     use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
     use crate::world::{
@@ -793,6 +793,111 @@ mod tests {
                 owner: BusinessOwner::Organization(rival),
             }
         );
+        validate_invariants(&fixture.state);
+    }
+
+    /// A chronic-loss suspension is automatic and resumption an owner decision — but an
+    /// independent business has no owner to decide. The acquisition path must therefore be
+    /// able to buy suspended books and reopen them, or sabotaged capital would stay dead
+    /// and unpurchasable forever.
+    #[test]
+    fn acquisition_buys_suspended_books_and_reopens_them_under_new_ownership() {
+        use crate::economy::business_economy_system::{
+            validate_establish_business_economy, validate_suspend_business_economy,
+        };
+        use crate::economy::BusinessOperatingStatus;
+
+        let mut fixture = make_independent_fixture();
+
+        // Give the target operating history: books over business-owned accounts, then the
+        // canonical manual suspension (the same state chronic losses produce).
+        let operating = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(fixture.business),
+                kind: AccountKind::LegitimateOperating,
+            },
+        )
+        .expect("operating account fixture should validate");
+        let settlement = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(fixture.business),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .expect("settlement account fixture should validate");
+        validate_establish_business_economy(
+            &fixture.registry,
+            &fixture.state,
+            BusinessEconomyDraft {
+                business: fixture.business,
+                operating_account: operating,
+                settlement_account: settlement,
+            },
+        )
+        .expect("books should establish")
+        .commit(&mut fixture.state)
+        .expect("books should commit");
+        validate_suspend_business_economy(&fixture.state, fixture.business)
+            .expect("active books should suspend")
+            .commit(&mut fixture.state)
+            .expect("suspension should commit");
+
+        let price = hospitality_price(&fixture);
+        fund_accounted_from_street(&mut fixture, price.cents());
+        let acquired = validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+        )
+        .expect("a funded acquisition of suspended books must validate")
+        .commit(&mut fixture.state)
+        .expect("the acquisition must commit");
+
+        assert!(
+            !acquired.established_economy,
+            "existing books are adopted, not re-established"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_business(fixture.business)
+                .expect("business must persist")
+                .owner(),
+            BusinessOwner::Organization(fixture.organization),
+        );
+        let economy = fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("acquired books must persist");
+        assert_eq!(economy.status(), BusinessOperatingStatus::Active);
+        // The purchase reopens the earning cycle under new ownership.
+        let cycle_duration = fixture
+            .registry
+            .get_business(BusinessKind::Hospitality)
+            .economics()
+            .cycle();
+        assert_eq!(
+            economy.next_cycle_at(),
+            Some(fixture.state.now() + cycle_duration)
+        );
+        // The full price capitalized the acquired books' own operating account.
+        let operating_balance = fixture
+            .state
+            .finance()
+            .get_account(operating)
+            .expect("operating account must persist")
+            .balance();
+        assert!(operating_balance >= price);
+        // Ownership moved, so the same acquisition cannot run twice.
+        assert!(matches!(
+            validate_acquire_business(&fixture.registry, &fixture.state, acquisition_draft(&fixture)),
+            Err(BusinessAcquisitionError::NotIndependentlyOwned { .. })
+        ));
+        validate_state(&fixture.state).expect("acquired state should remain structurally valid");
         validate_invariants(&fixture.state);
     }
 }

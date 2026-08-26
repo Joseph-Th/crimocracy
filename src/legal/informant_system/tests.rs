@@ -199,7 +199,8 @@ fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
         fixture
             .state
             .legal()
-            .informant_disclosures_from_information(information)
+            .informant_disclosures()
+            .filter(|record| record.source_information() == information)
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![disclosure]
@@ -315,7 +316,8 @@ fn disclosure_token_rejects_case_change_without_partial_mutation() {
         fixture
             .state
             .legal()
-            .informant_disclosures_from_information(information)
+            .informant_disclosures()
+            .filter(|record| record.source_information() == information)
             .count(),
         0
     );

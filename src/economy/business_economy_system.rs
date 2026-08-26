@@ -664,6 +664,33 @@ pub fn validate_resume_business_economy(
     business: BusinessId,
 ) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
     let business_record = validate_business(state, business)?;
+    let cycle_duration = registry
+        .get_business(business_record.kind())
+        .economics()
+        .cycle();
+    validate_resume_with_cycle_duration(state, business, cycle_duration)
+}
+
+/// Resumes suspended books as part of an acquisition commit. A chronic-loss suspension is
+/// an owner's problem while the business is independent; once a buyer capitalizes the
+/// purchase, the books reopen under new management instead of staying permanently dead.
+/// Re-validates suspension and account ownership against live state, so the acquisition's
+/// commit order (transfer → resume → payment → report) cannot resurrect active or missing
+/// books.
+pub(crate) fn commit_acquisition_resume(
+    state: &mut AppState,
+    business: BusinessId,
+    cycle_duration: SimDuration,
+) -> Result<(), BusinessEconomyError> {
+    validate_resume_with_cycle_duration(state, business, cycle_duration)?.commit(state)
+}
+
+fn validate_resume_with_cycle_duration(
+    state: &AppState,
+    business: BusinessId,
+    cycle_duration: SimDuration,
+) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
+    let _business_record = validate_business(state, business)?;
     let economy = state
         .economy
         .get_business_economy(business)
@@ -681,10 +708,6 @@ pub fn validate_resume_business_economy(
         economy.settlement_account(),
         Some(business),
     )?;
-    let cycle_duration = registry
-        .get_business(business_record.kind())
-        .economics()
-        .cycle();
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
         expected_version: economy.version(),

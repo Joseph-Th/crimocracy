@@ -91,19 +91,6 @@ impl LegalState {
             .get(&(character, handler))
             .and_then(|id| self.informants.get(id))
     }
-    #[cfg(test)]
-    pub fn informant_disclosures_from_information(
-        &self,
-        information: InformationId,
-    ) -> impl Iterator<Item = &InformantDisclosureRecord> {
-        self.indexes
-            .informants
-            .disclosures_by_information
-            .get(&information)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.informant_disclosures.get(id))
-    }
     pub(crate) fn informant_disclosure_for_case_information(
         &self,
         investigation: InvestigationId,
@@ -140,13 +127,9 @@ impl LegalState {
         &self,
         character: CharacterId,
     ) -> impl Iterator<Item = &ArrestRecord> {
-        self.indexes
-            .arrests
-            .by_character
-            .get(&character)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.arrests.get(id))
+        self.arrests
+            .values()
+            .filter(move |record| record.character() == character)
     }
     pub fn arrests_for_investigation(
         &self,
@@ -183,13 +166,9 @@ impl LegalState {
         &self,
         arrest: ArrestId,
     ) -> impl Iterator<Item = &LegalRepresentationRecord> {
-        self.indexes
-            .representations
-            .by_arrest
-            .get(&arrest)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.legal_representations.get(id))
+        self.legal_representations
+            .values()
+            .filter(move |record| record.arrest() == arrest)
     }
     pub(crate) fn active_representations_for_contact(
         &self,
@@ -229,13 +208,9 @@ impl LegalState {
         &self,
         arrest: ArrestId,
     ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
-        self.indexes
-            .prosecutions
-            .cases_by_arrest
-            .get(&arrest)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.prosecution_cases.get(id))
+        self.prosecution_cases
+            .values()
+            .filter(move |record| record.arrest() == arrest)
     }
     pub fn prosecution_cases_for_lead(
         &self,
@@ -305,15 +280,13 @@ impl LegalState {
             .flatten()
             .filter_map(|organization| self.jurisdictions.get(organization))
     }
+    /// Test-only observation surface: production code reads evidence through case-scoped
+    /// getters, so this scans the record set instead of maintaining a by-origin index.
     #[cfg(test)]
     pub fn evidence_from_origin(&self, origin: EntityRef) -> impl Iterator<Item = &EvidenceRecord> {
-        self.indexes
-            .evidence
-            .evidence_by_origin
-            .get(&origin)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.evidence.get(id))
+        self.evidence
+            .values()
+            .filter(move |record| record.origin() == Some(origin))
     }
     pub fn derived_evidence_from(
         &self,
@@ -429,13 +402,7 @@ impl LegalState {
         &self,
         kind: crate::legal::EvidenceKind,
     ) -> impl Iterator<Item = &EvidenceRecord> {
-        self.indexes
-            .evidence
-            .evidence_by_kind
-            .get(&kind)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.evidence.get(id))
+        self.evidence.values().filter(move |record| record.kind() == kind)
     }
     pub fn investigations_for_investigator(
         &self,
@@ -762,27 +729,6 @@ impl LegalState {
     );
         self.insert_evidence(evidence, activity_at);
         let id = disclosure.id();
-        self.indexes
-            .informants
-            .disclosures_by_informant
-            .entry(disclosure.informant())
-            .or_default()
-            .insert(id);
-        let previous_evidence = self
-            .indexes
-            .informants
-            .disclosure_by_evidence
-            .insert(disclosure.evidence(), id);
-        debug_assert!(
-            previous_evidence.is_none(),
-            "Ownership Exclusivity: evidence is linked to multiple informant disclosures"
-        );
-        self.indexes
-            .informants
-            .disclosures_by_information
-            .entry(disclosure.source_information())
-            .or_default()
-            .insert(id);
         let previous_case_information = self
             .indexes
             .informants
@@ -826,20 +772,6 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        if let Some(origin) = record.origin() {
-            self.indexes
-                .evidence
-                .evidence_by_origin
-                .entry(origin)
-                .or_default()
-                .insert(record.id());
-        }
-        self.indexes
-            .evidence
-            .evidence_by_kind
-            .entry(record.kind())
-            .or_default()
-            .insert(record.id());
         for source in record.derived_from() {
             self.indexes
                 .evidence
@@ -1442,12 +1374,6 @@ impl LegalState {
         );
         self.indexes
             .arrests
-            .by_character
-            .entry(record.character())
-            .or_default()
-            .insert(id);
-        self.indexes
-            .arrests
             .by_investigation
             .entry(record.investigation())
             .or_default()
@@ -1509,12 +1435,6 @@ impl LegalState {
                 .active_automatic_policy
                 .insert(id);
         }
-        self.indexes
-            .representations
-            .by_arrest
-            .entry(record.arrest())
-            .or_default()
-            .insert(id);
         let previous = self
             .indexes
             .representations
@@ -1608,12 +1528,6 @@ impl LegalState {
         debug_assert_eq!(case.initial_referral(), referral_id);
         debug_assert_eq!(case.referrals(), &BTreeSet::from([referral_id]));
         debug_assert_eq!(case.evidence(), referral.evidence());
-        self.indexes
-            .prosecutions
-            .cases_by_arrest
-            .entry(case.arrest())
-            .or_default()
-            .insert(case_id);
         self.indexes
             .prosecutions
             .cases_by_lead
