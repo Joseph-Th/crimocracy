@@ -414,7 +414,7 @@ fn resolve_target_snapshot(
                         )
                     },
                 );
-                any_known.then(|| LawEnforcementCaseSightline {
+                any_known.then_some(LawEnforcementCaseSightline {
                     // "Still being worked" while any known case is active: that is the
                     // player-relevant heat signal, and it never reveals evidence, subjects,
                     // or internal case details.
