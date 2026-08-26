@@ -20,8 +20,8 @@ use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{insert_character, insert_organization, set_policy};
 use crate::world::{
-    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft, PolicyKind,
-    PolicySetting, Rating,
+    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
+    PolicyKind, PolicySetting, Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -89,7 +89,8 @@ pub(crate) enum OperationResolutionError {
     DetaineeRelease {
         operation: OperationId,
         character: CharacterId,
-        error: String,
+        #[source]
+        error: crate::legal::arrest_system::ArrestError,
     },
     #[error("operation {operation} changed after resolution planning; expected version {expected}, found {found}")]
     StaleOperation {
@@ -678,7 +679,7 @@ pub(crate) fn validate_operation_resolution_plan(
                             .map_err(|error| OperationResolutionError::DetaineeRelease {
                                 operation: plan.snapshot.operation,
                                 character: *target,
-                                error: error.to_string(),
+                                error,
                             })?,
                     )
                 }

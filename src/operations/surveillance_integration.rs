@@ -404,22 +404,22 @@ fn resolve_target_snapshot(
                 // originated case to the surveiller; before that there is nothing to re-read,
                 // so surveillance falls back to ordinary personnel observation instead of
                 // fabricating a "shelved" read about a case that never touched this organization.
-                state
-                    .legal
-                    .investigations_for_owner(id)
-                    .any(|case| case.notified_organizations().contains(&surveiller))
-                    .then(|| LawEnforcementCaseSightline {
-                        // "Still being worked" while any known case is active: that is the
-                        // player-relevant heat signal, and it never reveals evidence, subjects,
-                        // or internal case details.
-                        active_case_against_surveiller: state
-                            .legal
-                            .investigations_for_owner(id)
-                            .any(|case| {
-                                case.status() == InvestigationStatus::Active
-                                    && case.notified_organizations().contains(&surveiller)
-                            }),
-                    })
+                let (any_known, any_active_known) = state.legal.investigations_for_owner(id).fold(
+                    (false, false),
+                    |(known, active), case| {
+                        let is_known = case.notified_organizations().contains(&surveiller);
+                        (
+                            known || is_known,
+                            active || (is_known && case.status() == InvestigationStatus::Active),
+                        )
+                    },
+                );
+                any_known.then(|| LawEnforcementCaseSightline {
+                    // "Still being worked" while any known case is active: that is the
+                    // player-relevant heat signal, and it never reveals evidence, subjects,
+                    // or internal case details.
+                    active_case_against_surveiller: any_active_known,
+                })
             } else {
                 None
             };

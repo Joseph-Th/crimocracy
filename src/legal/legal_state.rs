@@ -639,7 +639,7 @@ impl LegalState {
     /// Advances a case's last-activity instant and re-synchronizes the cold-decay index in one
     /// atomic step. Called by every consequence-bearing legal transition: incident intake,
     /// evidence insertion, investigation-work scheduling, and investigation-work resolution.
-    pub(crate) fn note_investigation_activity(
+    pub(crate) fn set_investigation_activity(
         &mut self,
         investigation_id: InvestigationId,
         at: SimTime,
@@ -791,7 +791,7 @@ impl LegalState {
         // discovery time: backdated evidence is legal (see validate_evidence_draft), but the case
         // still gained active work at the instant the evidence was actually added, so the
         // cold-case inactivity clock must reset to now.
-        self.note_investigation_activity(investigation_id, activity_at);
+        self.set_investigation_activity(investigation_id, activity_at);
     }
     /// Registers a case witness and resets the case's cold-case inactivity clock: witness
     /// registration is consequence-bearing (cooperation drives future interview support).
@@ -833,7 +833,7 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate case witness ID inserted"
         );
-        self.note_investigation_activity(investigation_id, activity_at);
+        self.set_investigation_activity(investigation_id, activity_at);
     }
     /// Updates witness cooperation and resets the case's cold-case inactivity clock:
     /// cooperation directly drives future interview support scoring.
@@ -863,7 +863,7 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        self.note_investigation_activity(investigation_id, activity_at);
+        self.set_investigation_activity(investigation_id, activity_at);
     }
     pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
         let id = record.id();
@@ -951,9 +951,9 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        self.note_investigation_activity(investigation_id, scheduled_at);
+        self.set_investigation_activity(investigation_id, scheduled_at);
     }
-    pub(crate) fn complete_investigation_work(
+    pub(crate) fn set_investigation_work_resolution(
         &mut self,
         id: InvestigationWorkId,
         resolution: InvestigationWorkResolution,
@@ -1016,7 +1016,7 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        self.note_investigation_activity(investigation_id, resolved_at);
+        self.set_investigation_activity(investigation_id, resolved_at);
     }
     pub(crate) fn set_investigation_status(
         &mut self,
@@ -1335,7 +1335,7 @@ impl LegalState {
             "Index Uniqueness: duplicate police response ID inserted"
         );
     }
-    pub(crate) fn mark_police_response_arrived(&mut self, id: PoliceResponseId, at: SimTime) {
+    pub(crate) fn set_police_response_arrived(&mut self, id: PoliceResponseId, at: SimTime) {
         let due_at = self
             .police_responses
             .get(&id)

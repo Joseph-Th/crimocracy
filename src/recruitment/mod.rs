@@ -1,6 +1,7 @@
 //! Relational recruitment records and indexes; `recruitment_system` owns candidate discovery, decisions, and membership changes.
 
 pub mod recruitment_system;
+pub mod scoring;
 
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{

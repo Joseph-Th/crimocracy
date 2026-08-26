@@ -265,7 +265,7 @@ impl ValidatedPoliceResponseArrival {
         validate_arrival_dependencies(state, record)?;
         state
             .legal
-            .mark_police_response_arrived(self.response, self.arrived_at);
+            .set_police_response_arrived(self.response, self.arrived_at);
         Ok(self.response)
     }
 }

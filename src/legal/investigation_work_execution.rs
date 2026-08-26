@@ -674,7 +674,7 @@ impl ValidatedInvestigationWorkResolution {
         } else {
             None
         };
-        state.legal.complete_investigation_work(
+        state.legal.set_investigation_work_resolution(
             self.plan.work,
             InvestigationWorkResolution {
                 resolved_at: self.plan.resolved_at,

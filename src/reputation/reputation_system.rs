@@ -715,9 +715,9 @@ mod tests {
 
     #[test]
     fn underworld_competence_sways_recruitment_margins() {
-        use crate::recruitment::recruitment_system::{
+        use crate::recruitment::recruitment_system::RecruitmentFactorContext;
+        use crate::recruitment::scoring::{
             resolve_recruitment_factors_from_context, resolve_recruitment_margin,
-            RecruitmentFactorContext,
         };
         use crate::recruitment::{
             build_recruitment_relationship_snapshot, RecruitmentApproach, RecruitmentFactors,

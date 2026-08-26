@@ -548,13 +548,11 @@ pub fn decide_enterprise_cycle(
 }
 
 /// The street-heat portion of the enterprise's most recently settled cycle, or `None` when the
-/// racket has never settled. Cycle IDs are allocated sequentially, so index order is settlement
-/// order.
+/// racket has never settled. Delegates to the owner's O(log n) latest-cycle lookup.
 fn latest_cycle_investigation_heat(state: &AppState, enterprise: EnterpriseId) -> Option<Money> {
     state
         .enterprises
-        .cycles_for(enterprise)
-        .next_back()
+        .latest_cycle(enterprise)
         .map(|cycle| cycle.investigation_heat())
 }
 

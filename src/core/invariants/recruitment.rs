@@ -9,9 +9,10 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::recruitment::recruitment_system::{
+use crate::recruitment::recruitment_system::RecruitmentFactorContext;
+use crate::recruitment::scoring::{
     resolve_perceived_legal_pressure_at, resolve_recruitment_factors_from_context,
-    resolve_recruitment_margin, resolve_recruitment_outcome, RecruitmentFactorContext,
+    resolve_recruitment_margin, resolve_recruitment_outcome,
 };
 use crate::recruitment::{RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource};
 use crate::registry::Registry;

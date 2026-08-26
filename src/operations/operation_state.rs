@@ -214,7 +214,7 @@ impl OperationState {
             record.runtime.police_response = police_response;
             record.runtime.awaiting_decision_since = None;
         }
-        self.change_status(id, OperationStatus::InProgress);
+        self.set_status(id, OperationStatus::InProgress);
         self.in_progress_by_resolution_due
             .entry(resolution_due_at)
             .or_default()
@@ -240,7 +240,7 @@ impl OperationState {
             .expect("validated operation disappeared before decision wait commit")
             .runtime
             .awaiting_decision_since = Some(paused_at);
-        self.change_status(id, OperationStatus::AwaitingDecision);
+        self.set_status(id, OperationStatus::AwaitingDecision);
     }
 
     pub(crate) fn resume(&mut self, id: OperationId, resumed_at: SimTime) {
@@ -282,7 +282,7 @@ impl OperationState {
             record.runtime.entry_at = shifted_entry_at;
             record.runtime.awaiting_decision_since = None;
         }
-        self.change_status(id, OperationStatus::InProgress);
+        self.set_status(id, OperationStatus::InProgress);
         self.in_progress_by_resolution_due
             .entry(shifted_due_at)
             .or_default()
@@ -334,7 +334,7 @@ impl OperationState {
             .expect("validated operation disappeared before abort commit")
             .runtime
             .abort = Some(abort);
-        self.change_status(id, OperationStatus::Aborted);
+        self.set_status(id, OperationStatus::Aborted);
     }
 
     pub(crate) fn complete(&mut self, id: OperationId, resolution: OperationResolutionRecord) {
@@ -394,7 +394,7 @@ impl OperationState {
                     .insert((resolution.resolved_at(), id));
             }
         }
-        self.change_status(id, OperationStatus::Completed);
+        self.set_status(id, OperationStatus::Completed);
     }
 
     /// Successful takes against `business` resolved inside the recency window before `at`,
@@ -489,7 +489,7 @@ impl OperationState {
             .expect("operation version counter exhausted");
     }
 
-    fn change_status(&mut self, id: OperationId, next: OperationStatus) {
+    fn set_status(&mut self, id: OperationId, next: OperationStatus) {
         let (previous, organization) = {
             let record = self
                 .records
