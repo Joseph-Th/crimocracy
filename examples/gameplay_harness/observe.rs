@@ -167,8 +167,12 @@ pub fn observe_tick(
             );
         }
         let response = match decision.context() {
-            DecisionContext::OperationPoliceArrival { .. }
-                if metrics.strategy == Some(Strategy::Press) =>
+            // PRESS's defining choice is to press on through a police response on the score
+            // itself. It is not a blanket suicide pact: any later operation's police-arrival
+            // exception gets the standing abort, because the branch is standing down.
+            DecisionContext::OperationPoliceArrival { operation, .. }
+                if metrics.strategy == Some(Strategy::Press)
+                    && Some(operation) == metrics.burglary =>
             {
                 DecisionResponse::Continue
             }
@@ -381,6 +385,74 @@ pub fn observe_tick(
     metrics.investigation_work_resolved = metrics.investigation_work_resolved.saturating_add(
         u32::try_from(outcome.resolved_investigation_work.len()).unwrap_or(u32::MAX),
     );
+
+    // Witness interviews are institutional work against the case's named witness: hidden
+    // from the organization until its channels read the case, but counted as audit evidence
+    // of the testimony chain.
+    metrics.witness_interviews_scheduled = metrics.witness_interviews_scheduled.saturating_add(
+        u32::try_from(outcome.scheduled_witness_interviews.len()).unwrap_or(u32::MAX),
+    );
+    if narrative {
+        for work_id in &outcome.scheduled_witness_interviews {
+            let work = scenario
+                .state
+                .legal()
+                .get_investigation_work(*work_id)
+                .expect("scheduled witness interview must persist");
+            let witness = work
+                .focus()
+                .witness_id()
+                .and_then(|id| scenario.state.legal().get_case_witness(id))
+                .map(|case_witness| {
+                    scenario
+                        .state
+                        .world()
+                        .get_character(case_witness.witness())
+                        .expect("case witness character must exist")
+                        .name()
+                        .to_owned()
+                })
+                .unwrap_or_else(|| "unknown witness".to_owned());
+            println!(
+                "[DEV AUDIT] {}: scheduled WitnessInterview due {} with {}.",
+                stamp(outcome.now.as_minutes()),
+                stamp(work.due_at().as_minutes()),
+                witness,
+            );
+        }
+    }
+
+    // An autonomous evidence-threshold arrest is a production custody event. The organization
+    // learns of an arrested member through custody and representation channels; here it is
+    // observed for what it is and counted per side so the consequence stays legible.
+    for arrest_id in &outcome.evidence_arrests {
+        let Some(arrest) = scenario.state.legal().get_arrest(*arrest_id) else {
+            continue;
+        };
+        let member_of_player = scenario
+            .state
+            .world()
+            .get_character(arrest.character())
+            .and_then(|character| character.organization())
+            .is_some_and(|organization| organization == scenario.player);
+        if !member_of_player {
+            continue;
+        }
+        metrics.player_member_arrests = metrics.player_member_arrests.saturating_add(1);
+        if narrative {
+            let name = scenario
+                .state
+                .world()
+                .get_character(arrest.character())
+                .map(|character| character.name().to_owned())
+                .unwrap_or_default();
+            println!(
+                "[ARREST]    {}: {} was taken into custody on the strength of the case file.",
+                stamp(outcome.now.as_minutes()),
+                name,
+            );
+        }
+    }
 
     if narrative {
         for operation in &outcome.resolved_operations {

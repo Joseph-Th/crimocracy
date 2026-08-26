@@ -2,6 +2,7 @@
 
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, InformationId};
+use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::delegation::delegation_system::validate_revise_mandate;
@@ -16,9 +17,11 @@ use crimocracy::legal::legal_representation_system::validate_retain_legal_repres
 use crimocracy::legal::prosecution_system::{
     validate_decline_prosecution_case, validate_open_prosecution_case,
 };
+use crimocracy::legal::witness_system::validate_register_case_witness;
 use crimocracy::legal::{
-    Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    InvestigationDraft, LegalRepresentationDraft, ProsecutionCaseDraft,
+    Admissibility, ArrestDraft, CaseWitnessDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+    EvidenceStrength, InvestigationDraft, LegalRepresentationDraft, ProsecutionCaseDraft,
+    WitnessCooperation,
 };
 use crimocracy::operations::operation_system::{validate_authorize_operation, OperationError};
 use crimocracy::operations::{
@@ -458,8 +461,118 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
         return Err("prosecution decline lifecycle did not produce expected state".into());
     }
 
+    // Witness-counterplay segment: the case names a cooperative on-scene witness, leadership
+    // runs one canonical WitnessPressure operation against him, and production rules degrade
+    // his registered cooperation — the discount any later testimony is weighed by.
+    let shopkeeper = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Shopkeeper".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    let intimidator = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Enforcer".to_owned(),
+            organization: Some(sponsor),
+            supervisor: Some(handler),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Intimidation, rating(90))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    // The crew pairs its enforcer with someone who can actually coordinate: resolution
+    // weights the Coordinator's management three-to-one over the leader's intimidation.
+    let coordinator = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Lieutenant".to_owned(),
+            organization: Some(sponsor),
+            supervisor: Some(handler),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(88))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    let case_witness = validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation,
+            witness: shopkeeper,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )?
+    .commit(&mut state)?;
+    let pressure = validate_authorize_operation(
+        registry,
+        &state,
+        OperationDraft {
+            title: "Quiet word to Harbor Shopkeeper".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: sponsor,
+            leader: intimidator,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(shopkeeper),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, coordinator)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )?
+    .commit(&mut state)?;
+    let mut pressure_resolved = false;
+    for _ in 0..200 {
+        let operation_status = state
+            .operations()
+            .get_operation(pressure)
+            .expect("pressure operation must remain queryable")
+            .status();
+        if matches!(
+            operation_status,
+            OperationStatus::Completed | OperationStatus::Aborted
+        ) {
+            pressure_resolved = true;
+            break;
+        }
+        run_tick(registry, &mut state);
+    }
+    let pressure_record = state
+        .operations()
+        .get_operation(pressure)
+        .expect("pressure operation must remain queryable");
+    let cooperation = state
+        .legal()
+        .get_case_witness(case_witness)
+        .map(|witness| witness.cooperation())
+        .expect("registered case witness must persist");
+    if !pressure_resolved
+        || !matches!(
+            cooperation,
+            WitnessCooperation::Reluctant | WitnessCooperation::Hostile
+        )
+    {
+        return Err(format!(
+            "witness-pressure segment did not degrade cooperation: resolved {pressure_resolved}, status {:?}, outcome {:?}, abort {:?}, cooperation {cooperation:?}",
+            pressure_record.status(),
+            pressure_record.resolution().map(|resolution| resolution.objective_outcome()),
+            pressure_record.abort_record().map(|abort| abort.cause()),
+        ).into());
+    }
+    validate_harness_state(registry, &state)?;
+
     println!(
-        "[LEGAL PASS] arrest -> paid counsel -> police custody-preserving referral -> terminal prosecution decline"
+        "[LEGAL PASS] arrest -> paid counsel -> police custody-preserving referral -> terminal prosecution decline -> named case witness intimidated through canonical pressure"
     );
     Ok(())
 }
@@ -658,6 +771,13 @@ pub fn persist_run_artifact(
         "rival_home_enterprises": metrics.rival_home_enterprises,
         "player_poach_warnings": metrics.player_poach_warnings,
         "session_case_staffed": metrics.session_case_staffed,
+        "case_witness_registered": metrics.case_witness_registered,
+        "witness_interviews_scheduled": metrics.witness_interviews_scheduled,
+        "witness_testimony_produced": metrics.witness_testimony_produced,
+        "witness_pressure_attempted": metrics.witness_pressure_attempted,
+        "witness_pressure_aborted": metrics.witness_pressure_aborted,
+        "witness_cooperation_degraded": metrics.witness_cooperation_degraded,
+        "player_member_arrests": metrics.player_member_arrests,
         "raw": {
             "second_opportunity_discovered": metrics.second_opportunity_discovered,
             "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),

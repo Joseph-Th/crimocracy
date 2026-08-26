@@ -174,6 +174,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     validate_night_trap_evidence(&press)?;
     validate_night_trap_evidence(&recon)?;
     validate_press_consequence_arc(&press)?;
+    validate_press_witness_counterplay(&press)?;
     validate_press_expansion_evidence(&press)?;
     validate_defector_trail_evidence(&rush)?;
     validate_defector_trail_evidence(&press)?;
@@ -283,10 +284,12 @@ mod tests {
     use super::{
         choose_safe_start_from_patrol_report, parse_options, parse_patrol_windows,
         run_opportunity_portfolio_probe, run_smoke, validate_branch_financial_isolation,
-        FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
-        RunMetrics, ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED,
+        validate_press_witness_counterplay, FixtureVariation, HarnessCliError,
+        HarnessContractError, HarnessMode, HarnessOptions, RunMetrics, ScenarioProfile,
+        ScenarioTimeline, Strategy, DEFAULT_SEED,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
+    use crimocracy::operations::OperationObjectiveOutcome;
 
     #[test]
     fn parses_explicit_smoke_mode_and_hex_seed() {
@@ -598,6 +601,53 @@ mod tests {
                 strategy: Strategy::Press
             }
         ));
+    }
+
+    #[test]
+    fn press_witness_counterplay_requires_named_witness_and_pressure() {
+        let mut metrics = branch_metrics(Strategy::Press, true, None);
+        let error = validate_press_witness_counterplay(&metrics)
+            .expect_err("a witnessed case must name its witness and draw pressure");
+        assert!(matches!(
+            error,
+            HarnessContractError::MissingStrategyEvidence { .. }
+        ));
+
+        metrics.case_witness_registered = true;
+        metrics.witness_pressure_attempted = true;
+        metrics.witness_pressure_outcome = Some(OperationObjectiveOutcome::Achieved);
+        metrics.witness_cooperation_degraded = true;
+        validate_press_witness_counterplay(&metrics)
+            .expect("a landed pressure that degrades cooperation must pass");
+
+        let mut aborted = branch_metrics(Strategy::Press, true, None);
+        aborted.case_witness_registered = true;
+        aborted.witness_pressure_attempted = true;
+        aborted.witness_pressure_aborted = true;
+        validate_press_witness_counterplay(&aborted)
+            .expect("a disciplined police-arrival abort without degradation must pass");
+
+        let mut botched = branch_metrics(Strategy::Press, true, None);
+        botched.case_witness_registered = true;
+        botched.witness_pressure_attempted = true;
+        botched.witness_pressure_outcome = Some(OperationObjectiveOutcome::Failed);
+        let error = validate_press_witness_counterplay(&botched)
+            .expect_err("a failed pressure with no degradation is neither shape");
+        assert!(matches!(
+            error,
+            HarnessContractError::MissingStrategyEvidence { .. }
+        ));
+    }
+
+    #[test]
+    fn witness_counterplay_contract_ignores_other_strategies_and_uncased_sessions() {
+        let mut rush = branch_metrics(Strategy::Rush, false, None);
+        rush.case_witness_registered = true;
+        validate_press_witness_counterplay(&rush)
+            .expect("non-press branches carry no counter-play contract");
+        let uncased = branch_metrics(Strategy::Press, false, None);
+        validate_press_witness_counterplay(&uncased)
+            .expect("a session without a case has nothing to counter");
     }
 
     fn branch_metrics(

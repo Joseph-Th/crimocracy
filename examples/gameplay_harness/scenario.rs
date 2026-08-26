@@ -410,6 +410,23 @@ pub fn build_scenario(
     )?
     .commit(&mut state)?;
 
+    // The primary target's owner: a shopkeeper who lives over the store. A witnessed or
+    // identifying exposure on a character-owned business names him as the case's witness
+    // through canonical incident intake, so institutional interviews, testimony quality,
+    // and the organization's witness-pressure counter-play all have a real person to act on.
+    let target_owner = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Emil Voss".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::SocialAccess, rating(40))]),
+            traits: BTreeSet::from([TraitKind::Proud]),
+            drives: BTreeMap::from([(DriveKind::Safety, rating(70))]),
+        },
+    )?;
+
     let target = insert_business(
         registry,
         &mut state,
@@ -421,7 +438,7 @@ pub fn build_scenario(
                 BusinessFunction::ProfessionalRecords,
             ]),
             neighborhood,
-            owner: BusinessOwner::Independent,
+            owner: BusinessOwner::Character(target_owner),
         },
     )?;
     let alternate_target = insert_business(
@@ -742,6 +759,7 @@ pub fn build_scenario(
         lieutenant,
         burglar,
         scout,
+        target_owner,
         danny_ferro,
         detective,
         police_contact,
@@ -872,6 +890,39 @@ pub fn authorize_burglary(
             intelligence,
             constraints: Vec::new(),
             contingencies,
+            scheduled_for,
+        },
+    )?
+    .commit(&mut scenario.state)?)
+}
+
+/// The canonical witness-pressure answer to a case the organization knows was witnessed:
+/// a quiet Frighten operation against the on-scene witness. Production resolution degrades
+/// the witness's registered cooperation on every active case run by another authority, which
+/// discounts any testimony they later give. The organization sends the lieutenant who actually
+/// carries the intimidation capability — leadership coordination alone does not frighten anyone.
+pub fn authorize_witness_pressure(
+    scenario: &mut Scenario,
+    witness: CharacterId,
+    title: &str,
+    scheduled_for: SimTime,
+) -> Result<OperationId, Box<dyn Error>> {
+    Ok(validate_authorize_operation(
+        scenario.registry,
+        &scenario.state,
+        OperationDraft {
+            title: title.to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: scenario.player,
+            leader: scenario.lieutenant,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(witness),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, scenario.lieutenant)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: vec![OperationContingency::RequestDecisionOnPoliceArrival],
             scheduled_for,
         },
     )?

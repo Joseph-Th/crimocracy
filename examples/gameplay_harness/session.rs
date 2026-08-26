@@ -208,6 +208,66 @@ fn commit_laundering(
     Ok((gross, fee))
 }
 
+/// Records the quiet word's outcome from production records: resolution or abort provenance,
+/// and whether the registered witness's cooperation actually moved. The after-action report
+/// is the organization's player-visible account; cooperation is audit evidence.
+fn capture_witness_pressure_outcome(
+    scenario: &mut Scenario,
+    pressure: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    metrics.witness_pressure_attempted = true;
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(pressure)
+        .expect("witness-pressure operation must remain queryable");
+    metrics.witness_pressure_aborted = record.status() == OperationStatus::Aborted;
+    if let Some(resolution) = record.resolution() {
+        metrics.witness_pressure_outcome = Some(resolution.objective_outcome());
+        if narrative {
+            let report = scenario
+                .state
+                .reports()
+                .get_report(resolution.after_action_report())
+                .expect("pressure after-action report must persist");
+            print_report("AFTER-ACTION", report, scenario);
+        }
+    }
+    if record.status() == OperationStatus::Aborted && narrative {
+        println!(
+            "[DECIDE]  A response was coming; the crew walked away. Quiet work in a watched district is not free — leadership leaves the witness alone rather than risk another case."
+        );
+    }
+    if let Some(investigation) = scenario.investigation {
+        metrics.witness_cooperation_degraded = scenario
+            .state
+            .legal()
+            .case_witnesses_for_investigation(investigation)
+            .filter(|case_witness| case_witness.witness() == scenario.target_owner)
+            .any(|case_witness| {
+                matches!(
+                    case_witness.cooperation(),
+                    crimocracy::legal::WitnessCooperation::Reluctant
+                        | crimocracy::legal::WitnessCooperation::Hostile
+                )
+            });
+        if narrative && metrics.witness_cooperation_degraded {
+            println!(
+                "[KNOWLEDGE] The word got back: {} will be a harder witness for anyone now.",
+                scenario
+                    .state
+                    .world()
+                    .get_character(scenario.target_owner)
+                    .map(|record| record.name().to_owned())
+                    .unwrap_or_else(|| "the witness".to_owned()),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn play_session(
     registry: &Registry,
     strategy: Strategy,
@@ -644,6 +704,82 @@ pub fn play_session_with_fixture_view(
         print_player_knowledge_gap(&scenario, burglary);
     }
 
+    // Audit facts about the witness chain, captured from production records the way every
+    // other audit metric is: whether the case named its on-scene witness at intake. Acting
+    // policy never reads this — the organization only knows the job "was witnessed" from its
+    // own after-action report.
+    if let Some(investigation) = scenario.investigation {
+        metrics.case_witness_registered = scenario
+            .state
+            .legal()
+            .case_witnesses_for_investigation(investigation)
+            .next()
+            .is_some();
+    }
+    // Whether an institutional interview ever connected into recorded testimony is captured
+    // after the whole arc below; here it only starts as false so batch runs still report the
+    // chain honestly when no narrative beat runs.
+
+    // The Press answer to a witnessed job is not only patience: leadership leans once on the
+    // shop's owner — public knowledge who that is. But not at three in the morning: the crew
+    // itself just reported how fast Central Precinct moves in this district overnight, so the
+    // quiet word waits for the first morning lull after the case opens. It carries its own
+    // exposure risk like any street work.
+    let mut pending_witness_pressure: Option<OperationId> = None;
+    if strategy == Strategy::Press
+        && metrics.investigation_created
+        && matches!(
+            metrics.exposure_level,
+            Some(
+                crimocracy::operations::OperationExposureLevel::Witnessed
+                    | crimocracy::operations::OperationExposureLevel::Identifying
+            )
+        )
+    {
+        let witness_name = match scenario
+            .state
+            .world()
+            .get_business(scenario.target)
+            .expect("target business must persist")
+            .owner()
+        {
+            crimocracy::world::BusinessOwner::Character(owner) => scenario
+                .state
+                .world()
+                .get_character(owner)
+                .map(|record| record.name().to_owned())
+                .unwrap_or_else(|| "the owner".to_owned()),
+            crimocracy::world::BusinessOwner::Independent
+            | crimocracy::world::BusinessOwner::Organization(_) => "the owner".to_owned(),
+        };
+        if narrative {
+            println!(
+                "[DECIDE]  The after-action says the job was witnessed. Everyone knows who keeps {}: send Carlo with a quiet word once the overnight watch thins out.",
+                scenario
+                    .state
+                    .world()
+                    .get_business(scenario.target)
+                    .expect("target business must persist")
+                    .name(),
+            );
+        }
+        // The lull anchor is player-visible reasoning: the crew's own field report places the
+        // heavy enforcement in the small hours, so leadership schedules the quiet word a bit
+        // over an hour after the case opened, inside the first morning gap, and still before
+        // an institutional interview would typically be worked.
+        let case_open_minute = metrics
+            .case_open_minute
+            .expect("witness-pressure arc requires the surfaced case-open minute");
+        let pressure_at = SimTime::from_minutes(case_open_minute + 70);
+        let witness = scenario.target_owner;
+        pending_witness_pressure = Some(authorize_witness_pressure(
+            &mut scenario,
+            witness,
+            &format!("Quiet word to {witness_name}"),
+            pressure_at,
+        )?);
+    }
+
     // The Press branch exercises a real player follow-up: the organization uses only the
     // surfaced legal-activity report and the crew's field report to authorize counter-surveillance
     // of the precinct itself. The investigation's evidence, lead, and internal ID stay hidden; the
@@ -695,6 +831,12 @@ pub fn play_session_with_fixture_view(
             heat_check_at,
         )?;
         run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
+        // The quiet word was scheduled into the same morning gap and is already terminal by
+        // the time the precinct watch closes; capture here so its narration stays
+        // chronological with the rest of the night.
+        if let Some(pressure) = pending_witness_pressure.take() {
+            capture_witness_pressure_outcome(&mut scenario, pressure, narrative, &mut metrics)?;
+        }
         let operation = scenario
             .state
             .operations()
@@ -897,6 +1039,11 @@ pub fn play_session_with_fixture_view(
             }
         }
     }
+    // The quiet word resolved during the same advance of the clock; capture its consequence
+    // from production records whether or not the narrative polling loop above ran.
+    if let Some(pressure) = pending_witness_pressure.take() {
+        capture_witness_pressure_outcome(&mut scenario, pressure, narrative, &mut metrics)?;
+    }
 
     if continue_for_financial_day {
         // The authored autonomous-recruitment cadence defines the rivals' campaign day. Sessions
@@ -977,8 +1124,35 @@ pub fn play_session_with_fixture_view(
                     .cents(),
             );
         }
+        // Audit evidence for the witness chain: whether any institutional interview against
+        // the session's case connected into recorded witness testimony.
+        if let Some(investigation) = scenario.investigation {
+            let interview_ran = scenario
+                .state
+                .legal()
+                .work_for_investigation(investigation)
+                .any(|work| work.kind() == InvestigationWorkKind::WitnessInterview);
+            metrics.witness_testimony_produced = interview_ran
+                && scenario
+                    .state
+                    .legal()
+                    .get_investigation(investigation)
+                    .is_some_and(|case| {
+                        case.evidence().iter().any(|evidence_id| {
+                            scenario
+                                .state
+                                .legal()
+                                .get_evidence(*evidence_id)
+                                .is_some_and(|evidence| {
+                                    evidence.kind()
+                                        == crimocracy::legal::EvidenceKind::WitnessTestimony
+                                })
+                        })
+                    });
+        }
         if narrative {
             print_final_case_audit(&scenario, burglary);
+            print_organization_closing_view(&scenario, &metrics);
             print_second_act_recap(&scenario, strategy, &metrics);
             print_financial_view(&scenario, financials);
             println!("\n[EXECUTIVE BRIEFS]");

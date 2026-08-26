@@ -12,7 +12,7 @@ use crimocracy::legal::InvestigationWorkStatus;
 use crimocracy::operations::{
     OperationAbortCause, OperationAbortPhase, OperationObjectiveOutcome, RoleKind,
 };
-use crimocracy::reports::ReportRecord;
+use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::world::{CapabilityKind, Rating};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -350,6 +350,72 @@ pub fn print_final_case_audit(scenario: &Scenario, burglary: OperationId) {
         evidence_kinds,
         work,
     );
+}
+
+/// The closing counterpart to the starting player view: what the organization actually looks
+/// like after the session, assembled only from state a boss can see — roster, mandates,
+/// holdings, and the reports the organization received. Hidden case state stays in the audit
+/// lines above.
+pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics) {
+    let members = scenario
+        .state
+        .world()
+        .characters_in_organization(scenario.player)
+        .map(|record| record.name().to_owned())
+        .collect::<Vec<_>>();
+    println!(
+        "\n[ORGANIZATION NOW] {} member(s): {}",
+        members.len(),
+        members.join(", ")
+    );
+    if metrics.player_personnel_departures > 0 {
+        println!(
+            "  - Lost {} member(s) to rival recruitment this session{}",
+            metrics.player_personnel_departures,
+            if metrics.replacement_recruited {
+                "; rebuilt through an executive recruitment".to_owned()
+            } else {
+                String::new()
+            },
+        );
+    }
+    for business in scenario
+        .state
+        .world()
+        .businesses_owned_by_organization(scenario.player)
+    {
+        let kind = format!("{:?}", business.kind());
+        println!(
+            "  - Owns {} ({}, {})",
+            business.name(),
+            kind,
+            host_district_label(scenario, business.id()),
+        );
+    }
+    for record in scenario
+        .state
+        .enterprises()
+        .enterprises_for_organization(scenario.player)
+    {
+        let cycles = scenario.state.enterprises().cycles_for(record.id()).count();
+        println!(
+            "  - Runs a {:?} enterprise at {}: {} settled cycle(s)",
+            record.kind(),
+            enterprise_label(scenario, record.id()),
+            cycles,
+        );
+    }
+    let standing_reports = scenario
+        .state
+        .reports()
+        .reports_for(scenario.player)
+        .filter(|report| report.kind() == ReportKind::Standing)
+        .count();
+    if standing_reports > 0 {
+        println!(
+            "  - Word on the street moved {standing_reports} time(s) this session (Standing reports)."
+        );
+    }
 }
 
 pub fn enterprise_label(scenario: &Scenario, enterprise: EnterpriseId) -> String {
@@ -741,6 +807,25 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.laundering_capacity_rejections,
         metrics.vice_inquiries_drawn,
     );
+    if metrics.case_witness_registered
+        || metrics.witness_pressure_attempted
+        || metrics.player_member_arrests > 0
+    {
+        println!(
+            "        witness chain: named case witness {}, interviews scheduled {}, testimony produced {}, pressure run {} (outcome {:?}, degraded {}), member arrests {}",
+            metrics.case_witness_registered,
+            metrics.witness_interviews_scheduled,
+            metrics.witness_testimony_produced,
+            metrics.witness_pressure_attempted,
+            metrics.witness_pressure_outcome,
+            metrics.witness_cooperation_degraded,
+            metrics.player_member_arrests,
+        );
+    }
+    println!(
+        "        world audit: rival home rackets at end {}",
+        metrics.rival_home_enterprises,
+    );
     if metrics.win_back_attempted {
         println!(
             "        win-back: attempted (accepted {:?}, margin {:?}), refusal leak to rival {:?}",
@@ -875,6 +960,18 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         "own heat",
         recon.self_heat_case_opened && recon.self_heat_case_active == Some(true),
         "casing carries risk both ways: after the organization's own surveillance draws a case, it reads that case through its standing police contact — no extra street exposure, provenance-bearing disclosure",
+    );
+    print_loop_checkpoint(
+        "witness chain",
+        press.case_witness_registered
+            && press.witness_interviews_scheduled > 0
+            && press.witness_testimony_produced,
+        "a witnessed crime names its on-scene witness on the case; institutional interviews turn his account into testimony the file is built on",
+    );
+    print_loop_checkpoint(
+        "counterplay",
+        press.witness_pressure_attempted,
+        "the organization can answer a witness with one canonical pressure operation — it lands and discounts his cooperation, or a police response forces a disciplined walk-away with no second case",
     );
     print_loop_checkpoint(
         "discipline cost",
@@ -1013,10 +1110,15 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
         recon.self_heat_case_active,
     );
     println!(
-        "  - Exception leverage: PRESS chose Continue at {} surfaced decision(s); RUSH chose Abort through its standing contingency, producing {} versus {}.",
+        "  - Exception leverage: PRESS chose Continue on the score's police exception at {} surfaced decision(s) and Abort on every later one, producing {} versus {}.",
         press.decision_requests,
         terminal_label(press),
         terminal_label(rush),
+    );
+    println!(
+        "  - Witness leverage: the case PRESS created carries a named witness whose institutional interview produced testimony; the organization's one pressure operation answers him - it lands and discounts his cooperation (degraded: {}) or a response forces a walk-away. Where an exposure identifies a crew member, the same chain escalates to autonomous arrest ({} member arrest(s) this comparison).",
+        press.witness_cooperation_degraded,
+        rush.player_member_arrests + press.player_member_arrests + recon.player_member_arrests,
     );
     println!(
         "  - Personnel leverage: RUSH/PRESS exposed the crew to police and lost {} crew member(s) to rival recruitment, while RECON kept everyone ({} departures) because the crew never saw police.",
@@ -1057,7 +1159,7 @@ pub fn print_experience_readout(rush: &RunMetrics, press: &RunMetrics, recon: &R
     );
     println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs, compounds across cases, and can escalate into a vice inquiry on the racket itself (reported by the manager in-cycle). Disrupting evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
+        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs, compounds across cases, and can escalate into a vice inquiry on the racket itself (reported by the manager in-cycle). The witness link in that chain is now two-sided - testimony builds the file and pressure discounts it - but disrupting physical evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
     );
     println!(
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."

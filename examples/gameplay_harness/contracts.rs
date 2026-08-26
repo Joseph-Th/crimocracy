@@ -324,6 +324,38 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
     }
 }
 
+/// Full-mode narrative PRESS must answer a witnessed job with the canonical counter-play:
+/// the case names its on-scene witness at intake and leadership runs one WitnessPressure
+/// operation against that person. Both terminal shapes are honest evidence:
+/// a landed pressure degrades the witness's registered cooperation, while an abort under the
+/// police-arrival contingency proves quiet counter-play in a watched district carries real
+/// risk and that discipline contains it (an InProgress abort leaves no second case).
+pub fn validate_press_witness_counterplay(
+    metrics: &RunMetrics,
+) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if !metrics.investigation_created {
+        return Ok(());
+    }
+    let attempted = metrics.witness_pressure_attempted;
+    let landed = metrics
+        .witness_pressure_outcome
+        .is_some_and(|outcome| outcome != OperationObjectiveOutcome::Failed)
+        && metrics.witness_cooperation_degraded;
+    let disciplined_abort =
+        metrics.witness_pressure_aborted && !metrics.witness_cooperation_degraded;
+    if metrics.case_witness_registered && attempted && (landed || disciplined_abort) {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "a witnessed job on a character-owned business must name its case witness at intake and draw one canonical WitnessPressure operation that either lands (degrading the witness's cooperation) or aborts under its police-arrival contingency without opening a second case",
+        })
+    }
+}
+
 pub fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
     validate_state(state)?;
     validate_state_against_registry(registry, state)?;

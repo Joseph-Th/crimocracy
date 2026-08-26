@@ -484,6 +484,9 @@ pub struct Scenario<'registry> {
     pub lieutenant: CharacterId,
     pub burglar: CharacterId,
     pub scout: CharacterId,
+    /// The primary target's owner: the on-scene witness a witnessed exposure names on the
+    /// case, and the person an intimidated witness-pressure operation would lean on.
+    pub target_owner: CharacterId,
     /// Player-side replacement candidate for act 2: an independent with a pre-existing personal
     /// relationship to the boss, recruitable only through canonical executive recruitment.
     pub danny_ferro: CharacterId,
@@ -630,6 +633,27 @@ pub struct RunMetrics {
     /// Player-owned cycles that drew a vice inquiry: sustained district casework converting
     /// into a dedicated investigation on the racket itself.
     pub vice_inquiries_drawn: u32,
+    // Witness-chain evidence: a witnessed exposure on a character-owned business names the
+    // owner as the case's witness, interviews are scheduled institutionally, and the player
+    // can answer with canonical witness pressure.
+    /// The case named its on-scene witness at intake (audit fact; the organization only
+    /// knows the job "was witnessed" from its own after-action).
+    pub case_witness_registered: bool,
+    /// Institutional witness interviews scheduled against the session's case (audit count).
+    pub witness_interviews_scheduled: u32,
+    /// Whether an interview connected into recorded witness testimony on the case (audit).
+    pub witness_testimony_produced: bool,
+    /// Whether leadership ran the canonical WitnessPressure operation against the witness.
+    pub witness_pressure_attempted: bool,
+    pub witness_pressure_outcome: Option<OperationObjectiveOutcome>,
+    /// True when the pressure op aborted under its police-arrival contingency before any
+    /// resolution: the discipline shape of the counter-play.
+    pub witness_pressure_aborted: bool,
+    /// Audit fact: the pressure degraded the witness's registered cooperation.
+    pub witness_cooperation_degraded: bool,
+    /// Autonomous evidence-threshold arrests of this organization's members during the
+    /// session. Custody is the production consequence chain: representation, referral.
+    pub player_member_arrests: u32,
     // Money-state evidence: street cash routed through an owned cash-intensive front's books.
     pub laundered_gross_cents: i64,
     /// The front's authored cut of everything it absorbed.
@@ -681,6 +705,15 @@ pub struct Aggregate {
     pub player_poach_warnings: u64,
     pub contact_reads: u64,
     pub vice_inquiries: u64,
+    pub witness_cases: u64,
+    pub witness_pressure_attempts: u64,
+    pub witness_testimony_sessions: u64,
+    pub player_member_arrests: u64,
+    pub rival_home_enterprises_total: u64,
+    pub front_acquisitions: u64,
+    pub laundered_gross_total_cents: i128,
+    pub accounted_balance_total_cents: i128,
+    pub accounted_balance_samples: u64,
     pub payroll_paid_total_cents: i128,
     pub payroll_short_total_cents: i128,
 }
@@ -748,6 +781,17 @@ impl Aggregate {
         self.player_poach_warnings += u64::from(metrics.player_poach_warnings);
         self.contact_reads += u64::from(metrics.contact_reads);
         self.vice_inquiries += u64::from(metrics.vice_inquiries_drawn);
+        self.witness_cases += u64::from(metrics.case_witness_registered);
+        self.witness_pressure_attempts += u64::from(metrics.witness_pressure_attempted);
+        self.witness_testimony_sessions += u64::from(metrics.witness_testimony_produced);
+        self.player_member_arrests += u64::from(metrics.player_member_arrests);
+        self.rival_home_enterprises_total += u64::from(metrics.rival_home_enterprises);
+        self.front_acquisitions += u64::from(metrics.front_acquired);
+        self.laundered_gross_total_cents += i128::from(metrics.laundered_gross_cents);
+        if let Some(balance) = metrics.accounted_balance_cents {
+            self.accounted_balance_total_cents += i128::from(balance);
+            self.accounted_balance_samples += 1;
+        }
         self.payroll_paid_total_cents += i128::from(metrics.payroll_paid_cents);
         self.payroll_short_total_cents += i128::from(metrics.payroll_short_cents);
     }
@@ -800,7 +844,9 @@ impl Aggregate {
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
        rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}  vice hits {:>3}
-                 payroll paid {:>7.0}c  unpaid {:>6.0}c",
+                 payroll paid {:>7.0}c  unpaid {:>6.0}c
+       witness:  named cases {}  pressure runs {}  testimony sessions {}  member arrests {}  rival rackets {:>4.1}  acquisitions {}
+       money:    laundered {:>8.0}c gross  accounted balance {:>7.0}c",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -833,6 +879,18 @@ impl Aggregate {
             self.vice_inquiries,
             self.payroll_paid_total_cents as f64 / self.samples as f64,
             self.payroll_short_total_cents as f64 / self.samples as f64,
+            self.witness_cases,
+            self.witness_pressure_attempts,
+            self.witness_testimony_sessions,
+            self.player_member_arrests,
+            self.rival_home_enterprises_total as f64 / self.samples as f64,
+            self.front_acquisitions,
+            self.laundered_gross_total_cents as f64 / self.samples as f64,
+            if self.accounted_balance_samples == 0 {
+                0.0
+            } else {
+                self.accounted_balance_total_cents as f64 / self.accounted_balance_samples as f64
+            },
         );
     }
 }
