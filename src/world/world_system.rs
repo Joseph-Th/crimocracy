@@ -8,7 +8,6 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
-use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
 use crate::registry::Registry;
 use crate::world::{
     BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
@@ -407,19 +406,11 @@ fn validate_role_change_release(
             investigation: investigation.id(),
         });
     }
-    for operation in state.operations.operations() {
-        if ACTIVE_ASSIGNMENT_STATUSES.contains(&operation.status())
-            && (operation.leader() == character
-                || operation
-                    .roles()
-                    .values()
-                    .any(|participant| *participant == character))
-        {
-            return Err(WorldError::ActiveOperationAssignment {
-                character,
-                operation: operation.id(),
-            });
-        }
+    if let Some(operation) = state.operations.find_active_operation_booking(character) {
+        return Err(WorldError::ActiveOperationAssignment {
+            character,
+            operation,
+        });
     }
     Ok(())
 }

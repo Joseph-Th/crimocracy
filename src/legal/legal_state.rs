@@ -402,7 +402,9 @@ impl LegalState {
         &self,
         kind: crate::legal::EvidenceKind,
     ) -> impl Iterator<Item = &EvidenceRecord> {
-        self.evidence.values().filter(move |record| record.kind() == kind)
+        self.evidence
+            .values()
+            .filter(move |record| record.kind() == kind)
     }
     pub fn investigations_for_investigator(
         &self,

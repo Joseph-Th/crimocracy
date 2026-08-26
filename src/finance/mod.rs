@@ -179,6 +179,10 @@ pub struct FinanceState {
     transactions: BTreeMap<LedgerTransactionId, LedgerTransactionRecord>,
     accounts_by_owner: BTreeMap<FinancialOwner, BTreeSet<FinancialAccountId>>,
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
+    /// Running per-(mandate, period) charged totals, updated at ledger commit. Budget
+    /// authority checks read this O(log n) instead of rescanning the mandate's full
+    /// transaction history (which grows for the life of the campaign) on every spend.
+    budget_used_by_period: BTreeMap<(MandateId, SimTime, SimTime), Money>,
     /// Every account referenced by at least one ledger posting, so guarded cleanup proves
     /// an account unused without scanning the append-only transaction history.
     posted_accounts: BTreeSet<FinancialAccountId>,
@@ -217,6 +221,30 @@ impl FinanceState {
             .into_iter()
             .flatten()
             .filter_map(|id| self.transactions.get(id))
+    }
+
+    /// The running charged total for one (mandate, period) window, maintained at ledger
+    /// commit time.
+    pub(crate) fn budget_used_for(
+        &self,
+        mandate: MandateId,
+        period_start: SimTime,
+        period_end: SimTime,
+    ) -> Money {
+        self.budget_used_by_period
+            .get(&(mandate, period_start, period_end))
+            .copied()
+            .unwrap_or(Money::ZERO)
+    }
+
+    pub(crate) fn budget_used_entries(
+        &self,
+    ) -> impl Iterator<Item = (&(MandateId, SimTime, SimTime), &Money)> {
+        self.budget_used_by_period.iter()
+    }
+
+    pub(crate) fn budget_used_entry_count(&self) -> usize {
+        self.budget_used_by_period.len()
     }
 
     pub(crate) fn accounts(&self) -> impl Iterator<Item = &FinancialAccountRecord> {
@@ -286,6 +314,16 @@ impl FinanceState {
                 .entry(usage.mandate())
                 .or_default()
                 .insert(record.id());
+            let key = (usage.mandate(), usage.period_start(), usage.period_end());
+            let used = self
+                .budget_used_by_period
+                .get(&key)
+                .copied()
+                .unwrap_or(Money::ZERO);
+            let total = used
+                .checked_add(usage.amount())
+                .expect("budget usage accumulator overflowed");
+            self.budget_used_by_period.insert(key, total);
         }
         for posting in record.postings() {
             self.posted_accounts.insert(posting.account);

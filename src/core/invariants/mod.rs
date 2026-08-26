@@ -1,5 +1,7 @@
 //! Runtime invariant enforcement and release-safe structural state validation.
 
+use std::collections::BTreeMap;
+
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{is_entity_present, EntityRef};
 use crate::core::id::{
@@ -1050,6 +1052,14 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
     }
 
     let mut expected_mandate_entries = 0_usize;
+    let mut derived_budget_totals: BTreeMap<
+        (
+            MandateId,
+            crate::core::time::SimTime,
+            crate::core::time::SimTime,
+        ),
+        i64,
+    > = BTreeMap::new();
     for transaction in state.finance.transactions() {
         if transaction.occurred_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
@@ -1134,6 +1144,15 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
                     transaction: transaction.id(),
                 });
             }
+            // Re-derive the running per-period charge total in the same pass, so the
+            // aggregate the budget checks read must agree with the transaction history.
+            let key = (usage.mandate(), usage.period_start(), usage.period_end());
+            let total = derived_budget_totals.entry(key).or_insert(0);
+            *total = total.checked_add(usage.amount().cents()).ok_or(
+                StateValidationError::LedgerArithmeticOverflow {
+                    transaction: transaction.id(),
+                },
+            )?;
         }
     }
     // Exact set agreement between accounts referenced by postings and the maintained
@@ -1150,6 +1169,18 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         });
     }
     if state.finance.indexed_mandate_entries() != expected_mandate_entries {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "finance",
+        });
+    }
+    // The budget-charge aggregate must agree exactly with the re-derived per-period totals.
+    let aggregate_matches = state.finance.budget_used_entries().all(|(key, total)| {
+        derived_budget_totals
+            .get(key)
+            .is_some_and(|derived| *derived == total.cents())
+    }) && derived_budget_totals.len()
+        == state.finance.budget_used_entry_count();
+    if !aggregate_matches {
         return Err(StateValidationError::IndexInconsistency {
             subsystem: "finance",
         });

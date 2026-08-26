@@ -263,16 +263,11 @@ pub fn resolve_budget_usage(
         .budget()
         .ok_or(FinanceError::MissingBudget(mandate))?;
     let window = budget.period.window(at);
-    let mut used = Money::ZERO;
-    for transaction in state.finance.transactions_for_mandate(mandate) {
-        if let Some(usage) = transaction.budget_usage() {
-            if usage.period_start() == window.start() && usage.period_end() == window.end() {
-                used = used
-                    .checked_add(usage.amount())
-                    .ok_or(FinanceError::BudgetOverflow(mandate))?;
-            }
-        }
-    }
+    // Served from the running per-period aggregate maintained at ledger commit, so a
+    // delegated spend costs O(log n) instead of rescanning the mandate's whole history.
+    let used = state
+        .finance
+        .budget_used_for(mandate, window.start(), window.end());
     let remaining = budget
         .limit
         .checked_sub(used)

@@ -894,7 +894,11 @@ mod tests {
         assert!(operating_balance >= price);
         // Ownership moved, so the same acquisition cannot run twice.
         assert!(matches!(
-            validate_acquire_business(&fixture.registry, &fixture.state, acquisition_draft(&fixture)),
+            validate_acquire_business(
+                &fixture.registry,
+                &fixture.state,
+                acquisition_draft(&fixture)
+            ),
             Err(BusinessAcquisitionError::NotIndependentlyOwned { .. })
         ));
         validate_state(&fixture.state).expect("acquired state should remain structurally valid");

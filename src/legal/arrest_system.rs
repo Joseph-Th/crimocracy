@@ -286,24 +286,9 @@ fn validate_character_can_enter_custody(
             work: work.id(),
         });
     }
-    // Only non-terminal operations can hold the character; scanning the status indexes
-    // instead of the full record history keeps this O(live bookings), not O(campaign).
-    // The full-history scan this replaces visited records in ascending ID order and named
-    // the first conflict, so the smallest conflicting operation ID is selected explicitly.
-    let mut conflict: Option<OperationId> = None;
-    for status in ACTIVE_ASSIGNMENT_STATUSES {
-        for operation in state.operations.operations_with_status(status) {
-            let holds_booking = operation.leader() == character
-                || operation
-                    .roles()
-                    .values()
-                    .any(|participant| *participant == character);
-            if holds_booking && conflict.is_none_or(|current| operation.id() < current) {
-                conflict = Some(operation.id());
-            }
-        }
-    }
-    if let Some(operation) = conflict {
+    // Only non-terminal operations can hold the character; the owner's booking lookup scans
+    // the live status indexes, so this stays O(live bookings), not O(campaign history).
+    if let Some(operation) = state.operations.find_active_operation_booking(character) {
         return Err(ArrestError::ActiveOperationResponsibility {
             character,
             operation,

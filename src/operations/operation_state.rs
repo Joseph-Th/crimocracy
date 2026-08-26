@@ -1,12 +1,14 @@
 //! Operation state storage and index maintenance; sibling `operations` types define records.
 
 use crate::core::id::IdKeyedBounds;
-use crate::core::id::{BusinessId, InformationId, OperationId, OrganizationId, PoliceResponseId};
+use crate::core::id::{
+    BusinessId, CharacterId, InformationId, OperationId, OrganizationId, PoliceResponseId,
+};
 use crate::core::time::SimTime;
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
     OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
-    OperationResolutionRecord, OperationStatus,
+    OperationResolutionRecord, OperationStatus, ACTIVE_ASSIGNMENT_STATUSES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,6 +81,30 @@ impl OperationState {
             .into_iter()
             .flatten()
             .filter_map(|operation_id| self.records.get(operation_id))
+    }
+
+    /// Finds the smallest non-terminal operation holding the character as leader or role
+    /// participant. Served from the status indexes, so reassignment and custody checks cost
+    /// O(live bookings), not O(campaign history).
+    pub(crate) fn find_active_operation_booking(
+        &self,
+        character: CharacterId,
+    ) -> Option<OperationId> {
+        ACTIVE_ASSIGNMENT_STATUSES
+            .iter()
+            .filter_map(|status| self.by_status.get(status))
+            .flatten()
+            .filter_map(|id| {
+                self.records.get(id).and_then(|operation| {
+                    let holds = operation.leader() == character
+                        || operation
+                            .roles()
+                            .values()
+                            .any(|participant| *participant == character);
+                    holds.then_some(*id)
+                })
+            })
+            .min()
     }
 
     pub fn operation_for_discovered_information(
@@ -358,6 +384,10 @@ impl OperationState {
             OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
         ) {
             if let Some(business) = record.objective().taken_business() {
+                // NOTE: deliberately unpruned. Load-time validation re-derives every
+                // historical settlement's take economics against that settlement's own
+                // recency window, so even entries older than the live window remain
+                // load-bearing - same trade as the append-only ledger itself.
                 self.successful_takes_by_business
                     .entry(business)
                     .or_default()
