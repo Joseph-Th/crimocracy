@@ -292,20 +292,20 @@ fn plan_wage_accounts(
             continue;
         }
         let owner = FinancialOwner::Character(*member);
-        if let Some(existing) = state
+        match state
             .finance()
             .accounts_for(owner)
             .find(|account| account.kind() == AccountKind::StreetCash)
             .map(|account| account.id())
-        {
+        { Some(existing) => {
             resolved[index] = Some(existing);
-        } else {
+        } _ => {
             missing_positions.push(index);
             missing.push(FinancialAccountDraft {
                 owner,
                 kind: AccountKind::StreetCash,
             });
-        }
+        }}
     }
     let openings = if missing.is_empty() {
         None
