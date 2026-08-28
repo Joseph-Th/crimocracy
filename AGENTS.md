@@ -1,5 +1,7 @@
 # Agent Guide
 
+**BCA policy:** advisory
+
 Execution rules for this repository. Ownership and mutation contracts are in [`ARCHITECTURE.md`](ARCHITECTURE.md); verification and harness rules are in [`TESTING.md`](TESTING.md); implemented scope is in [`STATUS.md`](STATUS.md).
 
 ## Cold start
