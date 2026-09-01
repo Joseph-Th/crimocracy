@@ -604,8 +604,8 @@ pub fn resolve_financial_view(
         laundered_gross_cents: metrics.laundered_gross_cents,
         launder_fee_cents: metrics.launder_fee_cents,
         laundering_capacity_rejections: metrics.laundering_capacity_rejections,
-        payroll_paid_cents: 0,
-        payroll_short_cents: 0,
+        payroll_paid_cents: metrics.payroll_paid_cents,
+        payroll_short_cents: metrics.payroll_short_cents,
     })
 }
 

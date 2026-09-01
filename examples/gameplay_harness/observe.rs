@@ -277,26 +277,14 @@ pub fn observe_tick(
                 .get_character(attempt.candidate())
                 .expect("autonomous candidate must exist");
             println!(
-                "[AUTONOMY] {}: {} independently approached {} using {:?}; pressure {}, margin {}, outcome {:?}.",
+                "[AUTONOMY] {}: {} → {} via {:?}; margin {}, pressure {}, outcome {:?}.",
                 stamp(outcome.now.as_minutes()),
                 recruiter.name(),
                 candidate.name(),
                 attempt.approach(),
-                attempt.factors().perceived_legal_pressure(),
                 attempt.margin(),
-                attempt.outcome(),
-            );
-            println!(
-                "[DEV AUDIT] Recruitment factors: recruiter influence {}, drive alignment {}, relationship support {}, incumbent attachment {}, incumbent resentment {}, perceived legal pressure {}, membership resistance {}, organization competence {}, trait adjustment {}.",
-                attempt.factors().recruiter_influence(),
-                attempt.factors().drive_alignment(),
-                attempt.factors().relationship_support(),
-                attempt.factors().incumbent_attachment(),
-                attempt.factors().incumbent_resentment(),
                 attempt.factors().perceived_legal_pressure(),
-                attempt.factors().membership_resistance(),
-                attempt.factors().organization_competence(),
-                attempt.factors().trait_adjustment(),
+                attempt.outcome(),
             );
             narrate_recruitment_causality(scenario, metrics, attempt, candidate);
             if attempt.previous_organization() == Some(scenario.player)

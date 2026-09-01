@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 36;
+pub const CURRENT_CONTENT_REVISION: u32 = 37;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -127,12 +127,12 @@ fn register_reputation(builder: &mut RegistryBuilder) {
             // One point per day: a witnessed job stays in an audience's memory for weeks,
             // not forever, and never manufactures impressions that were never touched.
             daily_decay_step: 1,
-            // A governed outfit whose police fear runs this hot suspends delegated
-            // expansion for the day; visible heat outranks growth.
-            expansion_police_fear_ceiling: 58,
-            witnessed_exposure_police_fear: 5,
-            identifying_exposure_police_fear: 7,
-            vice_inquiry_police_fear: 5,
+            // Lowered so a single witnessed exposure plus a vice inquiry visibly throttles
+            // delegated expansion: heat must be managed, not ignored.
+            expansion_police_fear_ceiling: 50,
+            witnessed_exposure_police_fear: 8,
+            identifying_exposure_police_fear: 10,
+            vice_inquiry_police_fear: 6,
             achieved_underworld_competence: 3,
             partial_underworld_competence: 1,
             violent_businesses_fear: 3,
@@ -155,10 +155,10 @@ fn register_upkeep(builder: &mut RegistryBuilder) {
         .register_upkeep(UpkeepConfigSpec {
             // Daily street wage per member: visible next to one enterprise cycle, so an
             // idle organization feels carrying costs and headcount is a real decision.
-            // Raised to $28 to make payroll a meaningful brake — a hot district with
-            // a 2-case surcharge noticeably shrinks the surplus without starving a
-            // 4-person crew in the first week.
-            per_member_daily: Money::from_cents(28_00),
+            // Raised to $32 to make headcount a real carrying-cost decision — a 4-person
+            // crew costs $128/day, close to one delegated cycle's net, so a hot district
+            // with heat tax visibly tightens the surplus without starving in week one.
+            per_member_daily: Money::from_cents(32_00),
             shortfall_resentment: 12,
         })
         .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));

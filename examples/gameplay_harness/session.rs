@@ -773,13 +773,65 @@ pub fn play_session_with_fixture_view(
         // The lull anchor is player-visible reasoning: the crew's own field report places the
         // heavy enforcement in the small hours, so leadership schedules the quiet word inside
         // the first morning gap after the case opened and still before an institutional
-        // interview would typically be worked. The exact offset is evaluation-owned variation
-        // derived from the run seed, not a game rule.
+        // interview would typically be worked. When the crew's debrief produced a patrol
+        // report, use the same patrol-aware window selection RECON uses; otherwise fall
+        // back to a bounded evaluation-owned offset.
         let case_open_minute = metrics
             .case_open_minute
             .expect("witness-pressure arc requires the surfaced case-open minute");
-        let pressure_delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
-        let pressure_at = SimTime::from_minutes(case_open_minute + pressure_delay);
+        let debrief_patrol_summary = metrics
+            .debrief_patrol_information
+            .iter()
+            .filter_map(|information| {
+                scenario
+                    .state
+                    .intelligence()
+                    .get_information(*information)
+                    .map(|record| record.summary().to_owned())
+            })
+            .next();
+        // Fallback: any organization-held police-activity observation about the district.
+        let police_activity_summary = debrief_patrol_summary.or_else(|| {
+            scenario
+                .state
+                .intelligence()
+                .information_for_holder_by_topic(
+                    KnowledgeHolder::Organization(scenario.player),
+                    InformationTopic::PoliceActivity,
+                )
+                .map(|information| information.summary().to_owned())
+                .next()
+        });
+        let pressure_at = if let Some(ref summary) = police_activity_summary {
+            let duration = scenario
+                .registry
+                .get_operation(OperationKind::WitnessPressure)
+                .execution()
+                .duration();
+            // Witness interviews typically land 2-3h after intake; fit the word inside the
+            // first quiet window after opening but before the authority can interview.
+            let latest_start = SimTime::from_minutes(case_open_minute + 180);
+            choose_safe_start_from_patrol_report(
+                SimTime::from_minutes(case_open_minute),
+                summary,
+                duration,
+                SimDuration::from_minutes(30),
+                latest_start,
+            )
+            .unwrap_or_else(|_| {
+                let delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
+                SimTime::from_minutes(case_open_minute + delay)
+            })
+        } else {
+            let delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
+            SimTime::from_minutes(case_open_minute + delay)
+        };
+        if narrative && police_activity_summary.is_some() {
+            println!(
+                "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
+                format_minute_of_day(pressure_at.as_minutes())
+            );
+        }
         let witness = scenario.target_owner;
         pending_witness_pressure = Some(authorize_witness_pressure(
             &mut scenario,
