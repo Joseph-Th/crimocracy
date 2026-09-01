@@ -614,25 +614,39 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         "\n[FINANCIAL VIEW {}]",
         stamp(scenario.state.now().as_minutes())
     );
+    let member_count = scenario
+        .state
+        .world()
+        .characters_in_organization(scenario.player)
+        .count();
+    let per_member = scenario.registry.upkeep().per_member_daily();
+    let daily_wage = per_member.cents() * member_count as i64;
+    let days = view
+        .legitimate_cycle_count
+        .max(view.enterprise_cycle_count as u32)
+        .max(1);
     println!(
-        "  Legitimate front: {} cycle(s), net {}.",
+        "  Legitimate front: {} cycle(s), net {} (avg {} /day).",
         view.legitimate_cycle_count,
         format_cents(view.legitimate_net_cents),
+        format_cents(view.legitimate_net_cents / days as i64),
     );
     for line in &view.enterprise_lines {
         println!(
-            "  Delegated gambling, {}: {} cycle(s), net {}, street float {}.",
+            "  Delegated gambling, {}: {} cycle(s), net {}, street float {} (avg {} /day).",
             line.label,
             line.cycle_count,
             format_cents(line.net_cents),
             format_cents(line.cash_cents),
+            format_cents(line.net_cents / (line.cycle_count.max(1) as i64)),
         );
     }
     if view.enterprise_lines.is_empty() {
         println!(
-            "  Delegated gambling: {} cycle(s), net {}.",
+            "  Delegated gambling: {} cycle(s), net {} (avg {} /day).",
             view.enterprise_cycle_count,
             format_cents(view.enterprise_net_cents),
+            format_cents(view.enterprise_net_cents / days as i64),
         );
     }
     println!(
@@ -678,10 +692,21 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
             view.laundering_capacity_rejections,
         );
     }
+    let payroll_status = if view.payroll_short_cents > 0 {
+        format!(
+            "SHORTFALL — crew resentment rising ({} unpaid)",
+            format_cents(view.payroll_short_cents)
+        )
+    } else {
+        "all wages met".to_owned()
+    };
     println!(
-        "  Payroll to date: {} paid across the crew, {} unpaid.",
+        "  Payroll to date: {} paid across {} member(s) ({} /day), {} unpaid — {}.",
         format_cents(view.payroll_paid_cents),
+        member_count,
+        format_cents(daily_wage),
         format_cents(view.payroll_short_cents),
+        payroll_status,
     );
 }
 

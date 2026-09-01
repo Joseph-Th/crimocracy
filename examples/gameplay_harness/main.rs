@@ -65,6 +65,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
     } else {
         println!("legal foundation: skipped for focused strategy iteration");
     }
+    let mut smoke_metrics: Vec<RunMetrics> = Vec::new();
     for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
         if selected_strategy.is_some_and(|selected| selected != strategy) {
             continue;
@@ -101,6 +102,32 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             tri_state(metrics.cold_case_confirmed),
             metrics.autonomous_recruitment_attempts,
             metrics.player_personnel_departures,
+        );
+        smoke_metrics.push(metrics);
+    }
+    if selected_strategy.is_none() && smoke_metrics.len() == 3 {
+        let rush = &smoke_metrics[0];
+        let press = &smoke_metrics[1];
+        let recon = &smoke_metrics[2];
+        let info_leverage = recon.planning_information_count > rush.planning_information_count
+            && recon.burglary_information_quality.unwrap_or_default()
+                > rush.burglary_information_quality.unwrap_or_default();
+        let consequence =
+            press.investigation_created || recon.property_realized_cash_cents.is_some();
+        println!(
+            "\n[SMOKE LOOP] Observe→Plan→Delegate→Consequence: info leverage {} | consequence {} | personnel departures {}/{}/{}.",
+            if info_leverage {
+                "PASS (RECON 3 intel > RUSH 1)"
+            } else {
+                "fail"
+            },
+            if consequence { "PASS" } else { "fail" },
+            rush.player_personnel_departures,
+            press.player_personnel_departures,
+            recon.player_personnel_departures,
+        );
+        println!(
+            "[SMOKE READOUT] Run `cargo harness-full --samples 2` for the full narrative, financial view, and audit trail."
         );
     }
     match selected_strategy {

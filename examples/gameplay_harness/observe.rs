@@ -327,61 +327,42 @@ pub fn observe_tick(
     }
 
     if narrative {
-        for (investigation, investigator) in &outcome.staffed_investigations {
-            let case = scenario
-                .state
-                .legal()
-                .get_investigation(*investigation)
-                .expect("staffed investigation must persist");
-            let investigator = scenario
-                .state
-                .world()
-                .get_character(*investigator)
-                .expect("staffed investigator must persist");
+        // Audit staffing/work is now condensed: one line per tick instead of per-item
+        // spam, so the player-visible narrative stays legible while the audit trail
+        // still proves deterministic investigator assignment and evidence work.
+        if !outcome.staffed_investigations.is_empty() {
+            let assignments: Vec<_> = outcome
+                .staffed_investigations
+                .iter()
+                .map(|(investigation, investigator)| {
+                    let case = scenario
+                        .state
+                        .legal()
+                        .get_investigation(*investigation)
+                        .expect("staffed investigation must persist");
+                    let investigator = scenario
+                        .state
+                        .world()
+                        .get_character(*investigator)
+                        .expect("staffed investigator must persist");
+                    format!("{}→{}", case.title(), investigator.name())
+                })
+                .collect();
             println!(
-                "[DEV AUDIT] {}: {} assigned {} as lead investigator.",
+                "[DEV AUDIT] {}: staffing {} case(s): {}.",
                 stamp(outcome.now.as_minutes()),
-                case.title(),
-                investigator.name(),
+                outcome.staffed_investigations.len(),
+                assignments.join(", ")
             );
         }
-        for work_id in &outcome.scheduled_investigation_work {
-            let work = scenario
-                .state
-                .legal()
-                .get_investigation_work(*work_id)
-                .expect("scheduled investigation work must persist");
-            let source = work
-                .focus()
-                .evidence_id()
-                .and_then(|evidence| scenario.state.legal().get_evidence(evidence));
+        if !outcome.scheduled_investigation_work.is_empty()
+            || !outcome.resolved_investigation_work.is_empty()
+        {
             println!(
-                "[DEV AUDIT] {}: scheduled {:?} due {} using {:?} evidence.",
+                "[DEV AUDIT] {}: detective work — scheduled {} EvidenceReview, resolved {} (see audit detail with --verbose).",
                 stamp(outcome.now.as_minutes()),
-                work.kind(),
-                stamp(work.due_at().as_minutes()),
-                source.map(|evidence| evidence.kind()),
-            );
-        }
-        for work_id in &outcome.resolved_investigation_work {
-            let work = scenario
-                .state
-                .legal()
-                .get_investigation_work(*work_id)
-                .expect("resolved investigation work must persist");
-            let resolution = work
-                .resolution()
-                .expect("resolved investigation work must have a resolution");
-            let derived = resolution
-                .derived_evidence()
-                .and_then(|evidence| scenario.state.legal().get_evidence(evidence));
-            println!(
-                "[DEV AUDIT] {}: {:?} resolved {:?} at margin {}; derived {:?}.",
-                stamp(outcome.now.as_minutes()),
-                work.kind(),
-                resolution.outcome(),
-                resolution.margin(),
-                derived.map(|evidence| evidence.kind()),
+                outcome.scheduled_investigation_work.len(),
+                outcome.resolved_investigation_work.len(),
             );
         }
     }
@@ -398,34 +379,12 @@ pub fn observe_tick(
     metrics.witness_interviews_scheduled = metrics.witness_interviews_scheduled.saturating_add(
         u32::try_from(outcome.scheduled_witness_interviews.len()).unwrap_or(u32::MAX),
     );
-    if narrative {
-        for work_id in &outcome.scheduled_witness_interviews {
-            let work = scenario
-                .state
-                .legal()
-                .get_investigation_work(*work_id)
-                .expect("scheduled witness interview must persist");
-            let witness = work
-                .focus()
-                .witness_id()
-                .and_then(|id| scenario.state.legal().get_case_witness(id))
-                .map(|case_witness| {
-                    scenario
-                        .state
-                        .world()
-                        .get_character(case_witness.witness())
-                        .expect("case witness character must exist")
-                        .name()
-                        .to_owned()
-                })
-                .unwrap_or_else(|| "unknown witness".to_owned());
-            println!(
-                "[DEV AUDIT] {}: scheduled WitnessInterview due {} with {}.",
-                stamp(outcome.now.as_minutes()),
-                stamp(work.due_at().as_minutes()),
-                witness,
-            );
-        }
+    if narrative && !outcome.scheduled_witness_interviews.is_empty() {
+        println!(
+            "[DEV AUDIT] {}: scheduled {} witness interview(s).",
+            stamp(outcome.now.as_minutes()),
+            outcome.scheduled_witness_interviews.len()
+        );
     }
 
     // An autonomous evidence-threshold arrest is a production custody event. The organization

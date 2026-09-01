@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 35;
+pub const CURRENT_CONTENT_REVISION: u32 = 36;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -129,8 +129,8 @@ fn register_reputation(builder: &mut RegistryBuilder) {
             daily_decay_step: 1,
             // A governed outfit whose police fear runs this hot suspends delegated
             // expansion for the day; visible heat outranks growth.
-            expansion_police_fear_ceiling: 60,
-            witnessed_exposure_police_fear: 4,
+            expansion_police_fear_ceiling: 58,
+            witnessed_exposure_police_fear: 5,
             identifying_exposure_police_fear: 7,
             vice_inquiry_police_fear: 5,
             achieved_underworld_competence: 3,
@@ -155,9 +155,10 @@ fn register_upkeep(builder: &mut RegistryBuilder) {
         .register_upkeep(UpkeepConfigSpec {
             // Daily street wage per member: visible next to one enterprise cycle, so an
             // idle organization feels carrying costs and headcount is a real decision.
-            // Raised from $15 to $25 to make payroll a meaningful brake on pure
-            // enterprise scaling without starving a 4-person crew in the first week.
-            per_member_daily: Money::from_cents(25_00),
+            // Raised to $28 to make payroll a meaningful brake — a hot district with
+            // a 2-case surcharge noticeably shrinks the surplus without starving a
+            // 4-person crew in the first week.
+            per_member_daily: Money::from_cents(28_00),
             shortfall_resentment: 12,
         })
         .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));
@@ -467,7 +468,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(35),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 300,
+                vice_attention_basis_points_per_active_case: 450,
                 gross_variance_basis_points: 800,
                 notable_variance_basis_points: 600,
                 losing_cycles_before_suspension: 3,
@@ -489,7 +490,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(45),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 500,
+                vice_attention_basis_points_per_active_case: 620,
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
@@ -514,7 +515,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(40),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 400,
+                vice_attention_basis_points_per_active_case: 600,
                 gross_variance_basis_points: 1_800,
                 notable_variance_basis_points: 1_200,
                 losing_cycles_before_suspension: 3,
@@ -543,7 +544,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(40),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 450,
+                vice_attention_basis_points_per_active_case: 650,
                 gross_variance_basis_points: 2_200,
                 notable_variance_basis_points: 1_400,
                 losing_cycles_before_suspension: 3,
@@ -569,7 +570,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(25),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 150,
+                vice_attention_basis_points_per_active_case: 250,
                 gross_variance_basis_points: 700,
                 notable_variance_basis_points: 550,
                 losing_cycles_before_suspension: 3,
@@ -592,7 +593,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 police_cost_per_point: Money::from_cents(30),
                 support_surcharge_per_business: Money::from_cents(7_500),
                 heat_surcharge_per_active_case: Money::from_cents(5_000),
-                vice_attention_basis_points_per_active_case: 100,
+                vice_attention_basis_points_per_active_case: 180,
                 gross_variance_basis_points: 1_000,
                 notable_variance_basis_points: 750,
                 losing_cycles_before_suspension: 3,
