@@ -1,4 +1,8 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
+//!
+//! `run_tick` is the only authoritative minute (14 phases, contractual order).
+//! See `AGENTS.md:§7` for the phase diagram and `ARCHITECTURE.md` for the tower.
+//! New autonomous work must slot explicitly here with a "runs after X so Y" comment.
 
 use crate::core::id::{
     BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,

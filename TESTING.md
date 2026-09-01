@@ -1,23 +1,48 @@
 # Testing
 
-Owns test selection, harness evidence, and local verification. Ownership is in [`ARCHITECTURE.md`](ARCHITECTURE.md); scope is in [`STATUS.md`](STATUS.md).
+Owns test selection, harness evidence, and local verification. Ownership is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md); scope is in [`STATUS.md`](STATUS.md);
+cockpit routing is in [`AGENTS.md`](AGENTS.md).
 
-## Test selection
+## Test selection — narrowest proof first
 
-Use the narrowest proof that covers the change:
+```
+Which change did you make?
+  │
+  ├─ One library behavior (single module, single system)
+  │   Focused: cargo test-focused <filter>         (~0.5s)
+  │   Complete: .\scripts\verify.cmd -Fast         (~1s)  — or go directly there
+  │
+  ├─ Library implementation (no harness surface touched)
+  │   Focused: cargo check-fast  or  cargo test-focused <filter>
+  │   Complete: .\scripts\verify.cmd -Fast
+  │
+  ├─ Harness surface (examples/gameplay_harness/*.rs)
+  │   Focused: cargo harness -- --mode smoke --strategy rush  (~0.15s)
+  │            or  cargo harness-press
+  │   Complete: .\scripts\verify.cmd -Fast -Harness          (~1-2s)
+  │
+  └─ Persistence, invariants, cross-domain, or verification infra
+      Focused: owning module's focused test or load/continuation diagnosis
+      Complete: .\scripts\verify.cmd               (~5-10s, broad gate)
+```
 
 | Change | Focused feedback | Completion lane |
-| --- | --- | --- |
+|---|---|---|
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
 | Harness filter | `cargo harness -- --mode smoke --strategy rush` or `cargo harness-press` | `.\scripts\verify.cmd -Fast -Harness` |
 | Persistence, invariants, or cross-domain behavior | Focused owner test or load/continuation diagnosis | `.\scripts\verify.cmd` (broad gate) |
 
-The columns are not a required sequence. Use focused feedback while iterating or isolating a failure; go directly to the completion lane once it compiles and exercises the same owner coverage.
+The columns are not a required sequence. Use focused feedback while iterating or
+isolating a failure; go directly to the completion lane once it compiles and
+exercises the same owner coverage. Never rerun the broad gate after a passing
+fast lane “for reassurance”.
 
 ## Test rules
 
-Tests prove observable production behavior: calculations, transitions, transactions, invariants, serialization, deterministic continuation, and failure paths.
+Tests prove observable production behavior: calculations, transitions, transactions,
+invariants, serialization, deterministic continuation, and failure paths.
 
 - Exercise canonical system operations, not private helpers or test-only mutation shortcuts.
 - Assert typed error variants and relevant fields, not rendered text.
@@ -25,55 +50,66 @@ Tests prove observable production behavior: calculations, transitions, transacti
 - Use explicit seeds and stable ordering. Do not hunt for a passing seed.
 - Keep content-count, CRUD, or smokes only when they protect a real contract.
 
-Ordinary tests live with their owning module under `#[cfg(test)]`, named after behavior. Use `make_test_*` for local fixtures and the idempotent `*_for_test` pattern when extending the shared production registry. Soak-class tests carry the substring `soak` and are excluded from fast lanes with `--skip soak`, so renames cannot silently un-exclude them; the invariant soak is stress evidence, not a replacement for focused behavioral tests.
+Ordinary tests live with their owning module under `#[cfg(test)]`, named after
+behavior. Use `make_test_*` for local fixtures and the idempotent `*_for_test`
+pattern when extending the shared production registry. Soak-class tests carry the
+substring `soak` and are excluded from fast lanes with `--skip soak`, so renames
+cannot silently un-exclude them; the invariant soak is stress evidence, not a
+replacement for focused behavioral tests.
 
-## Local verification
+### Accretion checklist for a new test
 
-Verification is local and for solo iteration. Hosted CI and GitHub Actions are not authorities.
+- [ ] Calls the owner's `validate_* → commit` or `decide_* → apply_*`, not a private helper.
+- [ ] Asserts the typed `Error` variant (e.g. `FinanceError::InsufficientFunds`) + fields on failure, not a string.
+- [ ] On rejection, clones `state` before and `assert_eq!(state, before)` after.
+- [ ] Uses `AppState::new(explicit_seed)` and `BTreeMap`/`BTreeSet` ordering — no `HashMap` iteration.
+- [ ] Named `fn <behavior>_when_<condition>()`, not `fn test_crud()`.
 
-### Fast lanes
+## Local verification — solo, in this repo, no hosted CI
 
-| Need | Command | Warm |
-| --- | --- | --- |
-| Type-check library | `cargo check-fast` | ~0.4s |
-| Type-check harness | `cargo check-harness` | ~1s |
-| Lib tests (no soak) | `cargo test-fast` | ~0.7s |
-| One test / module | `cargo test-focused <filter>` | ~0.5s |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run cost of the chosen lane |
-| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s |
-| Full-mode comparison batch | `cargo harness-full --samples 8` | ~5s |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s |
+### Fast lanes — inner loop
+
+| Need | Command | Warm | What it proves |
+|---|---|---|---|
+| Type-check library | `cargo check-fast` | ~0.4s | `src/` compiles |
+| Type-check harness | `cargo check-harness` | ~1s | example adapter compiles |
+| Lib tests (no soak) | `cargo test-fast` | ~0.7s | all lib, `--skip soak` |
+| One test / module | `cargo test-focused <filter>` | ~0.5s | owning `src/` module's `#[cfg(test)]` |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run cost of the chosen lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
+| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one branch (`Rush/Press/Recon`) on `[profile.harness]` |
+| Full-mode comparison batch | `cargo harness-full --samples 8` | ~5s | all strategies, matched seeds, artifacts |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s | iteration gate |
+| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s | smoke contract only |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s | focused + fmt |
 
 `cargo check-fast` and `cargo test-focused` are the inner loop; `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
 
-Harness rebuild cost model:
+**Harness rebuild cost model (measured, see `Cargo.toml`):**
 
 - All `harness*` aliases run on `[profile.harness]` (`target\harness\`): dev semantics at `opt-level 1`, never disturbing library caches in `target\debug\`.
 - Example-only edits recompile in ~2-3s. A library edit pays one optimized lib rebuild: ~75s cold or after a profile/cache change, ~10-20s warm.
 - Dependencies compile at `opt-level 3` in every dev-derived profile and rebuild only on lockfile changes.
-- The scripts pin `CARGO_INCREMENTAL=0` per stage, so an inherited value cannot override the profiles.
+- The scripts pin `CARGO_INCREMENTAL=0` per stage, so an inherited value cannot override the profiles. Dev stages force `0`; harness stages clear it so `[profile.harness] incremental=true` governs.
 
-### Broad completion gate
+### Broad completion gate — when cheap lanes are not enough
 
 ```text
 .\scripts\verify.cmd
 .\scripts\verify.cmd -Jobs 2
 ```
 
-Fail-fast stages, in order:
+Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 
 1. `cargo fmt --check`
 2. `cargo test --locked --lib --tests --quiet`
 3. Harness unit tests (`cargo test --locked --quiet --example gameplay_harness --lib`): the example's own options-parsing and financial-branch contract tests, which stage 2 never compiles
-4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed)
+4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed — `verify.ps1 -SelfTest` validates the count must be exactly 1)
 5. Gameplay-harness full mode, one sample (`--mode full --samples 1`): narrative arcs, probes, and cross-branch contracts that smoke skips
 6. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
 
 [`scripts/verify.ps1`](scripts/verify.ps1) owns the gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
 
-When to run what:
+**When to run what:**
 
 - Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work with `.\scripts\verify.cmd -Fast -Harness`.
 - Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Never rerun it after a passing fast lane merely for reassurance.
@@ -82,16 +118,19 @@ When to run what:
 
 Gate flags: `-Jobs N` caps parallelism; `-NoClippy` / `-NoFmt` skip known-passing stages; `-Verbose` (`-Detail`) shows cargo output on success. Profiles are tuned by measurement for this machine and crate; the alternatives are noted in [`Cargo.toml`](Cargo.toml). If rebuilds feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
 
-## Gameplay-harness evidence
+## Gameplay-harness evidence — bounded evaluation surface
 
 [`examples/gameplay_harness/main.rs`](examples/gameplay_harness/main.rs) evaluates bounded deterministic policy treatments through production paths. It is an evaluation surface, not a human-play test: it proves systemic behavior, not interface quality or comprehension.
 
-| Mode | Evidence |
-| --- | --- |
-| `smoke` | Canonical strategies plus the legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence |
-| `full` | Narrative strategy arcs, probes, matched-seed batches, scenario sensitivity, artifacts |
+### Modes
 
-Commands: `cargo harness` runs smoke by default; `cargo harness-full --samples 8` runs explicit comparison; append `--artifact-dir target/my-run` to relocate artifacts.
+| Mode | Command | Evidence | Cost |
+|---|---|---|---|
+| `smoke` (default) | `cargo harness` | Canonical strategies + legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence | ~0.5s |
+| focused smoke | `cargo harness-rush` / `-press` / `-recon` | One strategy branch only | ~0.15s |
+| `full` | `cargo harness-full --samples 8` | Narrative strategy arcs, probes, matched-seed batches, scenario sensitivity, artifacts | ~5s |
+
+Commands: `cargo harness` runs smoke by default; `cargo harness-full --samples 8` runs explicit comparison; append `--artifact-dir target/my-run` to relocate artifacts. `cargo harness -- --mode smoke --strategy press` selects one branch.
 
 ### Information boundary
 
@@ -99,7 +138,7 @@ RUSH, PRESS, and RECON act on the same seed-selected authored fixture and timeli
 
 `--samples N` (range 1..=64) varies simulation/world seed and bounded timing offsets. Matched branches share seed, fixture, and timeline. Per-run events and `RunMetrics` are raw evidence beneath aggregates; aggregates are not quality scores. `full` mode writes per-run JSON (seeds and raw metrics) to `--artifact-dir` (default `target/harness-runs/`) plus a `summary-<seed>.json`. Structural validation runs at setup and observation boundaries, not every tick.
 
-### Organic variation
+### Organic variation — not one replayed story
 
 The harness must not replay one exact story, so evaluation-owned choices vary deterministically with the run seed:
 
@@ -108,9 +147,7 @@ The harness must not replay one exact story, so evaluation-owned choices vary de
 - Seed-derived policy jitter inside fixed branch identities: the witness-pressure delay after case opening, which rival the defector watch visits first, and which executive approach the win-back uses (`PersonalAppeal` or `FinancialOpportunity`; both outcomes are contract-honest).
 - Authored fixture axes stay live: the racket till is street cash on even seeds and concealed cash on odd seeds, and the PRESS arc adapts to what its books actually hold (see the wealth-gate contract).
 
-### Contracts
-
-The harness enforces the contracts below. Changing any of them requires updating this section and the focused harness tests in the same change.
+### Contracts — changing any requires updating this section + the harness tests
 
 Narrative arcs (one shared fixture per comparison; each session closes with an organization view built from player-visible state):
 
@@ -145,7 +182,8 @@ Cross-cutting contracts:
 
 Before handoff:
 
-- Run exactly the smallest scripted completion lane that covers the changed surface; do not rerun an overlapping focused proof immediately before that lane.
-- Review `git diff --check`, generated output, and the final worktree.
+- [ ] Ran exactly the smallest scripted completion lane that covers the changed surface (see decision tree above); did not rerun an overlapping focused proof immediately before that lane.
+- [ ] `git diff --check` is clean; generated output and final worktree reviewed.
+- [ ] If a test, harness mode, alias, or verification rule changed, this document and the owning script/command definition were updated in the same change.
 
 When a test, harness mode, alias, or verification rule changes, update this document and the owning script or command definition in the same change.

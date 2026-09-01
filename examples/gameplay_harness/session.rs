@@ -599,32 +599,32 @@ pub fn play_session_with_fixture_view(
     // own debrief-derived read on how the responding authority moved in this district. That
     // record is what lets act 2 plan against the patrol rhythm without fresh surveillance or
     // hidden-state reads.
-    if metrics.aborted {
-        if let Some(OperationAbortCause::PoliceArrival(_)) = metrics.abort_cause {
-            let debrief_information = burglary_record
-                .abort_record()
-                .and_then(|abort| abort.artifacts())
-                .and_then(|artifacts| artifacts.police_activity_information());
-            if let Some(information) = debrief_information {
-                metrics.player_police_activity_information =
-                    metrics.player_police_activity_information.saturating_add(1);
-                metrics.debrief_patrol_information.push(information);
-                if narrative {
-                    let record = scenario
-                        .state
-                        .intelligence()
-                        .get_information(information)
-                        .expect("debrief police-activity knowledge must persist");
-                    println!(
-                        "[DECIDE]  Debrief the crew before anyone plans around that response; what they saw becomes organizational knowledge."
-                    );
-                    println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
-                        record.summary()
-                    );
-                }
+    if metrics.aborted
+        && let Some(OperationAbortCause::PoliceArrival(_)) = metrics.abort_cause
+    {
+        let debrief_information = burglary_record
+            .abort_record()
+            .and_then(|abort| abort.artifacts())
+            .and_then(|artifacts| artifacts.police_activity_information());
+        if let Some(information) = debrief_information {
+            metrics.player_police_activity_information =
+                metrics.player_police_activity_information.saturating_add(1);
+            metrics.debrief_patrol_information.push(information);
+            if narrative {
+                let record = scenario
+                    .state
+                    .intelligence()
+                    .get_information(information)
+                    .expect("debrief police-activity knowledge must persist");
+                println!(
+                    "[DECIDE]  Debrief the crew before anyone plans around that response; what they saw becomes organizational knowledge."
+                );
+                println!(
+                    "[LEARN]   {:?} / {:?}: {}",
+                    record.reliability(),
+                    record.specificity(),
+                    record.summary()
+                );
             }
         }
     }
@@ -1000,16 +1000,16 @@ pub fn play_session_with_fixture_view(
                         .unwrap_or_default()
                         .max(0);
                     let mut day_absorbed: Option<i64> = None;
-                    if launderable > 0 {
-                        if let Some(gross) = launder_through_front(
+                    if launderable > 0
+                        && let Some(gross) = launder_through_front(
                             &mut scenario,
                             narrative && first_laundry,
                             &mut metrics,
                             canal_float,
                             launderable,
-                        )? {
-                            day_absorbed = Some(gross);
-                        }
+                        )?
+                    {
+                        day_absorbed = Some(gross);
                     }
                     laundry_days += 1;
                     if narrative && !first_laundry && day_absorbed != last_absorbed {
@@ -1120,21 +1120,20 @@ pub fn play_session_with_fixture_view(
             // The diversified book must prove itself as live economy, not a paper
             // establishment: keep the world running until the second racket has settled
             // real cycles before the final financial view.
-            if metrics.front_acquired {
-                if let Some(expansion) = metrics.expansion_enterprise {
-                    for _ in 0..10 {
-                        let settled_cycles =
-                            scenario.state.enterprises().cycles_for(expansion).count();
-                        if settled_cycles >= 2 {
-                            break;
-                        }
-                        let next_day = scenario.state.now()
-                            + SimDuration::from_minutes(
-                                u32::try_from(campaign_day_minutes)
-                                    .expect("authored campaign day must fit the duration type"),
-                            );
-                        run_until(&mut scenario, next_day, narrative, &mut metrics)?;
+            if metrics.front_acquired
+                && let Some(expansion) = metrics.expansion_enterprise
+            {
+                for _ in 0..10 {
+                    let settled_cycles = scenario.state.enterprises().cycles_for(expansion).count();
+                    if settled_cycles >= 2 {
+                        break;
                     }
+                    let next_day = scenario.state.now()
+                        + SimDuration::from_minutes(
+                            u32::try_from(campaign_day_minutes)
+                                .expect("authored campaign day must fit the duration type"),
+                        );
+                    run_until(&mut scenario, next_day, narrative, &mut metrics)?;
                 }
             }
         }

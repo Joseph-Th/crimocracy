@@ -52,19 +52,18 @@ pub fn validate_run_metrics(
     // minus anything already spent on legitimate acquisitions - and a branch that
     // liquidated stolen property must have laundered those proceeds rather than leaving
     // organizational value in exposed street cash.
-    if let Some(balance) = metrics.accounted_balance_cents {
-        if balance
+    if let Some(balance) = metrics.accounted_balance_cents
+        && balance
             != metrics.laundered_gross_cents
                 - metrics.launder_fee_cents
                 - metrics.acquisition_spent_cents
-        {
-            return Err(HarnessContractError::InconsistentLaunderingEvidence {
-                strategy,
-                gross: metrics.laundered_gross_cents,
-                fee: metrics.launder_fee_cents,
-                balance: Some(balance),
-            });
-        }
+    {
+        return Err(HarnessContractError::InconsistentLaunderingEvidence {
+            strategy,
+            gross: metrics.laundered_gross_cents,
+            fee: metrics.launder_fee_cents,
+            balance: Some(balance),
+        });
     }
     if metrics.property_realized_cash_cents.is_some() && metrics.laundered_gross_cents == 0 {
         return Err(HarnessContractError::MissingStrategyEvidence {

@@ -116,16 +116,16 @@ pub fn observe_tick(
     // The second score's lapse is a deliberate, observed consequence: PRESS stands down while the
     // case is hot and the opportunity expires through the canonical lifecycle, generating its own
     // report instead of any hidden-state read.
-    if let Some(opportunity) = metrics.second_opportunity {
-        if outcome.expired_opportunities.contains(&opportunity) {
-            metrics.second_opportunity_expired = true;
-            if narrative {
-                println!(
-                    "[OPPORTUNITY COST] {}: the second score on {} lapsed without action. The standing-down discipline that protects the hot case has a real price.",
-                    stamp(outcome.now.as_minutes()),
-                    scenario.variation.alternate_target_name()
-                );
-            }
+    if let Some(opportunity) = metrics.second_opportunity
+        && outcome.expired_opportunities.contains(&opportunity)
+    {
+        metrics.second_opportunity_expired = true;
+        if narrative {
+            println!(
+                "[OPPORTUNITY COST] {}: the second score on {} lapsed without action. The standing-down discipline that protects the hot case has a real price.",
+                stamp(outcome.now.as_minutes()),
+                scenario.variation.alternate_target_name()
+            );
         }
     }
 

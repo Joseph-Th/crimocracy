@@ -1,6 +1,15 @@
 # Current Status
 
-Scope authority: what the foundation implements and what it explicitly excludes. Ownership is in [`ARCHITECTURE.md`](ARCHITECTURE.md); verification is in [`TESTING.md`](TESTING.md); intent is in [`GAME_DESIGN.md`](GAME_DESIGN.md).
+Scope authority: what the foundation implements and what it explicitly excludes.
+Ownership is in [`ARCHITECTURE.md`](ARCHITECTURE.md); verification is in
+[`TESTING.md`](TESTING.md); intent is in [`GAME_DESIGN.md`](GAME_DESIGN.md);
+agent routing is in [`AGENTS.md`](AGENTS.md).
+
+> **Agent quick-find:** the foundation is 11+1 domains (see table below) on the
+> `Registry → AppState (15 substates) → run_tick (14 phases)` tower described in
+> `AGENTS.md:§2` and `ARCHITECTURE.md`. To add capability, consult
+> `AGENTS.md:§10` accretion guide. Version facts are at the bottom — keep them
+> in sync with `src/core/state.rs` and `src/content/mod.rs`.
 
 ## Runtime foundation
 
@@ -57,7 +66,10 @@ The foundation does not model:
 
 These are scope boundaries, not evidence for unmodeled design goals.
 
-## Version facts
+## Version facts — single source of truth for persistence compat
+
+These two numbers gate `core::persistence::restore_save` (`src/core/persistence.rs`):
+mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 33.
 

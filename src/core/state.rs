@@ -1,4 +1,11 @@
 //! Serializable application state; subsystem state is owned here and mutated through systems.
+//!
+//! `AppState` is the God aggregate — 15 substates + 5 RNG streams + clocks.
+//! Find the owning field below, then the canonical `validate_* → commit` in that
+//! owner's `*_system.rs` (see `AGENTS.md:§3` quick-ref and `ARCHITECTURE.md` source map).
+//! All `//!` headers name the owner; `core::simulation::run_tick` orchestrates all 15.
+
+// Current schema — bump on any AppState layout change; `STATUS.md` must stay in sync.
 
 use crate::contacts::ContactState;
 use crate::core::attention::{AttentionClass, AttentionSettings};
