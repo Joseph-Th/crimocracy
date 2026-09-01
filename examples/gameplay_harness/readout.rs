@@ -903,7 +903,21 @@ pub fn print_experience_readout(
 ) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
-        "The core fantasy tested here is: learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
+        "Core fantasy: learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
+    );
+    // Compact fantasy scorecard for quick scannability before the detailed loop.
+    let info_leverage = recon.planning_information_count > rush.planning_information_count;
+    let delegated = recon.burglary.is_some() && recon.outcome.is_some();
+    let consequential = press.investigation_created && recon.property_realized_cash_cents.is_some();
+    let survivable = press.cold_case_confirmed == Some(true);
+    let social = rush.player_personnel_departures > 0 && rush.replacement_recruited;
+    println!(
+        "Fantasy scorecard: Information {} | Delegation {} | Consequence {} | Survival {} | People {}",
+        if info_leverage { "PASS" } else { "fail" },
+        if delegated { "PASS" } else { "fail" },
+        if consequential { "PASS" } else { "fail" },
+        if survivable { "PASS" } else { "fail" },
+        if social { "PASS" } else { "fail" },
     );
     println!("Evidence coverage (not a game-quality score):");
     print_loop_checkpoint(

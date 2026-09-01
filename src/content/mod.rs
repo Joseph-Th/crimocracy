@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 33;
+pub const CURRENT_CONTENT_REVISION: u32 = 34;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -110,9 +110,11 @@ fn register_laundering(builder: &mut RegistryBuilder) {
             // The front keeps a meaningful cut: laundering is a service the legitimate
             // business charges for, not a free conversion button.
             fee_basis_points: 1_500,
-            // A single transfer may plausibly hide inside half of one legitimate cycle's
-            // gross; larger volumes require larger or additional fronts.
-            plausibility_gross_basis_points: 5_000,
+            // A single transfer may plausibly hide inside 70% of one legitimate cycle's
+            // gross; larger volumes still require larger or additional fronts, but the
+            // PRESS diversification arc completes in ~4 days instead of ~6, keeping the
+            // standing-down wait interactive rather than a calendar grind.
+            plausibility_gross_basis_points: 7_000,
         })
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
 }
@@ -150,9 +152,11 @@ fn register_executive_brief(builder: &mut RegistryBuilder) {
 fn register_upkeep(builder: &mut RegistryBuilder) {
     builder
         .register_upkeep(UpkeepConfigSpec {
-            // Daily street wage per member: small next to one enterprise cycle, large enough
-            // that an idle organization feels carrying costs and headcount is a real decision.
-            per_member_daily: Money::from_cents(15_00),
+            // Daily street wage per member: visible next to one enterprise cycle, so an
+            // idle organization feels carrying costs and headcount is a real decision.
+            // Raised from $15 to $25 to make payroll a meaningful brake on pure
+            // enterprise scaling without starving a 4-person crew in the first week.
+            per_member_daily: Money::from_cents(25_00),
             shortfall_resentment: 12,
         })
         .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));

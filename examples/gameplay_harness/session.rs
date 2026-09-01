@@ -1028,16 +1028,21 @@ pub fn play_session_with_fixture_view(
                 // The diversification purchase: gated on accounted funds by production
                 // validation, so a street-till world simply retries each day until the books
                 // qualify. A concealed-till world never has clean money to attempt with.
-                if !till_concealed
-                    && !metrics.front_acquired
-                    && acquire_harbor_front(&mut scenario, narrative, &mut metrics)?
-                {
-                    establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-                    if narrative {
-                        println!(
-                            "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
-                        );
+                // Once the venue is owned, the harbor book is capitalized from whatever idle
+                // street cash exists - retry on later days if the first attempt lacked float.
+                if !till_concealed && !metrics.front_acquired {
+                    if acquire_harbor_front(&mut scenario, narrative, &mut metrics)? {
+                        establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
+                        if metrics.expansion_established && narrative {
+                            println!(
+                                "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
+                            );
+                        }
                     }
+                } else if metrics.front_acquired && !metrics.expansion_established {
+                    // Venue bought but float was insufficient yesterday - retry once new
+                    // enterprise cycles have settled fresh street cash.
+                    establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
                 }
                 // The precinct channel is only asked once the shelf could have landed; before
                 // that there is nothing fresh for it to say.
@@ -1061,23 +1066,28 @@ pub fn play_session_with_fixture_view(
                     Some((true, _)) => {}
                     None => {}
                 }
-                // Daily heartbeat while the wait continues: one line carrying the channel's
-                // read (or why it was not asked) and the clean-money progress, instead of
-                // repeating full contact prose every simulated day. Concealed-till worlds
-                // have no laundry counter, so their pulse keys on the wait itself.
-                if narrative
+                // Daily heartbeat while the wait continues: throttled to every other day
+                // or when the channel produced a fresh read, so the standing-down does not
+                // spam the narrative with identical lines. Concealed-till worlds have no
+                // laundry counter, so their pulse keys on the wait itself.
+                let should_heartbeat = narrative
                     && (laundry_days > 1 || till_concealed)
                     && metrics.cold_case_confirmed.is_none()
-                {
+                    && (read.is_some() || laundry_days % 2 == 0);
+                if should_heartbeat {
                     let accounted = scenario
                         .state
                         .finance()
                         .get_account(scenario.accounted_funds)
                         .expect("accounted-funds account must persist")
                         .balance();
-                    let channel_line = match read {
+                    let channel_line = match &read {
                         Some((true, _)) => {
                             "the channel still reads the case as actively developing"
+                        }
+                        Some((false, _)) => "the channel confirms the case has cooled",
+                        None if scenario.state.now() < poll_at => {
+                            "the channel cannot yet know - the case cannot have shelved"
                         }
                         _ => "the channel has nothing fresh to share yet",
                     };

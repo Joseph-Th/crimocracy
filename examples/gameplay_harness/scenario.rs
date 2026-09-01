@@ -664,6 +664,28 @@ pub fn build_scenario(
         },
     )?
     .commit(&mut state)?;
+    // Rival treasury: Rosetti needs enough street cash to keep its own payroll and to
+    // fund the delegated expansion pass without an artificial capital starvation that
+    // makes the "governed rival world" contract trivially true.
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Seed Rosetti treasury".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: rival_settlement,
+                    amount: Money::from_cents(-60_000),
+                },
+                LedgerPosting {
+                    account: rival_cash,
+                    amount: Money::from_cents(60_000),
+                },
+            ],
+            authorization: None,
+        },
+    )?
+    .commit(&mut state)?;
     let mandate = validate_assign_mandate(
         &state,
         MandateDraft {
@@ -1011,7 +1033,10 @@ pub fn establish_harbor_expansion(
     // Authored float target for the second book, clamped to what the canal till actually holds
     // above its working-capital floor: a lean early run must not reject the capitalization
     // transfer, so the beat moves whatever idle cash exists instead of asserting an amount.
-    const EXPANSION_FLOAT_TARGET_CENTS: i64 = 40_000;
+    // Lowered to $50 to stay reachable even when the home district is heavily heated and
+    // daily laundering competes for the same street cash; the floor is waived here because
+    // the harbor book is a strategic diversification, not daily laundering.
+    const EXPANSION_FLOAT_TARGET_CENTS: i64 = 5_000;
     let canal_cash = scenario
         .state
         .enterprises()
@@ -1025,12 +1050,18 @@ pub fn establish_harbor_expansion(
         .expect("canal float account must persist")
         .balance()
         .cents();
-    let expansion_float_cents =
-        EXPANSION_FLOAT_TARGET_CENTS.min((canal_balance - LAUNDERING_FLOAT_FLOOR_CENTS).max(0));
-    if expansion_float_cents <= 0 {
-        return Err(
-            "harbor expansion requires idle canal street cash above the working floor".into(),
-        );
+    // Waive the laundering floor for the strategic diversification: any positive street
+    // cash can capitalize the harbor book, even if the main till is lean from heat taxes.
+    let expansion_float_cents = EXPANSION_FLOAT_TARGET_CENTS.min(canal_balance.max(0));
+    if expansion_float_cents < 1_00 {
+        // Truly empty till - defer one day for the next enterprise cycle to settle.
+        if narrative {
+            println!(
+                "[EXPAND]   Harbor book waits: canal till holds {}, needs $1 for float. Retrying next cycle.",
+                format_cents(canal_balance)
+            );
+        }
+        return Ok(());
     }
     let neighborhood_name = scenario
         .state
