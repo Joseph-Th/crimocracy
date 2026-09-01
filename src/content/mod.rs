@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 37;
+pub const CURRENT_CONTENT_REVISION: u32 = 38;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -445,6 +445,42 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 acquisition_cost: Money::from_cents(64_000),
             },
         ),
+        (
+            BusinessKind::Brewery,
+            BusinessEconomicsDefinition {
+                // Illicit production front: high throughput, high police attention, swings hard with
+                // district demand. Priced as a premium infrastructure acquisition.
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(20_000),
+                base_operating_cost: Money::from_cents(13_000),
+                wealth_revenue_per_point: Money::from_cents(30),
+                commerce_revenue_per_point: Money::from_cents(70),
+                police_cost_per_point: Money::from_cents(45),
+                gross_variance_basis_points: 1_800,
+                notable_variance_basis_points: 1_200,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(85_000),
+            },
+        ),
+        (
+            BusinessKind::Nightclub,
+            BusinessEconomicsDefinition {
+                // Speakeasy venue: cash-heavy nightlife front, the natural laundering and
+                // customer-access hub for the Prohibition economy. Also the most plausible
+                // storefront: customer throughput and till camouflage make it the best laundering
+                // front per-dollar of gross.
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(17_000),
+                base_operating_cost: Money::from_cents(11_000),
+                wealth_revenue_per_point: Money::from_cents(90),
+                commerce_revenue_per_point: Money::from_cents(110),
+                police_cost_per_point: Money::from_cents(50),
+                gross_variance_basis_points: 1_400,
+                notable_variance_basis_points: 1_000,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(70_000),
+            },
+        ),
     ];
     for (kind, economics) in definitions {
         builder
@@ -604,6 +640,61 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
             ]),
             BTreeSet::new(),
         ),
+        (
+            // The Prohibition core: a concealed nightlife venue selling illicit alcohol.
+            // High gross and police cost, scales with wealth and commerce, and is the
+            // most vice-exposed racket. Requires a nightlife venue and a supply chain
+            // that can produce and move alcohol.
+            EnterpriseKind::Speakeasy,
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(12_000),
+                base_operating_cost: Money::from_cents(6_500),
+                demand_revenue_per_point: Money::from_cents(120),
+                commerce_revenue_per_point: Money::from_cents(80),
+                wealth_revenue_per_point: Money::from_cents(100),
+                management_revenue_per_point: Money::from_cents(55),
+                police_cost_per_point: Money::from_cents(55),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 720,
+                gross_variance_basis_points: 1_600,
+                notable_variance_basis_points: 1_100,
+                losing_cycles_before_suspension: 3,
+            },
+            BTreeSet::from([
+                BusinessFunction::Nightlife,
+                BusinessFunction::CustomerAccess,
+            ]),
+            BTreeSet::from([
+                BusinessFunction::AlcoholProduction,
+                BusinessFunction::DistributionInfrastructure,
+            ]),
+        ),
+        (
+            // Infiltration of the union hiring hall: extorts local businesses for
+            // payroll kickbacks. Stable and management-driven, with lower vice
+            // visibility than vice rackets but dependent on union access.
+            EnterpriseKind::LaborRacketeering,
+            EnterpriseEconomicsDefinition {
+                cycle: SimDuration::from_minutes(1_440),
+                base_gross: Money::from_cents(9_500),
+                base_operating_cost: Money::from_cents(5_200),
+                demand_revenue_per_point: Money::from_cents(60),
+                commerce_revenue_per_point: Money::from_cents(90),
+                wealth_revenue_per_point: Money::from_cents(40),
+                management_revenue_per_point: Money::from_cents(70),
+                police_cost_per_point: Money::from_cents(30),
+                support_surcharge_per_business: Money::from_cents(7_500),
+                heat_surcharge_per_active_case: Money::from_cents(5_000),
+                vice_attention_basis_points_per_active_case: 280,
+                gross_variance_basis_points: 900,
+                notable_variance_basis_points: 650,
+                losing_cycles_before_suspension: 3,
+            },
+            BTreeSet::new(),
+            BTreeSet::from([BusinessFunction::UnionAccess, BusinessFunction::Warehousing]),
+        ),
     ];
     for (kind, economics, required_business_functions, required_network_functions) in definitions {
         builder
@@ -648,6 +739,8 @@ fn operation_name(kind: OperationKind) -> &'static str {
         OperationKind::GamblingEvent => "Gambling event",
         OperationKind::Extraction => "Extraction",
         OperationKind::Sabotage => "Sabotage",
+        OperationKind::Bribery => "Bribery",
+        OperationKind::Arson => "Arson",
     }
 }
 fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
@@ -663,6 +756,8 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::GamblingEvent => &[RoleKind::Coordinator],
         OperationKind::Extraction => &[RoleKind::Coordinator, RoleKind::Driver],
         OperationKind::Sabotage => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
+        OperationKind::Bribery => &[RoleKind::Coordinator, RoleKind::Negotiator],
+        OperationKind::Arson => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
     };
     roles.iter().copied().collect()
 }
@@ -682,6 +777,12 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         // Sabotage is deliberate property damage: quieter than robbery, slower than
         // intimidation, and heavily dependent on knowing the target's layout.
         OperationKind::Sabotage => (55, 48, 30, 40),
+        // Bribery buys police goodwill rather than material value: low exposure but
+        // hard without inside knowledge and social leverage.
+        OperationKind::Bribery => (40, 58, 20, 32),
+        // Arson is high-risk message violence: short, exposed, and heavily penalized
+        // by police presence — the blunt counterpart to sabotage.
+        OperationKind::Arson => (30, 60, 55, 62),
     };
     let role_capabilities = BTreeMap::from([
         (
@@ -724,6 +825,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
     let leader_capability = match kind {
         OperationKind::Surveillance => CapabilityKind::Surveillance,
         OperationKind::WitnessPressure => CapabilityKind::Intimidation,
+        OperationKind::Bribery => CapabilityKind::Negotiation,
         OperationKind::Burglary
         | OperationKind::Robbery
         | OperationKind::Hijacking
@@ -732,7 +834,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
-        | OperationKind::Sabotage => CapabilityKind::Management,
+        | OperationKind::Sabotage
+        | OperationKind::Arson => CapabilityKind::Management,
     };
     let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
         .into_iter()
@@ -780,6 +883,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::GamblingEvent => (35, 15, None, 10, 16),
         OperationKind::Extraction => (18, 10, Some(8), 18, 24),
         OperationKind::Sabotage => (24, 12, Some(8), 14, 20),
+        // Bribery never triggers a mid-execution police response — it targets police.
+        OperationKind::Bribery => (60, 18, None, 8, 10),
+        OperationKind::Arson => (14, 8, Some(5), 20, 26),
     };
     OperationExecutionDefinition {
         difficulty: OperationDifficultyDefinition {
@@ -847,11 +953,14 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::WitnessPressure
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
-            | OperationKind::Sabotage => None,
+            | OperationKind::Sabotage
+            | OperationKind::Bribery
+            | OperationKind::Arson => None,
         },
         cash_proceeds: match kind {
             // Robbery takes the till directly; intimidation collects protection money;
-            // a gambling event keeps the house edge; a smuggling run is paid on delivery.
+            // a gambling event keeps the house edge; a smuggling run is paid on delivery;
+            // bribery extracts a kickback skim from the venue.
             OperationKind::Robbery => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 40_000,
                 partial_take_basis_points: 8_000,
@@ -868,13 +977,18 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
                 business_take_basis_points: 18_000,
                 partial_take_basis_points: 4_000,
             }),
+            OperationKind::Bribery => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 12_000,
+                partial_take_basis_points: 2_500,
+            }),
             OperationKind::Burglary
             | OperationKind::Hijacking
             | OperationKind::Surveillance
             | OperationKind::WitnessPressure
             | OperationKind::DocumentTheft
             | OperationKind::Extraction
-            | OperationKind::Sabotage => None,
+            | OperationKind::Sabotage
+            | OperationKind::Arson => None,
         },
     }
 }
@@ -890,12 +1004,12 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
             EvidenceKind::WitnessTestimony
         }
         OperationKind::Surveillance => EvidenceKind::Surveillance,
-        OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
-        // Sabotage leaves physical traces at the scene like any other hands-on crime. Intake
-        // evidence cannot be ForensicAnalysis: the legal model derives that kind only from
-        // investigator lab work on an already-open case, and a ForensicAnalysis intake draft
-        // would be rejected by the evidence-intake gate.
-        OperationKind::Sabotage => EvidenceKind::Fingerprint,
+        OperationKind::GamblingEvent | OperationKind::Bribery => EvidenceKind::FinancialRecord,
+        // Sabotage and arson leave physical traces at the scene like any other hands-on crime.
+        // Intake evidence cannot be ForensicAnalysis: the legal model derives that kind only
+        // from investigator lab work on an already-open case, and a ForensicAnalysis intake
+        // draft would be rejected by the evidence-intake gate.
+        OperationKind::Sabotage | OperationKind::Arson => EvidenceKind::Fingerprint,
     }
 }
 
@@ -944,7 +1058,13 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::Personnel,
             InformationTopic::MarketAccess,
         ],
-        OperationKind::Sabotage => &[
+        OperationKind::Bribery => &[
+            InformationTopic::Personnel,
+            InformationTopic::Relationship,
+            InformationTopic::PoliceActivity,
+            InformationTopic::MarketAccess,
+        ],
+        OperationKind::Sabotage | OperationKind::Arson => &[
             InformationTopic::TargetSecurity,
             InformationTopic::Personnel,
             InformationTopic::Schedule,

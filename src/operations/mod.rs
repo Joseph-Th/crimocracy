@@ -36,6 +36,8 @@ pub enum OperationKind {
     GamblingEvent,
     Extraction,
     Sabotage,
+    Bribery,
+    Arson,
 }
 
 impl OperationKind {
@@ -50,12 +52,16 @@ impl OperationKind {
     pub(crate) const fn can_take_cash(self) -> bool {
         matches!(
             self,
-            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent
+            Self::Robbery
+                | Self::Smuggling
+                | Self::Intimidation
+                | Self::GamblingEvent
+                | Self::Bribery
         )
     }
 }
 
-pub const ALL_OPERATION_KINDS: [OperationKind; 11] = [
+pub const ALL_OPERATION_KINDS: [OperationKind; 13] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
     OperationKind::Hijacking,
@@ -67,6 +73,8 @@ pub const ALL_OPERATION_KINDS: [OperationKind; 11] = [
     OperationKind::GamblingEvent,
     OperationKind::Extraction,
     OperationKind::Sabotage,
+    OperationKind::Bribery,
+    OperationKind::Arson,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

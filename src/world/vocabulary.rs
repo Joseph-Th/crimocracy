@@ -163,15 +163,19 @@ pub enum BusinessKind {
     Transportation,
     Warehouse,
     ProfessionalServices,
+    Brewery,
+    Nightclub,
 }
 
-pub const ALL_BUSINESS_KINDS: [BusinessKind; 6] = [
+pub const ALL_BUSINESS_KINDS: [BusinessKind; 8] = [
     BusinessKind::Retail,
     BusinessKind::Hospitality,
     BusinessKind::Automotive,
     BusinessKind::Transportation,
     BusinessKind::Warehouse,
     BusinessKind::ProfessionalServices,
+    BusinessKind::Brewery,
+    BusinessKind::Nightclub,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -185,6 +189,8 @@ pub enum BusinessFunction {
     UnionAccess,
     DistributionInfrastructure,
     ProfessionalRecords,
+    AlcoholProduction,
+    Nightlife,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

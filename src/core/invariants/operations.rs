@@ -868,7 +868,9 @@ fn validate_operation_discoveries(
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
-        | OperationKind::Sabotage => {
+        | OperationKind::Sabotage
+        | OperationKind::Bribery
+        | OperationKind::Arson => {
             if !resolution.discovered_information().is_empty() {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),

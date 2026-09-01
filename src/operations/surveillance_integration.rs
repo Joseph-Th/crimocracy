@@ -819,6 +819,8 @@ fn business_function_label(function: BusinessFunction) -> &'static str {
         BusinessFunction::UnionAccess => "union access",
         BusinessFunction::DistributionInfrastructure => "distribution infrastructure",
         BusinessFunction::ProfessionalRecords => "professional record handling",
+        BusinessFunction::AlcoholProduction => "alcohol production",
+        BusinessFunction::Nightlife => "nightlife venue",
     }
 }
 

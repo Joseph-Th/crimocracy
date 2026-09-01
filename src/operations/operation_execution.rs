@@ -348,7 +348,7 @@ pub(crate) fn decide_operation_resolution(
     // one decision.
     let sabotage_target = match (record.kind(), record.objective()) {
         (
-            OperationKind::Sabotage,
+            OperationKind::Sabotage | OperationKind::Arson,
             OperationObjective::DisruptBusiness {
                 target: EntityRef::Business(business),
             },
@@ -416,7 +416,7 @@ pub(crate) fn decide_operation_resolution(
         && matches!(
             (record.kind(), record.objective()),
             (
-                OperationKind::Sabotage,
+                OperationKind::Sabotage | OperationKind::Arson,
                 OperationObjective::DisruptBusiness {
                     target: EntityRef::Business(_)
                 }
@@ -904,7 +904,7 @@ pub(crate) fn validate_operation_resolution_plan(
     let mut business_disruption = None;
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
         && let (
-            crate::operations::OperationKind::Sabotage,
+            crate::operations::OperationKind::Sabotage | crate::operations::OperationKind::Arson,
             crate::operations::OperationObjective::DisruptBusiness {
                 target: EntityRef::Business(business),
             },

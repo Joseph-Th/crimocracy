@@ -776,7 +776,8 @@ pub(crate) fn is_valid_operation_objective(
         }
         OperationObjective::FreeDetainee { .. } => kind == OperationKind::Extraction,
         OperationObjective::DisruptBusiness { target } => {
-            kind == OperationKind::Sabotage && matches!(target, EntityRef::Business(_))
+            matches!(kind, OperationKind::Sabotage | OperationKind::Arson)
+                && matches!(target, EntityRef::Business(_))
         }
     }
 }
