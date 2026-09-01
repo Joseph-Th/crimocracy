@@ -48,7 +48,7 @@ Layer 2 — Leaf / low-dependency domains (no cross-domain writes)
   world  social  intelligence  history  reports
               \    |        |         |       /
 Layer 1 — Immutable authoring
-  registry  ◄──  content::build_registry  (CURRENT_CONTENT_REVISION = 36)
+  registry  ◄──  content::build_registry  (CURRENT_CONTENT_REVISION = 37)
                \
 Layer 0 — Foundations (everyone depends on these)
   core::{id, time, entity, attention, state, simulation, persistence, invariants}
@@ -210,7 +210,7 @@ Did you touch persistence, invariants, cross-domain behavior, or verification in
 | Broad local gate | `.\scripts\verify.cmd` | ~2-3s | **fmt → lib+integration → harness units → smoke (fail-closed) → full n=1 → clippy** |
 
 **Watch your lanes:** `tests/documentation_contracts.rs` guards alias names, doc links,
-and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION (66) / CURRENT_CONTENT_REVISION (36)`
+and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION (66) / CURRENT_CONTENT_REVISION (37)`
 agreement — they run in stage 2/3.
 
 ---
