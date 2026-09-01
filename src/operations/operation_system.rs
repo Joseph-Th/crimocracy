@@ -1,7 +1,7 @@
 //! Operation validation and lifecycle execution; sibling records contain no resolution logic.
 
 use crate::core::attention::AttentionClass;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     ArrestId, CharacterId, DecisionRequestId, IdExhaustionError, IdKind, InformationId,
     OperationId, OrganizationId, PoliceResponseId,
@@ -9,10 +9,10 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::enterprises::EnterpriseStatus;
-use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
+use crate::history::history_system::{HistoryError, ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -20,18 +20,18 @@ use crate::intelligence::{
 };
 use crate::operations::operation_state::{pause_duration_minutes, shift_past_pause};
 use crate::operations::police_response_integration::{
-    decide_operation_police_response_start, OperationPoliceResponseStartPlan,
-    PoliceResponseIntegrationError,
+    OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
+    decide_operation_police_response_start,
 };
 use crate::operations::surveillance_integration::validate_surveillance_request;
 use crate::operations::{
-    OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
-    OperationCommand, OperationDraft, OperationIdentity, OperationKind, OperationObjective,
-    OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus, RoleKind,
-    ACTIVE_ASSIGNMENT_STATUSES,
+    ACTIVE_ASSIGNMENT_STATUSES, OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase,
+    OperationAbortRecord, OperationCommand, OperationDraft, OperationIdentity, OperationKind,
+    OperationObjective, OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus,
+    RoleKind,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,8 +75,8 @@ pub enum OperationError {
         operation: OperationId,
     },
     #[error(
-    "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
-  )]
+        "character {character} assigned to an operation belongs to organization {actual:?}, not {expected}"
+    )]
     ForeignParticipant {
         character: CharacterId,
         expected: OrganizationId,
@@ -88,16 +88,16 @@ pub enum OperationError {
         arrest: ArrestId,
     },
     #[error(
-    "character {character} changed after operation validation; expected version {expected}, found {found}"
-  )]
+        "character {character} changed after operation validation; expected version {expected}, found {found}"
+    )]
     StaleParticipant {
         character: CharacterId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "operation authorization expired at simulation minute {scheduled_for}; current minute is {now}"
-  )]
+        "operation authorization expired at simulation minute {scheduled_for}; current minute is {now}"
+    )]
     AuthorizationExpired { scheduled_for: u64, now: u64 },
     #[error("operation approach is not supported by the operation definition")]
     UnsupportedApproach,
@@ -115,8 +115,8 @@ pub enum OperationError {
     #[error("extraction target character {0} is not currently detained")]
     TargetNotDetained(crate::core::id::CharacterId),
     #[error(
-    "detainee {character} is already the extraction target of non-terminal operation {operation}"
-  )]
+        "detainee {character} is already the extraction target of non-terminal operation {operation}"
+    )]
     DetaineeAlreadyTargeted {
         character: crate::core::id::CharacterId,
         operation: OperationId,
@@ -131,8 +131,8 @@ pub enum OperationError {
     #[error("operation objective target {0:?} is inactive")]
     InactiveObjectiveTarget(EntityRef),
     #[error(
-    "character {character} is assigned to multiple operation roles: {first_role:?} and {second_role:?}"
-  )]
+        "character {character} is assigned to multiple operation roles: {first_role:?} and {second_role:?}"
+    )]
     DuplicateRoleParticipant {
         character: CharacterId,
         first_role: RoleKind,
@@ -180,22 +180,24 @@ pub enum OperationError {
         transition: OperationTransition,
     },
     #[error(
-    "operation {operation} changed after abort validation; expected version {expected}, found {found}"
-  )]
+        "operation {operation} changed after abort validation; expected version {expected}, found {found}"
+    )]
     StaleAbortOperation {
         operation: OperationId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "operation {operation} abort was validated at {expected:?}, but simulation time is now {found:?}"
-  )]
+        "operation {operation} abort was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
     StaleAbortTime {
         operation: OperationId,
         expected: SimTime,
         found: SimTime,
     },
-    #[error("operation {operation} missed its completion deadline at {deadline:?} before it could begin at {now:?}")]
+    #[error(
+        "operation {operation} missed its completion deadline at {deadline:?} before it could begin at {now:?}"
+    )]
     DeadlineMissed {
         operation: OperationId,
         deadline: SimTime,
@@ -666,14 +668,14 @@ fn projected_operation_window(
     }
     let start = existing.started_at().unwrap_or(existing.scheduled_for());
     let mut end = existing.resolution_due_at()?;
-    if existing.status() == OperationStatus::AwaitingDecision {
-        if let Some(paused_at) = existing.awaiting_decision_since() {
-            end = shift_past_pause(
-                end,
-                pause_duration_minutes(paused_at, now),
-                "projected resolution time",
-            );
-        }
+    if existing.status() == OperationStatus::AwaitingDecision
+        && let Some(paused_at) = existing.awaiting_decision_since()
+    {
+        end = shift_past_pause(
+            end,
+            pause_duration_minutes(paused_at, now),
+            "projected resolution time",
+        );
     }
     Some((start, end))
 }
@@ -1233,14 +1235,14 @@ pub(crate) fn validate_begin_operation(
     if state.now() < record.scheduled_for() {
         return Err(OperationError::StartBeforeScheduled(operation));
     }
-    if let Some(deadline) = resolve_earliest_operation_deadline(record) {
-        if state.now() >= deadline {
-            return Err(OperationError::DeadlineMissed {
-                operation,
-                deadline,
-                now: state.now(),
-            });
-        }
+    if let Some(deadline) = resolve_earliest_operation_deadline(record)
+        && state.now() >= deadline
+    {
+        return Err(OperationError::DeadlineMissed {
+            operation,
+            deadline,
+            now: state.now(),
+        });
     }
     let duration = registry.get_operation(record.kind()).execution().duration();
     // A binding deadline compresses the modeled window: the operation resolves on the deadline
@@ -1344,23 +1346,23 @@ impl ValidatedOperationAbort {
         }
         let budget = self.id_budget();
         state.ids.reserve_many(&budget)?;
-        if let OperationAbortCause::Decision(decision) = self.cause {
-            if state.decisions.pending_for_operation(self.operation) != Some(decision) {
-                return Err(OperationError::InvalidAbortCause {
-                    operation: self.operation,
-                    status: record.status(),
-                    cause: self.cause,
-                });
-            }
+        if let OperationAbortCause::Decision(decision) = self.cause
+            && state.decisions.pending_for_operation(self.operation) != Some(decision)
+        {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
         }
-        if let OperationAbortCause::PoliceArrival(response) = self.cause {
-            if !police_arrival_can_abort(state, record, response) {
-                return Err(OperationError::InvalidAbortCause {
-                    operation: self.operation,
-                    status: record.status(),
-                    cause: self.cause,
-                });
-            }
+        if let OperationAbortCause::PoliceArrival(response) = self.cause
+            && !police_arrival_can_abort(state, record, response)
+        {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
         }
 
         let artifacts = match (self.information, self.report, self.history) {
@@ -1632,9 +1634,9 @@ fn build_abort_summary(
 ) -> Result<String, OperationError> {
     match cause {
         OperationAbortCause::AuthorityOrder => Ok(format!(
-      "{} was aborted by leadership after execution began. Objective resolution was not completed.",
-      operation.title()
-    )),
+            "{} was aborted by leadership after execution began. Objective resolution was not completed.",
+            operation.title()
+        )),
         OperationAbortCause::Decision(decision) => {
             let decision = state.decisions.get_decision(decision).ok_or(
                 OperationError::InvalidAbortArtifacts {
@@ -1642,10 +1644,10 @@ fn build_abort_summary(
                 },
             )?;
             Ok(format!(
-        "{} was aborted after leadership reviewed an execution exception: {}. Objective resolution was not completed.",
-        operation.title(),
-        decision.summary()
-      ))
+                "{} was aborted after leadership reviewed an execution exception: {}. Objective resolution was not completed.",
+                operation.title(),
+                decision.summary()
+            ))
         }
         OperationAbortCause::PoliceArrival(response) => {
             let response = state.legal.get_police_response(response).ok_or(
@@ -1659,10 +1661,10 @@ fn build_abort_summary(
                 },
             )?;
             Ok(format!(
-        "{} was aborted under its standing contingency when a {} response was due to reach the target before entry. Objective resolution was not completed.",
-        operation.title(),
-        authority.name()
-      ))
+                "{} was aborted under its standing contingency when a {} response was due to reach the target before entry. Objective resolution was not completed.",
+                operation.title(),
+                authority.name()
+            ))
         }
         OperationAbortCause::DeadlineMissed => {
             let deadline = resolve_earliest_operation_deadline(operation)

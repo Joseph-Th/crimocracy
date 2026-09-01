@@ -3,11 +3,11 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::legal::investigation_system::{
-    validate_add_evidence, validate_open_investigation, validate_transition_investigation,
-    InvestigationError, InvestigationTransition,
+    InvestigationError, InvestigationTransition, validate_add_evidence,
+    validate_open_investigation, validate_transition_investigation,
 };
 use crate::legal::{
     Admissibility, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
@@ -15,7 +15,7 @@ use crate::legal::{
 };
 use crate::registry::Registry;
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -216,11 +216,13 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
     assert_eq!(released.status(), ArrestStatus::Released);
     assert_eq!(released.version(), 2);
     assert_eq!(released.released_at(), Some(fixture.state.now()));
-    assert!(fixture
-        .state
-        .legal()
-        .active_arrest_for_character(fixture.suspect)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
     assert_eq!(
         fixture
             .state
@@ -255,11 +257,13 @@ fn arrest_validation_is_case_specific_and_stales_when_case_evidence_changes() {
         .commit(&mut fixture.state)
         .expect_err("case mutation must stale a previously validated arrest");
     assert!(matches!(error, ArrestError::StaleInvestigation { .. }));
-    assert!(fixture
-        .state
-        .legal()
-        .active_arrest_for_character(fixture.suspect)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
 
     let second_case = validate_open_investigation(
         &fixture.state,

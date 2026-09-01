@@ -223,8 +223,8 @@ mod tests {
     use crate::core::time::SimDuration;
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
-    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
     use crate::enterprises::EnterpriseDraft;
+    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
     use crate::finance::finance_system::insert_account;
     use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
     use crate::world::world_system::{insert_character, insert_neighborhood, insert_organization};

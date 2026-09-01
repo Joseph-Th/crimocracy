@@ -9,14 +9,14 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_reporting::{
-    resolve_organization_business_financial_summary, BusinessReportingError,
+    BusinessReportingError, resolve_organization_business_financial_summary,
 };
 use crate::enterprises::enterprise_reporting::{
-    resolve_organization_enterprise_financial_summary, EnterpriseReportingError,
+    EnterpriseReportingError, resolve_organization_enterprise_financial_summary,
 };
 use crate::finance::Money;
 use crate::operations::OperationStatus;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
 use std::collections::BTreeSet;

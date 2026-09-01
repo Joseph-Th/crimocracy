@@ -597,12 +597,7 @@ pub fn narrate_recruitment_causality(
         .and_then(|operation| scenario.state.operations().get_operation(operation))
         .map(|operation| operation.title().to_owned());
     let accepted = attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Accepted;
-    match (
-        accepted,
-        metrics.police_arrived,
-        crew_role,
-        operation_title,
-    ) {
+    match (accepted, metrics.police_arrived, crew_role, operation_title) {
         (true, true, Some(role), Some(title)) => println!(
             "[NARRATION] {candidate_name} was on the {title} crew when police arrived. That direct contact is the lever a rival's {:?} pitch exploited; the organization loses its {} for burglary work.",
             attempt.approach(),

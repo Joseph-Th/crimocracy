@@ -147,7 +147,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
             | (AttentionClass::Notable, None, Some(_))
             | (AttentionClass::Notable, Some(_), None)
             | (AttentionClass::Exception | AttentionClass::Crisis, _, _) => {
-                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })
+                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
             }
         }
         match (cycle.net_cash() == Money::ZERO, cycle.transaction()) {
@@ -182,7 +182,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                 }
             }
             (true, Some(_)) | (false, None) => {
-                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })
+                return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
             }
         }
     }
@@ -407,7 +407,7 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                 }
             }
             AttentionClass::Exception | AttentionClass::Crisis => {
-                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })
+                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
             }
         }
         match (cycle.net_cash() == Money::ZERO, cycle.transaction()) {
@@ -441,7 +441,7 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                 }
             }
             (true, Some(_)) | (false, None) => {
-                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })
+                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
             }
         }
     }

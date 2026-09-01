@@ -13,7 +13,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::CharacterId;
 use crate::core::id::InvestigationId;
 use crate::core::state::AppState;
-use crate::intelligence::intelligence_system::{validate_record_information, ValidatedInformation};
+use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,

@@ -87,7 +87,11 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             strategy.label(),
             metrics.burglary_terminal_minute.unwrap_or_default(),
             terminal_label(&metrics),
-            if metrics.police_arrived { "arrived" } else { "none" },
+            if metrics.police_arrived {
+                "arrived"
+            } else {
+                "none"
+            },
             metrics.evidence_count,
             metrics.player_legal_activity_information,
             metrics.player_police_activity_information,
@@ -326,11 +330,11 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_policy_choice, choose_safe_start_from_patrol_report, parse_options,
+        DEFAULT_SEED, FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode,
+        HarnessOptions, NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline,
+        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_report, parse_options,
         parse_patrol_windows, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
-        validate_branch_financial_isolation, validate_press_witness_counterplay, FixtureVariation,
-        HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions, RunMetrics,
-        ScenarioProfile, ScenarioTimeline, Strategy, DEFAULT_SEED, NARRATIVE_SEED_ROTATION,
+        validate_branch_financial_isolation, validate_press_witness_counterplay,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::operations::OperationObjectiveOutcome;

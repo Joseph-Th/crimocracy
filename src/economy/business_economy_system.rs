@@ -6,16 +6,16 @@ use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId, IdExhaust
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::economy::{
-    build_business_economy_record, BusinessCycleRecord, BusinessEconomyDraft,
-    BusinessOperatingStatus,
+    BusinessCycleRecord, BusinessEconomyDraft, BusinessOperatingStatus,
+    build_business_economy_record,
 };
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedFinancialAccountOpenings,
-    ValidatedLedgerTransaction,
+    FinanceError, ValidatedFinancialAccountOpenings, ValidatedLedgerTransaction,
+    validate_record_transaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
@@ -63,13 +63,17 @@ pub enum BusinessEconomyError {
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("business economics overflowed while resolving business {0}")]
     ArithmeticOverflow(BusinessId),
-    #[error("business {business} economy changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "business {business} economy changed after validation; expected version {expected}, found {found}"
+    )]
     StaleEconomy {
         business: BusinessId,
         expected: u32,
         found: u32,
     },
-    #[error("business {business} ownership changed after cycle planning; expected version {expected}, found {found}")]
+    #[error(
+        "business {business} ownership changed after cycle planning; expected version {expected}, found {found}"
+    )]
     StaleBusiness {
         business: BusinessId,
         expected: u32,
@@ -720,7 +724,7 @@ pub fn validate_suspend_business_economy(
     match economy.status() {
         BusinessOperatingStatus::Active => {}
         BusinessOperatingStatus::Suspended => {
-            return Err(BusinessEconomyError::EconomyNotActive(business))
+            return Err(BusinessEconomyError::EconomyNotActive(business));
         }
     }
     Ok(ValidatedBusinessEconomyStatusChange {
@@ -767,7 +771,7 @@ fn validate_resume_with_cycle_duration(
         .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
     match economy.status() {
         BusinessOperatingStatus::Active => {
-            return Err(BusinessEconomyError::EconomyNotSuspended(business))
+            return Err(BusinessEconomyError::EconomyNotSuspended(business));
         }
         BusinessOperatingStatus::Suspended => {}
     }
@@ -875,13 +879,13 @@ fn validate_accounts(
             settlement_account,
         ));
     }
-    if let Some(existing) = state.economy.get_by_settlement_account(settlement_account) {
-        if Some(existing.business()) != current_business {
-            return Err(BusinessEconomyError::SettlementAccountInUse {
-                account: settlement_account,
-                business: existing.business(),
-            });
-        }
+    if let Some(existing) = state.economy.get_by_settlement_account(settlement_account)
+        && Some(existing.business()) != current_business
+    {
+        return Err(BusinessEconomyError::SettlementAccountInUse {
+            account: settlement_account,
+            business: existing.business(),
+        });
     }
     Ok(())
 }

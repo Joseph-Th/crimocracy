@@ -35,8 +35,8 @@ pub enum WorldError {
         owner: BusinessOwner,
     },
     #[error(
-    "character {character} already has this organization and supervisor; reassignment unchanged"
-  )]
+        "character {character} already has this organization and supervisor; reassignment unchanged"
+    )]
     CharacterReassignmentUnchanged { character: CharacterId },
     #[error(
         "business {business} changed after validation; expected version {expected}, found {found}"
@@ -54,13 +54,17 @@ pub enum WorldError {
         expected: BusinessOwner,
         actual: BusinessOwner,
     },
-    #[error("business {business} supports active enterprise {enterprise} for organization {organization}")]
+    #[error(
+        "business {business} supports active enterprise {enterprise} for organization {organization}"
+    )]
     ActiveEnterpriseSupport {
         business: BusinessId,
         enterprise: EnterpriseId,
         organization: OrganizationId,
     },
-    #[error("business {business} is the hosted venue of active enterprise {enterprise} for organization {organization}")]
+    #[error(
+        "business {business} is the hosted venue of active enterprise {enterprise} for organization {organization}"
+    )]
     ActiveEnterpriseHost {
         business: BusinessId,
         enterprise: EnterpriseId,
@@ -108,8 +112,8 @@ pub enum WorldError {
         arrest: ArrestId,
     },
     #[error(
-    "character {character} is active informant {informant} for target handler organization {handler}"
-  )]
+        "character {character} is active informant {informant} for target handler organization {handler}"
+    )]
     ActiveInformantHandlerAssignment {
         character: CharacterId,
         handler: OrganizationId,
@@ -130,7 +134,9 @@ pub enum WorldError {
         character: CharacterId,
         direct_report: CharacterId,
     },
-    #[error("character {character} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "character {character} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
@@ -320,13 +326,13 @@ fn validate_reassignment_preconditions(
     }
     if organization_changed || supervisor_changed {
         validate_role_change_release(state, character)?;
-        if organization_changed {
-            if let Some(direct_report) = state.world.direct_reports(character).next() {
-                return Err(WorldError::DirectReportAssignment {
-                    character,
-                    direct_report: direct_report.id(),
-                });
-            }
+        if organization_changed
+            && let Some(direct_report) = state.world.direct_reports(character).next()
+        {
+            return Err(WorldError::DirectReportAssignment {
+                character,
+                direct_report: direct_report.id(),
+            });
         }
     }
 
@@ -377,14 +383,14 @@ fn validate_organization_change_release(
             contact: contact.id(),
         });
     }
-    if let Some(handler) = organization {
-        if let Some(informant) = state.legal.active_informant_for(character, handler) {
-            return Err(WorldError::ActiveInformantHandlerAssignment {
-                character,
-                handler,
-                informant: informant.id(),
-            });
-        }
+    if let Some(handler) = organization
+        && let Some(informant) = state.legal.active_informant_for(character, handler)
+    {
+        return Err(WorldError::ActiveInformantHandlerAssignment {
+            character,
+            handler,
+            informant: informant.id(),
+        });
     }
     Ok(())
 }

@@ -94,10 +94,18 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             "  - {:<14} autonomy {:?}; management {:?}; burglary {:?}; surveillance {:?}; stealth {:?}",
             record.name(),
             record.autonomy(),
-            record.capability(CapabilityKind::Management).map(Rating::value),
-            record.capability(CapabilityKind::Burglary).map(Rating::value),
-            record.capability(CapabilityKind::Surveillance).map(Rating::value),
-            record.capability(CapabilityKind::Stealth).map(Rating::value),
+            record
+                .capability(CapabilityKind::Management)
+                .map(Rating::value),
+            record
+                .capability(CapabilityKind::Burglary)
+                .map(Rating::value),
+            record
+                .capability(CapabilityKind::Surveillance)
+                .map(Rating::value),
+            record
+                .capability(CapabilityKind::Stealth)
+                .map(Rating::value),
         );
     }
     println!(
@@ -748,7 +756,10 @@ pub fn print_metrics(metrics: &RunMetrics) {
     println!(
         "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
         metrics.strategy.expect("strategy must be set").label(),
-        metrics.variation.expect("fixture variation must be set").label(),
+        metrics
+            .variation
+            .expect("fixture variation must be set")
+            .label(),
         terminal_label(metrics),
         metrics.burglary_terminal_minute,
         metrics.police_dispatched,
@@ -959,7 +970,8 @@ pub fn print_experience_readout(
     );
     print_loop_checkpoint(
         "rebuild",
-        rush.replacement_recruited && rush.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
+        rush.replacement_recruited
+            && rush.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
         "a crew member lost to rival pressure can be replaced through a player-authored executive recruitment, and the rebuilt crew works a second score safely",
     );
     print_loop_checkpoint(

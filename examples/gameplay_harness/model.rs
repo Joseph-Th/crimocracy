@@ -9,8 +9,8 @@ use crimocracy::core::time::SimTime;
 use crimocracy::finance::AccountKind;
 use crimocracy::intelligence::{InformationTopic, Reliability, Specificity};
 use crimocracy::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationKind, OperationObjectiveOutcome,
-    ALL_OPERATION_KINDS,
+    ALL_OPERATION_KINDS, OperationAbortCause, OperationAbortPhase, OperationKind,
+    OperationObjectiveOutcome,
 };
 use crimocracy::registry::Registry;
 use crimocracy::social::RelationshipLevel;

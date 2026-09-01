@@ -3,10 +3,10 @@
 use super::*;
 use crate::build_registry;
 use crate::contacts::contact_system::{
-    validate_establish_contact, validate_terminate_contact, ContactError, InstitutionalContactDraft,
+    ContactError, InstitutionalContactDraft, validate_establish_contact, validate_terminate_contact,
 };
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
@@ -21,12 +21,12 @@ use crate::legal::{
 use crate::registry::Registry;
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
+use crate::world::PolicyKind;
+use crate::world::PolicySetting;
 use crate::world::world_system::set_policy;
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,
 };
-use crate::world::PolicyKind;
-use crate::world::PolicySetting;
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -357,11 +357,13 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
 
     // The default CaseByCase policy never fires on its own.
     let untouched = fixture();
-    assert!(untouched
-        .state
-        .legal()
-        .active_representation_for_arrest(untouched.arrest)
-        .is_none());
+    assert!(
+        untouched
+            .state
+            .legal()
+            .active_representation_for_arrest(untouched.arrest)
+            .is_none()
+    );
 }
 
 #[test]
@@ -391,11 +393,13 @@ fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
 
     // Without a mandate override this default-policy organization would never act.
     let untouched = fixture();
-    assert!(untouched
-        .state
-        .legal()
-        .active_representation_for_arrest(untouched.arrest)
-        .is_none());
+    assert!(
+        untouched
+            .state
+            .legal()
+            .active_representation_for_arrest(untouched.arrest)
+            .is_none()
+    );
 
     let outcome = run_tick(&fx.registry, &mut fx.state);
     assert_eq!(
@@ -403,11 +407,12 @@ fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
         1,
         "the supervised defendant's retention must follow the mandate standing order"
     );
-    assert!(fx
-        .state
-        .legal()
-        .active_representation_for_arrest(fx.arrest)
-        .is_some());
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_some()
+    );
     validate_state(&fx.state).expect("mandate-driven support state should remain valid");
     validate_invariants(&fx.state);
 }
@@ -561,10 +566,12 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     );
     assert!(ended.ended_information().is_some());
     assert!(ended.ended_report().is_some());
-    assert!(restored
-        .legal()
-        .active_representation_for_arrest(fixture.arrest)
-        .is_none());
+    assert!(
+        restored
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none()
+    );
 
     let replacement = validate_retain_legal_representation(
         &restored,
@@ -757,11 +764,13 @@ fn stale_retainer_after_contact_termination_is_atomic() {
             .balance(),
         Money::ZERO
     );
-    assert!(fixture
-        .state
-        .legal()
-        .active_representation_for_arrest(fixture.arrest)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none()
+    );
     validate_state(&fixture.state).expect("rejected stale retainer should preserve valid state");
     validate_invariants(&fixture.state);
 }

@@ -6,19 +6,19 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::delegation::delegation_system::{
-    validate_assign_mandate, validate_revise_mandate, validate_revoke_mandate, DelegationError,
-    MandateRevisionDraft,
+    DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
+    validate_revoke_mandate,
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+use crate::enterprises::EnterpriseKind;
 use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises;
 use crate::enterprises::enterprise_reporting::{
     resolve_enterprise_financial_summary, resolve_neighborhood_enterprise_financial_summary,
     resolve_organization_enterprise_financial_summary,
 };
-use crate::enterprises::EnterpriseKind;
 use crate::finance::finance_system::insert_account;
 use crate::finance::{FinancialAccountDraft, FinancialOwner};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
@@ -35,8 +35,8 @@ use crate::operations::{
     OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
 };
 use crate::world::world_system::{
-    insert_business, insert_character, insert_neighborhood, insert_organization,
-    validate_transfer_business_ownership, WorldError,
+    WorldError, insert_business, insert_character, insert_neighborhood, insert_organization,
+    validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
@@ -594,9 +594,11 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
                 .expect("hot cycle must carry its report"),
         )
         .expect("cycle report information must persist");
-    assert!(hot_information
-        .summary()
-        .contains("$50.00 street surcharge while police work stays heavy"));
+    assert!(
+        hot_information
+            .summary()
+            .contains("$50.00 street surcharge while police work stays heavy")
+    );
     validate_state(&fixture.state).expect("district heat state should validate");
     validate_invariants(&fixture.state);
 }

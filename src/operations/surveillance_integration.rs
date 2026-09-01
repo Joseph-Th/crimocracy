@@ -8,7 +8,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
-use crate::intelligence::intelligence_system::{validate_record_information, ValidatedInformation};
+use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
 use crate::intelligence::{
     InformationDraft, InformationRecord, InformationSourceKind, InformationTopic, KnowledgeHolder,
     Reliability, Specificity,
@@ -265,30 +265,38 @@ pub(crate) fn surveillance_after_action_clause(
     let plan = plan?;
     let findings = plan.observation_findings().collect::<Vec<_>>().join("; ");
     let clause = match outcome {
-    OperationObjectiveOutcome::Achieved => format!(
-      "Surveillance produced {} usable target observation{}{}.",
-      plan.observation_count(),
-      if plan.observation_count() == 1 { "" } else { "s" },
-      if findings.is_empty() {
-        String::new()
-      } else {
-        format!(": {findings}")
-      }
-    ),
-    OperationObjectiveOutcome::Partial => format!(
-      "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
-      plan.observation_count(),
-      if plan.observation_count() == 1 { "" } else { "s" },
-      if findings.is_empty() {
-        String::new()
-      } else {
-        format!(" Covered: {findings}.")
-      }
-    ),
-    OperationObjectiveOutcome::Failed => {
-      "Surveillance produced no target observation reliable enough for planning.".to_owned()
-    }
-  };
+        OperationObjectiveOutcome::Achieved => format!(
+            "Surveillance produced {} usable target observation{}{}.",
+            plan.observation_count(),
+            if plan.observation_count() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if findings.is_empty() {
+                String::new()
+            } else {
+                format!(": {findings}")
+            }
+        ),
+        OperationObjectiveOutcome::Partial => format!(
+            "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
+            plan.observation_count(),
+            if plan.observation_count() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if findings.is_empty() {
+                String::new()
+            } else {
+                format!(" Covered: {findings}.")
+            }
+        ),
+        OperationObjectiveOutcome::Failed => {
+            "Surveillance produced no target observation reliable enough for planning.".to_owned()
+        }
+    };
     Some(clause)
 }
 
@@ -707,15 +715,15 @@ fn patrol_summary(
     if outcome == OperationObjectiveOutcome::Partial {
         let presence = patrol.current_presence.unwrap_or(patrol.baseline_presence);
         return format!(
-      "Police activity around {neighborhood_name} appeared {} during the observation period; a dependable daily patrol pattern was not established.",
-      police_presence_label(presence)
-    );
+            "Police activity around {neighborhood_name} appeared {} during the observation period; a dependable daily patrol pattern was not established.",
+            police_presence_label(presence)
+        );
     }
     if patrol.deployments.is_empty() {
         return format!(
-      "No stable daily patrol deployment pattern was confirmed around {neighborhood_name}; visible police activity appears {} overall.",
-      police_presence_label(patrol.baseline_presence)
-    );
+            "No stable daily patrol deployment pattern was confirmed around {neighborhood_name}; visible police activity appears {} overall.",
+            police_presence_label(patrol.baseline_presence)
+        );
     }
     let mut windows = Vec::new();
     for deployment in &patrol.deployments {
@@ -746,11 +754,11 @@ fn patrol_summary(
     let minute = u16::try_from(observed_at.as_minutes() % 1_440)
         .expect("minute-of-day remainder must fit u16");
     format!(
-    "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}{extra_clause}. Around {}, activity was {}.",
-    windows.join(", "),
-    format_day_minute(rounded_half_hour(minute)),
-    police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
-  )
+        "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}{extra_clause}. Around {}, activity was {}.",
+        windows.join(", "),
+        format_day_minute(rounded_half_hour(minute)),
+        police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
+    )
 }
 
 fn approximate_patrol_window(window: PatrolWindow) -> String {
@@ -852,8 +860,8 @@ fn authority_sightline_summary(
     // organization already knows exists; it never reveals evidence, subjects, or case internals.
     if outcome == OperationObjectiveOutcome::Partial {
         return format!(
-      "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
-    );
+            "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
+        );
     }
     // Dependable reads lead with the shared anchored activity marker so player-facing
     // parsers read the sightline without hidden state and free text cannot spoof the parse.
@@ -861,15 +869,15 @@ fn authority_sightline_summary(
         (
             CaseActivityStatus::Active,
             format!(
-        "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
-      ),
+                "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
+            ),
         )
     } else {
         (
             CaseActivityStatus::Shelved,
             format!(
-        "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
-      ),
+                "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
+            ),
         )
     };
     format!("{} {prose}", status.marker())
@@ -923,9 +931,9 @@ fn investigation_summary(
         String::new()
     };
     format!(
-    "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}{staffing_clause}",
-    investigation_status_label(status)
-  )
+        "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}{staffing_clause}",
+        investigation_status_label(status)
+    )
 }
 
 fn enterprise_summary(

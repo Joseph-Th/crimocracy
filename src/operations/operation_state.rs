@@ -6,9 +6,9 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::operations::{
-    OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
-    OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
-    OperationResolutionRecord, OperationStatus, ACTIVE_ASSIGNMENT_STATUSES,
+    ACTIVE_ASSIGNMENT_STATUSES, OperationAbortPhase, OperationAbortRecord,
+    OperationCashDispositionRecord, OperationObjectiveOutcome, OperationPropertyDispositionRecord,
+    OperationRecord, OperationResolutionRecord, OperationStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,17 +135,26 @@ impl OperationState {
     }
 
     pub(crate) fn find_due_authorized(&self, now: SimTime) -> Vec<OperationId> {
-        self.authorized_by_start
+        // BTreeMap + BTreeSet iteration is already sorted by (time, id) but make the
+        // contract explicit: due operations start in stable order regardless of backing
+        // collection choice. Matches the sorted scan for missed deadlines.
+        let mut due: Vec<OperationId> = self
+            .authorized_by_start
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+            .collect();
+        due.sort_unstable();
+        due
     }
 
     pub(crate) fn find_due_in_progress(&self, now: SimTime) -> Vec<OperationId> {
-        self.in_progress_by_resolution_due
+        let mut due: Vec<OperationId> = self
+            .in_progress_by_resolution_due
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+            .collect();
+        due.sort_unstable();
+        due
     }
 
     pub(crate) fn insert(&mut self, record: OperationRecord) {
@@ -382,17 +391,16 @@ impl OperationState {
         if matches!(
             resolution.objective_outcome(),
             OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
-        ) {
-            if let Some(business) = record.objective().taken_business() {
-                // NOTE: deliberately unpruned. Load-time validation re-derives every
-                // historical settlement's take economics against that settlement's own
-                // recency window, so even entries older than the live window remain
-                // load-bearing - same trade as the append-only ledger itself.
-                self.successful_takes_by_business
-                    .entry(business)
-                    .or_default()
-                    .insert((resolution.resolved_at(), id));
-            }
+        ) && let Some(business) = record.objective().taken_business()
+        {
+            // NOTE: deliberately unpruned. Load-time validation re-derives every
+            // historical settlement's take economics against that settlement's own
+            // recency window, so even entries older than the live window remain
+            // load-bearing - same trade as the append-only ledger itself.
+            self.successful_takes_by_business
+                .entry(business)
+                .or_default()
+                .insert((resolution.resolved_at(), id));
         }
         self.set_status(id, OperationStatus::Completed);
     }

@@ -8,15 +8,15 @@ use crate::core::invariants::{
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::legal::investigation_work_execution::{
-    decide_investigation_work_resolution, validate_investigation_work_resolution_plan,
-    validate_schedule_investigation_work, InvestigationWorkRandomness,
+    InvestigationWorkRandomness, decide_investigation_work_resolution,
+    validate_investigation_work_resolution_plan, validate_schedule_investigation_work,
 };
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InvestigationWorkDraft,
     InvestigationWorkFocus, InvestigationWorkKind,
 };
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{
     AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft, OrganizationKind, Rating,
@@ -339,10 +339,12 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
         2,
         "the shelf carries its original and the new exposure evidence"
     );
-    assert!(state
-        .legal()
-        .active_investigations()
-        .any(|case| case.id() == first.investigation));
+    assert!(
+        state
+            .legal()
+            .active_investigations()
+            .any(|case| case.id() == first.investigation)
+    );
     assert_eq!(state.legal().investigations_for_owner(police).count(), 1);
 
     // An unrelated subject never resurrects the shelf: a distinct originated matter opens
@@ -454,9 +456,11 @@ fn autonomous_staffing_assigns_best_available_detective_and_respects_active_case
             .lead_investigator(),
         Some(junior)
     );
-    assert!(apply_autonomous_investigator_staffing(&mut state)
-        .expect("already staffed cases should be a no-op")
-        .is_empty());
+    assert!(
+        apply_autonomous_investigator_staffing(&mut state)
+            .expect("already staffed cases should be a no-op")
+            .is_empty()
+    );
     validate_state(&state).expect("autonomous staffing state should validate");
     validate_invariants(&state);
 }
@@ -869,10 +873,12 @@ fn suspending_a_case_releases_its_investigator_and_resume_restafs_from_the_free_
     assert_eq!(resumed.status(), InvestigationStatus::Active);
     assert!(resumed.lead_investigator().is_none());
     // The resumed case is back in the unstaffed index, so autonomous staffing will fill it.
-    assert!(state
-        .legal()
-        .active_investigations_without_lead()
-        .any(|case| case == investigation));
+    assert!(
+        state
+            .legal()
+            .active_investigations_without_lead()
+            .any(|case| case == investigation)
+    );
     validate_state(&state).expect("resumed case should remain structurally valid");
     validate_invariants(&state);
 }
@@ -934,12 +940,14 @@ fn suspending_a_case_frees_its_investigator_for_other_casework() {
         .expect("resume re-engages the case without retained staffing")
         .commit(&mut state)
         .expect("resume should commit");
-    assert!(state
-        .legal()
-        .get_investigation(shelved)
-        .expect("resumed case should exist")
-        .lead_investigator()
-        .is_none());
+    assert!(
+        state
+            .legal()
+            .get_investigation(shelved)
+            .expect("resumed case should exist")
+            .lead_investigator()
+            .is_none()
+    );
     // The one-active-case rule still binds live assignments: promoting the same detective
     // again onto their current case's rival fails at capacity.
     let third = validate_open_investigation(
@@ -1711,12 +1719,14 @@ fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
     .expect("corroborating evidence should validate")
     .commit(&mut state)
     .expect("corroborating evidence should commit");
-    assert!(state
-        .legal()
-        .get_investigation(investigation)
-        .expect("investigation should exist")
-        .subjects()
-        .contains(&EntityRef::Character(suspect)));
+    assert!(
+        state
+            .legal()
+            .get_investigation(investigation)
+            .expect("investigation should exist")
+            .subjects()
+            .contains(&EntityRef::Character(suspect))
+    );
     assert_ne!(weak_tip, corroboration);
 
     validate_state(&state).expect("subject promotion state should validate");

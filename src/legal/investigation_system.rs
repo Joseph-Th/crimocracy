@@ -1,6 +1,6 @@
 //! Case-opening, investigator-staffing, and evidence transactions; sibling legal state keeps indexes synchronized.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
     InvestigationWorkId, OrganizationId,
@@ -49,15 +49,21 @@ pub enum InvestigationError {
         investigation: InvestigationId,
         lead: CharacterId,
     },
-    #[error("character {investigator} already leads an active investigation and cannot take another active case")]
+    #[error(
+        "character {investigator} already leads an active investigation and cannot take another active case"
+    )]
     InvestigatorAtCaseCapacity { investigator: CharacterId },
-    #[error("investigation {investigation} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "investigation {investigation} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
-    #[error("investigator {investigator} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "investigator {investigator} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigator {
         investigator: CharacterId,
         expected: u32,
@@ -181,7 +187,7 @@ fn validate_investigation_draft(
         | OrganizationKind::Labor
         | OrganizationKind::Civic
         | OrganizationKind::Commercial => {
-            return Err(InvestigationError::InvalidOwnerKind(draft.owner))
+            return Err(InvestigationError::InvalidOwnerKind(draft.owner));
         }
     }
     for subject in &draft.subjects {
@@ -304,17 +310,16 @@ fn validate_investigation_transition_dependencies(
     // live institutional work, so only Resume escapes this gate. Closing stays allowed: a case
     // whose every identified subject is detained is cleared by arrest, and prosecution works
     // from the arrest and its evidence rather than from an active investigation.
-    if transition == InvestigationTransition::Suspend {
-        if let Some(arrest) = state
+    if transition == InvestigationTransition::Suspend
+        && let Some(arrest) = state
             .legal
             .arrests_for_investigation(investigation_id)
             .find(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
-        {
-            return Err(InvestigationError::ActiveArrestBlocksTransition {
-                investigation: investigation_id,
-                arrest: arrest.id(),
-            });
-        }
+    {
+        return Err(InvestigationError::ActiveArrestBlocksTransition {
+            investigation: investigation_id,
+            arrest: arrest.id(),
+        });
     }
     if transition == InvestigationTransition::Resume {
         let _ = state.world.get_organization(investigation.owner()).ok_or(
@@ -746,10 +751,10 @@ fn validate_evidence_draft(
     if !is_entity_present(state, draft.subject) {
         return Err(InvestigationError::MissingEntity(draft.subject));
     }
-    if let Some(origin) = draft.origin {
-        if !is_entity_present(state, origin) {
-            return Err(InvestigationError::MissingEntity(origin));
-        }
+    if let Some(origin) = draft.origin
+        && !is_entity_present(state, origin)
+    {
+        return Err(InvestigationError::MissingEntity(origin));
     }
     if draft.discovered_at > state.now() {
         return Err(InvestigationError::DiscoveryInFuture);
@@ -1003,10 +1008,10 @@ fn validate_incident_intake_dependencies(
         if !is_entity_present(state, evidence.subject) {
             return Err(InvestigationError::MissingEntity(evidence.subject));
         }
-        if let Some(origin) = evidence.origin {
-            if !is_entity_present(state, origin) {
-                return Err(InvestigationError::MissingEntity(origin));
-            }
+        if let Some(origin) = evidence.origin
+            && !is_entity_present(state, origin)
+        {
+            return Err(InvestigationError::MissingEntity(origin));
         }
         if evidence.discovered_at > state.now() {
             return Err(InvestigationError::DiscoveryInFuture);

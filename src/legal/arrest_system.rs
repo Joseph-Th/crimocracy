@@ -17,7 +17,9 @@ use thiserror::Error;
 pub enum ArrestError {
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("arrest evidence {evidence} is too weak for custody: strength {strength:?}, reliability {reliability:?}")]
+    #[error(
+        "arrest evidence {evidence} is too weak for custody: strength {strength:?}, reliability {reliability:?}"
+    )]
     InsufficientEvidence {
         evidence: EvidenceId,
         strength: crate::legal::EvidenceStrength,
@@ -74,16 +76,16 @@ pub enum ArrestError {
         work: InvestigationWorkId,
     },
     #[error(
-    "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
-  )]
+        "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "character {character} changed after arrest validation; expected version {expected}, found {found}"
-  )]
+        "character {character} changed after arrest validation; expected version {expected}, found {found}"
+    )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
@@ -93,7 +95,9 @@ pub enum ArrestError {
     MissingArrest(ArrestId),
     #[error("arrest {0} is not an active detention")]
     NotDetained(ArrestId),
-    #[error("arrest {arrest} changed after release validation; expected version {expected}, found {found}")]
+    #[error(
+        "arrest {arrest} changed after release validation; expected version {expected}, found {found}"
+    )]
     StaleArrest {
         arrest: ArrestId,
         expected: u32,

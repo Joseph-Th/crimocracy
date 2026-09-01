@@ -7,20 +7,20 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{FinancialAccountId, OperationId, OrganizationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{SimDuration, SimTime};
-use crimocracy::finance::finance_system::{
-    validate_launder_funds, LaunderingDraft, LaunderingError, ValidatedLaundering,
-};
 use crimocracy::finance::Money;
+use crimocracy::finance::finance_system::{
+    LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
+};
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
 use crimocracy::legal::InvestigationWorkKind;
 use crimocracy::operations::property_disposition::{
-    validate_dispose_property, PropertyDispositionDraft,
+    PropertyDispositionDraft, validate_dispose_property,
 };
 use crimocracy::operations::{OperationAbortCause, OperationKind, OperationStatus};
+use crimocracy::opportunities::OperationOpportunityDraft;
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
 };
-use crimocracy::opportunities::OperationOpportunityDraft;
 use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
 use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome};
 use crimocracy::registry::Registry;

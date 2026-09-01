@@ -234,8 +234,7 @@ pub(crate) fn undeposited_cash_clause(cents: i64) -> String {
 
 /// After-action phrasing when the same target was successfully hit recently: the haul came in
 /// light because the target had not fully replaced what an earlier score already took.
-pub(crate) const DEPLETED_TAKE_CLAUSE: &str =
-  "The take came in lighter than usual; this target has not fully replaced stock from a recent score.";
+pub(crate) const DEPLETED_TAKE_CLAUSE: &str = "The take came in lighter than usual; this target has not fully replaced stock from a recent score.";
 
 /// The after-action phrasing used when held property has since been liquidated through a resale
 /// venue. Must stay coherent with `unliquidated_property_clause` for the brief's in-place refresh.
@@ -245,10 +244,10 @@ pub(crate) fn liquidated_property_clause(
     realized_cents: i64,
 ) -> String {
     format!(
-    "The crew secured property with an estimated held value of {}; it was later liquidated through {venue_name} for {}.",
-    crate::finance::helpers::format_money_cents(est_value_cents),
-    crate::finance::helpers::format_money_cents(realized_cents),
-  )
+        "The crew secured property with an estimated held value of {}; it was later liquidated through {venue_name} for {}.",
+        crate::finance::helpers::format_money_cents(est_value_cents),
+        crate::finance::helpers::format_money_cents(realized_cents),
+    )
 }
 
 /// After-action phrasing for successful sabotage: the target's earning power is degraded for

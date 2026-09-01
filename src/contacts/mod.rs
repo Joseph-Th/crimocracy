@@ -372,12 +372,12 @@ impl ContactState {
                 ContactStatus::Active
                     if pair != Some(&id) || !handler_active || !contact_active =>
                 {
-                    return false
+                    return false;
                 }
                 ContactStatus::Terminated
                     if pair == Some(&id) || handler_active || contact_active =>
                 {
-                    return false
+                    return false;
                 }
                 ContactStatus::Active | ContactStatus::Terminated => {}
             }

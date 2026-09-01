@@ -2,7 +2,7 @@
 
 //! Release-safe structural validation for the legal subsystems plus persisted reports and history.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;

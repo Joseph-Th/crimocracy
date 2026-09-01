@@ -130,7 +130,7 @@ mod tests {
     use crate::build_registry;
     use crate::core::attention::AttentionClass;
     use crate::finance::Money;
-    use crate::operations::{OperationApproach, RoleKind, ALL_OPERATION_KINDS};
+    use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, RoleKind};
     use crate::recruitment::RecruitmentApproach;
     use crate::world::{BusinessFunction, CapabilityKind, DriveKind, TraitKind};
     use std::collections::BTreeSet;
@@ -265,12 +265,14 @@ mod tests {
             definition.drives_for_approach(RecruitmentApproach::Protection),
             &BTreeSet::from([DriveKind::Safety, DriveKind::FamilySecurity])
         );
-        assert!(definition
-            .trait_rules()
-            .iter()
-            .any(|rule| rule.trait_kind == TraitKind::EasilyFrightened
-                && rule.approach == Some(RecruitmentApproach::Protection)
-                && rule.adjustment > 0));
+        assert!(
+            definition
+                .trait_rules()
+                .iter()
+                .any(|rule| rule.trait_kind == TraitKind::EasilyFrightened
+                    && rule.approach == Some(RecruitmentApproach::Protection)
+                    && rule.adjustment > 0)
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crimocracy::core::id::{BusinessId, InformationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
-use crimocracy::delegation::delegation_system::validate_revise_mandate;
 use crimocracy::delegation::delegation_system::MandateRevisionDraft;
+use crimocracy::delegation::delegation_system::validate_revise_mandate;
 use crimocracy::finance::finance_system::{insert_account, validate_record_transaction};
 use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -25,7 +25,7 @@ use crimocracy::legal::{
     EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
     LegalRepresentationDraft, ProsecutionCaseDraft, WitnessCooperation,
 };
-use crimocracy::operations::operation_system::{validate_authorize_operation, OperationError};
+use crimocracy::operations::operation_system::{OperationError, validate_authorize_operation};
 use crimocracy::operations::{
     OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
     OperationObjectiveOutcome, OperationStatus, RoleKind,
@@ -38,15 +38,15 @@ use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
 use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
 use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crimocracy::registry::Registry;
-use crimocracy::social::relationship_system::validate_set_relationship;
 use crimocracy::social::RelationshipDimensions;
+use crimocracy::social::relationship_system::validate_set_relationship;
 use crimocracy::world::world_system::{insert_character, insert_organization};
 use crimocracy::world::{
     ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft,
     OrganizationKind, PolicyKind, PolicySetting,
 };
 use crimocracy::{
-    contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft},
+    contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact},
     legal::arrest_system::validate_arrest,
     legal::investigation_system::{validate_add_evidence, validate_open_investigation},
 };

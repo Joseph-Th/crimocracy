@@ -2,7 +2,7 @@
 
 use super::opportunities::validate_operation_exposure_links;
 use crate::core::attention::AttentionClass;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{InformationId, LedgerTransactionId, ReportId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
@@ -172,16 +172,15 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
                 operation: operation.id(),
             });
         }
-        if let Some(response_id) = operation.police_response() {
-            if state
+        if let Some(response_id) = operation.police_response()
+            && state
                 .legal
                 .get_police_response(response_id)
                 .is_none_or(|response| response.source_operation() != operation.id())
-            {
-                return Err(StateValidationError::InvalidOperationRuntime {
-                    operation: operation.id(),
-                });
-            }
+        {
+            return Err(StateValidationError::InvalidOperationRuntime {
+                operation: operation.id(),
+            });
         }
         match operation.status() {
             OperationStatus::Authorized

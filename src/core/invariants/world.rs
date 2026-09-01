@@ -1,16 +1,16 @@
 //! Release-safe structural validation for the world, social, and contact subsystems.
 
+use crate::contacts::ContactRelationshipSnapshot;
+use crate::contacts::ContactStatus;
 use crate::contacts::contact_system::{
     information_source_kind, resolve_contact_kind_for_institution_kind,
 };
-use crate::contacts::ContactRelationshipSnapshot;
-use crate::contacts::ContactStatus;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder};
-use crate::world::{BusinessOwner, OrganizationKind, ALL_POLICY_KINDS};
+use crate::world::{ALL_POLICY_KINDS, BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidationError> {
@@ -53,13 +53,13 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
     // characters keeps the cycle detection identical without allocating per record.
     let mut visited = BTreeSet::new();
     for character in state.world.characters() {
-        if let Some(organization) = character.organization() {
-            if state.world.get_organization(organization).is_none() {
-                return Err(StateValidationError::MissingEntity {
-                    context: "character organization",
-                    entity: EntityRef::Organization(organization),
-                });
-            }
+        if let Some(organization) = character.organization()
+            && state.world.get_organization(organization).is_none()
+        {
+            return Err(StateValidationError::MissingEntity {
+                context: "character organization",
+                entity: EntityRef::Organization(organization),
+            });
         }
         if let Some(supervisor) = character.supervisor() {
             let supervisor_record = state.world.get_character(supervisor).ok_or(
@@ -110,13 +110,13 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
             BusinessOwner::Organization(id) => Some(EntityRef::Organization(id)),
             BusinessOwner::Character(id) => Some(EntityRef::Character(id)),
         };
-        if let Some(entity) = owner {
-            if !is_entity_present(state, entity) {
-                return Err(StateValidationError::MissingEntity {
-                    context: "business owner",
-                    entity,
-                });
-            }
+        if let Some(entity) = owner
+            && !is_entity_present(state, entity)
+        {
+            return Err(StateValidationError::MissingEntity {
+                context: "business owner",
+                entity,
+            });
         }
         if business.version() == 0
             || state
@@ -199,13 +199,13 @@ pub(super) fn validate_social_and_intelligence(
                 entity: information.subject(),
             });
         }
-        if let Some(source) = information.source_entity() {
-            if !is_entity_present(state, source) {
-                return Err(StateValidationError::MissingEntity {
-                    context: "information source",
-                    entity: source,
-                });
-            }
+        if let Some(source) = information.source_entity()
+            && !is_entity_present(state, source)
+        {
+            return Err(StateValidationError::MissingEntity {
+                context: "information source",
+                entity: source,
+            });
         }
         if information.observed_at() > information.recorded_at()
             || information.recorded_at() > state.now()

@@ -1,6 +1,6 @@
 //! Report validation and insertion; reports expose known information rather than world truth.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     DecisionRequestId, IdExhaustionError, InformationId, OrganizationId, ReportId,
 };
@@ -30,7 +30,9 @@ pub enum ReportError {
     ReservedKind(ReportKind),
     #[error("decision request {0} does not exist")]
     MissingDecision(DecisionRequestId),
-    #[error("decision request {decision} belongs to organization {decision_recipient}, not report recipient {report_recipient}")]
+    #[error(
+        "decision request {decision} belongs to organization {decision_recipient}, not report recipient {report_recipient}"
+    )]
     DecisionRecipientMismatch {
         decision: DecisionRequestId,
         decision_recipient: OrganizationId,

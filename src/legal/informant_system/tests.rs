@@ -3,20 +3,20 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
 };
-use crate::legal::investigation_system::{
-    validate_add_evidence, validate_open_investigation, validate_transition_investigation,
-    InvestigationError, InvestigationTransition,
-};
 use crate::legal::ArrestDraft;
+use crate::legal::investigation_system::{
+    InvestigationError, InvestigationTransition, validate_add_evidence,
+    validate_open_investigation, validate_transition_investigation,
+};
 use crate::legal::{EvidenceDraft, InvestigationDraft};
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};

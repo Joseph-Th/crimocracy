@@ -6,7 +6,7 @@ use crate::finance::Money;
 use crate::intelligence::InformationTopic;
 use crate::legal::{EvidenceKind, InvestigationWorkKind};
 use crate::operations::{
-    OperationApproach, OperationKind, RoleKind, ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS,
+    ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind,
 };
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
@@ -22,8 +22,9 @@ use crate::registry::{
     Registry, RegistryBuilder, ReputationConfigSpec, UpkeepConfigSpec,
 };
 use crate::world::{
-    ApprovalPolicy, BusinessFunction, BusinessKind, CapabilityKind, DriveKind, LegalSupportPolicy,
-    PolicyKind, PolicySetting, TraitKind, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS,
+    ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS, ApprovalPolicy, BusinessFunction,
+    BusinessKind, CapabilityKind, DriveKind, LegalSupportPolicy, PolicyKind, PolicySetting,
+    TraitKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 

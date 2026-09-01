@@ -11,7 +11,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::{
-    validate_contact_information_derivation, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_contact_information_derivation,
 };
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
 use crate::social::{RelationshipDimensions, RelationshipRecord};
@@ -56,7 +56,9 @@ pub enum ContactError {
         handler: CharacterId,
         contact: CharacterId,
     },
-    #[error("sponsor {sponsor} already has active institutional contact {existing} with character {contact}")]
+    #[error(
+        "sponsor {sponsor} already has active institutional contact {existing} with character {contact}"
+    )]
     DuplicateActiveContact {
         sponsor: OrganizationId,
         contact: CharacterId,
@@ -73,13 +75,17 @@ pub enum ContactError {
         contact: ContactId,
         representation: LegalRepresentationId,
     },
-    #[error("institutional contact {contact} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "institutional contact {contact} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleContact {
         contact: ContactId,
         expected: u32,
         found: u32,
     },
-    #[error("character {character} changed after contact validation; expected version {expected}, found {found}")]
+    #[error(
+        "character {character} changed after contact validation; expected version {expected}, found {found}"
+    )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
@@ -98,9 +104,7 @@ pub enum ContactError {
         information: InformationId,
         contact: CharacterId,
     },
-    #[error(
-        "information {information} topic {topic:?} is outside the domain of {kind:?} contacts"
-    )]
+    #[error("information {information} topic {topic:?} is outside the domain of {kind:?} contacts")]
     InformationOutsideContactDomain {
         information: InformationId,
         topic: crate::intelligence::InformationTopic,

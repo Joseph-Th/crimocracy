@@ -202,8 +202,8 @@ mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::time::SimDuration;
-    use crate::economy::business_economy_system::validate_establish_business_economy;
     use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::validate_establish_business_economy;
     use crate::finance::finance_system::insert_account;
     use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
     use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};

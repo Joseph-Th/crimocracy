@@ -32,7 +32,9 @@ pub enum PoliceResponseError {
     MissingOperation(OperationId),
     #[error("operation {0} is not awaiting its start transaction")]
     InvalidSourceOperation(OperationId),
-    #[error("law-enforcement authority {authority} has no jurisdiction over neighborhood {neighborhood}")]
+    #[error(
+        "law-enforcement authority {authority} has no jurisdiction over neighborhood {neighborhood}"
+    )]
     OutsideJurisdiction {
         authority: OrganizationId,
         neighborhood: NeighborhoodId,
@@ -53,7 +55,9 @@ pub enum PoliceResponseError {
         response: PoliceResponseId,
         due_at: SimTime,
     },
-    #[error("police response {response} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "police response {response} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleResponse {
         response: PoliceResponseId,
         expected: u32,

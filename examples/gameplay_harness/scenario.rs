@@ -1,6 +1,6 @@
 //! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
 
-use crimocracy::contacts::contact_system::{validate_establish_contact, InstitutionalContactDraft};
+use crimocracy::contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact};
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, CharacterId, InformationId, OperationId, OpportunityId};
 use crimocracy::core::state::AppState;
@@ -10,11 +10,11 @@ use crimocracy::delegation::delegation_system::{validate_assign_mandate, validat
 use crimocracy::delegation::{
     MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
 };
+use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::economy::business_acquisition::{
-    validate_acquire_business, BusinessAcquisitionDraft,
+    BusinessAcquisitionDraft, validate_acquire_business,
 };
 use crimocracy::economy::business_economy_system::validate_establish_business_economy;
-use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::enterprises::enterprise_execution::validate_establish_enterprise;
 use crimocracy::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crimocracy::finance::finance_system::{insert_account, validate_record_transaction};
@@ -35,13 +35,13 @@ use crimocracy::operations::{
     OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
     RoleKind,
 };
-use crimocracy::opportunities::opportunity_system::validate_discover_operation_opportunity;
 use crimocracy::opportunities::OperationOpportunityDraft;
+use crimocracy::opportunities::opportunity_system::validate_discover_operation_opportunity;
 use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
 use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crimocracy::registry::Registry;
-use crimocracy::social::relationship_system::validate_set_relationship;
 use crimocracy::social::RelationshipDimensions;
+use crimocracy::social::relationship_system::validate_set_relationship;
 use crimocracy::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization,

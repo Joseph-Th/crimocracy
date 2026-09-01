@@ -1,4 +1,4 @@
-﻿//! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
+//! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
 use crate::core::id::{
     ArrestId, BusinessId, CharacterId, EnterpriseId, IdExhaustionError, MandateId, NeighborhoodId,
@@ -6,8 +6,8 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::delegation::{
-    build_mandate_record, BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord,
-    MandateStatus, ResolvedMandateAuthority, ResponsibilityScope,
+    BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord, MandateStatus,
+    ResolvedMandateAuthority, ResponsibilityScope, build_mandate_record,
 };
 use crate::finance::FinancialOwner;
 use crate::world::{PolicyKind, PolicySetting};
@@ -98,9 +98,7 @@ pub enum DelegationError {
         mandate: MandateId,
         enterprise: EnterpriseId,
     },
-    #[error(
-        "active enterprise {enterprise} still depends on scope {scope:?} in mandate {mandate}"
-    )]
+    #[error("active enterprise {enterprise} still depends on scope {scope:?} in mandate {mandate}")]
     ActiveEnterpriseScopeDependency {
         mandate: MandateId,
         enterprise: EnterpriseId,
@@ -430,10 +428,10 @@ pub fn resolve_policy_for_manager(
         .organization()
         .ok_or(DelegationError::ManagerUnassigned(manager))?;
     validate_manager(state, manager, organization)?;
-    if let Some(mandate) = state.delegation.active_for_manager(manager) {
-        if let Some(setting) = mandate.standing_order(kind) {
-            return resolve_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
-        }
+    if let Some(mandate) = state.delegation.active_for_manager(manager)
+        && let Some(setting) = mandate.standing_order(kind)
+    {
+        return resolve_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
     }
     let organization_record = state
         .world

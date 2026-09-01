@@ -12,16 +12,16 @@ use crate::decisions::decision_system::{
     validate_request_recruitment_approval, validate_resolve_decision,
 };
 use crate::delegation::delegation_system::{
-    ensure_mandate_authority_current, resolve_mandate_authority, resolve_policy_for_manager,
-    DelegationError, PolicySource, ResolvedPolicy,
+    DelegationError, PolicySource, ResolvedPolicy, ensure_mandate_authority_current,
+    resolve_mandate_authority, resolve_policy_for_manager,
 };
 use crate::delegation::{
     MandateAuthority, ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope,
 };
-use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
+use crate::history::history_system::{HistoryError, ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -33,16 +33,16 @@ use crate::recruitment::scoring::{
     resolve_recruitment_margin, resolve_recruitment_outcome,
 };
 use crate::recruitment::{
-    build_recruitment_record, build_recruitment_relationship_snapshot, RecruitmentApproach,
-    RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors, RecruitmentOutcome,
-    RecruitmentPolicySource, RecruitmentRecordContextParts, RecruitmentRecordParts,
-    RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot,
+    RecruitmentApproach, RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors,
+    RecruitmentOutcome, RecruitmentPolicySource, RecruitmentRecordContextParts,
+    RecruitmentRecordParts, RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot,
+    build_recruitment_record, build_recruitment_relationship_snapshot,
 };
 use crate::registry::{RecruitmentDefinition, Registry};
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
-    validate_reassign_character, ValidatedCharacterReassignment, WorldError,
+    ValidatedCharacterReassignment, WorldError, validate_reassign_character,
 };
 use crate::world::{
     ApprovalPolicy, AutonomyLevel, OrganizationKind, PolicyKind, PolicySetting, TraitKind,
@@ -68,7 +68,9 @@ pub enum RecruitmentError {
         recruiter: CharacterId,
         organization: OrganizationId,
     },
-    #[error("executive recruitment is reserved for organization heads; recruiter {recruiter} reports to {supervisor}")]
+    #[error(
+        "executive recruitment is reserved for organization heads; recruiter {recruiter} reports to {supervisor}"
+    )]
     ExecutiveRecruiterSupervised {
         recruiter: CharacterId,
         supervisor: CharacterId,
@@ -84,7 +86,9 @@ pub enum RecruitmentError {
         candidate: CharacterId,
         organization: OrganizationId,
     },
-    #[error("candidate {candidate} belongs to organization {organization}, which requires a different personnel system")]
+    #[error(
+        "candidate {candidate} belongs to organization {organization}, which requires a different personnel system"
+    )]
     CandidateOrganizationNotRecruitable {
         candidate: CharacterId,
         organization: OrganizationId,
@@ -94,7 +98,9 @@ pub enum RecruitmentError {
         candidate: CharacterId,
         recruiter: CharacterId,
     },
-    #[error("candidate {candidate} cannot be approached again by organization {organization} before {next_eligible_at:?}")]
+    #[error(
+        "candidate {candidate} cannot be approached again by organization {organization} before {next_eligible_at:?}"
+    )]
     Cooldown {
         candidate: CharacterId,
         organization: OrganizationId,
@@ -102,42 +108,52 @@ pub enum RecruitmentError {
     },
     #[error("recruitment plan was decided at {expected:?}, but simulation time is now {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
-    #[error("candidate {candidate} changed after recruitment was decided; expected version {expected}, found {found}")]
+    #[error(
+        "candidate {candidate} changed after recruitment was decided; expected version {expected}, found {found}"
+    )]
     StaleCandidate {
         candidate: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("recruiter {recruiter} changed after recruitment was decided; expected version {expected}, found {found}")]
+    #[error(
+        "recruiter {recruiter} changed after recruitment was decided; expected version {expected}, found {found}"
+    )]
     StaleRecruiter {
         recruiter: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("relationship {from}->{to} changed after recruitment was decided; expected version {expected:?}, found {found:?}")]
+    #[error(
+        "relationship {from}->{to} changed after recruitment was decided; expected version {expected:?}, found {found:?}"
+    )]
     StaleRelationship {
         from: CharacterId,
         to: CharacterId,
         expected: Option<u32>,
         found: Option<u32>,
     },
-    #[error("recruitment history for candidate {candidate} and organization {organization} changed after the plan was decided")]
+    #[error(
+        "recruitment history for candidate {candidate} and organization {organization} changed after the plan was decided"
+    )]
     StaleRecruitmentHistory {
         candidate: CharacterId,
         organization: OrganizationId,
     },
-    #[error(
-        "candidate {candidate} legal-pressure knowledge changed after recruitment was decided"
-    )]
+    #[error("candidate {candidate} legal-pressure knowledge changed after recruitment was decided")]
     StalePressureKnowledge { candidate: CharacterId },
-    #[error("delegated recruitment requires recruiter {recruiter} to be the authority manager {manager}")]
+    #[error(
+        "delegated recruitment requires recruiter {recruiter} to be the authority manager {manager}"
+    )]
     DelegatedRecruiterMismatch {
         recruiter: CharacterId,
         manager: CharacterId,
     },
     #[error("delegated recruitment requires Personnel scope, not {scope:?}")]
     DelegatedRecruitmentRequiresPersonnelScope { scope: ResponsibilityScope },
-    #[error("delegated recruitment authority belongs to organization {authority_organization}, not target {target_organization}")]
+    #[error(
+        "delegated recruitment authority belongs to organization {authority_organization}, not target {target_organization}"
+    )]
     DelegatedOrganizationMismatch {
         authority_organization: OrganizationId,
         target_organization: OrganizationId,

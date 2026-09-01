@@ -51,13 +51,17 @@ pub enum InvestigationWorkError {
     DuplicateScheduledWork { work: InvestigationWorkId },
     #[error("investigation evidence set is too large to persist as one work item")]
     SourceEvidenceCountOverflow,
-    #[error("investigation {investigation} changed after work validation; expected version {expected}, found {found}")]
+    #[error(
+        "investigation {investigation} changed after work validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
-    #[error("investigator {investigator} changed after work validation; expected version {expected}, found {found}")]
+    #[error(
+        "investigator {investigator} changed after work validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigator {
         investigator: CharacterId,
         expected: u32,
@@ -72,7 +76,9 @@ pub enum InvestigationWorkError {
         work: InvestigationWorkId,
         due_at: SimTime,
     },
-    #[error("investigation work {work} changed after resolution planning; expected version {expected}, found {found}")]
+    #[error(
+        "investigation work {work} changed after resolution planning; expected version {expected}, found {found}"
+    )]
     StaleWork {
         work: InvestigationWorkId,
         expected: u32,
@@ -80,7 +86,9 @@ pub enum InvestigationWorkError {
     },
     #[error("resolution context for investigation work {work} changed after resolution planning")]
     StaleResolutionContext { work: InvestigationWorkId },
-    #[error("investigation work resolution was planned at {expected:?}, but simulation time is now {found:?}")]
+    #[error(
+        "investigation work resolution was planned at {expected:?}, but simulation time is now {found:?}"
+    )]
     StaleResolutionTime { expected: SimTime, found: SimTime },
     #[error("investigation work variance {variance} exceeds authored limit {limit}")]
     VarianceOutOfRange { variance: i8, limit: u8 },

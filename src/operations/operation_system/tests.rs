@@ -5,7 +5,7 @@ use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::id::MandateId;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
@@ -767,9 +767,11 @@ fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
         .intelligence()
         .get_information(artifacts.information())
         .expect("deadline information should persist");
-    assert!(information
-        .summary()
-        .contains("missed its completion deadline"));
+    assert!(
+        information
+            .summary()
+            .contains("missed its completion deadline")
+    );
     assert_eq!(state.reports().reports_for(organization).count(), 1);
     validate_state(&state).expect("deadline-missed operation should remain valid");
     validate_invariants(&state);
@@ -826,12 +828,14 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
         .abort_record()
         .and_then(|abort| abort.artifacts())
         .expect("an in-progress deadline miss should be visible");
-    assert!(state
-        .intelligence()
-        .get_information(artifacts.information())
-        .expect("deadline information should persist")
-        .summary()
-        .contains("before execution could complete"));
+    assert!(
+        state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("deadline information should persist")
+            .summary()
+            .contains("before execution could complete")
+    );
     validate_state(&state).expect("deadline abort should remain structurally valid");
     validate_invariants(&state);
 }
@@ -867,18 +871,20 @@ fn deadline_constrained_operation_resolves_on_its_clamped_deadline_minute() {
         .expect("resolved operation should persist");
     assert_eq!(record.status(), OperationStatus::Completed);
     // The compressed execution window is visible in the organization's after-action knowledge.
-    assert!(state
-        .intelligence()
-        .information_for_holder_by_topic(
-            KnowledgeHolder::Organization(organization),
-            InformationTopic::OperationalOutcome,
-        )
-        .any(|information| {
-            information.subject() == EntityRef::Operation(operation)
-                && information
-                    .summary()
-                    .contains("completion deadline compressed the execution window")
-        }));
+    assert!(
+        state
+            .intelligence()
+            .information_for_holder_by_topic(
+                KnowledgeHolder::Organization(organization),
+                InformationTopic::OperationalOutcome,
+            )
+            .any(|information| {
+                information.subject() == EntityRef::Operation(operation)
+                    && information
+                        .summary()
+                        .contains("completion deadline compressed the execution window")
+            })
+    );
     validate_state(&state).expect("deadline resolution should remain structurally valid");
     validate_invariants(&state);
 }

@@ -1,27 +1,27 @@
-﻿//! Soak-fixture and persistence/continuation tests for `core::state`.
+//! Soak-fixture and persistence/continuation tests for `core::state`.
 
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKind;
-use crate::core::invariants::{validate_state, StateValidationError};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::invariants::{StateValidationError, validate_state};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::decisions::decision_system::{
-    validate_request_recruitment_approval, validate_resolve_decision, DecisionError,
+    DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
 };
 use crate::decisions::{DecisionResponse, RecruitmentApprovalRequestDraft};
 use crate::delegation::delegation_system::{
-    resolve_policy_for_manager, validate_assign_mandate, validate_revise_mandate,
-    validate_revoke_mandate, DelegationError, MandateRevisionDraft, PolicySource,
+    DelegationError, MandateRevisionDraft, PolicySource, resolve_policy_for_manager,
+    validate_assign_mandate, validate_revise_mandate, validate_revoke_mandate,
 };
 use crate::delegation::{
     BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
     ResponsibilityScope,
 };
-use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::economy::BusinessEconomyDraft;
+use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::enterprises::enterprise_execution::validate_establish_enterprise;
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{
@@ -59,8 +59,8 @@ use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
-    designate_player_organization, insert_business, insert_character, insert_neighborhood,
-    insert_organization, validate_reassign_character, WorldError,
+    WorldError, designate_player_organization, insert_business, insert_character,
+    insert_neighborhood, insert_organization, validate_reassign_character,
 };
 use crate::world::{
     ApprovalPolicy, AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,

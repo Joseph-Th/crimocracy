@@ -3,7 +3,7 @@
 
 //! Release-safe structural validation for the legal subsystems plus persisted reports and history.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
@@ -77,7 +77,7 @@ pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValid
                     | EntityRef::Mandate(_) => {
                         return Err(StateValidationError::InvalidInvestigationActivity {
                             investigation: investigation.id(),
-                        })
+                        });
                     }
                 };
                 if investigation.notified_organizations().is_empty()
@@ -483,13 +483,13 @@ pub(super) fn validate_evidence_records(
                 entity: evidence.subject(),
             });
         }
-        if let Some(origin) = evidence.origin() {
-            if !is_entity_present(state, origin) {
-                return Err(StateValidationError::MissingEntity {
-                    context: "evidence origin",
-                    entity: origin,
-                });
-            }
+        if let Some(origin) = evidence.origin()
+            && !is_entity_present(state, origin)
+        {
+            return Err(StateValidationError::MissingEntity {
+                context: "evidence origin",
+                entity: origin,
+            });
         }
         if let Some(source) = evidence.source() {
             if !is_entity_present(state, source) {

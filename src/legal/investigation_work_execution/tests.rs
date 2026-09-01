@@ -334,9 +334,11 @@ fn evidence_review_develops_case_owned_evidence_without_inventing_subjects() {
     );
 
     for _ in 0..179 {
-        assert!(run_tick(&registry, &mut fixture.state)
-            .resolved_investigation_work
-            .is_empty());
+        assert!(
+            run_tick(&registry, &mut fixture.state)
+                .resolved_investigation_work
+                .is_empty()
+        );
     }
     let outcome = run_tick(&registry, &mut fixture.state);
     assert_eq!(outcome.resolved_investigation_work, vec![work]);

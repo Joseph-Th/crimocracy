@@ -10,15 +10,15 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, DelegationError,
+    DelegationError, resolve_mandate_authority, resolve_policy_for_manager,
 };
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+    FinanceError, ValidatedLedgerTransaction, validate_record_transaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -28,7 +28,7 @@ use crate::legal::{
     ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
     LegalRepresentationRecord, LegalRepresentationStatus,
 };
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
@@ -94,12 +94,16 @@ pub enum LegalRepresentationError {
         account: FinancialAccountId,
         sponsor: OrganizationId,
     },
-    #[error("provider account {account} is not a legitimate operating account owned by legal-services organization {provider}")]
+    #[error(
+        "provider account {account} is not a legitimate operating account owned by legal-services organization {provider}"
+    )]
     InvalidProviderAccount {
         account: FinancialAccountId,
         provider: OrganizationId,
     },
-    #[error("payer account {account} has {available_cents} cents but retainer requires {required_cents} cents")]
+    #[error(
+        "payer account {account} has {available_cents} cents but retainer requires {required_cents} cents"
+    )]
     InsufficientFunds {
         account: FinancialAccountId,
         available_cents: i64,
@@ -109,38 +113,52 @@ pub enum LegalRepresentationError {
     FeeArithmeticOverflow,
     #[error("delegated legal representation authority must use the Legal responsibility function")]
     InvalidAuthorityScope,
-    #[error("delegated legal representation authority belongs to organization {actual}, not sponsor {expected}")]
+    #[error(
+        "delegated legal representation authority belongs to organization {actual}, not sponsor {expected}"
+    )]
     AuthorityOrganizationMismatch {
         expected: OrganizationId,
         actual: OrganizationId,
     },
-    #[error("legal representation validation was performed at {expected:?}, but simulation time is now {found:?}")]
+    #[error(
+        "legal representation validation was performed at {expected:?}, but simulation time is now {found:?}"
+    )]
     StaleTime { expected: SimTime, found: SimTime },
-    #[error("arrest {arrest} changed after legal representation validation; expected version {expected}, found {found}")]
+    #[error(
+        "arrest {arrest} changed after legal representation validation; expected version {expected}, found {found}"
+    )]
     StaleArrest {
         arrest: ArrestId,
         expected: u32,
         found: u32,
     },
-    #[error("contact {contact} changed after legal representation validation; expected version {expected}, found {found}")]
+    #[error(
+        "contact {contact} changed after legal representation validation; expected version {expected}, found {found}"
+    )]
     StaleContact {
         contact: ContactId,
         expected: u32,
         found: u32,
     },
-    #[error("defendant {defendant} changed after legal representation validation; expected version {expected}, found {found}")]
+    #[error(
+        "defendant {defendant} changed after legal representation validation; expected version {expected}, found {found}"
+    )]
     StaleDefendant {
         defendant: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("counsel {counsel} changed after legal representation validation; expected version {expected}, found {found}")]
+    #[error(
+        "counsel {counsel} changed after legal representation validation; expected version {expected}, found {found}"
+    )]
     StaleCounsel {
         counsel: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("contact handler {handler} changed after legal representation validation; expected version {expected}, found {found}")]
+    #[error(
+        "contact handler {handler} changed after legal representation validation; expected version {expected}, found {found}"
+    )]
     StaleHandler {
         handler: CharacterId,
         expected: u32,
@@ -150,7 +168,9 @@ pub enum LegalRepresentationError {
     MissingRepresentation(LegalRepresentationId),
     #[error("legal representation {0} is not active")]
     RepresentationNotActive(LegalRepresentationId),
-    #[error("legal representation {representation} changed after end validation; expected version {expected}, found {found}")]
+    #[error(
+        "legal representation {representation} changed after end validation; expected version {expected}, found {found}"
+    )]
     StaleRepresentation {
         representation: LegalRepresentationId,
         expected: u32,

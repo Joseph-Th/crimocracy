@@ -7,11 +7,11 @@ use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
-    validate_request_police_arrival_decision_on_arrival, validate_resolve_decision, DecisionError,
+    DecisionError, validate_request_police_arrival_decision_on_arrival, validate_resolve_decision,
 };
 use crate::decisions::{DecisionContext, DecisionResponse};
 use crate::finance::finance_system::insert_account;
@@ -28,10 +28,10 @@ use crate::legal::{
     EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
 };
 use crate::operations::operation_economics::RECENT_HIT_WINDOW_MINUTES;
-use crate::operations::operation_system::{validate_authorize_operation, OperationError};
+use crate::operations::operation_system::{OperationError, validate_authorize_operation};
 use crate::operations::property_disposition::{
-    validate_deposit_operation_cash, validate_dispose_property, CashDispositionDraft,
-    PropertyDispositionDraft, PropertyDispositionError,
+    CashDispositionDraft, PropertyDispositionDraft, PropertyDispositionError,
+    validate_deposit_operation_cash, validate_dispose_property,
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
@@ -732,17 +732,21 @@ fn scheduled_operation_resolves_into_persisted_after_action_report_information_a
     assert_eq!(report.entries()[0].summary, information.summary());
     assert!(report.entries()[0].sources.is_empty());
     assert!(report.entries()[0].decision.is_none());
-    assert!(report.entries()[0]
-        .entities
-        .contains(&EntityRef::Operation(operation)));
+    assert!(
+        report.entries()[0]
+            .entities
+            .contains(&EntityRef::Operation(operation))
+    );
     let history = state
         .history()
         .get_event(resolution.history_event())
         .expect("operation resolution should create campaign history");
     assert_eq!(history.kind(), HistoryEventKind::Operation);
-    assert!(history
-        .entities()
-        .contains(&EntityRef::Operation(operation)));
+    assert!(
+        history
+            .entities()
+            .contains(&EntityRef::Operation(operation))
+    );
     validate_state(&state).expect("resolved operation state should validate");
     validate_invariants(&state);
 }
@@ -1155,17 +1159,21 @@ fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts(
         .get_report(artifacts.report())
         .expect("abort report should persist");
     assert_eq!(report.entries()[0].summary, information.summary());
-    assert!(report.entries()[0]
-        .entities
-        .contains(&EntityRef::DecisionRequest(decision_id)));
+    assert!(
+        report.entries()[0]
+            .entities
+            .contains(&EntityRef::DecisionRequest(decision_id))
+    );
     let history = state
         .history()
         .get_event(artifacts.history_event())
         .expect("abort history should persist");
     assert_eq!(history.summary(), information.summary());
-    assert!(history
-        .entities()
-        .contains(&EntityRef::DecisionRequest(decision_id)));
+    assert!(
+        history
+            .entities()
+            .contains(&EntityRef::DecisionRequest(decision_id))
+    );
 
     for _ in 0..30 {
         let tick = run_tick(&registry, &mut state);
@@ -2038,9 +2046,11 @@ fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() 
             .expect("player legal-activity information should persist");
         assert_eq!(legal_activity.topic(), InformationTopic::LegalActivity);
         assert_eq!(legal_activity.subject(), EntityRef::Operation(operation));
-        assert!(legal_activity
-            .summary()
-            .contains("produced a police investigation"));
+        assert!(
+            legal_activity
+                .summary()
+                .contains("produced a police investigation")
+        );
         let evidence_id = *resolution
             .exposure()
             .evidence()
@@ -2144,12 +2154,14 @@ fn patrol_presence_controls_persisted_police_response_delay() {
         PatrolDeploymentDraft {
             organization: low_police,
             neighborhood: low_neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(0).expect("zero patrol presence should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("zero-presence patrol should validate")
@@ -2179,12 +2191,14 @@ fn patrol_presence_controls_persisted_police_response_delay() {
         PatrolDeploymentDraft {
             organization: high_police,
             neighborhood: high_neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(100).expect("full patrol presence should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(100).expect("full patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("full-presence patrol should validate")
@@ -2312,12 +2326,14 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
         PatrolDeploymentDraft {
             organization: police,
             neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(0).expect("zero patrol presence should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("zero-presence patrol should validate")
@@ -2449,12 +2465,14 @@ fn police_arrival_decision_id_exhaustion_leaves_response_dispatched_and_operatio
         PatrolDeploymentDraft {
             organization: police,
             neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(0).expect("zero patrol presence should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("zero-presence patrol should validate")
@@ -2521,11 +2539,13 @@ fn police_arrival_decision_id_exhaustion_leaves_response_dispatched_and_operatio
     assert_eq!(operation_record.awaiting_decision_since(), None);
     assert_eq!(operation_record.version(), operation_version);
     assert_eq!(state.ids.next_raw(IdKind::Information), information_next);
-    assert!(state
-        .decisions()
-        .decisions_for_operation(operation)
-        .next()
-        .is_none());
+    assert!(
+        state
+            .decisions()
+            .decisions_for_operation(operation)
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -2734,12 +2754,14 @@ fn resolution_plan_snapshots_patrol_versions_and_uses_explicit_schedule_gaps() {
         PatrolDeploymentDraft {
             organization: police,
             neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(0).expect("fixture minute should validate"),
-                1_440,
-                Rating::try_new(70).expect("fixture patrol rating should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(70).expect("fixture patrol rating should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("patrol deployment should validate")
@@ -2764,12 +2786,14 @@ fn resolution_plan_snapshots_patrol_versions_and_uses_explicit_schedule_gaps() {
     validate_revise_patrol_deployment(
         &state,
         deployment,
-        vec![PatrolWindow::try_new(
-            DayMinute::try_new(600).expect("fixture minute should validate"),
-            120,
-            Rating::try_new(80).expect("fixture patrol rating should validate"),
-        )
-        .expect("fixture patrol window should validate")],
+        vec![
+            PatrolWindow::try_new(
+                DayMinute::try_new(600).expect("fixture minute should validate"),
+                120,
+                Rating::try_new(80).expect("fixture patrol rating should validate"),
+            )
+            .expect("fixture patrol window should validate"),
+        ],
     )
     .expect("patrol revision should validate")
     .commit(&mut state)
@@ -2824,12 +2848,14 @@ fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_wind
         PatrolDeploymentDraft {
             organization: police,
             neighborhood,
-            windows: vec![PatrolWindow::try_new(
-                DayMinute::try_new(45).expect("fixture patrol minute should validate"),
-                60,
-                Rating::try_new(90).expect("fixture patrol rating should validate"),
-            )
-            .expect("fixture patrol window should validate")],
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(45).expect("fixture patrol minute should validate"),
+                    60,
+                    Rating::try_new(90).expect("fixture patrol rating should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
         },
     )
     .expect("patrol deployment should validate")
@@ -2863,10 +2889,12 @@ fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_wind
             .map(Rating::value),
         Some(2)
     );
-    assert!(!plan
-        .narrative
-        .summary
-        .contains("High local police presence materially increased execution pressure."));
+    assert!(
+        !plan
+            .narrative
+            .summary
+            .contains("High local police presence materially increased execution pressure.")
+    );
     validate_operation_resolution_plan(&registry, &state, plan)
         .expect("time-weighted patrol plan should validate")
         .commit(&mut state)
@@ -2901,14 +2929,18 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
         .proceeds
         .expect("achieved property acquisition should create held proceeds");
     assert_eq!(achieved_proceeds.estimated_value().cents(), 56_400);
-    assert!(achieved_plan
-        .narrative
-        .summary
-        .contains("estimated held value of $564.00"));
-    assert!(achieved_plan
-        .narrative
-        .summary
-        .contains("remains unliquidated"));
+    assert!(
+        achieved_plan
+            .narrative
+            .summary
+            .contains("estimated held value of $564.00")
+    );
+    assert!(
+        achieved_plan
+            .narrative
+            .summary
+            .contains("remains unliquidated")
+    );
     validate_operation_resolution_plan(&registry, &achieved_state, achieved_plan)
         .expect("achieved property proceeds should validate")
         .commit(&mut achieved_state)
@@ -3014,9 +3046,11 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
         .reports()
         .get_report(liquidated_report)
         .expect("liquidation financial report should persist");
-    assert!(liquidated_report.entries()[0]
-        .summary
-        .contains("Held operation property at period end: 0 operation(s), estimated value $0.00"));
+    assert!(
+        liquidated_report.entries()[0].summary.contains(
+            "Held operation property at period end: 0 operation(s), estimated value $0.00"
+        )
+    );
     assert!(liquidated_report.entries()[0].summary.contains(
         "Liquidated operation property during period: 1 disposition(s), realized cash $321.48"
     ));
@@ -3317,17 +3351,23 @@ fn property_disposition_reporting_respects_executive_brief_window() {
         .filter(|entry| entry.entities.contains(&EntityRef::Operation(operation)))
         .collect::<Vec<_>>();
     assert_eq!(operation_entries.len(), 1);
-    assert!(operation_entries[0]
-        .summary
-        .contains("it was later liquidated through Fixture Pawn Exchange for $321.48"));
-    assert!(!same_window_report
-        .entries()
-        .iter()
-        .any(|entry| entry.summary.starts_with("Property from ")));
-    assert!(!same_window_report
-        .entries()
-        .iter()
-        .any(|entry| entry.summary.contains("remains unliquidated")));
+    assert!(
+        operation_entries[0]
+            .summary
+            .contains("it was later liquidated through Fixture Pawn Exchange for $321.48")
+    );
+    assert!(
+        !same_window_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.starts_with("Property from "))
+    );
+    assert!(
+        !same_window_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated"))
+    );
 
     let delta = 1_439_u64
         .checked_sub(later_window.now().as_minutes())
@@ -3343,10 +3383,12 @@ fn property_disposition_reporting_respects_executive_brief_window() {
         .reports()
         .get_report(first_brief)
         .expect("first executive brief should persist");
-    assert!(first_report
-        .entries()
-        .iter()
-        .any(|entry| entry.summary.contains("remains unliquidated")));
+    assert!(
+        first_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated"))
+    );
 
     validate_dispose_property(
         &registry,
@@ -3381,10 +3423,12 @@ fn property_disposition_reporting_respects_executive_brief_window() {
                 .summary
                 .contains("liquidated through Fixture Pawn Exchange for $321.48")
     }));
-    assert!(!second_report
-        .entries()
-        .iter()
-        .any(|entry| entry.summary.contains("remains unliquidated")));
+    assert!(
+        !second_report
+            .entries()
+            .iter()
+            .any(|entry| entry.summary.contains("remains unliquidated"))
+    );
 
     validate_state_against_registry(&registry, &same_window)
         .expect("same-window brief state should remain registry-valid");

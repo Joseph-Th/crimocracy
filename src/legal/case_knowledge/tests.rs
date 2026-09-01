@@ -4,8 +4,8 @@
 use super::*;
 use crate::build_registry;
 use crate::contacts::contact_system::{
-    find_pending_disclosure_sources, validate_contact_disclosure, validate_establish_contact,
-    InstitutionalContactDraft,
+    InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
+    validate_establish_contact,
 };
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OrganizationId};

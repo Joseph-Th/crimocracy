@@ -89,7 +89,9 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("pre-entry police arrival triggers the standing abort contingency and the crew's direct observations are debriefed into organization knowledge")
+                Some(
+                    "pre-entry police arrival triggers the standing abort contingency and the crew's direct observations are debriefed into organization knowledge",
+                )
             }
         }
         Strategy::Press => {
@@ -103,7 +105,9 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up that reads whether the case is still active")
+                Some(
+                    "police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up that reads whether the case is still active",
+                )
             }
         }
         Strategy::Recon => {
@@ -116,7 +120,9 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("surveillance information must carry both patrol and venue-access facts into the burglary plan")
+                Some(
+                    "surveillance information must carry both patrol and venue-access facts into the burglary plan",
+                )
             }
         }
     };
@@ -257,7 +263,9 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("the RUSH second act must discover the reopened score, debrief the aborted crew's police observations into organizational knowledge, rebuild through the canonical executive path, and work the second score in the morning lull with the rebuilt crew, no fresh recon, and the debriefed patrol information in the plan")
+                Some(
+                    "the RUSH second act must discover the reopened score, debrief the aborted crew's police observations into organizational knowledge, rebuild through the canonical executive path, and work the second score in the morning lull with the rebuilt crew, no fresh recon, and the debriefed patrol information in the plan",
+                )
             }
         }
         Strategy::Recon => {
@@ -274,7 +282,9 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("the RECON second act must discover the reopened score, re-run surveillance on the alternate target, complete the burglary inside a fresh patrol-safe window, and read any surveillance-drawn case through its police contact")
+                Some(
+                    "the RECON second act must discover the reopened score, re-run surveillance on the alternate target, complete the burglary inside a fresh patrol-safe window, and read any surveillance-drawn case through its police contact",
+                )
             }
         }
         Strategy::Press => {
@@ -285,7 +295,9 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             {
                 None
             } else {
-                Some("the PRESS second act must discover the reopened score and deliberately let it lapse while standing down, without recruiting or working the second score")
+                Some(
+                    "the PRESS second act must discover the reopened score and deliberately let it lapse while standing down, without recruiting or working the second score",
+                )
             }
         }
     };

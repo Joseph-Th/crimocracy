@@ -20,10 +20,10 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessId, FinancialAccountId, IdExhaustionError, IdKind, OrganizationId};
 use crate::core::state::AppState;
-use crate::economy::{business_economy_system, BusinessEconomyDraft};
+use crate::economy::{BusinessEconomyDraft, business_economy_system};
 use crate::finance::finance_system::{
-    validate_open_accounts, validate_record_transaction, validate_record_transaction_with_openings,
-    FinanceError,
+    FinanceError, validate_open_accounts, validate_record_transaction,
+    validate_record_transaction_with_openings,
 };
 use crate::finance::helpers::format_money_cents;
 use crate::finance::{
@@ -31,11 +31,11 @@ use crate::finance::{
     Money,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError};
+use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::world_system::validate_transfer_business_ownership;
-use crate::world::world_system::WorldError;
 use crate::world::BusinessOwner;
+use crate::world::world_system::WorldError;
+use crate::world::world_system::validate_transfer_business_ownership;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -592,9 +592,11 @@ mod tests {
             .find(|report| report.kind() == ReportKind::Financial)
             .expect("the acquisition must surface as a financial report");
         assert_eq!(report.entries()[0].attention, AttentionClass::Notable);
-        assert!(report.entries()[0]
-            .summary
-            .contains("Pier Nine Social Club"));
+        assert!(
+            report.entries()[0]
+                .summary
+                .contains("Pier Nine Social Club")
+        );
 
         validate_invariants(&fixture.state);
     }
@@ -636,11 +638,13 @@ mod tests {
                 .owner(),
             BusinessOwner::Independent
         );
-        assert!(fixture
-            .state
-            .economy()
-            .get_business_economy(fixture.business)
-            .is_none());
+        assert!(
+            fixture
+                .state
+                .economy()
+                .get_business_economy(fixture.business)
+                .is_none()
+        );
         assert_eq!(fixture.state.finance().accounts().count(), account_count);
         assert_eq!(
             fixture.state.ids.next_raw(IdKind::FinancialAccount),
@@ -865,10 +869,10 @@ mod tests {
     /// and unpurchasable forever.
     #[test]
     fn acquisition_buys_suspended_books_and_reopens_them_under_new_ownership() {
+        use crate::economy::BusinessOperatingStatus;
         use crate::economy::business_economy_system::{
             validate_establish_business_economy, validate_suspend_business_economy,
         };
-        use crate::economy::BusinessOperatingStatus;
 
         let mut fixture = make_independent_fixture();
 

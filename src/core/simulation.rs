@@ -7,29 +7,30 @@ use crate::core::id::{
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::decisions::decision_system::{validate_resolve_decision, DecisionRequestOutcome};
 use crate::decisions::DecisionResponse;
+use crate::decisions::decision_system::{DecisionRequestOutcome, validate_resolve_decision};
 use crate::economy::business_economy_system::{
     decide_business_cycle, find_due_businesses, validate_business_cycle_plan,
 };
 use crate::enterprises::enterprise_execution::{
-    decide_enterprise_cycle, find_due_enterprises, validate_enterprise_cycle_plan,
-    EnterpriseCycleRandomness,
+    EnterpriseCycleRandomness, decide_enterprise_cycle, find_due_enterprises,
+    validate_enterprise_cycle_plan,
 };
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
 use crate::legal::investigation_work_execution::{
-    apply_initial_evidence_reviews, decide_investigation_work_resolution,
-    find_due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
-    InvestigationWorkRandomness,
+    InvestigationWorkRandomness, apply_initial_evidence_reviews,
+    decide_investigation_work_resolution, find_due_scheduled_investigation_work,
+    validate_investigation_work_resolution_plan,
 };
 use crate::operations::operation_execution::{
-    decide_operation_resolution, find_due_in_progress_operations,
-    validate_operation_resolution_plan, OperationResolutionRandomness,
+    OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
+    validate_operation_resolution_plan,
 };
 use crate::operations::operation_system::{
-    apply_transition, find_due_authorized_operations, find_due_operations_with_missed_deadlines,
-    has_missed_operation_deadline, validate_deadline_missed_operation, OperationTransition,
+    OperationTransition, apply_transition, find_due_authorized_operations,
+    find_due_operations_with_missed_deadlines, has_missed_operation_deadline,
+    validate_deadline_missed_operation,
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
 use crate::opportunities::opportunity_system::apply_opportunity_expiry;

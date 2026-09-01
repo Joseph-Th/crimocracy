@@ -17,16 +17,16 @@ pub enum JurisdictionError {
     #[error("neighborhood {0} does not exist or is not active")]
     MissingNeighborhood(NeighborhoodId),
     #[error(
-    "organization {organization} cannot remove neighborhood {neighborhood} from jurisdiction while patrol deployment {deployment} is active"
-  )]
+        "organization {organization} cannot remove neighborhood {neighborhood} from jurisdiction while patrol deployment {deployment} is active"
+    )]
     ActivePatrolDeployment {
         organization: OrganizationId,
         neighborhood: NeighborhoodId,
         deployment: PatrolDeploymentId,
     },
     #[error(
-    "jurisdiction for organization {organization} changed after validation; expected version {expected:?}, found {found:?}"
-  )]
+        "jurisdiction for organization {organization} changed after validation; expected version {expected:?}, found {found:?}"
+    )]
     StaleJurisdiction {
         organization: OrganizationId,
         expected: Option<u32>,

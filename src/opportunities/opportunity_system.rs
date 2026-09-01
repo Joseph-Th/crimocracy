@@ -1,7 +1,7 @@
 //! Validation, lifecycle transitions, and deterministic expiry for provenance-backed operation opportunities.
 
 use crate::core::attention::AttentionClass;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     IdExhaustionError, IdKind, InformationId, OperationId, OpportunityId, OrganizationId, ReportId,
 };
@@ -14,7 +14,7 @@ use crate::opportunities::{
     OpportunityStatus,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
@@ -24,7 +24,9 @@ use thiserror::Error;
 pub enum OpportunityError {
     #[error("opportunity summary must not be empty")]
     EmptySummary,
-    #[error("operation {operation} cites none of the information that discovered opportunity {opportunity}")]
+    #[error(
+        "operation {operation} cites none of the information that discovered opportunity {opportunity}"
+    )]
     OperationLacksSourceIntelligence {
         operation: crate::core::id::OperationId,
         opportunity: OpportunityId,
@@ -78,8 +80,8 @@ pub enum OpportunityError {
     #[error("opportunity {0} has no validity deadline and cannot expire automatically")]
     MissingValidityDeadline(OpportunityId),
     #[error(
-    "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
-  )]
+        "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
+    )]
     OperationScheduledAfterWindow {
         operation: OperationId,
         valid_until: SimTime,
@@ -96,7 +98,9 @@ pub enum OpportunityError {
         "opportunity expiry was validated at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleExpiryTime { expected: SimTime, found: SimTime },
-    #[error("opportunity {opportunity} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "opportunity {opportunity} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleOpportunity {
         opportunity: OpportunityId,
         expected: u32,
@@ -106,19 +110,25 @@ pub enum OpportunityError {
     MissingOperation(OperationId),
     #[error("operation {operation} is not authorized for opportunity conversion")]
     OperationNotAuthorized { operation: OperationId },
-    #[error("operation {operation} changed after opportunity conversion validation; expected version {expected}, found {found}")]
+    #[error(
+        "operation {operation} changed after opportunity conversion validation; expected version {expected}, found {found}"
+    )]
     StaleOperation {
         operation: OperationId,
         expected: u32,
         found: u32,
     },
-    #[error("operation {operation} belongs to organization {operation_organization}, not opportunity organization {opportunity_organization}")]
+    #[error(
+        "operation {operation} belongs to organization {operation_organization}, not opportunity organization {opportunity_organization}"
+    )]
     OperationOrganizationMismatch {
         operation: OperationId,
         operation_organization: OrganizationId,
         opportunity_organization: OrganizationId,
     },
-    #[error("operation {operation} kind {operation_kind:?} does not match opportunity kind {opportunity_kind:?}")]
+    #[error(
+        "operation {operation} kind {operation_kind:?} does not match opportunity kind {opportunity_kind:?}"
+    )]
     OperationKindMismatch {
         operation: OperationId,
         operation_kind: OperationKind,
@@ -286,13 +296,13 @@ fn validate_discovery_state(
     {
         return Err(OpportunityError::UncoveredTarget(*uncovered));
     }
-    if let Some(valid_until) = draft.valid_until {
-        if valid_until <= discovered_at {
-            return Err(OpportunityError::InvalidValidityWindow {
-                now: discovered_at,
-                valid_until,
-            });
-        }
+    if let Some(valid_until) = draft.valid_until
+        && valid_until <= discovered_at
+    {
+        return Err(OpportunityError::InvalidValidityWindow {
+            now: discovered_at,
+            valid_until,
+        });
     }
     if let Some(existing) = state.opportunities.find_open_operation(
         draft.organization,
@@ -415,13 +425,13 @@ fn validate_not_expired(
     state: &AppState,
     opportunity: &OpportunityRecord,
 ) -> Result<(), OpportunityError> {
-    if let Some(valid_until) = opportunity.valid_until() {
-        if state.now() >= valid_until {
-            return Err(OpportunityError::OpportunityExpired {
-                opportunity: opportunity.id(),
-                valid_until,
-            });
-        }
+    if let Some(valid_until) = opportunity.valid_until()
+        && state.now() >= valid_until
+    {
+        return Err(OpportunityError::OpportunityExpired {
+            opportunity: opportunity.id(),
+            valid_until,
+        });
     }
     Ok(())
 }

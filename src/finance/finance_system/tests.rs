@@ -3,9 +3,9 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::delegation::delegation_system::{
-    validate_assign_mandate, validate_revise_mandate, DelegationError, MandateRevisionDraft,
+    DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
 };
 use crate::delegation::{
     BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
@@ -16,8 +16,8 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character,
-    validate_transfer_business_ownership, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
+    validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessOwner, CharacterDraft, OrganizationDraft, OrganizationKind,

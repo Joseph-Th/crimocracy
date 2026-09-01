@@ -10,8 +10,8 @@ use crate::core::time::SimTime;
 use crate::intelligence::{InformationRecord, InformationTopic, KnowledgeHolder};
 use crate::recruitment::recruitment_system::RecruitmentFactorContext;
 use crate::recruitment::{
-    build_recruitment_factors, RecruitmentApproach, RecruitmentFactorComponents,
-    RecruitmentFactors, RecruitmentOutcome,
+    RecruitmentApproach, RecruitmentFactorComponents, RecruitmentFactors, RecruitmentOutcome,
+    build_recruitment_factors,
 };
 use crate::registry::RecruitmentDefinition;
 use crate::social::RelationshipDimensions;
@@ -226,7 +226,7 @@ pub(crate) fn resolve_perceived_legal_pressure_from_ids(
     pressure_information_ids: &BTreeSet<InformationId>,
     at: SimTime,
 ) -> (Option<InformationId>, u8) {
-    let selected = pressure_information_ids
+    pressure_information_ids
         .iter()
         .filter_map(|id| state.intelligence.get_information(*id))
         .map(|information| {
@@ -238,8 +238,7 @@ pub(crate) fn resolve_perceived_legal_pressure_from_ids(
         })
         .filter(|(_, score, _)| *score > 0)
         .max_by_key(|(id, score, observed_at)| (*score, *observed_at, *id))
-        .map_or((None, 0), |(id, score, _)| (Some(id), score));
-    selected
+        .map_or((None, 0), |(id, score, _)| (Some(id), score))
 }
 fn perceived_legal_pressure_score(
     definition: &RecruitmentDefinition,

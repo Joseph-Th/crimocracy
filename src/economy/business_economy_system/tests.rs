@@ -3,16 +3,16 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
+use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_reporting::{
     resolve_business_financial_summary, resolve_organization_business_financial_summary,
 };
-use crate::economy::BusinessEconomyDraft;
 use crate::finance::finance_system::insert_account;
 use crate::finance::{FinancialAccountDraft, FinancialOwner};
-use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::reports::ReportKind;
+use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::world::world_system::{
     insert_business, insert_neighborhood, insert_organization, validate_transfer_business_ownership,
 };
@@ -509,9 +509,11 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
     assert_eq!(report.entries()[0].attention, AttentionClass::Routine);
     assert_eq!(report.entries()[1].attention, AttentionClass::Notable);
     assert_eq!(report.entries()[1].sources.len(), 1);
-    assert!(report.entries()[1]
-        .entities
-        .contains(&EntityRef::Business(fixture.business)));
+    assert!(
+        report.entries()[1]
+            .entities
+            .contains(&EntityRef::Business(fixture.business))
+    );
     validate_invariants(&fixture.state);
 }
 

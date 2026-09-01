@@ -318,12 +318,12 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
         }
 
         let pair = (attempt.candidate(), attempt.target_organization());
-        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at()) {
-            if attempt.occurred_at() < previous_time {
-                return Err(StateValidationError::InvalidRecruitmentAttempt {
-                    attempt: attempt.id(),
-                });
-            }
+        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at())
+            && attempt.occurred_at() < previous_time
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
         }
 
         match attempt.outcome() {
@@ -460,12 +460,12 @@ pub(super) fn validate_recruitment_against_registry(
         }
 
         let pair = (attempt.candidate(), attempt.target_organization());
-        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at()) {
-            if attempt.occurred_at() < previous_time + definition.cooldown() {
-                return Err(StateValidationError::InvalidRecruitmentAttempt {
-                    attempt: attempt.id(),
-                });
-            }
+        if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at())
+            && attempt.occurred_at() < previous_time + definition.cooldown()
+        {
+            return Err(StateValidationError::InvalidRecruitmentAttempt {
+                attempt: attempt.id(),
+            });
         }
     }
     Ok(())

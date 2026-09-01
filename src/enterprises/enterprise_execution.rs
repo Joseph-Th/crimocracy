@@ -9,22 +9,22 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::delegation::delegation_system::{
-    ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
+    DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
 };
 use crate::delegation::{
     MandateAuthority, ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope,
 };
 use crate::enterprises::{
-    build_enterprise_record, EnterpriseCycleRecord, EnterpriseDraft, EnterpriseKind,
-    EnterpriseLocation, EnterpriseStatus,
+    EnterpriseCycleRecord, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
+    build_enterprise_record,
 };
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedFinancialAccountOpenings,
-    ValidatedLedgerTransaction,
+    FinanceError, ValidatedFinancialAccountOpenings, ValidatedLedgerTransaction,
+    validate_record_transaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
@@ -41,7 +41,9 @@ pub enum EnterpriseError {
     MissingEnterprise(EnterpriseId),
     #[error("organization {0} does not exist or is inactive")]
     InvalidOrganization(OrganizationId),
-    #[error("enterprise authority belongs to organization {authority_organization}, not {enterprise_organization}")]
+    #[error(
+        "enterprise authority belongs to organization {authority_organization}, not {enterprise_organization}"
+    )]
     AuthorityOrganizationMismatch {
         authority_organization: OrganizationId,
         enterprise_organization: OrganizationId,
@@ -60,13 +62,17 @@ pub enum EnterpriseError {
     },
     #[error("supporting business {0} does not exist or is inactive")]
     InvalidSupportingBusiness(BusinessId),
-    #[error("supporting business {business} is owned by {owner:?}, not enterprise organization {organization}")]
+    #[error(
+        "supporting business {business} is owned by {owner:?}, not enterprise organization {organization}"
+    )]
     SupportingBusinessOwnershipMismatch {
         business: BusinessId,
         owner: BusinessOwner,
         organization: OrganizationId,
     },
-    #[error("hosted business {business} is owned by {owner:?}, not enterprise organization {organization}")]
+    #[error(
+        "hosted business {business} is owned by {owner:?}, not enterprise organization {organization}"
+    )]
     HostBusinessOwnershipMismatch {
         business: BusinessId,
         owner: BusinessOwner,
@@ -76,19 +82,25 @@ pub enum EnterpriseError {
     DuplicateSupportingLocation { business: BusinessId },
     #[error("enterprise support network lacks required function {function:?}")]
     MissingNetworkFunction { function: BusinessFunction },
-    #[error("supporting business {business} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "supporting business {business} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleSupportingBusiness {
         business: BusinessId,
         expected: u32,
         found: u32,
     },
-    #[error("hosted business {business} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "hosted business {business} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleHostBusiness {
         business: BusinessId,
         expected: u32,
         found: u32,
     },
-    #[error("enterprise manager {character} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "enterprise manager {character} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleManager {
         character: CharacterId,
         expected: u32,
@@ -121,13 +133,13 @@ pub enum EnterpriseError {
         enterprise: EnterpriseId,
         due_at: SimTime,
     },
-    #[error(
-        "enterprise cycle variance {basis_points} basis points exceeds authored limit {limit}"
-    )]
+    #[error("enterprise cycle variance {basis_points} basis points exceeds authored limit {limit}")]
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("enterprise economics overflowed while resolving cycle {0}")]
     ArithmeticOverflow(EnterpriseId),
-    #[error("enterprise {enterprise} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "enterprise {enterprise} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleEnterprise {
         enterprise: EnterpriseId,
         expected: u32,
@@ -699,7 +711,7 @@ fn validate_enterprise_accounts_with_planned_settlement(
         AccountKind::AccountedFunds
         | AccountKind::LegitimateOperating
         | AccountKind::Settlement => {
-            return Err(EnterpriseError::InvalidCashAccountKind(cash_account))
+            return Err(EnterpriseError::InvalidCashAccountKind(cash_account));
         }
     }
     if !openings.account_matches(
@@ -1150,7 +1162,7 @@ pub fn validate_resume_enterprise(
         .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
     match record.status() {
         EnterpriseStatus::Active => {
-            return Err(EnterpriseError::EnterpriseNotSuspended(enterprise))
+            return Err(EnterpriseError::EnterpriseNotSuspended(enterprise));
         }
         EnterpriseStatus::Suspended => {}
     }
@@ -1201,7 +1213,7 @@ pub fn validate_resume_enterprise(
 }
 
 pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
-    state
+    let mut due: Vec<EnterpriseId> = state
         .enterprises
         .find_due_cycles(state.now())
         .into_iter()
@@ -1216,7 +1228,9 @@ pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
                         .is_none()
                 })
         })
-        .collect()
+        .collect();
+    due.sort_unstable();
+    due
 }
 
 fn validate_enterprise_environment(
@@ -1470,7 +1484,7 @@ fn validate_enterprise_accounts(
         AccountKind::AccountedFunds
         | AccountKind::LegitimateOperating
         | AccountKind::Settlement => {
-            return Err(EnterpriseError::InvalidCashAccountKind(cash_account))
+            return Err(EnterpriseError::InvalidCashAccountKind(cash_account));
         }
     }
     match settlement.kind() {
@@ -1481,7 +1495,7 @@ fn validate_enterprise_accounts(
         | AccountKind::LegitimateOperating => {
             return Err(EnterpriseError::InvalidSettlementAccountKind(
                 settlement_account,
-            ))
+            ));
         }
     }
     // Settlement-account exclusivity is permanent, including after the incumbent closes:
@@ -1490,13 +1504,12 @@ fn validate_enterprise_accounts(
     if let Some(existing) = state
         .enterprises
         .get_by_settlement_account(settlement_account)
+        && Some(existing.id()) != current_enterprise
     {
-        if Some(existing.id()) != current_enterprise {
-            return Err(EnterpriseError::SettlementAccountInUse {
-                account: settlement_account,
-                enterprise: existing.id(),
-            });
-        }
+        return Err(EnterpriseError::SettlementAccountInUse {
+            account: settlement_account,
+            enterprise: existing.id(),
+        });
     }
     Ok(())
 }

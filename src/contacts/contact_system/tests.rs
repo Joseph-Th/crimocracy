@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -13,7 +13,7 @@ use crate::intelligence::{
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -322,11 +322,13 @@ fn active_contact_locks_memberships_until_termination_then_history_survives_move
         .expect("terminated contact should remain historical");
     assert_eq!(historical.status(), ContactStatus::Terminated);
     assert_eq!(historical.institution(), fixture.institution);
-    assert!(fixture
-        .state
-        .contacts()
-        .get_disclosure(disclosure)
-        .is_some());
+    assert!(
+        fixture
+            .state
+            .contacts()
+            .get_disclosure(disclosure)
+            .is_some()
+    );
     validate_state(&fixture.state)
         .expect("terminated contact history should survive personnel moves");
     validate_invariants(&fixture.state);

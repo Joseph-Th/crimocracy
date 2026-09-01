@@ -1,7 +1,7 @@
 //! Release-safe structural validation for the opportunities subsystem.
 
 use crate::core::attention::AttentionClass;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
@@ -219,12 +219,12 @@ pub(super) fn validate_operation_exposure_links(
     resolution: &crate::operations::OperationResolutionRecord,
 ) -> Result<(), StateValidationError> {
     let exposure = resolution.exposure();
-    if let Some(neighborhood) = exposure.neighborhood() {
-        if state.world.get_neighborhood(neighborhood).is_none() {
-            return Err(StateValidationError::InvalidOperationExposure {
-                operation: operation.id(),
-            });
-        }
+    if let Some(neighborhood) = exposure.neighborhood()
+        && state.world.get_neighborhood(neighborhood).is_none()
+    {
+        return Err(StateValidationError::InvalidOperationExposure {
+            operation: operation.id(),
+        });
     }
     let participants: BTreeSet<_> = std::iter::once(operation.leader())
         .chain(operation.roles().values().copied())
@@ -290,15 +290,14 @@ pub(super) fn validate_operation_exposure_links(
                     operation: operation.id(),
                 });
             }
-            if let Some(character) = exposure.identified_character() {
-                if !investigation
+            if let Some(character) = exposure.identified_character()
+                && !investigation
                     .subjects()
                     .contains(&EntityRef::Character(character))
-                {
-                    return Err(StateValidationError::InvalidOperationExposure {
-                        operation: operation.id(),
-                    });
-                }
+            {
+                return Err(StateValidationError::InvalidOperationExposure {
+                    operation: operation.id(),
+                });
             }
             let evidence_id = *exposure
                 .evidence()

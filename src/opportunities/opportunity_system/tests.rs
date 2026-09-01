@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
@@ -13,7 +13,7 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::operation_system::{
-    apply_transition, validate_authorize_operation, OperationTransition,
+    OperationTransition, apply_transition, validate_authorize_operation,
 };
 use crate::operations::{OperationApproach, OperationDraft, OperationObjective, RoleKind};
 use crate::opportunities::OpportunityResolution;
@@ -239,9 +239,11 @@ fn discovery_requires_organization_knowledge_and_creates_a_provenance_report() {
     assert_eq!(report.recipient(), fixture.organization);
     assert_eq!(report.entries().len(), 1);
     assert_eq!(report.entries()[0].sources, vec![fixture.source]);
-    assert!(report.entries()[0]
-        .entities
-        .contains(&EntityRef::Business(fixture.business)));
+    assert!(
+        report.entries()[0]
+            .entities
+            .contains(&EntityRef::Business(fixture.business))
+    );
     validate_state(&fixture.state).expect("discovered opportunity state should validate");
     validate_invariants(&fixture.state);
 }
@@ -431,9 +433,9 @@ fn opportunity_expiry_runs_in_stable_tick_pipeline_and_releases_duplicate_key() 
     assert_eq!(report.generated_at(), SimTime::from_minutes(2));
     assert_eq!(report.entries().len(), 1);
     assert_eq!(
-    report.entries()[0].summary,
-    "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
-  );
+        report.entries()[0].summary,
+        "Opportunity expired: Bellmore Jewelry may be vulnerable around its Thursday delivery window."
+    );
     assert_eq!(report.entries()[0].sources, vec![fixture.source]);
     assert_eq!(
         fixture
@@ -504,15 +506,17 @@ fn expiry_report_reaches_later_executive_brief_after_discovery_window_has_closed
     let first_brief = first
         .executive_brief
         .expect("first daily boundary should create an executive brief");
-    assert!(fixture
-        .state
-        .reports()
-        .get_report(first_brief)
-        .expect("first executive brief should persist")
-        .entries()
-        .iter()
-        .any(|entry| entry.summary
-            == "Bellmore Jewelry may be vulnerable around its Thursday delivery window."));
+    assert!(
+        fixture
+            .state
+            .reports()
+            .get_report(first_brief)
+            .expect("first executive brief should persist")
+            .entries()
+            .iter()
+            .any(|entry| entry.summary
+                == "Bellmore Jewelry may be vulnerable around its Thursday delivery window.")
+    );
 
     fixture
         .state
@@ -657,11 +661,13 @@ fn conversion_token_rejects_operation_lifecycle_change_without_mutating_opportun
             .status(),
         OpportunityStatus::Open
     );
-    assert!(fixture
-        .state
-        .opportunities()
-        .opportunity_for_operation(operation)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .opportunities()
+            .opportunity_for_operation(operation)
+            .is_none()
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -791,11 +797,13 @@ fn conversion_rejects_mismatched_operation_kind_without_consuming_opportunity() 
             .status(),
         OpportunityStatus::Open
     );
-    assert!(fixture
-        .state
-        .opportunities()
-        .opportunity_for_operation(operation)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .opportunities()
+            .opportunity_for_operation(operation)
+            .is_none()
+    );
     validate_state(&fixture.state).expect("mismatched conversion rejection must leave valid state");
     validate_invariants(&fixture.state);
 }

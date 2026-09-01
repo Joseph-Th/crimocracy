@@ -18,9 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use rating::{QualitativeBand, Rating, RatingError};
 pub use stores::WorldState;
 pub use vocabulary::{
+    ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
     ApprovalPolicy, AutonomyLevel, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
     DriveKind, LegalSupportPolicy, OrganizationKind, PolicyKind, PolicySetting, TraitKind,
-    ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

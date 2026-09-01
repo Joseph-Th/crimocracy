@@ -6,14 +6,14 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::{
-    ensure_mandate_authority_current, resolve_mandate_authority, DelegationError,
+    DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::economy::business_economy_system::resolve_business_current_gross;
 use crate::finance::{
-    build_budget_usage, helpers::resolve_basis_point_share, AccountKind, BudgetUsageRecord,
-    FinancialAccountDraft, FinancialAccountRecord, FinancialOwner, LedgerPosting,
-    LedgerTransactionDraft, LedgerTransactionRecord, Money,
+    AccountKind, BudgetUsageRecord, FinancialAccountDraft, FinancialAccountRecord, FinancialOwner,
+    LedgerPosting, LedgerTransactionDraft, LedgerTransactionRecord, Money, build_budget_usage,
+    helpers::resolve_basis_point_share,
 };
 use crate::registry::Registry;
 use crate::world::BusinessOwner;
@@ -50,7 +50,9 @@ pub enum FinanceError {
     BalanceOverflow(FinancialAccountId),
     #[error("ledger transaction cannot occur in the future")]
     OccursInFuture,
-    #[error("financial account {account} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "financial account {account} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleAccount {
         account: FinancialAccountId,
         expected: u32,
@@ -76,7 +78,9 @@ pub enum FinanceError {
     },
     #[error("budget arithmetic overflow for mandate {0}")]
     BudgetOverflow(MandateId),
-    #[error("mandate {mandate} budget exceeded: limit {limit_cents} cents, used {used_cents}, requested {requested_cents}")]
+    #[error(
+        "mandate {mandate} budget exceeded: limit {limit_cents} cents, used {used_cents}, requested {requested_cents}"
+    )]
     BudgetExceeded {
         mandate: MandateId,
         limit_cents: i64,
@@ -569,8 +573,8 @@ pub enum LaunderingError {
         requested_cents: i64,
     },
     #[error(
-    "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
-  )]
+        "amount {requested_cents} exceeds business {business}'s plausible laundering capacity {capacity_cents}"
+    )]
     CapacityExceeded {
         business: crate::core::id::BusinessId,
         requested_cents: i64,

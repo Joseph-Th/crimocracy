@@ -32,8 +32,8 @@ pub enum InformantError {
         handler: OrganizationId,
     },
     #[error(
-    "character {character} already has active informant relationship {informant} with handler {handler}"
-  )]
+        "character {character} already has active informant relationship {informant} with handler {handler}"
+    )]
     AlreadyActive {
         character: CharacterId,
         handler: OrganizationId,
@@ -48,8 +48,8 @@ pub enum InformantError {
     #[error("investigation {0} is not active")]
     InactiveInvestigation(InvestigationId),
     #[error(
-    "informant {informant} is handled by {handler}, which does not own investigation {investigation}"
-  )]
+        "informant {informant} is handled by {handler}, which does not own investigation {investigation}"
+    )]
     HandlerInvestigationMismatch {
         informant: InformantId,
         handler: OrganizationId,
@@ -63,32 +63,32 @@ pub enum InformantError {
         character: CharacterId,
     },
     #[error(
-    "information {information} already has disclosure {disclosure} in investigation {investigation}"
-  )]
+        "information {information} already has disclosure {disclosure} in investigation {investigation}"
+    )]
     DuplicateDisclosure {
         investigation: InvestigationId,
         information: InformationId,
         disclosure: InformantDisclosureId,
     },
     #[error(
-    "character {character} changed after informant validation; expected version {expected}, found {found}"
-  )]
+        "character {character} changed after informant validation; expected version {expected}, found {found}"
+    )]
     StaleCharacter {
         character: CharacterId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "informant {informant} changed after validation; expected version {expected}, found {found}"
-  )]
+        "informant {informant} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleInformant {
         informant: InformantId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
-  )]
+        "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,

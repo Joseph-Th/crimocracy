@@ -7,8 +7,8 @@ use crate::core::invariants::{
 };
 use crate::core::persistence::{build_save, restore_save};
 use crate::legal::investigation_system::{
-    validate_add_evidence, validate_open_investigation, validate_transition_investigation,
-    InvestigationTransition,
+    InvestigationTransition, validate_add_evidence, validate_open_investigation,
+    validate_transition_investigation,
 };
 use crate::legal::{EvidenceDraft, InvestigationDraft, WitnessStatementDraft};
 use crate::world::world_system::{insert_character, insert_organization};
@@ -404,26 +404,32 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
         .expect_err("suspended case must reject cooperation mutation"),
         WitnessError::InactiveInvestigation(fixture.investigation)
     );
-    assert!(fixture
-        .state
-        .legal()
-        .get_witness_statement(historical.statement)
-        .is_some());
-    assert!(fixture
-        .state
-        .legal()
-        .get_evidence(historical.evidence)
-        .is_some());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_witness_statement(historical.statement)
+            .is_some()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_evidence(historical.evidence)
+            .is_some()
+    );
 
     let restored = restore_save(
         &registry,
         build_save(&registry, &fixture.state).expect("suspended case with testimony should save"),
     )
     .expect("suspended case with testimony should restore");
-    assert!(restored
-        .legal()
-        .get_witness_statement(historical.statement)
-        .is_some());
+    assert!(
+        restored
+            .legal()
+            .get_witness_statement(historical.statement)
+            .is_some()
+    );
     validate_state(&restored).expect("historical testimony should survive suspension");
     validate_invariants(&restored);
 }
@@ -456,11 +462,13 @@ fn anonymous_witness_testimony_remains_valid_without_named_source() {
         .expect("anonymous testimony should exist");
     assert_eq!(record.kind(), EvidenceKind::WitnessTestimony);
     assert_eq!(record.source(), None);
-    assert!(fixture
-        .state
-        .legal()
-        .witness_statement_for_evidence(evidence)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .witness_statement_for_evidence(evidence)
+            .is_none()
+    );
     validate_state(&fixture.state).expect("anonymous testimony should remain structurally valid");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("anonymous testimony should remain registry-valid");

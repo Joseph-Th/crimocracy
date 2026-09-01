@@ -11,13 +11,13 @@ use crate::enterprises::enterprise_execution::{
     validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
-    EnterpriseDraft, EnterpriseKind, EnterpriseLocation, ALL_ENTERPRISE_KINDS,
+    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
 };
 use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
 use crate::registry::{EnterpriseDefinition, Registry};
-use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::AutonomyLevel;
+use crate::world::territory_influence::resolve_neighborhood_influence;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Daily delegated-autonomy expansion for organizations other than the player's: every active

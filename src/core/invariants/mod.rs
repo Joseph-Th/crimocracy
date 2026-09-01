@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::core::attention::AttentionClass;
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     ArrestId, BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId,
     ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, IdCounters, IdKind,
@@ -107,9 +107,7 @@ pub enum StateValidationError {
     InvalidOperationAfterAction { operation: OperationId },
     #[error("completed operation {operation} has an invalid after-action report link")]
     InvalidOperationAfterActionReport { operation: OperationId },
-    #[error(
-        "aborted operation {operation} has invalid abort provenance or after-action artifacts"
-    )]
+    #[error("aborted operation {operation} has invalid abort provenance or after-action artifacts")]
     InvalidOperationAbort { operation: OperationId },
     #[error("completed operation {operation} has an invalid campaign-history link")]
     InvalidOperationHistory { operation: OperationId },

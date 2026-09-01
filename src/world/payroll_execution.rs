@@ -12,20 +12,20 @@ use crate::core::id::{CharacterId, FinancialAccountId, IdExhaustionError, IdKind
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::finance_system::{
-    validate_open_accounts, validate_record_transaction, validate_record_transaction_with_openings,
-    FinanceError, ValidatedFinancialAccountOpenings,
+    FinanceError, ValidatedFinancialAccountOpenings, validate_open_accounts,
+    validate_record_transaction, validate_record_transaction_with_openings,
 };
 use crate::finance::{
-    helpers::format_money_cents, AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting,
-    LedgerTransactionDraft, Money,
+    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    Money, helpers::format_money_cents,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::social::relationship_system::{
-    validate_set_relationship, RelationshipError, ValidatedRelationship,
-};
 use crate::social::RelationshipDimensions;
+use crate::social::relationship_system::{
+    RelationshipError, ValidatedRelationship, validate_set_relationship,
+};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -91,13 +91,21 @@ pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<Pay
         .collect();
     let mut outcomes = Vec::with_capacity(organizations.len());
     for organization in organizations {
-        let outcome = apply_organization_payroll(
+        let outcome = match apply_organization_payroll(
             registry,
             state,
             organization,
             &find_funding_accounts(state, organization),
-        )
-        .unwrap_or_else(|error| panic!("daily payroll for {organization} failed: {error}"));
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Payroll is autonomous routine work. A ledger or allocation failure for one
+                // organization must not crash the whole tick; the invariant suite will flag
+                // the underlying state inconsistency, and payroll retries next day boundary.
+                eprintln!("daily payroll for {organization} failed: {error}");
+                continue;
+            }
+        };
         if let Some(outcome) = outcome {
             outcomes.push(outcome);
         }
@@ -297,15 +305,18 @@ fn plan_wage_accounts(
             .accounts_for(owner)
             .find(|account| account.kind() == AccountKind::StreetCash)
             .map(|account| account.id())
-        { Some(existing) => {
-            resolved[index] = Some(existing);
-        } _ => {
-            missing_positions.push(index);
-            missing.push(FinancialAccountDraft {
-                owner,
-                kind: AccountKind::StreetCash,
-            });
-        }}
+        {
+            Some(existing) => {
+                resolved[index] = Some(existing);
+            }
+            _ => {
+                missing_positions.push(index);
+                missing.push(FinancialAccountDraft {
+                    owner,
+                    kind: AccountKind::StreetCash,
+                });
+            }
+        }
     }
     let openings = if missing.is_empty() {
         None

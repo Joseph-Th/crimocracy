@@ -1,6 +1,6 @@
 //! Campaign-history validation and insertion; sibling history state owns the record map.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{HistoryEventId, IdExhaustionError};
 use crate::core::state::AppState;
 use crate::history::{HistoryEventDraft, HistoryEventRecord};

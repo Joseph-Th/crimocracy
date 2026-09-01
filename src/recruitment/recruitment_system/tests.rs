@@ -3,10 +3,10 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
-    validate_request_recruitment_approval, validate_resolve_decision, DecisionError,
+    DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
 };
 use crate::decisions::{
     DecisionContext, DecisionResponse, DecisionStatus, RecruitmentApprovalRequestDraft,
@@ -494,11 +494,13 @@ fn rejected_recruitment_approval_records_no_attempt() {
     .expect("rejection should commit");
 
     assert_eq!(resolution.recruitment_attempt, None);
-    assert!(fixture
-        .state
-        .recruitment()
-        .get_attempt_for_approval_decision(request.decision)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt_for_approval_decision(request.decision)
+            .is_none()
+    );
     assert_eq!(
         fixture
             .state
@@ -552,11 +554,13 @@ fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
         Err(error) => error,
     };
     assert_eq!(error, DecisionError::StaleRecruitmentApprovalAuthority);
-    assert!(fixture
-        .state
-        .recruitment()
-        .get_attempt_for_approval_decision(request.decision)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt_for_approval_decision(request.decision)
+            .is_none()
+    );
 
     validate_resolve_decision(
         &fixture.registry,
@@ -843,11 +847,13 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         outcome_information.subject(),
         EntityRef::Character(fixture.candidate)
     );
-    assert!(!fixture
-        .state
-        .intelligence()
-        .information_for_holder(KnowledgeHolder::Organization(fixture.source))
-        .any(|information| information.id() == record.outcome_information()));
+    assert!(
+        !fixture
+            .state
+            .intelligence()
+            .information_for_holder(KnowledgeHolder::Organization(fixture.source))
+            .any(|information| information.id() == record.outcome_information())
+    );
     let history = fixture
         .state
         .history()
@@ -858,19 +864,25 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         )
         .expect("recruitment history should persist");
     assert_eq!(history.kind(), HistoryEventKind::Recruitment);
-    assert!(history
-        .entities()
-        .contains(&EntityRef::Character(fixture.candidate)));
+    assert!(
+        history
+            .entities()
+            .contains(&EntityRef::Character(fixture.candidate))
+    );
     // This is a defection out of `fixture.source`, so campaign history must not leak the
     // hidden recruiting organization: the player finds the destination through surveillance,
     // not a global history read. The recruiter is omitted too — their membership would
     // resolve straight back to the destination organization.
-    assert!(!history
-        .entities()
-        .contains(&EntityRef::Character(fixture.recruiter)));
-    assert!(!history
-        .entities()
-        .contains(&EntityRef::Organization(fixture.target)));
+    assert!(
+        !history
+            .entities()
+            .contains(&EntityRef::Character(fixture.recruiter))
+    );
+    assert!(
+        !history
+            .entities()
+            .contains(&EntityRef::Organization(fixture.target))
+    );
     let target_name = fixture
         .state
         .world()
@@ -894,15 +906,21 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         .collect();
     assert_eq!(departure_reports.len(), 1);
     assert_eq!(departure_reports[0].entries().len(), 1);
-    assert!(departure_reports[0].entries()[0]
-        .summary
-        .contains("Frightened Associate left North Crew"));
-    assert!(departure_reports[0].entries()[0]
-        .entities
-        .contains(&EntityRef::Character(fixture.candidate)));
-    assert!(!departure_reports[0].entries()[0]
-        .entities
-        .contains(&EntityRef::Organization(fixture.target)));
+    assert!(
+        departure_reports[0].entries()[0]
+            .summary
+            .contains("Frightened Associate left North Crew")
+    );
+    assert!(
+        departure_reports[0].entries()[0]
+            .entities
+            .contains(&EntityRef::Character(fixture.candidate))
+    );
+    assert!(
+        !departure_reports[0].entries()[0]
+            .entities
+            .contains(&EntityRef::Organization(fixture.target))
+    );
     validate_state(&fixture.state).expect("accepted recruitment state should validate");
     validate_invariants(&fixture.state);
 }
@@ -1273,10 +1291,12 @@ fn save_round_trip_preserves_recruitment_history_and_drive_authorship() {
             .organization(),
         Some(fixture.target)
     );
-    assert!(record
-        .history_event()
-        .and_then(|history| restored.history().get_event(history))
-        .is_some());
+    assert!(
+        record
+            .history_event()
+            .and_then(|history| restored.history().get_event(history))
+            .is_some()
+    );
     validate_state(&restored).expect("restored recruitment state should validate");
     validate_invariants(&restored);
 }
@@ -1373,7 +1393,7 @@ fn player_organization_approval_requests_wait_for_the_player() {
 
 #[test]
 fn delegated_channel_cannot_race_a_pending_recruitment_approval() {
-    use crate::delegation::delegation_system::{validate_revise_mandate, MandateRevisionDraft};
+    use crate::delegation::delegation_system::{MandateRevisionDraft, validate_revise_mandate};
 
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));

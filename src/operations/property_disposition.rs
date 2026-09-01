@@ -9,11 +9,11 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::finance_system::{
-    validate_record_transaction, FinanceError, ValidatedLedgerTransaction,
+    FinanceError, ValidatedLedgerTransaction, validate_record_transaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -24,7 +24,7 @@ use crate::operations::{
     OperationStatus,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{BusinessFunction, BusinessOwner};
 use std::collections::BTreeSet;
@@ -96,13 +96,17 @@ pub enum PropertyDispositionError {
     ArithmeticOverflow(OperationId),
     #[error("operation {0} held property value is too small to liquidate")]
     NegligibleValue(OperationId),
-    #[error("operation {operation} changed after disposition validation; expected version {expected}, found {found}")]
+    #[error(
+        "operation {operation} changed after disposition validation; expected version {expected}, found {found}"
+    )]
     StaleOperation {
         operation: OperationId,
         expected: u32,
         found: u32,
     },
-    #[error("business {venue} changed after disposition validation; expected version {expected}, found {found}")]
+    #[error(
+        "business {venue} changed after disposition validation; expected version {expected}, found {found}"
+    )]
     StaleVenue {
         venue: BusinessId,
         expected: u32,
@@ -740,8 +744,8 @@ mod tests {
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
     use crate::enterprises::enterprise_execution::validate_establish_enterprise;
     use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
-    use crate::finance::finance_system::insert_account;
     use crate::finance::FinancialAccountDraft;
+    use crate::finance::finance_system::insert_account;
     use crate::world::world_system::{insert_character, insert_neighborhood, insert_organization};
     use crate::world::{
         AutonomyLevel, CapabilityKind, CharacterDraft, NeighborhoodDraft,

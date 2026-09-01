@@ -1,6 +1,6 @@
 //! Case-witness registration, cooperation, and named testimony transactions; anonymous testimony remains ordinary incident evidence.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
     WitnessStatementId,
@@ -21,7 +21,9 @@ pub enum WitnessError {
     InactiveInvestigation(InvestigationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error("character {witness} is already registered as case witness {existing} for investigation {investigation}")]
+    #[error(
+        "character {witness} is already registered as case witness {existing} for investigation {investigation}"
+    )]
     DuplicateCaseWitness {
         investigation: InvestigationId,
         witness: CharacterId,
@@ -38,19 +40,25 @@ pub enum WitnessError {
         witness: CaseWitnessId,
         cooperation: WitnessCooperation,
     },
-    #[error("investigation {investigation} changed after witness validation; expected version {expected}, found {found}")]
+    #[error(
+        "investigation {investigation} changed after witness validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
-    #[error("character {witness} changed after witness validation; expected version {expected}, found {found}")]
+    #[error(
+        "character {witness} changed after witness validation; expected version {expected}, found {found}"
+    )]
     StaleWitnessCharacter {
         witness: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("case witness {witness} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "case witness {witness} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleCaseWitness {
         witness: CaseWitnessId,
         expected: u32,
@@ -403,10 +411,10 @@ fn validate_statement_dependencies(
     if !is_entity_present(state, draft.subject) {
         return Err(WitnessError::MissingEntity(draft.subject));
     }
-    if let Some(origin) = draft.origin {
-        if !is_entity_present(state, origin) {
-            return Err(WitnessError::MissingEntity(origin));
-        }
+    if let Some(origin) = draft.origin
+        && !is_entity_present(state, origin)
+    {
+        return Err(WitnessError::MissingEntity(origin));
     }
     validate_current_witness_character(state, case_witness.witness())?;
     Ok(())

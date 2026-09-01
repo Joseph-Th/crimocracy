@@ -8,28 +8,28 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::decisions::{
+    DecisionContext, DecisionRecordParts, DecisionRequestDraft, DecisionRequestRecord,
+    DecisionResponse, DecisionStatus, RecruitmentApprovalContext, RecruitmentApprovalRequestDraft,
     build_recruitment_approval_authority_snapshot, build_recruitment_approval_context,
-    build_resolution, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
-    DecisionRequestRecord, DecisionResponse, DecisionStatus, RecruitmentApprovalContext,
-    RecruitmentApprovalRequestDraft,
+    build_resolution,
 };
 use crate::delegation::delegation_system::{
-    resolve_mandate_authority, resolve_policy_for_manager, DelegationError,
+    DelegationError, resolve_mandate_authority, resolve_policy_for_manager,
 };
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
 use crate::operations::operation_system::{
-    has_operation_deadline_fully_passed, validate_deadline_missed_operation,
-    validate_decision_abort_operation, validate_police_arrival_abort_if_applicable, OperationError,
-    ValidatedOperationAbort,
+    OperationError, ValidatedOperationAbort, has_operation_deadline_fully_passed,
+    validate_deadline_missed_operation, validate_decision_abort_operation,
+    validate_police_arrival_abort_if_applicable,
 };
 use crate::operations::{OperationContingency, OperationStatus};
-use crate::recruitment::recruitment_system::{
-    recruitment_policy_source, validate_approved_recruitment_attempt,
-    validate_recruitment_proposal, RecruitmentError, ValidatedRecruitmentAttempt,
-    ValidatedRecruitmentProposal,
-};
 use crate::recruitment::RecruitmentDraft;
+use crate::recruitment::recruitment_system::{
+    RecruitmentError, ValidatedRecruitmentAttempt, ValidatedRecruitmentProposal,
+    recruitment_policy_source, validate_approved_recruitment_attempt,
+    validate_recruitment_proposal,
+};
 use crate::registry::Registry;
 use crate::world::{ApprovalPolicy, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
@@ -76,7 +76,9 @@ pub enum DecisionError {
         operation: OperationId,
         response: PoliceResponseId,
     },
-    #[error("police response {response} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "police response {response} changed after validation; expected version {expected}, found {found}"
+    )]
     StalePoliceResponse {
         response: PoliceResponseId,
         expected: u32,
@@ -93,7 +95,9 @@ pub enum DecisionError {
     },
     #[error("recruitment approval requires Personnel scope, not {scope:?}")]
     RecruitmentApprovalRequiresPersonnelScope { scope: ResponsibilityScope },
-    #[error("recruitment approval authority belongs to organization {authority_organization}, not target {target_organization}")]
+    #[error(
+        "recruitment approval authority belongs to organization {authority_organization}, not target {target_organization}"
+    )]
     RecruitmentApprovalOrganizationMismatch {
         authority_organization: OrganizationId,
         target_organization: OrganizationId,
@@ -119,7 +123,9 @@ pub enum DecisionError {
         decision: DecisionRequestId,
         response: DecisionResponse,
     },
-    #[error("operation {operation} changed after validation; expected version {expected}, found {found}")]
+    #[error(
+        "operation {operation} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleOperation {
         operation: OperationId,
         expected: u32,
@@ -331,8 +337,8 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
 
 fn police_arrival_decision_summary(operation_title: &str) -> String {
     format!(
-    "Police response reached the target during {operation_title}. Leadership direction is required."
-  )
+        "Police response reached the target during {operation_title}. Leadership direction is required."
+    )
 }
 
 fn validate_request_metadata(

@@ -7,7 +7,7 @@ use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::{DecisionContext, DecisionRequestRecord};
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_report_draft, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use std::cmp::Reverse;
 use std::collections::BTreeSet;

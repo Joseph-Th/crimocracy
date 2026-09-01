@@ -743,10 +743,10 @@ impl LegalState {
             "Record Reference Validity: informant disclosure evidence ID mismatch"
         );
         debug_assert_eq!(
-      evidence.investigation(),
-      disclosure.investigation(),
-      "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
-    );
+            evidence.investigation(),
+            disclosure.investigation(),
+            "Ownership Exclusivity: informant disclosure belongs to a different case than its evidence"
+        );
         self.insert_evidence(evidence, activity_at);
         let id = disclosure.id();
         let previous_case_information = self
@@ -1001,21 +1001,21 @@ impl LegalState {
                 .expect("validated investigation work disappeared before completion");
             // Count a completed interview against its witness whether or not it produced a
             // statement, so scheduling can stop retrying witnesses who never open up.
-            if record.kind() == InvestigationWorkKind::WitnessInterview {
-                if let Some(case_witness) = record.focus().witness_id() {
-                    let witness = self
-                        .case_witnesses
-                        .get_mut(&case_witness)
-                        .expect("validated interview focus must reference an existing witness");
-                    witness.interview_attempts = witness
-                        .interview_attempts
-                        .checked_add(1)
-                        .expect("witness interview attempt counter exhausted");
-                    witness.version = witness
-                        .version
-                        .checked_add(1)
-                        .expect("case witness version counter exhausted");
-                }
+            if record.kind() == InvestigationWorkKind::WitnessInterview
+                && let Some(case_witness) = record.focus().witness_id()
+            {
+                let witness = self
+                    .case_witnesses
+                    .get_mut(&case_witness)
+                    .expect("validated interview focus must reference an existing witness");
+                witness.interview_attempts = witness
+                    .interview_attempts
+                    .checked_add(1)
+                    .expect("witness interview attempt counter exhausted");
+                witness.version = witness
+                    .version
+                    .checked_add(1)
+                    .expect("case witness version counter exhausted");
             }
             record.runtime.status = InvestigationWorkStatus::Completed;
             record.runtime.resolution = Some(resolution);
@@ -1291,9 +1291,9 @@ impl LegalState {
             {
                 let removed = ids.remove(&id);
                 debug_assert!(
-          removed,
-          "Derived Data Consistency: neighborhood active patrol index changed before lifecycle commit"
-        );
+                    removed,
+                    "Derived Data Consistency: neighborhood active patrol index changed before lifecycle commit"
+                );
                 if ids.is_empty() {
                     self.indexes
                         .patrols

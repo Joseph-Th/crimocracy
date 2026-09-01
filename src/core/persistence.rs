@@ -1,7 +1,7 @@
 //! Versioned persistence envelope; serialization adapters remain outside the simulation core.
 
 use crate::core::invariants::{
-    validate_state, validate_state_against_registry, StateValidationError,
+    StateValidationError, validate_state, validate_state_against_registry,
 };
 use crate::core::state::{AppState, CURRENT_STATE_SCHEMA_VERSION};
 use crate::registry::Registry;

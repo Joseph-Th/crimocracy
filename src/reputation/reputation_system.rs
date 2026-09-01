@@ -6,7 +6,7 @@ use crate::core::id::{IdExhaustionError, IdKind, OrganizationId};
 use crate::core::state::AppState;
 use crate::operations::{OperationApproach, OperationExposureLevel, OperationObjectiveOutcome};
 use crate::registry::Registry;
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::reputation::{AudienceKind, ReputationDimension, ReputationRecord, ReputationState};
 use crate::world::OrganizationKind;
@@ -510,10 +510,12 @@ mod tests {
             baseline,
             "untouched dimensions keep the baseline"
         );
-        assert!(state
-            .reputation
-            .get_record(organization, AudienceKind::Underworld)
-            .is_none());
+        assert!(
+            state
+                .reputation
+                .get_record(organization, AudienceKind::Underworld)
+                .is_none()
+        );
 
         // Clamping holds at both rails no matter how large the authored swing.
         let clamped_high = apply_reputation_delta(
@@ -767,7 +769,7 @@ mod tests {
             resolve_recruitment_factors_from_context, resolve_recruitment_margin,
         };
         use crate::recruitment::{
-            build_recruitment_relationship_snapshot, RecruitmentApproach, RecruitmentFactors,
+            RecruitmentApproach, RecruitmentFactors, build_recruitment_relationship_snapshot,
         };
         use crate::world::{AutonomyLevel, CharacterDraft};
 
@@ -1021,10 +1023,12 @@ mod tests {
             shifts.is_empty(),
             "an institution cannot be scared of itself"
         );
-        assert!(state
-            .reputation
-            .get_record(precinct, AudienceKind::Police)
-            .is_none());
+        assert!(
+            state
+                .reputation
+                .get_record(precinct, AudienceKind::Police)
+                .is_none()
+        );
 
         validate_invariants(&state);
     }

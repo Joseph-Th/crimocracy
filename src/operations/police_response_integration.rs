@@ -5,10 +5,10 @@ use crate::core::id::{IdExhaustionError, IdKind, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
-    validate_request_police_arrival_decision_on_arrival, DecisionError, DecisionRequestOutcome,
+    DecisionError, DecisionRequestOutcome, validate_request_police_arrival_decision_on_arrival,
 };
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -17,8 +17,8 @@ use crate::intelligence::{
 use crate::legal::jurisdiction_system::resolve_police_response_authority;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
 use crate::legal::police_response_system::{
-    find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
     PoliceResponseDispatchDraft, PoliceResponseError, ValidatedPoliceResponseDispatch,
+    find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::operation_system::{

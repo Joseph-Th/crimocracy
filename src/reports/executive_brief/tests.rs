@@ -3,7 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::decisions::decision_system::{
     validate_request_recruitment_approval, validate_resolve_decision,
@@ -214,9 +214,11 @@ fn synthesis_prioritizes_pending_decisions_filters_routine_and_deduplicates_sour
     assert_eq!(plan.entries().len(), 2);
     assert_eq!(plan.entries()[0].attention, AttentionClass::Exception);
     assert_eq!(plan.entries()[0].decision, Some(decision));
-    assert!(plan.entries()[0]
-        .entities
-        .contains(&EntityRef::DecisionRequest(decision)));
+    assert!(
+        plan.entries()[0]
+            .entities
+            .contains(&EntityRef::DecisionRequest(decision))
+    );
     assert_eq!(plan.entries()[1].attention, AttentionClass::Notable);
     assert_eq!(
         plan.entries()[1].summary,
@@ -269,11 +271,13 @@ fn stale_plan_rejects_pending_decision_changes_without_partial_mutation() {
             .collect::<Vec<_>>(),
         vec![decision]
     );
-    assert!(fixture
-        .state
-        .reports()
-        .latest_for_kind(fixture.organization, ReportKind::ExecutiveBrief)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .reports()
+            .latest_for_kind(fixture.organization, ReportKind::ExecutiveBrief)
+            .is_none()
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -303,11 +307,13 @@ fn stale_plan_rejects_report_window_changes_without_partial_mutation() {
         Err(error) => error,
     };
     assert_eq!(error, ExecutiveBriefError::StaleReportWindow);
-    assert!(fixture
-        .state
-        .reports()
-        .latest_for_kind(fixture.organization, ReportKind::ExecutiveBrief)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .reports()
+            .latest_for_kind(fixture.organization, ReportKind::ExecutiveBrief)
+            .is_none()
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -416,10 +422,12 @@ fn next_brief_reads_only_reports_created_after_the_previous_brief() {
             .expect("second daily brief should plan from the prior brief cursor");
     assert_eq!(second_plan.entries().len(), 1);
     assert_eq!(second_plan.entries()[0].summary, "Day two notable item.");
-    assert!(!second_plan
-        .entries()
-        .iter()
-        .any(|entry| entry.summary == "Day one notable item."));
+    assert!(
+        !second_plan
+            .entries()
+            .iter()
+            .any(|entry| entry.summary == "Day one notable item.")
+    );
     validate_invariants(&fixture.state);
 }
 

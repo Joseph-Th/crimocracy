@@ -3,7 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::{
@@ -12,7 +12,7 @@ use crate::legal::{
 };
 use crate::registry::Registry;
 use crate::world::world_system::{
-    insert_character, insert_organization, validate_reassign_character, WorldError,
+    WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -288,11 +288,13 @@ fn initial_referral_must_include_every_evidence_record_that_supported_arrest() {
         error,
         ProsecutionError::MissingArrestEvidence(fixture.arrest_evidence)
     );
-    assert!(fixture
-        .state
-        .legal()
-        .open_prosecution_case_for(fixture.arrest, fixture.office)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .open_prosecution_case_for(fixture.arrest, fixture.office)
+            .is_none()
+    );
     validate_state(&fixture.state).expect("rejected referral should preserve valid state");
     validate_invariants(&fixture.state);
 }
@@ -468,16 +470,20 @@ fn declining_case_releases_lead_assignment_and_ends_referral_access() {
     assert!(record.resolution_information().is_some());
     assert!(record.resolution_report().is_some());
     assert_eq!(record.version(), 2);
-    assert!(fixture
-        .state
-        .legal()
-        .open_prosecution_case_for(fixture.arrest, fixture.office)
-        .is_none());
-    assert!(fixture
-        .state
-        .legal()
-        .active_arrest_for_character(fixture.defendant)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .open_prosecution_case_for(fixture.arrest, fixture.office)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.defendant)
+            .is_none()
+    );
     assert_eq!(
         fixture
             .state
@@ -543,10 +549,12 @@ fn closed_case_survives_save_and_allows_later_reconsideration() {
     assert_eq!(historical.resolved_at(), Some(restored.now()));
     assert!(historical.resolution_information().is_some());
     assert!(historical.resolution_report().is_some());
-    assert!(restored
-        .legal()
-        .open_prosecution_case_for(fixture.arrest, fixture.office)
-        .is_none());
+    assert!(
+        restored
+            .legal()
+            .open_prosecution_case_for(fixture.arrest, fixture.office)
+            .is_none()
+    );
     assert_eq!(
         restored
             .legal()
@@ -616,11 +624,13 @@ fn prosecution_resolution_token_stales_after_new_referral_without_partial_resolu
     assert_eq!(record.resolved_at(), None);
     assert_eq!(record.resolution_information(), None);
     assert_eq!(record.resolution_report(), None);
-    assert!(fixture
-        .state
-        .legal()
-        .open_prosecution_case_for(fixture.arrest, fixture.office)
-        .is_some_and(|open| open.id() == case));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .open_prosecution_case_for(fixture.arrest, fixture.office)
+            .is_some_and(|open| open.id() == case)
+    );
     validate_state(&fixture.state).expect("stale disposition rejection should be atomic");
     validate_invariants(&fixture.state);
 }

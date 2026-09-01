@@ -312,10 +312,10 @@ impl OpportunityState {
             if self.by_report.get(&record.report()) != Some(&id) {
                 return false;
             }
-            if let Some(report) = record.resolution().and_then(OpportunityResolution::report) {
-                if self.by_report.get(&report) != Some(&id) {
-                    return false;
-                }
+            if let Some(report) = record.resolution().and_then(OpportunityResolution::report)
+                && self.by_report.get(&report) != Some(&id)
+            {
+                return false;
             }
             let key = OperationOpportunityKey::from_record(record);
             match record.resolution() {

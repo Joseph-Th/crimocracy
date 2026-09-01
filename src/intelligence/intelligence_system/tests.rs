@@ -4,8 +4,8 @@ use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
-use crate::reports::report_system::{validate_record_report, ReportError};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,

@@ -39,8 +39,8 @@ pub enum PatrolError {
     #[error("patrol windows overlap at minute {minute:?} of the simulation day")]
     OverlappingWindow { minute: DayMinute },
     #[error(
-    "organization {organization} already has active patrol deployment {existing} in neighborhood {neighborhood}"
-  )]
+        "organization {organization} already has active patrol deployment {existing} in neighborhood {neighborhood}"
+    )]
     DuplicateActiveDeployment {
         organization: OrganizationId,
         neighborhood: NeighborhoodId,
@@ -51,24 +51,24 @@ pub enum PatrolError {
     #[error("retired patrol deployment {0} cannot be revised")]
     RetiredDeployment(PatrolDeploymentId),
     #[error(
-    "patrol deployment {deployment} in status {status:?} cannot apply transition {transition:?}"
-  )]
+        "patrol deployment {deployment} in status {status:?} cannot apply transition {transition:?}"
+    )]
     InvalidTransition {
         deployment: PatrolDeploymentId,
         status: PatrolDeploymentStatus,
         transition: PatrolDeploymentTransition,
     },
     #[error(
-    "patrol deployment {deployment} changed after validation; expected version {expected}, found {found}"
-  )]
+        "patrol deployment {deployment} changed after validation; expected version {expected}, found {found}"
+    )]
     StaleDeployment {
         deployment: PatrolDeploymentId,
         expected: u32,
         found: u32,
     },
     #[error(
-    "jurisdiction for organization {organization} changed after patrol validation; expected version {expected}, found {found:?}"
-  )]
+        "jurisdiction for organization {organization} changed after patrol validation; expected version {expected}, found {found:?}"
+    )]
     StaleJurisdiction {
         organization: OrganizationId,
         expected: u32,

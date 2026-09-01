@@ -8,38 +8,38 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::economy::business_economy_system::{
-    validate_disrupt_business_economy, BusinessEconomyError, ValidatedBusinessDisruption,
+    BusinessEconomyError, ValidatedBusinessDisruption, validate_disrupt_business_economy,
 };
-use crate::history::history_system::{validate_record_event, HistoryError, ValidatedHistoryEvent};
+use crate::history::history_system::{HistoryError, ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
 use crate::legal::investigation_system::{
-    validate_incident_intake, InvestigationError, ValidatedIncidentIntake,
+    InvestigationError, ValidatedIncidentIntake, validate_incident_intake,
 };
 use crate::legal::jurisdiction_system::resolve_case_intake_authority;
 use crate::legal::patrol_system::{
-    resolve_patrol_presence_interval_snapshot, resolve_patrol_presence_snapshot,
-    PatrolPresenceSnapshot,
+    PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
+    resolve_patrol_presence_snapshot,
 };
 use crate::legal::{
     Admissibility, EvidenceReliability, EvidenceStrength, IncidentEvidenceDraft,
     IncidentIntakeDraft, IncidentWitnessDraft, WitnessCooperation,
 };
 use crate::operations::operation_economics::{
+    CashProceedsPlan, DEPLETED_TAKE_CLAUSE, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE,
     resolve_cash_proceeds, resolve_property_proceeds, undeposited_cash_clause,
-    unliquidated_property_clause, CashProceedsPlan, PropertyProceedsPlan, DEPLETED_TAKE_CLAUSE,
-    SABOTAGE_DISRUPTION_CLAUSE,
+    unliquidated_property_clause,
 };
 use crate::operations::surveillance_integration::{
-    decide_surveillance_intelligence, surveillance_after_action_clause,
-    validate_surveillance_information, validate_surveillance_plan_snapshot, SurveillanceError,
-    SurveillanceIntelligencePlan,
+    SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
+    surveillance_after_action_clause, validate_surveillance_information,
+    validate_surveillance_plan_snapshot,
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
@@ -47,7 +47,7 @@ use crate::operations::{
     OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, QualitativeBand, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,31 +92,37 @@ pub(crate) enum OperationResolutionError {
         #[source]
         error: crate::legal::arrest_system::ArrestError,
     },
-    #[error("operation {operation} changed after resolution planning; expected version {expected}, found {found}")]
+    #[error(
+        "operation {operation} changed after resolution planning; expected version {expected}, found {found}"
+    )]
     StaleOperation {
         operation: OperationId,
         expected: u32,
         found: u32,
     },
-    #[error("operation resolution plan was resolved at {expected:?}, but simulation time is now {found:?}")]
+    #[error(
+        "operation resolution plan was resolved at {expected:?}, but simulation time is now {found:?}"
+    )]
     StaleResolutionTime { expected: SimTime, found: SimTime },
-    #[error("police deployment context affecting operation {operation} changed after resolution planning")]
+    #[error(
+        "police deployment context affecting operation {operation} changed after resolution planning"
+    )]
     StalePoliceDeploymentContext { operation: OperationId },
     #[error(
         "police response context affecting operation {operation} changed after resolution planning"
     )]
     StalePoliceResponseContext { operation: OperationId },
     #[error(
-    "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
-  )]
+        "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
+    )]
     StaleIncidentRouting {
         neighborhood: NeighborhoodId,
         expected: Option<crate::core::id::OrganizationId>,
         found: Option<crate::core::id::OrganizationId>,
     },
     #[error(
-    "operation incident jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
-  )]
+        "operation incident jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
+    )]
     StaleIncidentJurisdictionVersion {
         neighborhood: NeighborhoodId,
         organization: crate::core::id::OrganizationId,
@@ -427,14 +433,13 @@ pub(crate) fn decide_operation_resolution(
     ]);
     history_entities.extend(record.objective().referenced_entities());
     history_entities.extend(record.roles().values().copied().map(EntityRef::Character));
-    if police_response_arrived {
-        if let Some(response) = record
+    if police_response_arrived
+        && let Some(response) = record
             .police_response()
             .and_then(|id| state.legal.get_police_response(id))
-        {
-            history_entities.insert(EntityRef::Organization(response.authority()));
-            history_entities.insert(EntityRef::Neighborhood(response.neighborhood()));
-        }
+    {
+        history_entities.insert(EntityRef::Organization(response.authority()));
+        history_entities.insert(EntityRef::Neighborhood(response.neighborhood()));
     }
 
     Ok(OperationResolutionPlan {
@@ -848,46 +853,45 @@ pub(crate) fn validate_operation_resolution_plan(
     // authorization enforces. Each degradation is validated here so commit re-checks only
     // staleness.
     let mut witness_intimidation = Vec::new();
-    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
-        if let (
+    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
+        && let (
             crate::operations::OperationKind::WitnessPressure,
             crate::operations::OperationObjective::Frighten {
                 target: EntityRef::Character(character),
             },
         ) = (record.kind(), record.objective())
-        {
-            let responsible_organization = record.responsible_organization();
-            // The by-character witness index scopes this to the target's own registrations;
-            // scanning every witness ever registered would grow with campaign length.
-            let targets: Vec<_> = state
-                .legal
-                .case_witnesses_for_character(*character)
-                .filter(|witness| witness.witness() == *character)
-                .filter(|witness| {
-                    state
-                        .legal
-                        .get_investigation(witness.investigation())
-                        .is_some_and(|investigation| {
-                            investigation.status() == crate::legal::InvestigationStatus::Active
-                                && investigation.owner() != responsible_organization
-                        })
-                })
-                .map(|witness| (witness.id(), witness.cooperation()))
-                .collect();
-            for (case_witness, cooperation) in targets {
-                let degraded = match cooperation {
-                    WitnessCooperation::Cooperative => WitnessCooperation::Reluctant,
-                    WitnessCooperation::Reluctant => WitnessCooperation::Hostile,
-                    WitnessCooperation::Hostile => continue,
-                };
-                witness_intimidation.push(
-                    crate::legal::witness_system::validate_set_witness_cooperation(
-                        state,
-                        case_witness,
-                        degraded,
-                    )?,
-                );
-            }
+    {
+        let responsible_organization = record.responsible_organization();
+        // The by-character witness index scopes this to the target's own registrations;
+        // scanning every witness ever registered would grow with campaign length.
+        let targets: Vec<_> = state
+            .legal
+            .case_witnesses_for_character(*character)
+            .filter(|witness| witness.witness() == *character)
+            .filter(|witness| {
+                state
+                    .legal
+                    .get_investigation(witness.investigation())
+                    .is_some_and(|investigation| {
+                        investigation.status() == crate::legal::InvestigationStatus::Active
+                            && investigation.owner() != responsible_organization
+                    })
+            })
+            .map(|witness| (witness.id(), witness.cooperation()))
+            .collect();
+        for (case_witness, cooperation) in targets {
+            let degraded = match cooperation {
+                WitnessCooperation::Cooperative => WitnessCooperation::Reluctant,
+                WitnessCooperation::Reluctant => WitnessCooperation::Hostile,
+                WitnessCooperation::Hostile => continue,
+            };
+            witness_intimidation.push(
+                crate::legal::witness_system::validate_set_witness_cooperation(
+                    state,
+                    case_witness,
+                    degraded,
+                )?,
+            );
         }
     }
     // Sabotage damage lands through the canonical economy disruption path; the disruption is
@@ -898,31 +902,29 @@ pub(crate) fn validate_operation_resolution_plan(
     // plan's own decision is re-derived so the after-action narrative can never claim
     // disruption the committed state will not carry.
     let mut business_disruption = None;
-    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed {
-        if let (
+    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
+        && let (
             crate::operations::OperationKind::Sabotage,
             crate::operations::OperationObjective::DisruptBusiness {
                 target: EntityRef::Business(business),
             },
         ) = (record.kind(), record.objective())
-        {
-            let economy_active =
-                state
-                    .economy
-                    .get_business_economy(*business)
-                    .is_some_and(|economy| {
-                        economy.status() == crate::economy::BusinessOperatingStatus::Active
-                    });
-            if economy_active != plan.outcome.targets_operating_economy {
-                return Err(OperationResolutionError::StaleSabotageContext {
-                    operation: plan.snapshot.operation,
-                });
-            }
-            if economy_active {
-                business_disruption = Some(validate_disrupt_business_economy(
-                    registry, state, *business,
-                )?);
-            }
+    {
+        let economy_active = state
+            .economy
+            .get_business_economy(*business)
+            .is_some_and(|economy| {
+                economy.status() == crate::economy::BusinessOperatingStatus::Active
+            });
+        if economy_active != plan.outcome.targets_operating_economy {
+            return Err(OperationResolutionError::StaleSabotageContext {
+                operation: plan.snapshot.operation,
+            });
+        }
+        if economy_active {
+            business_disruption = Some(validate_disrupt_business_economy(
+                registry, state, *business,
+            )?);
         }
     }
     // Personal after-action knowledge for each participant: the crew knows what went down
@@ -1369,11 +1371,11 @@ fn resolve_target_neighborhoods(
                 }
             }
             EntityRef::Character(id) => {
-                if let Some(character) = state.world.get_character(id) {
-                    if let Some(org) = character.organization() {
-                        for business in state.world.businesses_owned_by_organization(org) {
-                            neighborhoods.insert(business.neighborhood());
-                        }
+                if let Some(character) = state.world.get_character(id)
+                    && let Some(org) = character.organization()
+                {
+                    for business in state.world.businesses_owned_by_organization(org) {
+                        neighborhoods.insert(business.neighborhood());
                     }
                 }
                 for business in state.world.businesses_owned_by_character(id) {
@@ -1426,10 +1428,10 @@ pub(crate) fn resolve_investigation_target_neighborhoods(
     let mut entities: Vec<EntityRef> = investigation.subjects().iter().copied().collect();
     // Operation-originated cases also target their objective's entities. Enterprise-originated
     // cases already carry the racket as a subject, whose location maps to a neighborhood below.
-    if let Some(EntityRef::Operation(origin)) = investigation.origin() {
-        if let Some(operation) = state.operations.get_operation(origin) {
-            entities.extend(operation.objective().referenced_entities());
-        }
+    if let Some(EntityRef::Operation(origin)) = investigation.origin()
+        && let Some(operation) = state.operations.get_operation(origin)
+    {
+        entities.extend(operation.objective().referenced_entities());
     }
     resolve_target_neighborhoods(state, entities)
 }

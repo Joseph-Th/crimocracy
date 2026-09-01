@@ -171,11 +171,13 @@ fn funded_payroll_moves_wages_into_member_pockets() {
             .expect("payroll cost must fit money")
     );
     // No shortfall means no resentment edge toward the supervisor was manufactured.
-    assert!(fixture
-        .state
-        .social
-        .get_relationship(fixture.member, fixture.boss)
-        .is_none());
+    assert!(
+        fixture
+            .state
+            .social
+            .get_relationship(fixture.member, fixture.boss)
+            .is_none()
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -452,14 +454,18 @@ fn player_shortfall_report_exhaustion_rejects_before_money_or_resentment_moves()
         fixture.state.ids.next_raw(IdKind::LedgerTransaction),
         transaction_next_before
     );
-    assert!(fixture
-        .state
-        .social()
-        .get_relationship(fixture.member, fixture.boss)
-        .is_none());
-    assert!(fixture
-        .state
-        .finance()
-        .accounts_for(FinancialOwner::Character(fixture.member))
-        .all(|account| account.kind() != AccountKind::StreetCash));
+    assert!(
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.member, fixture.boss)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Character(fixture.member))
+            .all(|account| account.kind() != AccountKind::StreetCash)
+    );
 }

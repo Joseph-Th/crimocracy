@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::id::EvidenceId;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{build_save, restore_save, SaveEnvelope};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::legal::investigation_system::{
@@ -19,10 +19,10 @@ use crate::legal::{
     PatrolDeploymentDraft, PatrolWindow,
 };
 use crate::operations::operation_execution::{
-    decide_operation_resolution, resolve_intelligence_factors, validate_operation_resolution_plan,
-    OperationResolutionError, OperationResolutionRandomness,
+    OperationResolutionError, OperationResolutionRandomness, decide_operation_resolution,
+    resolve_intelligence_factors, validate_operation_resolution_plan,
 };
-use crate::operations::operation_system::{validate_authorize_operation, OperationError};
+use crate::operations::operation_system::{OperationError, validate_authorize_operation};
 use crate::operations::{
     OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
 };
@@ -446,9 +446,11 @@ fn partial_and_failed_surveillance_degrade_or_withhold_target_knowledge() {
         .intelligence()
         .get_information(failed_resolution.after_action_information())
         .expect("failed surveillance should still produce after-action information");
-    assert!(after_action
-        .summary()
-        .contains("no target observation reliable enough for planning"));
+    assert!(
+        after_action
+            .summary()
+            .contains("no target observation reliable enough for planning")
+    );
     validate_state(&partial.state).expect("partial surveillance state should validate");
     validate_state(&failed.state).expect("failed surveillance state should validate");
     validate_invariants(&partial.state);
@@ -648,9 +650,11 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
         .expect("case-heat observation should persist");
     assert_eq!(hot_observation.topic(), InformationTopic::LegalActivity);
     assert_eq!(hot_observation.subject(), EntityRef::Organization(police));
-    assert!(hot_observation
-        .summary()
-        .contains("actively developing the case"));
+    assert!(
+        hot_observation
+            .summary()
+            .contains("actively developing the case")
+    );
     assert!(!hot_observation.summary().contains("Crew Incident Inquiry"));
     assert!(!hot_observation.summary().contains("Surveillance"));
 
@@ -693,9 +697,11 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
         )
         .expect("shelved observation should persist");
     assert!(cold_observation.summary().contains("shelved"));
-    assert!(!cold_observation
-        .summary()
-        .contains("actively developing the case"));
+    assert!(
+        !cold_observation
+            .summary()
+            .contains("actively developing the case")
+    );
     validate_state(&fixture.state).expect("shelved recheck state should validate");
     validate_invariants(&fixture.state);
 }
@@ -763,8 +769,8 @@ fn surveillance_authorization_rejects_semantically_invalid_objectives_and_target
 }
 
 #[test]
-fn police_org_surveillance_without_notified_case_produces_personnel_and_survives_later_notification(
-) {
+fn police_org_surveillance_without_notified_case_produces_personnel_and_survives_later_notification()
+ {
     let mut fixture = fixture(90, false);
     let police = fixture.police;
 

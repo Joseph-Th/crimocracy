@@ -190,13 +190,15 @@ fn active_mandate_index_tracks_revocation() {
         .expect("revocation should commit");
 
     assert!(active_ids(&state).is_empty());
-    assert!(state
-        .delegation()
-        .active_for_scope(ResponsibilityScope::Function(
-            ResponsibilityFunction::Finance
-        ))
-        .next()
-        .is_none());
+    assert!(
+        state
+            .delegation()
+            .active_for_scope(ResponsibilityScope::Function(
+                ResponsibilityFunction::Finance
+            ))
+            .next()
+            .is_none()
+    );
     // The revoked mandate stays in durable history; only the live-work scan surfaces shrank.
     assert_eq!(
         state

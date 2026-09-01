@@ -1,6 +1,6 @@
-﻿//! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
+//! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
 
-use crate::core::entity::{is_entity_present, EntityRef};
+use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{CharacterId, IdExhaustionError, InformationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::intelligence::{
@@ -34,7 +34,9 @@ pub enum IntelligenceError {
         "information source kind {0:?} cannot be created as an institutional-contact derivation"
     )]
     InvalidContactSourceKind(InformationSourceKind),
-    #[error("institutional-contact source information {information} is not personally held by character {contact}")]
+    #[error(
+        "institutional-contact source information {information} is not personally held by character {contact}"
+    )]
     InvalidContactInformationSource {
         information: InformationId,
         contact: CharacterId,
@@ -46,7 +48,9 @@ pub enum IntelligenceError {
         source_holder: KnowledgeHolder,
         recipient: KnowledgeHolder,
     },
-    #[error("character {character} changed after transfer validation; expected version {expected}, found {found}")]
+    #[error(
+        "character {character} changed after transfer validation; expected version {expected}, found {found}"
+    )]
     StaleTransferCharacter {
         character: CharacterId,
         expected: u32,
@@ -189,10 +193,10 @@ fn validate_information_draft(
     if !is_entity_present(state, draft.subject) {
         return Err(IntelligenceError::MissingEntity(draft.subject));
     }
-    if let Some(source) = draft.source_entity {
-        if !is_entity_present(state, source) {
-            return Err(IntelligenceError::MissingEntity(source));
-        }
+    if let Some(source) = draft.source_entity
+        && !is_entity_present(state, source)
+    {
+        return Err(IntelligenceError::MissingEntity(source));
     }
     if draft.observed_at > state.now() {
         return Err(IntelligenceError::ObservationInFuture);

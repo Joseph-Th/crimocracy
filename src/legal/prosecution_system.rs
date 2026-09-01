@@ -9,18 +9,18 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::{
-    validate_record_information, IntelligenceError, ValidatedInformation,
+    IntelligenceError, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
-use crate::legal::arrest_system::{validate_release_arrest, ArrestError};
+use crate::legal::arrest_system::{ArrestError, validate_release_arrest};
 use crate::legal::{
     ProsecutionCaseDraft, ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
     ProsecutionReferralDraft, ProsecutionReferralRecord,
 };
-use crate::reports::report_system::{validate_record_report, ReportError, ValidatedReport};
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
@@ -88,25 +88,33 @@ pub enum ProsecutionError {
         "prosecution referral was validated at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleTime { expected: SimTime, found: SimTime },
-    #[error("arrest {arrest} changed after referral validation; expected version {expected}, found {found}")]
+    #[error(
+        "arrest {arrest} changed after referral validation; expected version {expected}, found {found}"
+    )]
     StaleArrest {
         arrest: ArrestId,
         expected: u32,
         found: u32,
     },
-    #[error("source investigation {investigation} changed after referral validation; expected version {expected}, found {found}")]
+    #[error(
+        "source investigation {investigation} changed after referral validation; expected version {expected}, found {found}"
+    )]
     StaleInvestigation {
         investigation: InvestigationId,
         expected: u32,
         found: u32,
     },
-    #[error("lead prosecutor {prosecutor} changed after referral validation; expected version {expected}, found {found}")]
+    #[error(
+        "lead prosecutor {prosecutor} changed after referral validation; expected version {expected}, found {found}"
+    )]
     StaleLeadProsecutor {
         prosecutor: CharacterId,
         expected: u32,
         found: u32,
     },
-    #[error("prosecution case {case} changed after referral validation; expected version {expected}, found {found}")]
+    #[error(
+        "prosecution case {case} changed after referral validation; expected version {expected}, found {found}"
+    )]
     StaleProsecutionCase {
         case: ProsecutionCaseId,
         expected: u32,

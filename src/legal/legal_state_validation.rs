@@ -41,7 +41,7 @@ impl LegalState {
                 ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed
                     if open == Some(&id) =>
                 {
-                    return false
+                    return false;
                 }
                 ProsecutionCaseStatus::Reviewing
                 | ProsecutionCaseStatus::Declined
@@ -93,12 +93,12 @@ impl LegalState {
                 LegalRepresentationStatus::Active
                     if arrest_active != Some(&id) || !contact_active =>
                 {
-                    return false
+                    return false;
                 }
                 LegalRepresentationStatus::Ended
                     if arrest_active == Some(&id) || contact_active =>
                 {
-                    return false
+                    return false;
                 }
                 LegalRepresentationStatus::Active | LegalRepresentationStatus::Ended => {}
             }

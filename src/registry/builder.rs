@@ -4,14 +4,14 @@
 use super::definitions::*;
 use super::{LegalConfigDefinition, Registry};
 use crate::core::attention::AttentionClass;
-use crate::enterprises::{EnterpriseKind, ALL_ENTERPRISE_KINDS};
-use crate::legal::{InvestigationWorkKind, ALL_INVESTIGATION_WORK_KINDS};
-use crate::operations::{OperationApproach, OperationKind, RoleKind, ALL_OPERATION_KINDS};
-use crate::recruitment::{RecruitmentApproach, ALL_RECRUITMENT_APPROACHES};
+use crate::enterprises::{ALL_ENTERPRISE_KINDS, EnterpriseKind};
+use crate::legal::{ALL_INVESTIGATION_WORK_KINDS, InvestigationWorkKind};
+use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind};
+use crate::recruitment::{ALL_RECRUITMENT_APPROACHES, RecruitmentApproach};
 use crate::world::{
+    ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
     BusinessFunction, BusinessKind, CapabilityKind, DriveKind, PolicyKind, PolicySetting,
-    TraitKind, ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS,
-    ALL_TRAIT_KINDS,
+    TraitKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
