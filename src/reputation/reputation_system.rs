@@ -153,7 +153,12 @@ pub(crate) fn apply_operation_reputation_consequences(
         police_fear,
     ));
 
-    if approach == OperationApproach::Violent {
+    if approach == OperationApproach::Violent
+        && !matches!(
+            exposure_level,
+            OperationExposureLevel::None | OperationExposureLevel::Trace
+        )
+    {
         shifts.extend(resolve_shift(
             registry,
             state,

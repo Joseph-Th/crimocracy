@@ -238,6 +238,8 @@ pub enum StateValidationError {
         mandate: MandateId,
         account: crate::core::id::FinancialAccountId,
     },
+    #[error("campaign attention auto-pause contains invalid class {attention:?}")]
+    InvalidAttentionPreference { attention: AttentionClass },
     #[error("report {report} references missing information {information}")]
     MissingReportInformation {
         report: ReportId,
@@ -330,6 +332,7 @@ use self::world::{validate_contacts, validate_social_and_intelligence, validate_
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_id_allocators(state)?;
     validate_indexes(state)?;
+    validate_campaign(state)?;
     validate_world_state(state)?;
     validate_social_and_intelligence(state)?;
     validate_contacts(state)?;
@@ -342,6 +345,18 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_enterprises(state)?;
     validate_reputations(state)?;
     validate_legal_subsystems(state)?;
+    Ok(())
+}
+
+fn validate_campaign(state: &AppState) -> Result<(), StateValidationError> {
+    for attention in state.attention_settings().auto_pause.iter().copied() {
+        if !matches!(
+            attention,
+            AttentionClass::Exception | AttentionClass::Crisis
+        ) {
+            return Err(StateValidationError::InvalidAttentionPreference { attention });
+        }
+    }
     Ok(())
 }
 
@@ -863,8 +878,13 @@ fn validate_business_cycles_against_registry(
         // Notability must agree with the production rule in `business_economy_system`: a
         // notable variance or a net-losing settlement is accountant-worthy.
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
+        let disrupted = state
+            .economy
+            .get_business_economy(cycle.business())
+            .is_some_and(|economy| economy.is_disrupted(cycle.occurred_at()));
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
             || cycle.net_cash() < crate::finance::Money::ZERO
+            || disrupted
         {
             AttentionClass::Notable
         } else {
@@ -992,6 +1012,7 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("enterprises", state.enterprises.has_consistent_indexes()),
         ("legal", state.legal.has_consistent_indexes()),
         ("reports", state.reports.has_consistent_indexes()),
+        ("history", state.history.has_consistent_indexes()),
     ];
     for (subsystem, is_consistent) in checks {
         if !is_consistent {

@@ -98,11 +98,11 @@ pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<Pay
             &find_funding_accounts(state, organization),
         ) {
             Ok(outcome) => outcome,
-            Err(error) => {
+            Err(_error) => {
                 // Payroll is autonomous routine work. A ledger or allocation failure for one
                 // organization must not crash the whole tick; the invariant suite will flag
                 // the underlying state inconsistency, and payroll retries next day boundary.
-                eprintln!("daily payroll for {organization} failed: {error}");
+                // No stderr side effect: external effects stay behind adapter boundaries.
                 continue;
             }
         };

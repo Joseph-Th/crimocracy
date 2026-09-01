@@ -69,6 +69,12 @@ impl HistoryState {
             "Index Uniqueness: duplicate history event ID inserted"
         );
     }
+
+    pub(crate) fn has_consistent_indexes(&self) -> bool {
+        // History is append-only with no derived indexes; consistency is key uniqueness,
+        // which BTreeMap guarantees. Keep the hook so validate_indexes covers every substate.
+        true
+    }
 }
 
 pub struct HistoryEventDraft {

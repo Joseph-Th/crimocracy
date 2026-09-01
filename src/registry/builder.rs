@@ -365,6 +365,9 @@ impl RegistryBuilder {
         if spec.expansion_police_fear_ceiling > 100 {
             return Err(RegistryBuildError::InvalidReputationCeiling);
         }
+        if spec.expansion_police_fear_ceiling < spec.baseline {
+            return Err(RegistryBuildError::InvalidReputationCeiling);
+        }
         for delta in [
             spec.witnessed_exposure_police_fear,
             spec.identifying_exposure_police_fear,
@@ -383,6 +386,9 @@ impl RegistryBuilder {
             // A zero decay step would make decay a structural no-op: impressions never
             // recover and faded records are never erased.
             return Err(RegistryBuildError::InvalidReputationDecayStep);
+        }
+        if spec.daily_decay_step > 25 {
+            return Err(RegistryBuildError::InvalidReputationDelta);
         }
         self.reputation = Some(ReputationConfigDefinition {
             baseline: spec.baseline,

@@ -366,9 +366,12 @@ pub fn decide_business_cycle(
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
-    // A losing cycle is always accountant-worthy: chronic silent losses are exactly what the
-    // owner must see before the authored suspension threshold stops the bleeding.
+    // A losing cycle or a sabotage-degraded gross is always accountant-worthy: chronic
+    // silent losses and invisible sabotage are exactly what the owner must see before the
+    // authored suspension threshold stops the bleeding.
+    let disrupted = economy.is_disrupted(state.now());
     let attention = if net_cash < Money::ZERO
+        || disrupted
         || i32::from(variance_basis_points).unsigned_abs()
             >= u32::from(economics.notable_variance_basis_points())
     {
