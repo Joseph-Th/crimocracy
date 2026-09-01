@@ -492,7 +492,7 @@ fn make_test_scenario() -> TestScenario {
 }
 
 #[test]
-fn test_mixed_scenario_soak_preserves_invariants() {
+fn mixed_scenario_soak_preserves_invariants() {
     let registry = build_registry();
     let TestScenario {
         mut state,

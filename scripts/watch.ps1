@@ -123,9 +123,17 @@ try {
         $countInfo = if ($result.TestCount) { $result.TestCount } else { "" }
         Write-Host ("{0}  {1,5}s{2}" -f $status, $result.Seconds, $countInfo) -ForegroundColor $color
         if ($result.Output -and ($result.Exit -ne 0 -or $Filter)) {
-            Write-Host $result.Output -ForegroundColor DarkGray
+            # Cap watch failure output so the terminal stays scannable.
+            $lines = $result.Output -split "`n"
+            if ($lines.Count -gt 60) {
+                $lines = $lines[0..59] + @("  ... ($($lines.Count - 60) more lines; re-run with cargo test -- --nocapture)")
+            }
+            Write-Host ($lines -join "`n") -ForegroundColor DarkGray
         } elseif ($result.Exit -eq 0 -and $result.Seconds -gt 3) {
             Write-Host "  (rebuild: $($result.Seconds)s -- file change triggered recompile)" -ForegroundColor DarkGray
+        } elseif ($result.Exit -eq 0) {
+            # Warm cache hit — confirm the lane is fast.
+            Write-Host "  (warm cache)" -ForegroundColor DarkGray
         }
 
         if ($Clear) { Clear-Host }

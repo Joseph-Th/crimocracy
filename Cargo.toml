@@ -22,12 +22,22 @@ bincode = "1.3.3"
 # ── Profile tuning for solo local iteration ─────────────────────────────────
 # This is a single large crate; profile choices are measured on this machine.
 #
+# Inner loop (while editing one domain):
+#   cargo check-fast                  0.06s warm -- type-check only, no link
+#   cargo test-focused finance        0.11s warm -- filtered lib tests
+# Outer loop (behavior ready):
+#   .\scripts\verify.cmd -Fast        0.7s  warm -- iteration gate
+#   .\scripts\verify.cmd              2-3s  warm -- full gate (before push)
+#
 # Warm cache, no file changed:        check 0.06s  |  test 0.11s  |  fmt 0.64s
 # After touching one lib file:        check 6s     |  test 12s   |  harness full n=1: 5s
 # Cold build (clean):                 ~60-90s
 #
 # The split profile design is the key win: library iteration and harness
 # execution never invalidate each other's caches.
+#
+# Windows: exclude `target\` from Defender real-time scanning (can save 30-60s
+# on cold builds). See .cargo/config.toml [build] note.
 #
 # Measured alternatives that LOST (kept as warnings for future tuners):
 #   incremental = true (dev)          check 44s, test rebuild up to 187s

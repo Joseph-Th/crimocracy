@@ -80,6 +80,7 @@ replacement for focused behavioral tests.
 | Type-check harness | `cargo check-harness` | ~0.4s | ~3s | example adapter compiles |
 | Lib tests (no soak) | `cargo test-fast` | ~0.11s | ~12s | 324 lib tests, `--skip soak` |
 | One test / module | `cargo test-focused <filter>` | ~0.11s | ~6-12s | owning module's `#[cfg(test)]` |
+| One domain | `cargo test-legal` / `test-finance` / `test-world` … | ~0.11s | ~6-12s | sugar over `test-focused <domain>` |
 | Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, `-Check`) | per-run | per-run | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | ~10-15s | one branch on `[profile.harness]` |
 | Full-mode batch | `cargo harness-full --samples 8` | ~5s | ~15s | all strategies, matched seeds, artifacts |

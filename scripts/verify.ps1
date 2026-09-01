@@ -137,20 +137,49 @@ function Invoke-CargoStage {
 
     if ($exit -ne 0) {
         Write-Host "FAIL $timing" -ForegroundColor Red
-        Write-Host $output -ForegroundColor DarkGray
+        # Trim cargo's build noise on failure — show only errors and the failing command.
+        $trimmed = $output.Trim()
+        if ($trimmed) {
+            # Cap failure output to keep the terminal scannable.
+            $lines = $trimmed -split "`n"
+            if ($lines.Count -gt 80) {
+                $lines = $lines[0..79] + @("  ... ($($lines.Count - 80) more lines truncated; re-run with -Detail for full output)")
+            }
+            Write-Host ($lines -join "`n") -ForegroundColor DarkGray
+        }
         Write-Host "  -> cargo $($cargoArgs -join ' ') exited $exit" -ForegroundColor Red
         # Hint at the cheapest re-check for the failure domain.
         $hint = switch -Wildcard ($Name) {
             "fmt*"              { "fix formatting: cargo fmt" }
             "lib*tests"         { "re-run: cargo test-focused <filter>  or  cargo test --lib -- --nocapture" }
+            "test-focused*"     { "re-run: cargo test-focused <filter> -- --nocapture" }
             "harness unit*"     { "re-run: cargo test --quiet --example gameplay_harness --lib -- --nocapture" }
             "harness smoke"     { "re-run: cargo harness-rush  or  cargo test --example gameplay_harness -- --ignored --nocapture" }
             "harness full*"     { "re-run: cargo harness-full --samples 1" }
             "clippy*"           { "fix lints: cargo clippy --lib --example gameplay_harness -- -D warnings" }
+            "check*"            { "re-run: cargo check-fast  or  cargo check-all" }
             default             { "" }
         }
         if ($hint) { Write-Host "  hint: $hint" -ForegroundColor Yellow }
         exit $exit
+    }
+    # Extract pass count for the success line when available.
+    # Some stages (harness unit tests: `cargo test --example X --lib` runs both
+    # the main lib and the example's lib) report multiple binaries; sum them.
+    $countSuffix = ""
+    $allPassed = [regex]::Matches($output, '(\d+) passed')
+    if ($allPassed.Count -gt 0) {
+        $totalPassed = 0
+        foreach ($m in $allPassed) { $totalPassed += [int]$m.Groups[1].Value }
+        if ($allPassed.Count -gt 1) {
+            $countSuffix = "  $totalPassed passed ($($allPassed.Count) binaries)"
+        } else {
+            $countSuffix = "  $totalPassed passed"
+        }
+        $allFailed = [regex]::Matches($output, '(\d+) failed')
+        $totalFailed = 0
+        foreach ($m in $allFailed) { $totalFailed += [int]$m.Groups[1].Value }
+        if ($totalFailed -gt 0) { $countSuffix += "  $totalFailed FAILED" }
     }
     if ($Detail -or $ShowOutputOnPass) {
         $trimmed = $output.Trim()
@@ -159,7 +188,11 @@ function Invoke-CargoStage {
     $script:GateStagesPassed++
     # Record timing for the summary table.
     $script:GateTimings += [pscustomobject]@{ Stage = $Name; Seconds = $elapsed }
-    Write-Host "ok   $timing" -ForegroundColor Green
+    if ($countSuffix) {
+        Write-Host "ok   $timing$countSuffix" -ForegroundColor Green
+    } else {
+        Write-Host "ok   $timing" -ForegroundColor Green
+    }
 }
 
 function Skip-Stage {
@@ -252,7 +285,12 @@ if ($Fast) {
         Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
     }
     $gate.Stop()
-    Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  $lane" -ForegroundColor Green
+    $totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
+    if ($script:GateTimings.Count -gt 0) {
+        $table = ($script:GateTimings | ForEach-Object { "$($_.Stage): $($_.Seconds)s" }) -join "  |  "
+        Write-Host "  stages: $table" -ForegroundColor DarkGray
+    }
+    Write-Host "FAST PASS ($totalSec`s)  $lane" -ForegroundColor Green
     Write-Host "  next: .\scripts\verify.cmd  (full gate before push)  |  cargo soak  (if you touched invariants/persistence)" -ForegroundColor DarkGray
     exit 0
 }
