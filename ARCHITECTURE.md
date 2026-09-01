@@ -28,7 +28,7 @@ layers below it; nothing depends upward.
                   ├─────────────────────────────────────────────┤
                   │  Layer 1 — Immutable authoring              │
                   │  registry ◄── content::build_registry       │
-                  │  CURRENT_CONTENT_REVISION = 34              │
+                  │  CURRENT_CONTENT_REVISION = 35              │
                   ├─────────────────────────────────────────────┤
                   │  Layer 0 — Foundations                      │
                   │  core::{id,time,entity,attention,           │
@@ -78,13 +78,13 @@ persisted, not reconstructed.
 After that, every minute advances through one contractual pipeline:
 
 ```text
- 1  content::build_registry          validated immutable registry (CURRENT_CONTENT_REVISION = 34)
+ 1  content::build_registry          validated immutable registry (CURRENT_CONTENT_REVISION = 35)
  2  AppState::new(seed)              serializable state, 5 ChaCha8Rng streams, SimTime::ZERO
  3  validate_* / decide_*            domain system validates or derives read-only plan
  4  Validated*::commit / apply_*      owning system commits atomically, preserves indexes
  5  core::simulation::run_tick        one simulated minute, 14 phases in stable order
  6  TickOutcome + reports/projections player-visible consequences, no hidden-state leak
- 7  build_save / restore_save         envelope {format:1, content_revision:34, state:66}
+ 7  build_save / restore_save         envelope {format:1, content_revision:35, state:66}
 ```
 
 Tick cadence is an adapter concern. Calling `run_tick` faster or slower changes
@@ -132,7 +132,7 @@ are validated by `src/core/invariants/`. The top-level tick is
 |---|---|---|---|
 | `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters` 31 kinds), entity refs (`EntityRef` 11 variants), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/invariants/mod.rs` |
 | `registry/` | Immutable authored definitions and validated lookups | Read-only after `content::build_registry` | `src/registry/mod.rs` |
-| `content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` (`CURRENT_CONTENT_REVISION=34`) |
+| `content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` (`CURRENT_CONTENT_REVISION=35`) |
 | `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, designation, daily payroll; read-only territory-influence aggregation | `world_system` (insertion, designation); `payroll_execution` (daily wage pass through canonical ledger, relationship, and report paths); `territory_influence` (read-only district summaries, never an omniscience feed) | `src/world/world_system.rs`, `src/world/payroll_execution.rs` |
 | `social/` | Directional character relationships with source/target indexes | `relationship_system` only; requires active endpoints | `src/social/relationship_system.rs` |
 | `intelligence/` | Provenance-bearing information, holder/topic indexes, lineage | `intelligence_system` (record, transfer) | `src/intelligence/intelligence_system.rs` |

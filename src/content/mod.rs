@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 34;
+pub const CURRENT_CONTENT_REVISION: u32 = 35;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -110,11 +110,12 @@ fn register_laundering(builder: &mut RegistryBuilder) {
             // The front keeps a meaningful cut: laundering is a service the legitimate
             // business charges for, not a free conversion button.
             fee_basis_points: 1_500,
-            // A single transfer may plausibly hide inside 70% of one legitimate cycle's
+            // A single transfer may plausibly hide inside 80% of one legitimate cycle's
             // gross; larger volumes still require larger or additional fronts, but the
-            // PRESS diversification arc completes in ~4 days instead of ~6, keeping the
-            // standing-down wait interactive rather than a calendar grind.
-            plausibility_gross_basis_points: 7_000,
+            // PRESS diversification arc now completes in ~2-3 days instead of ~4, keeping
+            // the standing-down wait interactive rather than a calendar grind. Player
+            // still sees capacity rejections as the visible pacing mechanic.
+            plausibility_gross_basis_points: 8_000,
         })
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
 }
@@ -380,7 +381,7 @@ fn register_businesses(builder: &mut RegistryBuilder) {
                 gross_variance_basis_points: 1_200,
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(60_000),
+                acquisition_cost: Money::from_cents(48_000),
             },
         ),
         (

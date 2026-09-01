@@ -431,6 +431,35 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
             "  - Word on the street moved {standing_reports} time(s) this session (Standing reports)."
         );
     }
+    // Player-visible street standing so a leader can see what the city thinks.
+    // Only touched impressions exist; absent means unremarkable baseline.
+    let registry = scenario.registry;
+    for audience in [
+        crimocracy::reputation::AudienceKind::Underworld,
+        crimocracy::reputation::AudienceKind::Police,
+        crimocracy::reputation::AudienceKind::Businesses,
+    ] {
+        for dimension in [
+            crimocracy::reputation::ReputationDimension::Competence,
+            crimocracy::reputation::ReputationDimension::Fear,
+            crimocracy::reputation::ReputationDimension::Reliability,
+            crimocracy::reputation::ReputationDimension::Treachery,
+        ] {
+            let score = crimocracy::reputation::reputation_system::resolve_score(
+                registry,
+                scenario.state.reputation(),
+                scenario.player,
+                audience,
+                dimension,
+            );
+            let baseline = registry.reputation().baseline();
+            if score != baseline {
+                println!(
+                    "  - Standing {audience:?}/{dimension:?}: {score} (baseline {baseline})"
+                );
+            }
+        }
+    }
 }
 
 pub fn enterprise_label(scenario: &Scenario, enterprise: EnterpriseId) -> String {
@@ -1278,7 +1307,7 @@ pub fn print_experience_readout(
         "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
     );
     println!(
-        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways - surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. The fixture's second rival (D'Amato Crew) is watched to confirm absence but makes no autonomous moves of its own yet."
+        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways - surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. Both home-district rivals (Rosetti and D'Amato) now make autonomous recruitment attempts and can expand venues in the contested district (rival_home_enterprises now averages 2.0)."
     );
     println!(
         "  - The delegation pillar now carries real weight in the narrative arc: PRESS must own its second-district venue before anything can be established there, so the arc runs acquisition -> mandate revision -> enterprise establishment through canonical paths. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."

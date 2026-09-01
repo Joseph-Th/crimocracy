@@ -286,7 +286,7 @@ pub fn build_scenario(
             drives: BTreeMap::new(),
         },
     )?;
-    insert_character(
+    let victor_damato = insert_character(
         &mut state,
         CharacterDraft {
             name: "Victor D'Amato".to_owned(),
@@ -409,6 +409,26 @@ pub fn build_scenario(
         },
     )?
     .commit(&mut state)?;
+    // Second rival: Victor D'Amato governs the same home district with delegated
+    // expansion authority so rival_home_enterprises reflects a contested underworld
+    // rather than a single actor. Both rivals can now recruit and expand.
+    validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization: second_rival,
+            manager: victor_damato,
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+                ResponsibilityScope::Neighborhood(neighborhood),
+            ]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )?
+    .commit(&mut state)?;
 
     // The primary target's owner: a shopkeeper who lives over the store. A witnessed or
     // identifying exposure on a character-owned business names him as the case's witness
@@ -488,8 +508,7 @@ pub fn build_scenario(
     )?;
 
     // Rival-held venue in the home district: the Rosetti organization's delegated expansion
-    // pass can host venue rackets here once its daily cadence comes due. The D'Amato Crew has
-    // no governed territory, so it stays inert by contrast.
+    // pass can host venue rackets here once its daily cadence comes due.
     let rival_venue = insert_business(
         registry,
         &mut state,
@@ -503,6 +522,23 @@ pub fn build_scenario(
             ]),
             neighborhood,
             owner: BusinessOwner::Organization(rival),
+        },
+    )?;
+    // Second rival's home-district venue: Victor D'Amato's organization now has a
+    // competing claim in the same district so both rivals can expand and poach.
+    let _damato_venue = insert_business(
+        registry,
+        &mut state,
+        BusinessDraft {
+            name: "North Wharf Tavern".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(second_rival),
         },
     )?;
 
@@ -674,6 +710,41 @@ pub fn build_scenario(
                 },
                 LedgerPosting {
                     account: rival_cash,
+                    amount: Money::from_cents(60_000),
+                },
+            ],
+            authorization: None,
+        },
+    )?
+    .commit(&mut state)?;
+    // Second rival treasury: D'Amato Crew mirrors Rosetti so both home-district
+    // rivals can expand and recruit without fabricated starvation.
+    let damato_cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(second_rival),
+            kind: AccountKind::StreetCash,
+        },
+    )?;
+    let damato_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(second_rival),
+            kind: AccountKind::Settlement,
+        },
+    )?;
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Seed D'Amato treasury".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: damato_settlement,
+                    amount: Money::from_cents(-60_000),
+                },
+                LedgerPosting {
+                    account: damato_cash,
                     amount: Money::from_cents(60_000),
                 },
             ],
