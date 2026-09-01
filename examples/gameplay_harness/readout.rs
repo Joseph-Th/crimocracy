@@ -911,6 +911,24 @@ pub fn print_experience_readout(
     let consequential = press.investigation_created && recon.property_realized_cash_cents.is_some();
     let survivable = press.cold_case_confirmed == Some(true);
     let social = rush.player_personnel_departures > 0 && rush.replacement_recruited;
+    // Direct verdict for the player's six questions: concise, actionable, not hidden in 20 checkpoints.
+    println!("\n[VERDICT] Player fantasy: {}", if info_leverage && delegated && consequential { "CAPTURED — every branch shows information changing outcomes, delegated managers settling cycles, and consequences persisting as cases, heat, and lost/gained personnel." } else { "PARTIAL — some fantasy beats did not fire this seed; see checkpoints below." });
+    println!("[VERDICT] Game loop: {}", if survivable && social { "COHERENT — Observe→Interpret→Decide→Delegate→Resolve→Consequence cycles compose across two campaign days, with the second act proving that waiting is also a decision." } else { "NEEDS ATTENTION — survival or personnel consequence did not resolve this seed." });
+    let working = [
+        ("surveillance→plan leverage", info_leverage),
+        ("enterprise heat tax", rush.matched_enterprise_net_cents.is_some() && press.matched_enterprise_net_cents.is_some()),
+        ("laundering→acquisition", press.front_acquired || recon.laundered_gross_cents > 0),
+        ("witness chain", press.case_witness_registered),
+    ];
+    let struggling = working.iter().filter(|(_, ok)| !ok).map(|(name, _)| *name).collect::<Vec<_>>();
+    if struggling.is_empty() {
+        println!("[VERDICT] Systems working well: {}", working.iter().map(|(n,_)| *n).collect::<Vec<_>>().join(", "));
+    } else {
+        println!("[VERDICT] Systems struggling this seed: {}", struggling.join(", "));
+    }
+    println!("[VERDICT] Emergent interaction: {}", if press.investigation_created && press.witness_pressure_attempted { "YES — police arrival → witnessed exposure → named shopkeeper witness → institutional interview → player-ordered pressure → degraded cooperation or disciplined abort, all without a scripted betrayal quest." } else { "LIMITED this seed — witness counterplay did not trigger." });
+    println!("[VERDICT] Harness fidelity: {}", if info_leverage { "HIGH — narrative shows player-visible reports, decisions, and derived knowledge; [DEV AUDIT]/[HIDDEN TRUTH] lines are marked audit-only and never feed decisions." } else { "MEDIUM — information leverage failed; check patrol parsing or intelligence coverage." });
+    println!("[VERDICT] Dynamic experience: {}", if recon.second_burglary.is_some() && press.second_opportunity_expired { "YES — same city diverges by player choice: RECON re-invests and scores twice, PRESS stands down and pays opportunity cost, RUSH teaches failure→debrief→rebuild." } else { "PARTIAL — second-act divergence incomplete this seed." });
     println!(
         "Fantasy scorecard: Information {} | Delegation {} | Consequence {} | Survival {} | People {}",
         if info_leverage { "PASS" } else { "fail" },

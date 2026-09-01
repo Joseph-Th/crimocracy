@@ -584,16 +584,11 @@ pub fn build_scenario(
     )?
     .commit(&mut state)?;
 
-    let cash_kind = if seed.is_multiple_of(2) {
-        AccountKind::StreetCash
-    } else {
-        AccountKind::ConcealedCash
-    };
     let enterprise_cash = insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
-            kind: cash_kind,
+            kind: AccountKind::StreetCash,
         },
     )?;
     let enterprise_settlement = insert_account(

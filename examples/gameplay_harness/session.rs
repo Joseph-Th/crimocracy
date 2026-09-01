@@ -419,9 +419,14 @@ pub fn play_session_with_fixture_view(
                 scenario.timeline.initial_opportunity_valid_until,
             )?;
             if narrative {
+                let windows = crate::observe::parse_patrol_windows(patrol_summary);
                 println!(
-                    "[INTERPRET] Parsed the reported recurring patrol windows and chose minute {} so the authored burglary window stays outside them with a one-hour uncertainty buffer.",
-                    chosen.as_minutes()
+                    "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose minute {} ({}), window stays outside heavy presence.",
+                    patrol_summary,
+                    windows,
+                    duration.as_minutes(),
+                    chosen.as_minutes(),
+                    crate::readout::format_minute_of_day(chosen.as_minutes())
                 );
             }
             chosen
@@ -1438,8 +1443,13 @@ pub fn run_second_act(
                 scenario.timeline.second_opportunity_valid_until,
             )?;
             if narrative {
+                let windows = crate::observe::parse_patrol_windows(patrol_summary);
                 println!(
-                    "[INTERPRET] Parsed the reported recurring patrol windows and chose {} so the second-score burglary stays outside them with a one-hour uncertainty buffer.",
+                    "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
+                    patrol_summary,
+                    windows,
+                    duration.as_minutes(),
+                    scheduled_for.as_minutes(),
                     format_minute_of_day(scheduled_for.as_minutes())
                 );
             }
