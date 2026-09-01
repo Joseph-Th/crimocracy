@@ -87,6 +87,11 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
                 }
             }
         }
+        if economy.laundered_this_cycle().cents() < 0 {
+            return Err(StateValidationError::InvalidBusinessEconomy {
+                business: economy.business(),
+            });
+        }
     }
 
     let mut used_transactions: BTreeSet<LedgerTransactionId> = state
@@ -443,6 +448,39 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
             (true, Some(_)) | (false, None) => {
                 return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
             }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_business_economies_against_registry(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for economy in state.economy.business_economies() {
+        let laundered = economy.laundered_this_cycle();
+        if laundered == crate::finance::Money::ZERO {
+            continue;
+        }
+        let gross = crate::economy::business_economy_system::resolve_business_current_gross(
+            registry,
+            state,
+            economy.business(),
+        )
+        .map_err(|_| StateValidationError::InvalidBusinessEconomy {
+            business: economy.business(),
+        })?;
+        let capacity = crate::finance::helpers::resolve_basis_point_share(
+            gross,
+            registry.laundering().plausibility_gross_basis_points(),
+        )
+        .ok_or(StateValidationError::InvalidBusinessEconomy {
+            business: economy.business(),
+        })?;
+        if laundered > capacity {
+            return Err(StateValidationError::InvalidBusinessEconomy {
+                business: economy.business(),
+            });
         }
     }
     Ok(())

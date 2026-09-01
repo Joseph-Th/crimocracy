@@ -696,24 +696,7 @@ fn validate_enterprise_accounts_with_planned_settlement(
     openings: &ValidatedFinancialAccountOpenings,
 ) -> Result<(), EnterpriseError> {
     openings.ensure_current(state)?;
-    let cash = state
-        .finance
-        .get_account(cash_account)
-        .ok_or(EnterpriseError::MissingAccount(cash_account))?;
-    if cash.owner() != FinancialOwner::Organization(organization) {
-        return Err(EnterpriseError::AccountOwnerMismatch {
-            account: cash_account,
-            organization,
-        });
-    }
-    match cash.kind() {
-        AccountKind::StreetCash | AccountKind::ConcealedCash => {}
-        AccountKind::AccountedFunds
-        | AccountKind::LegitimateOperating
-        | AccountKind::Settlement => {
-            return Err(EnterpriseError::InvalidCashAccountKind(cash_account));
-        }
-    }
+    validate_cash_account_kind(state, organization, cash_account)?;
     if !openings.account_matches(
         settlement_account,
         FinancialOwner::Organization(organization),
@@ -731,6 +714,29 @@ fn validate_enterprise_accounts_with_planned_settlement(
         "a future account id cannot already back an enterprise"
     );
     Ok(())
+}
+
+fn validate_cash_account_kind(
+    state: &AppState,
+    organization: OrganizationId,
+    cash_account: FinancialAccountId,
+) -> Result<(), EnterpriseError> {
+    let cash = state
+        .finance
+        .get_account(cash_account)
+        .ok_or(EnterpriseError::MissingAccount(cash_account))?;
+    if cash.owner() != FinancialOwner::Organization(organization) {
+        return Err(EnterpriseError::AccountOwnerMismatch {
+            account: cash_account,
+            organization,
+        });
+    }
+    match cash.kind() {
+        AccountKind::StreetCash | AccountKind::ConcealedCash => Ok(()),
+        AccountKind::AccountedFunds
+        | AccountKind::LegitimateOperating
+        | AccountKind::Settlement => Err(EnterpriseError::InvalidCashAccountKind(cash_account)),
+    }
 }
 
 impl ValidatedEnterpriseCycle {
@@ -1463,29 +1469,16 @@ fn validate_enterprise_accounts(
     settlement_account: FinancialAccountId,
     current_enterprise: Option<EnterpriseId>,
 ) -> Result<(), EnterpriseError> {
-    let cash = state
-        .finance
-        .get_account(cash_account)
-        .ok_or(EnterpriseError::MissingAccount(cash_account))?;
+    validate_cash_account_kind(state, organization, cash_account)?;
     let settlement = state
         .finance
         .get_account(settlement_account)
         .ok_or(EnterpriseError::MissingAccount(settlement_account))?;
-    for account in [cash, settlement] {
-        if account.owner() != FinancialOwner::Organization(organization) {
-            return Err(EnterpriseError::AccountOwnerMismatch {
-                account: account.id(),
-                organization,
-            });
-        }
-    }
-    match cash.kind() {
-        AccountKind::StreetCash | AccountKind::ConcealedCash => {}
-        AccountKind::AccountedFunds
-        | AccountKind::LegitimateOperating
-        | AccountKind::Settlement => {
-            return Err(EnterpriseError::InvalidCashAccountKind(cash_account));
-        }
+    if settlement.owner() != FinancialOwner::Organization(organization) {
+        return Err(EnterpriseError::AccountOwnerMismatch {
+            account: settlement_account,
+            organization,
+        });
     }
     match settlement.kind() {
         AccountKind::Settlement => {}

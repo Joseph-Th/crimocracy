@@ -309,7 +309,7 @@ fn plan_wage_accounts(
             Some(existing) => {
                 resolved[index] = Some(existing);
             }
-            _ => {
+            None => {
                 missing_positions.push(index);
                 missing.push(FinancialAccountDraft {
                     owner,

@@ -569,6 +569,9 @@ pub fn validate_state_against_registry(
     validate_opportunities_against_registry(registry, state)?;
     validate_investigation_work_against_registry(registry, state)?;
     validate_business_cycles_against_registry(registry, state)?;
+    crate::core::invariants::business::validate_business_economies_against_registry(
+        registry, state,
+    )?;
     validate_enterprises_against_registry(registry, state)?;
     validate_recruitment_against_registry(registry, state)?;
     Ok(())
