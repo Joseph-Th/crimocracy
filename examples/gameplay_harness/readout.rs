@@ -454,9 +454,7 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
             );
             let baseline = registry.reputation().baseline();
             if score != baseline {
-                println!(
-                    "  - Standing {audience:?}/{dimension:?}: {score} (baseline {baseline})"
-                );
+                println!("  - Standing {audience:?}/{dimension:?}: {score} (baseline {baseline})");
             }
         }
     }

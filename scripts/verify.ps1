@@ -1,50 +1,45 @@
-# verify.ps1 -- local Crimocracy completion gate for a solo developer.
+# verify.ps1 -- local verification gate for a solo developer.
 #
-# Optimized for fast incremental iteration: cached warm runs are ~0.7-1.5s for the
-# fast lane and ~5-10s for the full gate, because all stages reuse artifacts and
-# avoid redundant rebuilds. A small library edit costs ~7-16s to re-check and
-# ~23-31s to rebuild+link tests (see Cargo.toml profile notes for measured tuning).
-# Cold builds are dominated by rustc.
+# Design: cheapest proof first, warm caches reused, fail-fast.
 #
-# Incremental is measurably slower for the dev-profile everyday loop, but
-# measurably faster for the single-binary harness profile ([profile.harness]
-# sets incremental = true). The pin is therefore scoped per stage below:
-# dev-profile stages force CARGO_INCREMENTAL=0 so an inherited variable cannot
-# re-enable dev incremental; harness-profile stages clear it so the profile's
-# own setting governs.
+# Warm cache (no file changed):          fmt 0.6s  check 0.06s  test 0.11s  full gate 2-3s
+# After touching one lib file:           check 6s   test 12s    full gate 15-20s
+# Cold (cargo clean):                    ~60-90s (dominated by rustc)
+#
+# Incremental is slower for [profile.dev] but faster for the single-binary
+# [profile.harness]; the pin is scoped per stage: dev stages force
+# CARGO_INCREMENTAL=0, harness stages clear it so the profile governs.
+# See Cargo.toml for measured profile tuning and alternatives that lost.
 #
 # Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
-#   2. cargo test --locked --lib --tests --quiet   (lib + integration, excludes examples)
-#   3. cargo test --locked --quiet --example gameplay_harness --lib   (harness unit tests)
-#   4. cargo test --locked --quiet --example gameplay_harness tests::smoke_mode_covers_canonical_paths -- --ignored --exact --nocapture
-#   5. gameplay-harness full mode on [profile.harness] (--samples 1): exercises every
-#      narrative/probe contract that smoke mode does not cover, in seconds
+#   2. cargo test --locked --lib --tests --quiet         (lib + integration)
+#   3. cargo test --locked --quiet --example gameplay_harness --lib
+#   4. harness smoke contract (exact ignored test, fail-closed)
+#   5. harness full --samples 1 on [profile.harness]      (narratives + probes)
 #   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
-# driver hash. Clippy is last: you get test signal even if lint fails. The smoke
-# contract is selected fail-closed (exact count must be 1). See
-# `Get-SmokeContractSelectableCount` and `Invoke-SmokeContractSelectionSelfTest`.
+# driver hash. Clippy is last: you get test signal even if lint fails.
 #
-# Fast lanes for iteration:
-#   .\scripts\verify.cmd -Fast              # fmt + lib tests (skip soak) ~1s warm
-#   .\scripts\verify.cmd -Fast -Harness     # fmt + smoke contract only
-#   cargo check-fast / test-fast / harness  # even more targeted, via .cargo aliases
+# Lanes:
+#   .\scripts\verify.cmd                  full gate (before push)
+#   .\scripts\verify.cmd -Fast            fmt + lib tests --skip soak  (~0.7s warm)
+#   .\scripts\verify.cmd -Fast -Harness   fmt + smoke contract only    (~0.7s warm)
+#   .\scripts\verify.cmd -Check           type-check only, no tests     (~0.06s warm)
+#   .\scripts\verify.cmd -Fast -Filter X  fmt + matching lib tests      (~0.5s warm)
+#   cargo check-fast / test-fast / harness  even more targeted, via .cargo aliases
 #
-# Additional options for targeted debugging:
-#   -Filter <pattern>   Run only matching lib tests (implies -Fast)
-#   -NoClippy / -NoFmt  Skip stages when you know they already pass
-#   -Jobs N             Cap cargo parallelism (e.g. -Jobs 2 on a hot laptop)
-#   -Verbose / -Detail  Show cargo output even for passing quiet stages
-#
-# Exit code is non-zero on the first failing stage so hooks can gate commits.
+# Flags: -Jobs N  cap cargo parallelism  |  -NoClippy -NoFmt  skip known-passing
+#        -Verbose (-Detail)  show cargo output on success
+# Exit code is non-zero on first failing stage.
 
 [CmdletBinding()]
 param(
     [int]$Jobs = 0,
     [switch]$Fast,
     [switch]$Harness,
+    [switch]$Check,
     [switch]$SelfTest,
     [string]$Filter = "",
     [switch]$NoClippy,
@@ -52,13 +47,8 @@ param(
     [switch]$Detail
 )
 
-# Support -Verbose (common parameter) as alias for -Detail without collision.
-if (-not $Detail -and $PSBoundParameters.ContainsKey('Verbose')) {
-    $Detail = $true
-}
-if ($VerbosePreference -eq 'Continue' -and -not $Detail) {
-    $Detail = $true
-}
+if (-not $Detail -and $PSBoundParameters.ContainsKey('Verbose')) { $Detail = $true }
+if ($VerbosePreference -eq 'Continue' -and -not $Detail) { $Detail = $true }
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -119,8 +109,6 @@ function Invoke-CargoStage {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [bool]$AllowJobs = $true,
-        # Harness-profile stages run under [profile.harness] (incremental there
-        # is a measured win), so the dev pin must be cleared for them.
         [switch]$HarnessProfile,
         [switch]$ShowOutputOnPass
     )
@@ -151,6 +139,17 @@ function Invoke-CargoStage {
         Write-Host "FAIL $timing" -ForegroundColor Red
         Write-Host $output -ForegroundColor DarkGray
         Write-Host "  -> cargo $($cargoArgs -join ' ') exited $exit" -ForegroundColor Red
+        # Hint at the cheapest re-check for the failure domain.
+        $hint = switch -Wildcard ($Name) {
+            "fmt*"              { "fix formatting: cargo fmt" }
+            "lib*tests"         { "re-run: cargo test-focused <filter>  or  cargo test --lib -- --nocapture" }
+            "harness unit*"     { "re-run: cargo test --quiet --example gameplay_harness --lib -- --nocapture" }
+            "harness smoke"     { "re-run: cargo harness-rush  or  cargo test --example gameplay_harness -- --ignored --nocapture" }
+            "harness full*"     { "re-run: cargo harness-full --samples 1" }
+            "clippy*"           { "fix lints: cargo clippy --lib --example gameplay_harness -- -D warnings" }
+            default             { "" }
+        }
+        if ($hint) { Write-Host "  hint: $hint" -ForegroundColor Yellow }
         exit $exit
     }
     if ($Detail -or $ShowOutputOnPass) {
@@ -158,6 +157,8 @@ function Invoke-CargoStage {
         if ($trimmed) { Write-Host $trimmed -ForegroundColor DarkGray }
     }
     $script:GateStagesPassed++
+    # Record timing for the summary table.
+    $script:GateTimings += [pscustomobject]@{ Stage = $Name; Seconds = $elapsed }
     Write-Host "ok   $timing" -ForegroundColor Green
 }
 
@@ -168,23 +169,16 @@ function Skip-Stage {
     $script:GateStagesSkipped++
 }
 
-# ── header ───────────────────────────────────────────────────────────────────
+# ── incremental pin scoping ──────────────────────────────────────────────────
 
-# Dev-profile stages must never let an inherited CARGO_INCREMENTAL=1 re-enable
-# dev incremental; harness-profile stages need the variable unset so the
-# [profile.harness] incremental setting applies.
-function Set-DevIncrementalPin {
-    $env:CARGO_INCREMENTAL = "0"
-}
+function Set-DevIncrementalPin { $env:CARGO_INCREMENTAL = "0" }
+function Clear-DevIncrementalPin { Remove-Item Env:\CARGO_INCREMENTAL -ErrorAction SilentlyContinue }
 
-function Clear-DevIncrementalPin {
-    Remove-Item Env:\CARGO_INCREMENTAL -ErrorAction SilentlyContinue
-}
+# ── bookkeeping ──────────────────────────────────────────────────────────────
 
-# Gate bookkeeping: Invoke-CargoStage counts every passing stage; explicit SKIP
-# branches increment the skipped count so the summary stays honest.
 $script:GateStagesPassed = 0
 $script:GateStagesSkipped = 0
+$script:GateTimings = @()
 
 $gitBranch = ""
 try { $gitBranch = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim() } catch {}
@@ -193,11 +187,14 @@ try { $gitShort = (& git rev-parse --short HEAD 2>$null).Trim() } catch {}
 
 Write-Host ""
 Write-Host "CRIMOCRACY LOCAL VERIFICATION" -ForegroundColor Cyan
-if ($gitBranch) { Write-Host "  branch $gitBranch @ $gitShort  " -NoNewline -ForegroundColor DarkGray; Write-Host "|  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray }
+if ($gitBranch) {
+    Write-Host "  branch $gitBranch @ $gitShort  " -NoNewline -ForegroundColor DarkGray
+    Write-Host "|  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+}
 
 if ($SelfTest) {
-    if ($Fast -or $Harness -or $Filter) {
-        Write-Host "[FAIL] -SelfTest cannot be combined with -Fast, -Harness, or -Filter" -ForegroundColor Red
+    if ($Fast -or $Harness -or $Filter -or $Check) {
+        Write-Host "[FAIL] -SelfTest cannot be combined with -Fast, -Harness, -Check, or -Filter" -ForegroundColor Red
         exit 1
     }
     Invoke-SmokeContractSelectionSelfTest
@@ -209,10 +206,26 @@ if ($Harness -and -not $Fast) {
     Write-Host "[FAIL] -Harness requires -Fast" -ForegroundColor Red
     exit 1
 }
-
+if ($Check -and ($Fast -or $Harness -or $Filter)) {
+    Write-Host "[FAIL] -Check cannot be combined with -Fast, -Harness, or -Filter" -ForegroundColor Red
+    exit 1
+}
 if ($Filter -and -not $Fast) {
     Write-Host "  note: -Filter implies -Fast (focused lib tests)" -ForegroundColor Yellow
     $Fast = $true
+}
+
+# ── type-check lane (fastest: no linking) ──────────────────────────────────
+
+if ($Check) {
+    $gate = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host "CHECK LANE: type-check (lib + harness)" -ForegroundColor Yellow
+    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+    Invoke-CargoStage "check (lib + harness)" @("check", "--locked", "--lib", "--example", "gameplay_harness")
+    $gate.Stop()
+    Write-Host "CHECK PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  type-check only" -ForegroundColor Green
+    Write-Host "  next: .\scripts\verify.cmd -Fast  (tests)  |  cargo check-fast  (lib only, even faster)" -ForegroundColor DarkGray
+    exit 0
 }
 
 # ── fast lanes ───────────────────────────────────────────────────────────────
@@ -248,7 +261,7 @@ if ($Fast) {
 
 $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
-Write-Host "FULL GATE  (fmt -> tests -> harness units -> harness smoke -> harness full -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+Write-Host "FULL GATE  (fmt -> lib+integration -> harness units -> smoke -> full n=1 -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
 if ($NoFmt) {
     Skip-Stage -Name "fmt --check" -Reason "--NoFmt"
@@ -258,18 +271,17 @@ if ($NoFmt) {
 
 Invoke-CargoStage "lib+integration tests" @("test", "--locked", "--lib", "--tests", "--quiet")
 
-# The harness example carries its own unit tests for options parsing and the financial
-# branch contracts; --lib --tests never compiles example test targets, so run them here.
+# Harness unit tests (options parsing, financial contracts) live in the example
+# target; --lib --tests never compiles example test targets, so run them here.
 Invoke-CargoStage "harness unit tests" @("test", "--locked", "--quiet", "--example", "gameplay_harness", "--lib")
 
 Assert-SmokeContractSelectable
 Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
 
-# Full mode exercises every narrative, probe, and cross-branch contract that smoke mode
-# skips; a single-sample run costs seconds and has caught contract drift the gate
-# previously could not see. It runs on [profile.harness] (dev semantics, opt-level 1,
-# incremental = true): warm full-mode runtime ~1-2s, and after a library edit the
-# profile's incremental cache cuts the rebuild from ~75s to ~10-20s.
+# Full mode exercises every narrative, probe, and cross-branch contract that
+# smoke skips; a single sample costs ~5s and has caught drift that smoke did
+# not. Runs on [profile.harness] (opt-level 1, incremental = true): after a
+# lib edit the incremental cache cuts the rebuild from ~75s to ~10-20s.
 Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1") -HarnessProfile
 
 if ($NoClippy) {
@@ -279,7 +291,13 @@ if ($NoClippy) {
 }
 
 $gate.Stop()
+$totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
 Write-Host ""
+# Compact per-stage timing table so a slow gate shows where time went.
+if ($script:GateTimings.Count -gt 0) {
+    $table = ($script:GateTimings | ForEach-Object { "$($_.Stage): $($_.Seconds)s" }) -join "  |  "
+    Write-Host "  stages: $table" -ForegroundColor DarkGray
+}
 $skippedNote = if ($script:GateStagesSkipped -gt 0) { ", $($script:GateStagesSkipped) skipped by flag" } else { "" }
-Write-Host "GATE PASS  $($script:GateStagesPassed) stages$skippedNote in $([math]::Round($gate.Elapsed.TotalSeconds,1))s" -ForegroundColor Green
-Write-Host "  tip: use -Fast for iteration, -Filter <name> for one test, -Jobs N on a hot machine" -ForegroundColor DarkGray
+Write-Host "GATE PASS  $($script:GateStagesPassed) stages$skippedNote in ${totalSec}s" -ForegroundColor Green
+Write-Host "  tip: -Fast for iteration  |  -Check for type-check only  |  -Filter <name> for one test  |  -Jobs N on a hot machine" -ForegroundColor DarkGray

@@ -9,35 +9,39 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 ```
 Which change did you make?
   │
+  ├─ Syntax / type error?
+  │   Fastest: cargo check-fast              (~0.06s warm / 6s after edit)
+  │            .\scripts\verify.cmd -Check   (~0.7s warm, includes fmt)
+  │
   ├─ One library behavior (single module, single system)
-  │   Focused: cargo test-focused <filter>         (~0.5s)
-  │   Complete: .\scripts\verify.cmd -Fast         (~1s)  — or go directly there
+  │   Focused: cargo test-focused <filter>         (~0.11s warm / 6-12s after edit)
+  │   Complete: .\scripts\verify.cmd -Fast         (~0.7s warm)
   │
   ├─ Library implementation (no harness surface touched)
   │   Focused: cargo check-fast  or  cargo test-focused <filter>
   │   Complete: .\scripts\verify.cmd -Fast
   │
   ├─ Harness surface (examples/gameplay_harness/*.rs)
-  │   Focused: cargo harness -- --mode smoke --strategy rush  (~0.15s)
-  │            or  cargo harness-press
-  │   Complete: .\scripts\verify.cmd -Fast -Harness          (~1-2s)
+  │   Focused: cargo harness-rush  (~0.15s warm, incremental cache)
+  │   Complete: .\scripts\verify.cmd -Fast -Harness
   │
   └─ Persistence, invariants, cross-domain, or verification infra
       Focused: owning module's focused test or load/continuation diagnosis
-      Complete: .\scripts\verify.cmd               (~5-10s, broad gate)
+      Complete: .\scripts\verify.cmd               (~2-3s warm / 15-20s after edit)
 ```
 
 | Change | Focused feedback | Completion lane |
 |---|---|---|
+| Syntax / types | `cargo check-fast` | `.\scripts\verify.cmd -Check` |
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
-| Harness filter | `cargo harness -- --mode smoke --strategy rush` or `cargo harness-press` | `.\scripts\verify.cmd -Fast -Harness` |
-| Persistence, invariants, or cross-domain behavior | Focused owner test or load/continuation diagnosis | `.\scripts\verify.cmd` (broad gate) |
+| Harness filter | `cargo harness-rush` | `.\scripts\verify.cmd -Fast -Harness` |
+| Persistence, invariants, or cross-domain | Focused owner test | `.\scripts\verify.cmd` (broad gate) |
 
 The columns are not a required sequence. Use focused feedback while iterating or
 isolating a failure; go directly to the completion lane once it compiles and
 exercises the same owner coverage. Never rerun the broad gate after a passing
-fast lane “for reassurance”.
+fast lane "for reassurance".
 
 ## Test rules
 
@@ -69,25 +73,36 @@ replacement for focused behavioral tests.
 
 ### Fast lanes — inner loop
 
-| Need | Command | Warm | What it proves |
-|---|---|---|---|
-| Type-check library | `cargo check-fast` | ~0.4s | `src/` compiles |
-| Type-check harness | `cargo check-harness` | ~1s | example adapter compiles |
-| Lib tests (no soak) | `cargo test-fast` | ~0.7s | all lib, `--skip soak` |
-| One test / module | `cargo test-focused <filter>` | ~0.5s | owning `src/` module's `#[cfg(test)]` |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter <pattern>`, `-Harness`, `-Check`) | per-run cost of the chosen lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
-| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one branch (`Rush/Press/Recon`) on `[profile.harness]` |
-| Full-mode comparison batch | `cargo harness-full --samples 8` | ~5s | all strategies, matched seeds, artifacts |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7-1.5s | iteration gate |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s | smoke contract only |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pattern>` | ~0.5-1s | focused + fmt |
+| Need | Command | Warm (no change) | After touching one file | What it proves |
+|---|---|---|---|---|
+| Type-check lib | `cargo check-fast` | ~0.06s | ~6s | `src/` compiles |
+| Type-check all | `cargo check-all` | ~0.45s | ~6s | lib + harness compile |
+| Type-check harness | `cargo check-harness` | ~0.4s | ~3s | example adapter compiles |
+| Lib tests (no soak) | `cargo test-fast` | ~0.11s | ~12s | 324 lib tests, `--skip soak` |
+| One test / module | `cargo test-focused <filter>` | ~0.11s | ~6-12s | owning module's `#[cfg(test)]` |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, `-Check`) | per-run | per-run | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
+| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | ~10-15s | one branch on `[profile.harness]` |
+| Full-mode batch | `cargo harness-full --samples 8` | ~5s | ~15s | all strategies, matched seeds, artifacts |
+| Check lane | `.\scripts\verify.cmd -Check` | ~0.7s | ~7s | fmt + type-check |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | ~13s | iteration gate |
+| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~0.7s | ~10s | smoke contract only |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | ~0.5s | ~6-12s | focused + fmt |
+| Soak only | `cargo soak` | ~1s | ~13s | mixed-state invariant stress |
 
-`cargo check-fast` and `cargo test-focused` are the inner loop; `.\scripts\verify.cmd -Fast` is the next lane and still avoids soak, clippy, and harness compilation on a warm build.
+`cargo check-fast` is the absolute fastest; `cargo test-focused` is the inner loop
+for behavior; `.\scripts\verify.cmd -Fast` is the iteration gate. The full gate
+is reserved for persistence/invariant/cross-domain work.
+
+**Why some lanes are slower after edits:** after touching one lib file, `cargo check`
+recompiles that file's crate (~6s). Tests additionally link the test binary
+(~12s). These are rustc costs, not script overhead. Warm runs with no changes
+are near-instant because cargo's cache is reused. See `Cargo.toml` for the
+profile tuning and measured alternatives that lost.
 
 **Harness rebuild cost model (measured, see `Cargo.toml`):**
 
 - All `harness*` aliases run on `[profile.harness]` (`target\harness\`): dev semantics at `opt-level 1`, never disturbing library caches in `target\debug\`.
-- Example-only edits recompile in ~2-3s. A library edit pays one optimized lib rebuild: ~75s cold or after a profile/cache change, ~10-20s warm.
+- Example-only edits recompile in ~2-3s. A library edit pays one optimized lib rebuild: ~10-20s warm (incremental cache) vs ~75s cold.
 - Dependencies compile at `opt-level 3` in every dev-derived profile and rebuild only on lockfile changes.
 - The scripts pin `CARGO_INCREMENTAL=0` per stage, so an inherited value cannot override the profiles. Dev stages force `0`; harness stages clear it so `[profile.harness] incremental=true` governs.
 
@@ -96,6 +111,8 @@ replacement for focused behavioral tests.
 ```text
 .\scripts\verify.cmd
 .\scripts\verify.cmd -Jobs 2
+.\scripts\verify.cmd -Check          # type-check only, fastest gate
+.\scripts\verify.cmd -Fast -Filter payroll   # one module
 ```
 
 Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
@@ -116,7 +133,7 @@ Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 - Run `cargo soak` or `cargo harness-full --samples 8` only when the changed contract requires that evidence.
 - When optimized compilation could change behavior, also run `cargo test-release`.
 
-Gate flags: `-Jobs N` caps parallelism; `-NoClippy` / `-NoFmt` skip known-passing stages; `-Verbose` (`-Detail`) shows cargo output on success. Profiles are tuned by measurement for this machine and crate; the alternatives are noted in [`Cargo.toml`](Cargo.toml). If rebuilds feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
+Gate flags: `-Check` (type-check only) | `-Fast` (skip soak/harness-full/clippy) | `-Harness` (smoke only, requires `-Fast`) | `-Filter <pat>` (one module, implies `-Fast`) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show cargo output on success). Profiles are tuned by measurement for this machine and crate; alternatives are noted in [`Cargo.toml`](Cargo.toml). If rebuilds feel pathological on Windows, exclude the repository `target\` directory from Defender real-time scanning.
 
 ## Gameplay-harness evidence — bounded evaluation surface
 
@@ -124,7 +141,7 @@ Gate flags: `-Jobs N` caps parallelism; `-NoClippy` / `-NoFmt` skip known-passin
 
 ### Modes
 
-| Mode | Command | Evidence | Cost |
+| Mode | Command | Evidence | Cost (warm) |
 |---|---|---|---|
 | `smoke` (default) | `cargo harness` | Canonical strategies + legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence | ~0.5s |
 | focused smoke | `cargo harness-rush` / `-press` / `-recon` | One strategy branch only | ~0.15s |

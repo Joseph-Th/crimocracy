@@ -15,11 +15,12 @@ Harness   (smoke/full, player-visible only)        ─┘
 ```
 
 ```powershell
-cargo check-fast          # 0.4s  — does it compile?
-cargo test-focused social # 0.5s  — did one behavior change?
-.\scripts\verify.cmd -Fast # 1s   — iteration gate (fmt + lib --skip soak)
-.\scripts\verify.cmd       # 5-10s — broad gate (only for persistence/invariant/cross-domain)
-cargo harness-rush         # 0.15s — does one strategy still narrate correctly?
+cargo check-fast          # 0.06s warm — does it compile? (6s after touching a file)
+cargo test-focused social # 0.11s warm — did one behavior change?
+.\scripts\verify.cmd -Check # 0.7s warm — type-check + fmt (fastest gate)
+.\scripts\verify.cmd -Fast  # 0.7s warm — iteration gate (fmt + lib --skip soak)
+.\scripts\verify.cmd        # 2-3s warm — broad gate (only for persistence/invariant/cross-domain)
+cargo harness-rush         # 0.15s warm — does one strategy still narrate correctly?
 cargo harness-full --samples 8  # 5s — full calibration + artifacts in target/harness-runs/
 ```
 
@@ -67,22 +68,24 @@ Fast iteration uses the cheapest lane that proves the change. Routine completion
 
 ```
 Did you touch persistence, invariants, cross-domain, or verify infra?
-  YES → .\scripts\verify.cmd                (broad gate, 5-10s)
+  YES → .\scripts\verify.cmd                (broad gate, 2-3s warm)
   NO  → Did you touch harness?
-          YES → .\scripts\verify.cmd -Fast -Harness  (1-2s)
-          NO  → cargo test-focused <filter>  (0.5s)  or  .\scripts\verify.cmd -Fast  (1s)
+          YES → .\scripts\verify.cmd -Fast -Harness  (0.7s warm)
+          NO  → cargo check-fast  (0.06s warm)  or  cargo test-focused <filter>  (0.11s warm)
+                └─ complete with  .\scripts\verify.cmd -Fast  (0.7s warm)
 ```
 
-| Need | Command | Warm |
-|---|---|---|
-| Type-check library | `cargo check-fast` | ~0.4s |
-| Type-check harness | `cargo check-harness` | ~1s |
-| One focused test | `cargo test-focused <filter>` | ~0.5s |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.7s |
-| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <pattern> \| -Harness \| -Check]` | per-run warm cost of the chosen lane |
-| Harness smoke, one strategy | `cargo harness-rush` / `cargo harness-press` / `cargo harness-recon` | ~0.15s |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s |
-| Broad local gate | `.\scripts\verify.cmd` | ~5-10s |
+| Need | Command | Warm (no change) | After one file edit |
+|---|---|---|---|
+| Type-check lib | `cargo check-fast` | ~0.06s | ~6s |
+| Type-check all | `cargo check-all` | ~0.45s | ~6s |
+| One focused test | `cargo test-focused <filter>` | ~0.11s | ~6-12s |
+| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | ~12s |
+| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <pattern> \| -Harness \| -Check]` | per lane | per lane + rebuild |
+| Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | ~10-15s |
+| Check lane (fmt + check) | `.\scripts\verify.cmd -Check` | ~0.7s | ~7s |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | ~13s |
+| Broad local gate | `.\scripts\verify.cmd` | ~2-3s | ~15-20s |
 
 The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1` on `[profile.harness]`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test-release`.
 

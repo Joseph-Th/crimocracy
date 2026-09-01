@@ -1,45 +1,46 @@
 [alias]
-# ── fast iteration (type-check only) ──────────────────────────────────────────
-# Quickest syntax + type check for library systems. No test harness, no lint.
+# ── type-check (fastest feedback, no linking) ─────────────────────────────────
+# Warm: 0.06s (no change) / 6s (after touching one lib file).
 check-fast = ["check", "--locked", "--lib"]
-# Compile the gameplay harness surface (adapter-facing example) without tests.
+# Check both lib and harness surface in one invocation — cheaper than two
+# separate checks because cargo shares the lib build. Warm: ~0.45s.
+check-all = ["check", "--locked", "--lib", "--example", "gameplay_harness"]
+# Harness surface only (adapter-facing example) without lib tests.
 check-harness = ["check", "--locked", "--example", "gameplay_harness"]
 
-# ── tests ───────────────────────────────────────────────────────────────────
-# Soak-class tests are named with the substring "soak" by convention; fast
-# lanes exclude them with `--skip soak` so renames and module moves cannot
-# silently un-exclude them.
-# Fast library lane: excludes the invariant soak (~1s warm).
+# ── tests ─────────────────────────────────────────────────────────────────────
+# Soak tests carry the "soak" substring by convention; fast lanes exclude them
+# with `--skip soak` so renames and module moves cannot silently un-exclude.
 test-fast = ["test", "--locked", "--lib", "--quiet", "--", "--skip", "soak"]
-# Focused filter lane: `cargo test-focused <filter>` runs matching lib tests. Filter is positional after alias.
+# Focused lane: `cargo test-focused <filter>` runs matching lib tests only.
+# Example: `cargo test-focused finance` or `cargo test-focused laundering`
 test-focused = ["test", "--locked", "--lib", "--quiet"]
-# Optimized-behavior lane: run when optimized compilation could change behavior
-# (overflow arithmetic, wrapping, or float paths that dev and release share).
+# Full lib tests including soak (same as `cargo test --lib` but locked).
+test-all = ["test", "--locked", "--lib", "--quiet"]
+# Optimized-behavior lane: when overflow/wrapping could differ under opt.
 test-release = ["test", "--locked", "--release", "--quiet"]
+# Soak stress test only (mixed-state invariant exercise, ~1s).
 soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
 
-# ── gameplay harness ────────────────────────────────────────────────────────
+# ── gameplay harness ──────────────────────────────────────────────────────────
 # All harness execution uses [profile.harness] (dev semantics, opt-level 1):
-# warm runs are ~10x faster than the dev profile and library iteration caches
-# in target/debug are never disturbed. Use --quiet to keep output concise.
+# warm runs are ~10x faster than dev and lib caches in target/debug are never
+# disturbed. Harness output is quiet by default; the harness itself prints
+# its own narrative readouts. Use --quiet to suppress cargo's build log.
 harness = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness"]
 harness-rush = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
 harness-press = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
 harness-recon = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
-# Full controlled comparison (bounded, deterministic, artifact-persisting).
+# Full controlled comparison (narrative rotation + probes + batches, ~5s, artifacts in target/harness-runs/).
 harness-full = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
 
 [build]
-# Incremental compilation is disabled in [profile.dev] (measured slower than a
-# plain rebuild on this crate) and enabled for the single-binary harness
-# profile (measured much faster there). `verify.ps1` pins CARGO_INCREMENTAL=0
-# around dev-profile stages so an inherited variable cannot re-enable dev
-# incremental, and clears it around harness-profile stages so this profile's
-# own setting governs.
-# `verify.ps1 -Jobs N` caps parallelism when needed on a quieter machine.
+# Incremental is disabled in [profile.dev] (measured slower for this crate)
+# and enabled for the single-binary harness profile (measured much faster).
+# verify.ps1 pins CARGO_INCREMENTAL=0 around dev stages so an inherited var
+# cannot re-enable dev incremental, and clears it around harness-profile
+# stages so [profile.harness] governs. `verify.ps1 -Jobs N` caps parallelism.
 
 [term]
-# Avoid redundant verbose cargo output for fast lanes; `verify.ps1` adds
-# explicit timing and stage summaries instead.
 quiet = false
 color = "auto"

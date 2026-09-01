@@ -39,8 +39,8 @@ $title = if ($Filter) {
     "fast lib tests (soak excluded)"
 }
 
-# Soak-class tests carry the "soak" substring by convention; fast lanes skip
-# them with a substring filter so renames cannot silently un-exclude them.
+# Soak tests carry the "soak" substring by convention; fast lanes skip them
+# with a substring filter so renames cannot silently un-exclude them.
 $cargoArgs = if ($Filter) {
     @("test", "--locked", "--lib", "--quiet", $Filter)
 } elseif ($Harness) {
@@ -52,21 +52,29 @@ $cargoArgs = if ($Filter) {
     @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
 }
 
+# Warm-cache reference (no file changed): check 0.06s / test 0.11s.
+# The per-run timing printed below tells you whether a lane paid a rebuild.
+$laneIsCheck = $Check
+
 function Invoke-Lane {
-    # Dev-profile lanes must never let an inherited CARGO_INCREMENTAL=1
-    # re-enable dev incremental; the harness smoke contract also runs on the
-    # dev profile (it is an example test binary), so only clear the pin when a
-    # lane explicitly needs the [profile.harness] setting to govern. None of
-    # the watch lanes do, so the pin stays on for all of them.
     $env:CARGO_INCREMENTAL = "0"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $output = & cargo @cargoArgs 2>&1 | Out-String
     $exit = $LASTEXITCODE
     $sw.Stop()
+    # Extract test count from cargo output for concise summary.
+    $testCount = ""
+    if (-not $laneIsCheck) {
+        $m = [regex]::Match($output, '(\d+) passed')
+        if ($m.Success) { $testCount = "  $($m.Groups[1].Value) passed" }
+        $fm = [regex]::Match($output, '(\d+) failed')
+        if ($fm.Success) { $testCount += "  $($fm.Groups[1].Value) FAILED" }
+    }
     [pscustomobject]@{
-        Exit    = $exit
-        Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-        Output  = $output.Trim()
+        Exit      = $exit
+        Seconds   = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Output    = $output.Trim()
+        TestCount = $testCount
     }
 }
 
@@ -74,6 +82,7 @@ function Invoke-Lane {
 
 $global:WatchPending = $false
 $global:WatchOverflow = $false
+$global:WatchLastPath = ""
 
 $watcher = New-Object System.IO.FileSystemWatcher
 $watcher.Path = (Get-Location).Path
@@ -85,6 +94,7 @@ $onChange = {
     $path = $Event.SourceEventArgs.FullPath
     if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml|md)$') {
         $global:WatchPending = $true
+        $global:WatchLastPath = $path
     }
 }
 $onOverflow = { $global:WatchOverflow = $true }
@@ -100,17 +110,22 @@ try {
     $watcher.EnableRaisingEvents = $true
     Write-Host "CRIMOCRACY WATCH" -ForegroundColor Cyan
     Write-Host "  lane: $title   (save a file to rerun, Ctrl+C to stop)" -ForegroundColor DarkGray
+    Write-Host "  tip:  .\scripts\watch.cmd -Check  for type-check only (fastest)" -ForegroundColor DarkGray
 
+    $runCount = 0
     while ($true) {
+        $runCount++
         Write-Host ""
-        Write-Host ("[{0}] running: {1}" -f (Get-Date -Format 'HH:mm:ss'), $title) -ForegroundColor Yellow
+        Write-Host ("[{0}] run #{1}: {2}" -f (Get-Date -Format 'HH:mm:ss'), $runCount, $title) -ForegroundColor Yellow
         $result = Invoke-Lane
         $status = if ($result.Exit -eq 0) { "PASS" } else { "FAIL" }
         $color = if ($result.Exit -eq 0) { "Green" } else { "Red" }
-        Write-Host ("{0}  {1,5}s" -f $status, $result.Seconds) -ForegroundColor $color
+        $countInfo = if ($result.TestCount) { $result.TestCount } else { "" }
+        Write-Host ("{0}  {1,5}s{2}" -f $status, $result.Seconds, $countInfo) -ForegroundColor $color
         if ($result.Output -and ($result.Exit -ne 0 -or $Filter)) {
-            # Show failures in full; focused filters show their test lines too.
             Write-Host $result.Output -ForegroundColor DarkGray
+        } elseif ($result.Exit -eq 0 -and $result.Seconds -gt 3) {
+            Write-Host "  (rebuild: $($result.Seconds)s -- file change triggered recompile)" -ForegroundColor DarkGray
         }
 
         if ($Clear) { Clear-Host }
@@ -119,18 +134,25 @@ try {
         do {
             $global:WatchPending = $false
             $global:WatchOverflow = $false
+            $global:WatchLastPath = ""
             $idle = [System.Diagnostics.Stopwatch]::StartNew()
             while (-not $global:WatchPending -and -not $global:WatchOverflow -and
                     $idle.Elapsed.TotalMinutes -lt 30) {
-                Start-Sleep -Milliseconds 120   # sleeps yield so queued events fire
+                Start-Sleep -Milliseconds 120
             }
             if ($global:WatchOverflow) {
-                $triggered = $true              # buffer overflow: rerun defensively
+                Write-Host "  [watch: buffer overflow -- rerunning]" -ForegroundColor Yellow
+                $triggered = $true
                 break
             }
             if ($global:WatchPending) {
-                Start-Sleep -Milliseconds 300   # let editors finish writing
+                $changed = if ($global:WatchLastPath) {
+                    $rel = $global:WatchLastPath.Replace((Get-Location).Path + [IO.Path]::DirectorySeparatorChar, "")
+                    " ($rel)"
+                } else { "" }
+                Start-Sleep -Milliseconds 300
                 $global:WatchPending = $false
+                Write-Host "  [watch: change detected$changed -- rerunning]" -ForegroundColor DarkGray
                 $triggered = $true
             }
         } until ($triggered)

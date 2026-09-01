@@ -25,8 +25,8 @@ Harness   (evaluation surface, smoke/full, player-visible only) ─┘
   Speed is an adapter concern — call it more often, don't change its semantics.
 - **Determinism** = `Registry + AppState + ordered inputs + state-owned RNG`. No wall
   clock, no hash iteration, no ambient entropy.
-- **Cheapest proof:** `cargo check-fast` (~0.4s) → `cargo test-focused <filter>` (~0.5s)
-  → `.\scripts\verify.cmd -Fast` (~1s) → `.\scripts\verify.cmd` (~5-10s) only for
+- **Cheapest proof:** `cargo check-fast` (0.06s warm) → `cargo test-focused <filter>` (0.11s warm)
+  → `.\scripts\verify.cmd -Fast` (0.7s warm) → `.\scripts\verify.cmd` (2-3s warm) only for
   persistence/invariant/cross-domain work.
 
 ---
@@ -183,30 +183,31 @@ If any step is not discoverable, repair the owning documentation as part of the 
 
 ```text
 Did you touch persistence, invariants, cross-domain behavior, or verification infra?
-  ├─ YES → broad gate:  .\scripts\verify.cmd              (~5-10s warm)
+  ├─ YES → broad gate:  .\scripts\verify.cmd              (2-3s warm)
   └─ NO ─┬─ Did you touch harness surface (examples/gameplay_harness)?
-          │   ├─ YES → fast harness lane: .\scripts\verify.cmd -Fast -Harness  (~1-2s)
-          │   └─ NO ─┬─ Single behavior? → cargo test-focused <filter>          (~0.5s)
-          │           └─ Library work?   → .\scripts\verify.cmd -Fast           (~1-2s)
-          │                              cargo test-fast                         (~0.7s)
-          │                              cargo check-fast                        (~0.4s)
+          │   ├─ YES → fast harness lane: .\scripts\verify.cmd -Fast -Harness  (0.7s warm)
+          │   └─ NO ─┬─ Single behavior? → cargo test-focused <filter>          (0.11s warm)
+          │           └─ Library work?   → .\scripts\verify.cmd -Fast           (0.7s warm)
+          │                              cargo test-fast                         (0.11s warm)
+          │                              cargo check-fast                        (0.06s warm)
 ```
 
 **Never rerun the broad gate after a passing fast lane “for reassurance”.**
 
-| Need | Command | Warm | What it proves |
+| Need | Command | Warm (no change) | What it proves |
 |---|---|---|---|
-| Type-check library | `cargo check-fast` | ~0.4s | `src/` compiles |
-| Type-check harness | `cargo check-harness` | ~1s | example adapter compiles |
-| One focused test | `cargo test-focused <filter>` | ~0.5s | owning module's `#[cfg(test)]` |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.7s | all lib, `--skip soak` |
-| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <p> \| -Harness \| -Check]` | per-lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
-| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one branch (`Rush/Press/Recon`) on `[profile.harness]` |
+| Type-check library | `cargo check-fast` | ~0.06s | `src/` compiles |
+| Type-check all | `cargo check-all` | ~0.45s | `src/` + harness surface |
+| One focused test | `cargo test-focused <filter>` | ~0.11s | owning module's `#[cfg(test)]` |
+| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (324 tests) |
+| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <p> \| -Harness \| -Check]` | per lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
+| Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one strategy on `[profile.harness]` |
 | Harness smoke, all | `cargo harness` | ~0.5s | all 3 strategies + legal foundation |
 | Full comparison batch | `cargo harness-full --samples 8` | ~5s | all strategies, matched seeds, artifacts in `target/harness-runs/` |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~1-2s | iteration gate |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~1-2s | smoke contract only |
-| Broad local gate | `.\scripts\verify.cmd` | ~5-10s | **fmt → lib+integration → harness units → smoke (fail-closed) → full n=1 → clippy** |
+| Check lane (fmt + check) | `.\scripts\verify.cmd -Check` | ~0.7s | type-check only, fastest gate |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | iteration gate |
+| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~0.7s | smoke contract only |
+| Broad local gate | `.\scripts\verify.cmd` | ~2-3s | **fmt → lib+integration → harness units → smoke (fail-closed) → full n=1 → clippy** |
 
 **Watch your lanes:** `tests/documentation_contracts.rs` guards alias names, doc links,
 and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION (66) / CURRENT_CONTENT_REVISION (35)`
