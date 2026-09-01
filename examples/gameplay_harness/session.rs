@@ -1039,66 +1039,104 @@ pub fn play_session_with_fixture_view(
                     .cash_account();
                 let first_laundry = laundry_days == 0;
                 if !till_concealed {
-                    // Sweep the racket's street-cash float each day. Cycle settlements flow
-                    // gross in and costs out through the paired settlement account, so the
-                    // float needs no positive reserve; the family treasury stays reserved
-                    // for wages. A concealed till cannot route through a front's ledgers at
-                    // all, which is why concealed-till worlds stand down on survival alone.
-                    if narrative && first_laundry {
-                        println!(
-                            "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
-                        );
-                    }
-                    let launderable = scenario
-                        .state
-                        .finance()
-                        .get_account(canal_float)
-                        .map(|account| account.balance().cents())
-                        .unwrap_or_default()
-                        .max(0);
-                    let mut day_absorbed: Option<i64> = None;
-                    if launderable > 0
-                        && let Some(gross) = launder_through_front(
-                            &mut scenario,
-                            narrative && first_laundry,
-                            &mut metrics,
-                            canal_float,
-                            launderable,
-                        )?
-                    {
-                        day_absorbed = Some(gross);
-                    }
-                    laundry_days += 1;
-                    if narrative && !first_laundry && day_absorbed != last_absorbed {
-                        match day_absorbed {
-                            Some(gross) => println!(
-                                "[LAUNDER] The front's daily absorbable volume moved to {}.",
-                                format_cents(gross)
-                            ),
-                            None => println!(
-                                "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
-                            ),
-                        }
-                    }
-                    last_absorbed = day_absorbed;
-                }
-                // The diversification purchase: gated on accounted funds by production
-                // validation, so a street-till world simply retries each day until the books
-                // qualify. A concealed-till world never has clean money to attempt with.
-                // Once the venue is owned, the harbor book is capitalized from whatever idle
-                // street cash exists - retry on later days if the first attempt lacked float.
-                if !till_concealed && !metrics.front_acquired {
-                    if acquire_harbor_front(&mut scenario, narrative, &mut metrics)? {
+                    if metrics.front_acquired && !metrics.expansion_established {
+                        // Harbor venue owned but book still needs float: capitalize before
+                        // the daily sweep so fresh enterprise income is not drained first.
+                        // Without this ordering the same till funded both laundering and
+                        // capitalization and the new book always starved with $0.00.
                         establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-                        if metrics.expansion_established && narrative {
+                        let launderable = scenario
+                            .state
+                            .finance()
+                            .get_account(canal_float)
+                            .map(|account| account.balance().cents())
+                            .unwrap_or_default()
+                            .max(0);
+                        let mut day_absorbed: Option<i64> = None;
+                        if launderable > 0
+                            && let Some(gross) = launder_through_front(
+                                &mut scenario,
+                                false,
+                                &mut metrics,
+                                canal_float,
+                                launderable,
+                            )?
+                        {
+                            day_absorbed = Some(gross);
+                        }
+                        laundry_days += 1;
+                        if narrative && day_absorbed != last_absorbed {
+                            match day_absorbed {
+                                Some(gross) => println!(
+                                    "[LAUNDER] The front's daily absorbable volume moved to {}.",
+                                    format_cents(gross)
+                                ),
+                                None => println!(
+                                    "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
+                                ),
+                            }
+                        }
+                        last_absorbed = day_absorbed;
+                    } else {
+                        // Sweep the racket's street-cash float each day. Cycle settlements flow
+                        // gross in and costs out through the paired settlement account, so the
+                        // float needs no positive reserve; the family treasury stays reserved
+                        // for wages. A concealed till cannot route through a front's ledgers at
+                        // all, which is why concealed-till worlds stand down on survival alone.
+                        if narrative && first_laundry {
                             println!(
-                                "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
+                                "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
                             );
+                        }
+                        let launderable = scenario
+                            .state
+                            .finance()
+                            .get_account(canal_float)
+                            .map(|account| account.balance().cents())
+                            .unwrap_or_default()
+                            .max(0);
+                        let mut day_absorbed: Option<i64> = None;
+                        if launderable > 0
+                            && let Some(gross) = launder_through_front(
+                                &mut scenario,
+                                narrative && first_laundry,
+                                &mut metrics,
+                                canal_float,
+                                launderable,
+                            )?
+                        {
+                            day_absorbed = Some(gross);
+                        }
+                        laundry_days += 1;
+                        if narrative && !first_laundry && day_absorbed != last_absorbed {
+                            match day_absorbed {
+                                Some(gross) => println!(
+                                    "[LAUNDER] The front's daily absorbable volume moved to {}.",
+                                    format_cents(gross)
+                                ),
+                                None => println!(
+                                    "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
+                                ),
+                            }
+                        }
+                        last_absorbed = day_absorbed;
+                        // The diversification purchase: gated on accounted funds by production
+                        // validation, so a street-till world simply retries each day until the books
+                        // qualify. Once the venue is owned, the priority branch above retries
+                        // capitalization before future sweeps.
+                        if !metrics.front_acquired
+                            && acquire_harbor_front(&mut scenario, narrative, &mut metrics)?
+                        {
+                            establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
+                            if metrics.expansion_established && narrative {
+                                println!(
+                                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
+                                );
+                            }
                         }
                     }
                 } else if metrics.front_acquired && !metrics.expansion_established {
-                    // Venue bought but float was insufficient yesterday - retry once new
-                    // enterprise cycles have settled fresh street cash.
+                    // Concealed-till worlds never acquire, but keep retry for completeness.
                     establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
                 }
                 // The precinct channel is only asked once the shelf could have landed; before

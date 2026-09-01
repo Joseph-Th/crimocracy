@@ -110,12 +110,13 @@ fn register_laundering(builder: &mut RegistryBuilder) {
             // The front keeps a meaningful cut: laundering is a service the legitimate
             // business charges for, not a free conversion button.
             fee_basis_points: 1_500,
-            // A single transfer may plausibly hide inside 80% of one legitimate cycle's
-            // gross; larger volumes still require larger or additional fronts, but the
-            // PRESS diversification arc now completes in ~2-3 days instead of ~4, keeping
-            // the standing-down wait interactive rather than a calendar grind. Player
-            // still sees capacity rejections as the visible pacing mechanic.
-            plausibility_gross_basis_points: 8_000,
+            // A front can plausibly hide 100% of one legitimate cycle's gross per transfer:
+            // one resale still needs at most two daily sweeps (front capacity ~$270, resale
+            // ~$400), but the PRESS diversification wait now closes in ~2 days instead of
+            // ~4, keeping the standing-down interactive while preserving the capacity-
+            // rejection as the visible pacing signal. Larger diversification still needs
+            // additional fronts, not just waiting.
+            plausibility_gross_basis_points: 10_000,
         })
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
 }
