@@ -32,6 +32,17 @@ impl Rating {
             _ => unreachable!(),
         }
     }
+
+    pub const fn police_presence_label(self) -> &'static str {
+        match self.0 {
+            0..=19 => "sparse",
+            20..=44 => "light",
+            45..=69 => "regular",
+            70..=89 => "heavy",
+            90..=100 => "concentrated",
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Rating {

@@ -790,14 +790,7 @@ fn format_day_minute(minute: u16) -> String {
 }
 
 fn police_presence_label(rating: Rating) -> &'static str {
-    match rating.value() {
-        0..=19 => "sparse",
-        20..=44 => "light",
-        45..=69 => "regular",
-        70..=89 => "heavy",
-        90..=100 => "concentrated",
-        _ => unreachable!(),
-    }
+    rating.police_presence_label()
 }
 
 fn business_access_summary(name: &str, functions: &BTreeSet<BusinessFunction>) -> String {

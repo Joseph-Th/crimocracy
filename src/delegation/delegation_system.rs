@@ -55,6 +55,8 @@ pub enum DelegationError {
         account: crate::core::id::FinancialAccountId,
         organization: OrganizationId,
     },
+    #[error("budget funding account {0} must be accounted funds")]
+    InvalidBudgetAccountKind(crate::core::id::FinancialAccountId),
     #[error("mandate {0} does not exist")]
     MissingMandate(MandateId),
     #[error("mandate {0} is not active")]
@@ -572,6 +574,13 @@ fn validate_budget_authority(
                 account: budget.funding_account,
                 organization,
             });
+        }
+        // Mandate budgets are accounted-wealth budgets: street or concealed cash cannot
+        // fund delegated authority directly; it must be laundered first.
+        if account.kind() != crate::finance::AccountKind::AccountedFunds {
+            return Err(DelegationError::InvalidBudgetAccountKind(
+                budget.funding_account,
+            ));
         }
     }
     Ok(())

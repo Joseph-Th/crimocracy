@@ -1078,7 +1078,7 @@ pub fn play_session_with_fixture_view(
                 let should_heartbeat = narrative
                     && (laundry_days > 1 || till_concealed)
                     && metrics.cold_case_confirmed.is_none()
-                    && (read.is_some() || laundry_days % 2 == 0);
+                    && (read.is_some() || laundry_days.is_multiple_of(2));
                 if should_heartbeat {
                     let accounted = scenario
                         .state

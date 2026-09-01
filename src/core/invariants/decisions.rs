@@ -461,6 +461,12 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
                     account: budget.funding_account,
                 });
             }
+            if account.kind() != crate::finance::AccountKind::AccountedFunds {
+                return Err(StateValidationError::MandateBudgetAccountOwnerMismatch {
+                    mandate: mandate.id(),
+                    account: budget.funding_account,
+                });
+            }
         }
         match mandate.status() {
             // Exhaustiveness tripwire: a new mandate status must be either validated here or

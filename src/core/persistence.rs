@@ -11,6 +11,7 @@ use thiserror::Error;
 pub const CURRENT_SAVE_FORMAT_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SaveEnvelope {
     format_version: u16,
     content_revision: u32,
