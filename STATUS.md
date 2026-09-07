@@ -5,8 +5,8 @@ Ownership is in [`ARCHITECTURE.md`](ARCHITECTURE.md); verification is in
 [`TESTING.md`](TESTING.md); intent is in [`GAME_DESIGN.md`](GAME_DESIGN.md);
 agent routing is in [`AGENTS.md`](AGENTS.md).
 
-> **Agent quick-find:** the foundation is 11+1 domains (see table below) on the
-> `Registry → AppState (15 substates) → run_tick (14 phases)` tower described in
+> **Agent quick-find:** the implemented domains are listed below on the
+> `Registry → AppState → run_tick` tower described in
 > `AGENTS.md:§2` and `ARCHITECTURE.md`. To add capability, consult
 > `AGENTS.md:§10` accretion guide. Version facts are at the bottom — keep them
 > in sync with `src/core/state.rs` and `src/content/mod.rs`.
@@ -73,6 +73,6 @@ mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 38.
 
-The current in-memory state schema version is 66.
+The current in-memory state schema version is 67.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

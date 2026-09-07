@@ -195,6 +195,11 @@ struct RecruitmentResolution {
     factors: RecruitmentFactors,
     margin: i16,
     outcome: RecruitmentOutcome,
+    /// Character membership version immediately after this attempt resolved. Character
+    /// versions advance only on organization/supervisor reassignment, so validators can
+    /// enforce the attempt's immediate membership consequence while this remains the current
+    /// version without pretending that consequence must remain true after a later transfer.
+    resulting_candidate_version: u32,
     outcome_information: InformationId,
     history_event: Option<HistoryEventId>,
 }
@@ -265,6 +270,10 @@ impl RecruitmentAttemptRecord {
 
     pub fn outcome(&self) -> RecruitmentOutcome {
         self.resolution.outcome
+    }
+
+    pub fn resulting_candidate_version(&self) -> u32 {
+        self.resolution.resulting_candidate_version
     }
 
     pub fn outcome_information(&self) -> InformationId {
@@ -455,6 +464,7 @@ pub(crate) struct RecruitmentRecordResolutionParts {
     pub factors: RecruitmentFactors,
     pub margin: i16,
     pub outcome: RecruitmentOutcome,
+    pub resulting_candidate_version: u32,
     pub outcome_information: InformationId,
     pub history_event: Option<HistoryEventId>,
 }
@@ -479,6 +489,7 @@ pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> Recruit
         factors,
         margin,
         outcome,
+        resulting_candidate_version,
         outcome_information,
         history_event,
     } = resolution;
@@ -503,6 +514,7 @@ pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> Recruit
             factors,
             margin,
             outcome,
+            resulting_candidate_version,
             outcome_information,
             history_event,
         },

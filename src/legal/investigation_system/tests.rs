@@ -28,6 +28,136 @@ fn rating(value: u8) -> Rating {
 }
 
 #[test]
+fn investigator_assignment_information_id_exhaustion_is_atomic() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1D_A5516E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Staffing Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Staffing Target".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Atomic Detective", 85);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Atomic staffing inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    let assignment = validate_assign_investigator(&state, investigation, detective)
+        .expect("assignment should validate before allocator exhaustion");
+    let before = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist")
+        .clone();
+
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX);
+    let error = assignment
+        .commit(&mut state)
+        .expect_err("knowledge allocation exhaustion must reject staffing atomically");
+    assert!(matches!(error, InvestigationError::IdExhaustion(_)));
+    let after = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist");
+    assert_eq!(after.lead_investigator(), before.lead_investigator());
+    assert_eq!(
+        after.assigned_investigators(),
+        before.assigned_investigators()
+    );
+    assert_eq!(after.version(), before.version());
+    assert_eq!(after.last_activity_at(), before.last_activity_at());
+    assert_eq!(
+        state
+            .intelligence()
+            .information_for_holder(crate::intelligence::KnowledgeHolder::Character(detective))
+            .count(),
+        0,
+        "failed staffing must not manufacture lead knowledge"
+    );
+    validate_state(&state).expect("failed atomic staffing must leave state structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn autonomous_staffing_surfaces_allocator_failure_instead_of_erasing_the_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1D_A070);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Fail Fast Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Fail Fast Target".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Available Detective", 90);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Fail-fast staffing inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX);
+    let error = apply_autonomous_investigator_staffing(&mut state)
+        .expect_err("autonomous staffing must surface its canonical allocation failure");
+    assert!(matches!(error, InvestigationError::IdExhaustion(_)));
+    let record = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist");
+    assert_eq!(record.lead_investigator(), None);
+    assert!(record.assigned_investigators().is_empty());
+    assert_eq!(
+        state
+            .intelligence()
+            .information_for_holder(crate::intelligence::KnowledgeHolder::Character(detective))
+            .count(),
+        0
+    );
+    validate_state(&state).expect("failed autonomous staffing must leave state valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn investigation_transition_id_exhaustion_leaves_case_unchanged() {
     let registry = build_registry();
     let mut state = AppState::new(0x1D_5AFE);
@@ -1484,6 +1614,123 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
         .commit(&mut state)
         .expect("resume should commit");
     validate_state(&state).expect("resumed cold case state should validate");
+    validate_invariants(&state);
+}
+
+#[test]
+fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC01D_A70C);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Cold Case Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Cold Case Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Origin Leader".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Surveillance, rating(80)),
+                (CapabilityKind::Management, rating(80)),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("origin leader should validate");
+    let detective = insert_test_investigator(&mut state, police, "Cold Case Detective", 80);
+    let origin = crate::operations::operation_system::validate_authorize_operation(
+        &registry,
+        &state,
+        crate::operations::OperationDraft {
+            title: "Cold-case origin".to_owned(),
+            kind: crate::operations::OperationKind::Surveillance,
+            responsible_organization: criminal,
+            leader,
+            objective: crate::operations::OperationObjective::GatherInformation {
+                target: EntityRef::Organization(criminal),
+            },
+            approach: crate::operations::OperationApproach::Covert,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut state)
+    .expect("origin operation should commit");
+    let investigation = validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Atomic cold inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::KnownAssociation,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: None,
+        },
+    )
+    .expect("incident intake should validate")
+    .commit(&mut state)
+    .expect("incident intake should commit")
+    .investigation;
+    validate_assign_investigator(&state, investigation, detective)
+        .expect("cold case lead should validate")
+        .commit(&mut state)
+        .expect("cold case lead should commit");
+    let before = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist")
+        .clone();
+
+    state.advance_clock(SimDuration::from_minutes(121));
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
+    let error = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect_err("cold-case decay must surface case-knowledge allocator exhaustion");
+    assert!(matches!(error, InvestigationError::IdExhaustion(_)));
+    let after = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("failed cold-case transition must retain the case");
+    assert_eq!(after.status(), InvestigationStatus::Active);
+    assert_eq!(after.version(), before.version());
+    assert_eq!(after.lead_investigator(), before.lead_investigator());
+    assert_eq!(
+        after.assigned_investigators(),
+        before.assigned_investigators()
+    );
+    validate_state(&state).expect("failed cold-case decay must leave state structurally valid");
     validate_invariants(&state);
 }
 

@@ -402,7 +402,12 @@ pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidatio
                 entity: EntityRef::Character(mandate.manager()),
             },
         )?;
-        if manager.organization() != Some(mandate.organization()) {
+        // Active authority requires a live manager inside the owning organization. Revoked
+        // mandates are durable governance history: once the active-manager index releases the
+        // character, a later canonical transfer must not retroactively invalidate that history.
+        if mandate.status() == MandateStatus::Active
+            && manager.organization() != Some(mandate.organization())
+        {
             return Err(StateValidationError::MandateManagerOrganizationMismatch {
                 mandate: mandate.id(),
                 manager: mandate.manager(),

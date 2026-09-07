@@ -8,7 +8,8 @@
 //! Layer 1  registry ◄── content::build_registry
 //! Layer 0  core::{id,time,entity,attention,state,simulation,persistence,invariants}
 //! ```
-//! Start at `core::state::AppState` (15 substates) and `core::simulation::run_tick` (14 phases).
+//! Start at `core::state::AppState` (16 domain substates) and the ordered
+//! `core::simulation::run_tick` pipeline.
 //! Every `src/*/mod.rs` //! header names its canonical mutation path — treat it as contract.
 
 pub mod contacts;

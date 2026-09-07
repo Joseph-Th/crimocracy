@@ -312,8 +312,7 @@ pub fn validate_retain_legal_representation(
         .get_organization(dependencies.counsel_institution)
         .expect("validated legal-services institution must exist");
 
-    let summary = format!(
-        "{} retained {} of {} to represent {} for a fee of {}.",
+    let summary = retained_representation_summary(
         state
             .world
             .get_organization(draft.sponsor)
@@ -322,7 +321,7 @@ pub fn validate_retain_legal_representation(
         counsel.name(),
         firm.name(),
         defendant.name(),
-        crate::finance::helpers::format_money_cents(draft.fee.cents()),
+        draft.fee,
     );
     let information = validate_record_information(
         state,
@@ -723,12 +722,7 @@ pub fn validate_end_legal_representation(
         .world
         .get_character(record.counsel())
         .ok_or(LegalRepresentationError::MissingCounsel(record.counsel()))?;
-    let summary = format!(
-        "{}'s representation of {} ended: {}.",
-        counsel.name(),
-        defendant.name(),
-        end_reason_label(reason),
-    );
+    let summary = ended_representation_summary(counsel.name(), defendant.name(), reason);
     let information = validate_record_information(
         state,
         InformationDraft {
@@ -772,7 +766,31 @@ pub fn validate_end_legal_representation(
     })
 }
 
-const fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str {
+pub(crate) fn retained_representation_summary(
+    sponsor: &str,
+    counsel: &str,
+    firm: &str,
+    defendant: &str,
+    fee: Money,
+) -> String {
+    format!(
+        "{sponsor} retained {counsel} of {firm} to represent {defendant} for a fee of {}.",
+        crate::finance::helpers::format_money_cents(fee.cents()),
+    )
+}
+
+pub(crate) fn ended_representation_summary(
+    counsel: &str,
+    defendant: &str,
+    reason: LegalRepresentationEndReason,
+) -> String {
+    format!(
+        "{counsel}'s representation of {defendant} ended: {}.",
+        end_reason_label(reason),
+    )
+}
+
+fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str {
     match reason {
         LegalRepresentationEndReason::MatterConcluded => "matter concluded",
         LegalRepresentationEndReason::Replaced => "counsel replaced",
@@ -789,10 +807,10 @@ const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
 /// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
 /// organization that runs the Automatic policy gets counsel retained through the canonical
 /// representation path, paid from the organization's first funded cash account through its
-/// first active Legal-channel contact. Organizations without those prerequisites see no
+/// first currently usable LegalServices channel. Organizations without those prerequisites see no
 /// action — the policy promises support, and this stage delivers it only when the pieces
 /// exist for the canonical transaction to carry it.
-pub fn apply_automatic_legal_support(
+pub(crate) fn apply_automatic_legal_support(
     state: &mut AppState,
 ) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
     use crate::finance::{AccountKind, FinancialOwner};
@@ -827,86 +845,70 @@ pub fn apply_automatic_legal_support(
         .map(|record| record.id())
         .collect();
     for representation in concluded {
-        // An autonomous stage must not abort the tick on one drifted record; the same
-        // canonical end path a player command would use stays in charge of each ending.
-        if let Ok(token) = validate_end_legal_representation(
+        // These records came from the authoritative active index in the same pass. A failure
+        // here means the canonical state contract is broken and must surface instead of
+        // leaving a concluded automatic retainer active indefinitely.
+        validate_end_legal_representation(
             state,
             representation,
             LegalRepresentationEndReason::MatterConcluded,
+        )?
+        .commit(state)?;
+    }
+
+    let mut candidates = Vec::new();
+    for arrest in state.legal.detained_arrests() {
+        if state
+            .legal
+            .active_representation_for_arrest(arrest.id())
+            .is_some()
+        {
+            continue;
+        }
+        let defendant = arrest.character();
+        let defendant_record = state
+            .world
+            .get_character(defendant)
+            .ok_or(LegalRepresentationError::MissingDefendant(defendant))?;
+        let Some(organization) = defendant_record.organization() else {
+            continue;
+        };
+        let record = state
+            .world
+            .get_organization(organization)
+            .ok_or(LegalRepresentationError::MissingSponsor(organization))?;
+        if record.kind() != OrgKind::Criminal {
+            continue;
+        }
+        // The supervisor's standing order governs first. A detained supervisor cannot exercise
+        // delegated authority, so the organization's standing default takes over. Every other
+        // delegation error denotes malformed current governance and must surface rather than be
+        // disguised as an ordinary policy fallback.
+        let setting = if let Some(supervisor) = defendant_record.supervisor() {
+            match resolve_policy_for_manager(state, supervisor, PolicyKind::AssociateLegalSupport) {
+                Ok(resolved) => Some(resolved.setting),
+                Err(DelegationError::DetainedManager { .. }) => {
+                    record.policy(PolicyKind::AssociateLegalSupport)
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            record.policy(PolicyKind::AssociateLegalSupport)
+        };
+        if matches!(
+            setting,
+            Some(PolicySetting::AssociateLegalSupport(
+                crate::world::LegalSupportPolicy::Automatic,
+            )),
         ) {
-            token.commit(state).ok();
+            candidates.push((arrest.id(), organization));
         }
     }
 
-    let candidates: Vec<crate::core::id::ArrestId> = state
-        .legal
-        .detained_arrests()
-        .filter(|arrest| {
-            state
-                .legal
-                .active_representation_for_arrest(arrest.id())
-                .is_none()
-        })
-        .filter_map(|arrest| {
-            let defendant = arrest.character();
-            let defendant_record = state.world.get_character(defendant)?;
-            let organization = defendant_record.organization()?;
-            let record = state.world.get_organization(organization)?;
-            if record.kind() != OrgKind::Criminal {
-                return None;
-            }
-            // The mandate standing order of whoever supervises the detained associate
-            // governs first — delegation overrides are real policy, not decoration. Without
-            // a resolvable supervisor the organization default applies.
-            let setting = defendant_record
-                .supervisor()
-                .and_then(|supervisor| {
-                    resolve_policy_for_manager(state, supervisor, PolicyKind::AssociateLegalSupport)
-                        .ok()
-                })
-                .map(|resolved| resolved.setting)
-                .or_else(|| record.policy(PolicyKind::AssociateLegalSupport));
-            matches!(
-                setting,
-                Some(PolicySetting::AssociateLegalSupport(
-                    crate::world::LegalSupportPolicy::Automatic,
-                )),
-            )
-            .then_some(arrest.id())
-        })
-        .collect();
-
     let mut retained = Vec::new();
-    for arrest_id in candidates {
-        let arrest = state
-            .legal
-            .get_arrest(arrest_id)
-            .expect("indexed detained arrest must exist");
-        let defendant = arrest.character();
-        let Some(sponsor) = state
-            .world
-            .get_character(defendant)
-            .and_then(|record| record.organization())
-        else {
-            continue;
-        };
-        // First active Legal-channel contact of the sponsor, by contact id order, with its
-        // institution captured in the same pass.
+    for (arrest_id, sponsor) in candidates {
         let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
-        let Some((contact, institution)) = state
-            .contacts
-            .contacts_for_sponsor(sponsor)
-            .find(|contact| {
-                contact.status() == crate::contacts::ContactStatus::Active
-                    && contact.kind() == crate::contacts::ContactKind::Legal
-            })
-            .map(|contact| (contact.id(), contact.institution()))
-        else {
-            continue;
-        };
-
-        // The payer must be a sponsor-owned cash account that can cover the flat retainer;
-        // the provider account is the counsel institution's operating account.
+        // The payer must be a sponsor-owned liquid account that can cover the flat retainer.
         let payer_account = state
             .finance
             .accounts_for(FinancialOwner::Organization(sponsor))
@@ -922,36 +924,58 @@ pub fn apply_automatic_legal_support(
         let Some(payer_account) = payer_account else {
             continue;
         };
-        let provider_account = state
-            .finance
-            .accounts_for(FinancialOwner::Organization(institution))
-            .find(|account| account.kind() == AccountKind::LegitimateOperating);
-        let Some(provider_account) = provider_account else {
-            continue;
-        };
 
-        let draft = LegalRepresentationDraft {
-            arrest: arrest_id,
-            sponsor,
-            contact,
-            fee,
-            payer_account: payer_account.id(),
-            provider_account: provider_account.id(),
-            authorization: None,
-            origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
-        };
-        if validate_representation_dependencies(state, &draft).is_err() {
-            // Prerequisites drifted since the snapshot (contact inactive, custody released);
-            // the policy stage simply waits rather than forcing a partial transaction.
+        // Legal contacts are broader than retained counsel: prosecutors and legal authorities
+        // also expose Legal channels. Walk contacts in stable ID order until a live LegalServices
+        // lawyer with an operating account can actually carry this representation. A detained
+        // endpoint or non-lawyer is an ordinary temporary/institutional mismatch, not a reason to
+        // let an older unusable contact block a later viable one.
+        let mut validated_representation = None;
+        for contact in state.contacts.contacts_for_sponsor(sponsor) {
+            if contact.status() != crate::contacts::ContactStatus::Active
+                || contact.kind() != crate::contacts::ContactKind::Legal
+                || !crate::contacts::contact_system::are_channel_endpoints_available(state, contact)
+            {
+                continue;
+            }
+            let institution = state.world.get_organization(contact.institution()).ok_or(
+                LegalRepresentationError::MissingCounselInstitution(contact.institution()),
+            )?;
+            if institution.kind() != OrgKind::LegalServices {
+                continue;
+            }
+            let counsel = state
+                .world
+                .get_character(contact.contact())
+                .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
+            if counsel.capability(CapabilityKind::LegalKnowledge).is_none() {
+                continue;
+            }
+            let Some(provider_account) = state
+                .finance
+                .accounts_for(FinancialOwner::Organization(contact.institution()))
+                .find(|account| account.kind() == AccountKind::LegitimateOperating)
+            else {
+                continue;
+            };
+            let draft = LegalRepresentationDraft {
+                arrest: arrest_id,
+                sponsor,
+                contact: contact.id(),
+                fee,
+                payer_account: payer_account.id(),
+                provider_account: provider_account.id(),
+                authorization: None,
+                origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
+            };
+            validated_representation = Some(validate_retain_legal_representation(state, draft)?);
+            break;
+        }
+        let Some(validated_representation) = validated_representation else {
             continue;
-        }
-        // A candidate whose prerequisites changed between the dependency check and commit is
-        // skipped, not fatal: an autonomous pass must never abort the tick.
-        if let Ok(representation) = validate_retain_legal_representation(state, draft)
-            .and_then(|validated| validated.commit(state))
-        {
-            retained.push(representation);
-        }
+        };
+        let representation = validated_representation.commit(state)?;
+        retained.push(representation);
     }
     Ok(retained)
 }

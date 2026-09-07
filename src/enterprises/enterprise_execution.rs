@@ -1558,25 +1558,97 @@ fn resolve_operating_cost(
     active_district_cases: u32,
     enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
+    let heat = resolve_investigation_heat_surcharge(enterprise, economics, active_district_cases)?;
+    resolve_operating_cost_with_heat(
+        economics,
+        profile,
+        supporting_business_count,
+        heat,
+        enterprise,
+    )
+}
+
+fn resolve_operating_cost_with_heat(
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    supporting_business_count: usize,
+    investigation_heat: Money,
+    enterprise: EnterpriseId,
+) -> Result<OperatingCostBreakdown, EnterpriseError> {
     let base = economics.base_operating_cost().checked_add(weighted_rating(
         enterprise,
         economics.police_cost_per_point(),
         profile.institutions.police_presence,
     )?);
     let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let heat = resolve_investigation_heat_surcharge(enterprise, economics, active_district_cases)?;
     let support_surcharge = economics
         .support_surcharge_per_business()
         .checked_mul(i64::try_from(supporting_business_count).expect("usize must fit i64"))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let total = base
-        .checked_add(heat)
+        .checked_add(investigation_heat)
         .and_then(|sum| sum.checked_add(support_surcharge))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     Ok(OperatingCostBreakdown {
         total,
-        investigation_heat: heat,
+        investigation_heat,
     })
+}
+
+/// Re-derives a persisted enterprise cycle from immutable enterprise/district authorship plus
+/// the cycle's frozen variance and street-heat surcharge. Historical validation deliberately
+/// does not consult the current active-investigation count because those cases may have closed.
+pub(crate) fn resolve_historical_enterprise_cycle_financials(
+    registry: &Registry,
+    state: &AppState,
+    cycle: &EnterpriseCycleRecord,
+) -> Result<(Money, Money, Money), EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(cycle.enterprise())
+        .ok_or(EnterpriseError::MissingEnterprise(cycle.enterprise()))?;
+    let definition = registry.get_enterprise(record.kind());
+    let economics = definition.economics();
+    let variance = cycle.variance_basis_points();
+    let variance_limit = economics.gross_variance_basis_points();
+    if i32::from(variance).unsigned_abs() > u32::from(variance_limit) {
+        return Err(EnterpriseError::VarianceOutOfRange {
+            basis_points: variance,
+            limit: variance_limit,
+        });
+    }
+    let profile = resolve_location_profile(state, record.location())?;
+    let manager = state
+        .world
+        .get_character(record.manager())
+        .ok_or(DelegationError::MissingManager(record.manager()))?;
+    let gross_before_variance = resolve_gross_before_variance(
+        record.id(),
+        economics,
+        profile,
+        manager.capability(CapabilityKind::Management),
+    )?;
+    let gross_revenue = resolve_basis_point_variance(record.id(), gross_before_variance, variance)?;
+    let heat = cycle.investigation_heat();
+    let per_case_heat = economics.heat_surcharge_per_active_case().cents();
+    if heat.cents() < 0
+        || (per_case_heat == 0 && heat != Money::ZERO)
+        || (per_case_heat > 0 && heat.cents() % per_case_heat != 0)
+    {
+        return Err(EnterpriseError::ArithmeticOverflow(record.id()));
+    }
+    let operating_cost = resolve_operating_cost_with_heat(
+        economics,
+        profile,
+        record.supporting_businesses().len(),
+        heat,
+        record.id(),
+    )?
+    .total;
+    let net_cash = gross_revenue
+        .checked_sub(operating_cost)
+        .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;
+    Ok((gross_revenue, operating_cost, net_cash))
 }
 
 /// The manager's cycle report to leadership. Heat-bearing cycles must say *why* cost rose —

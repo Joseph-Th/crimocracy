@@ -6,19 +6,31 @@ use crate::core::id::{
     BusinessId, EnterpriseId, FinancialAccountId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityScope};
 use crate::enterprises::enterprise_execution::{
-    validate_establish_enterprise, validate_establish_enterprise_with_openings,
+    EnterpriseError, validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
 };
-use crate::finance::finance_system::validate_open_accounts;
+use crate::finance::finance_system::{FinanceError, validate_open_accounts};
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
 use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::AutonomyLevel;
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub(crate) enum AutonomousExpansionError {
+    #[error(transparent)]
+    Delegation(#[from] DelegationError),
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
+    #[error(transparent)]
+    Enterprise(#[from] EnterpriseError),
+}
 
 /// Daily delegated-autonomy expansion for organizations other than the player's: every active
 /// mandate whose manager holds Delegated or Broad autonomy may open one enterprise per pass
@@ -32,9 +44,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn apply_due_autonomous_enterprises(
     registry: &Registry,
     state: &mut AppState,
-) -> Vec<EnterpriseId> {
+) -> Result<Vec<EnterpriseId>, AutonomousExpansionError> {
     if !crate::core::time::is_day_boundary(state.now()) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let player_organization = state.player_organization();
     // Active mandates iterate in mandate-id order, so every eligible authority is evaluated
@@ -61,9 +73,10 @@ pub(crate) fn apply_due_autonomous_enterprises(
             continue;
         }
         let manager = mandate.manager();
-        let Some(manager_record) = state.world().get_character(manager) else {
-            continue;
-        };
+        let manager_record = state
+            .world()
+            .get_character(manager)
+            .ok_or(DelegationError::MissingManager(manager))?;
         if state.legal().active_arrest_for_character(manager).is_some()
             || !matches!(
                 manager_record.autonomy(),
@@ -100,61 +113,34 @@ pub(crate) fn apply_due_autonomous_enterprises(
         // commit open it only after every establishment dependency is current.
         match existing_settlement {
             Some(settlement_account) => {
-                establish_autonomous_enterprise(
-                    registry,
-                    state,
-                    draft(settlement_account),
-                    &mut established,
-                );
+                let enterprise =
+                    validate_establish_enterprise(registry, state, draft(settlement_account))?
+                        .commit(state)?;
+                established.push(enterprise);
             }
             None => {
-                let Ok(openings) = validate_open_accounts(
+                let openings = validate_open_accounts(
                     state,
                     vec![FinancialAccountDraft {
                         owner: FinancialOwner::Organization(organization),
                         kind: AccountKind::Settlement,
                     }],
-                ) else {
-                    continue;
-                };
+                )?;
                 let fresh = openings
                     .account_id(0)
                     .expect("one planned settlement account must expose one id");
-                let Ok(validated) = validate_establish_enterprise_with_openings(
+                let enterprise = validate_establish_enterprise_with_openings(
                     registry,
                     state,
                     draft(fresh),
                     openings,
-                ) else {
-                    continue;
-                };
-                if let Ok(enterprise) = validated.commit(state) {
-                    established.push(enterprise);
-                }
+                )?
+                .commit(state)?;
+                established.push(enterprise);
             }
         }
     }
-    established
-}
-
-/// Validates and commits one autonomous establishment; a failure must not abort the pass.
-fn establish_autonomous_enterprise(
-    registry: &Registry,
-    state: &mut AppState,
-    draft: EnterpriseDraft,
-    established: &mut Vec<EnterpriseId>,
-) -> bool {
-    match validate_establish_enterprise(registry, state, draft) {
-        // One authority that cannot commit must not abort the rest of the pass.
-        Ok(validated) => match validated.commit(state) {
-            Ok(enterprise) => {
-                established.push(enterprise);
-                true
-            }
-            Err(_) => false,
-        },
-        Err(_) => false,
-    }
+    Ok(established)
 }
 
 /// Read-only first-fit decision over authored kind order and stable location order.

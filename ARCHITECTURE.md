@@ -28,14 +28,14 @@ layers below it; nothing depends upward.
                   ├─────────────────────────────────────────────┤
                   │  Layer 1 — Immutable authoring              │
                   │  registry ◄── content::build_registry       │
-                  │  CURRENT_CONTENT_REVISION = 38              │
+                  │  content::CURRENT_CONTENT_REVISION          │
                   ├─────────────────────────────────────────────┤
                   │  Layer 0 — Foundations                      │
                   │  core::{id,time,entity,attention,           │
                   │         state,simulation,persistence,       │
                   │         invariants}                         │
                   └─────────────────────────────────────────────┘
-                          AppState owns all 15 substates
+                          AppState owns all domain state
                           Registry is read-only after build
                           run_tick (1 min) orchestrates all layers
 ```
@@ -55,8 +55,8 @@ registry/content ──► everything reads it; nothing writes it after build_re
 AppState (state.rs) owns all; simulation.rs orchestrates all
 ```
 
-File inventory: `src/lib.rs` lists all 20 modules. `src/core/state.rs` is the
-God aggregate — any cross-domain question starts by finding which `AppState` field
+File inventory: `src/lib.rs` is the authoritative top-level module list. `src/core/state.rs` is the
+cross-domain aggregate — any cross-domain question starts by finding which `AppState` field
 owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 
 ## Program model
@@ -72,25 +72,25 @@ Static definitions describe what may exist. Runtime records describe what does e
 Mutable progress does not live in the registry. Future-affecting generated state is
 persisted, not reconstructed.
 
-## Runtime flow — the 14-phase tick
+## Runtime flow — the authoritative tick
 
 `AppState::new(seed)` + `content::build_registry()` are the only constructors.
 After that, every minute advances through one contractual pipeline:
 
 ```text
- 1  content::build_registry          validated immutable registry (CURRENT_CONTENT_REVISION = 38)
+ 1  content::build_registry          validated immutable registry (content::CURRENT_CONTENT_REVISION)
  2  AppState::new(seed)              serializable state, 5 ChaCha8Rng streams, SimTime::ZERO
  3  validate_* / decide_*            domain system validates or derives read-only plan
  4  Validated*::commit / apply_*      owning system commits atomically, preserves indexes
- 5  core::simulation::run_tick        one simulated minute, 14 phases in stable order
+ 5  core::simulation::run_tick        one simulated minute in stable contractual order
  6  TickOutcome + reports/projections player-visible consequences, no hidden-state leak
- 7  build_save / restore_save         envelope {format:1, content_revision:38, state:66}
+ 7  build_save / restore_save         envelope {format_version, content_revision, state}
 ```
 
 Tick cadence is an adapter concern. Calling `run_tick` faster or slower changes
 wall time, not the semantics of one canonical minute.
 
-### run_tick — 14 phases in contractual order (`src/core/simulation.rs`)
+### run_tick — contractual order (`src/core/simulation.rs`)
 
 Phase order is the coupling contract. Comments at `src/core/simulation.rs`
 explain each “runs after X so Y is visible” dependency. Reordering breaks
@@ -104,7 +104,7 @@ determinism and harness contracts.
  5    ├─ apply_due_police_response_arrivals (exposure → decisions)
  6    └─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
  7  apply_autonomous_investigator_staffing  single-seat staffing, lead-investigator knowledge
- 8  apply_initial_evidence_reviews          schedule per staffed investigation
+ 8  apply_initial_evidence_reviews          first reviewable evidence on active staffed cases
  9  apply_witness_interview_scheduling      after reviews so same-minute witness is interviewable
 10  run_investigation_work_phase            resolve due work (RNG: investigation stream)
 11  apply_autonomous_evidence_arrests       2 independent evidence items → custody
@@ -130,9 +130,9 @@ are validated by `src/core/invariants/`. The top-level tick is
 
 | Module | Owns | Canonical mutation | Key file:line |
 |---|---|---|---|
-| `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters` 31 kinds), entity refs (`EntityRef` 11 variants), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/invariants/mod.rs` |
+| `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters`), entity refs (`EntityRef`), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/invariants/mod.rs` |
 | `registry/` | Immutable authored definitions and validated lookups | Read-only after `content::build_registry` | `src/registry/mod.rs` |
-| `content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` (`CURRENT_CONTENT_REVISION=38`) |
+| `content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` owns `CURRENT_CONTENT_REVISION` |
 | `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, designation, daily payroll; read-only territory-influence aggregation | `world_system` (insertion, designation); `payroll_execution` (daily wage pass through canonical ledger, relationship, and report paths); `territory_influence` (read-only district summaries, never an omniscience feed) | `src/world/world_system.rs`, `src/world/payroll_execution.rs` |
 | `social/` | Directional character relationships with source/target indexes | `relationship_system` only; requires active endpoints | `src/social/relationship_system.rs` |
 | `intelligence/` | Provenance-bearing information, holder/topic indexes, lineage | `intelligence_system` (record, transfer) | `src/intelligence/intelligence_system.rs` |
@@ -234,9 +234,9 @@ Save/load preserves every value required for continuation: IDs, relationships,
 lifecycle, counters, generated definitions, RNG state, and active durable work.
 
 ```text
-SaveEnvelope { format_version: 1, content_revision: 37, state: AppState(schema:66)}
+SaveEnvelope { format_version, content_revision, state: AppState(current schema) }
 build_save(registry, state)  ─► validate_state + validate_state_against_registry, then clone
-restore_save(registry, envelope) ─► format check → schema check (66) → revision check (37)
+restore_save(registry, envelope) ─► format check → schema check → content revision check
                                     → validate_state → validate_state_against_registry → Ok(state)
 ```
 
@@ -246,7 +246,7 @@ restore_save(registry, envelope) ─► format check → schema check (66) → r
 - Compatibility policy is in [`STATUS.md`](STATUS.md): current-version only, no implicit migration.
 - Core systems do not perform implicit filesystem IO (`src/core/persistence.rs` returns data; adapters do IO).
 
-ID high-water marks: `validate_id_allocators` checks `next > max_persisted` per `IdKind` (31 kinds).
+ID high-water marks: `validate_id_allocators` checks `next > max_persisted` per `IdKind`.
 Finance re-derivation: `src/core/invariants/mod.rs` walks the ledger once,
 dense `Vec<i64>` keyed by `raw()` — balances must agree with derived cents.
 

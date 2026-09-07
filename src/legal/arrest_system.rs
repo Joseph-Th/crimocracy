@@ -360,7 +360,8 @@ const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
 /// Runs the police institution's evidence-to-custody conversion across originated
 /// cases: when an identified subject has enough admissible non-weak evidence against them,
 /// the owning authority makes the arrest through the canonical validated path. Subjects who
-/// currently hold any non-terminal operation booking are left alone until their work ends.
+/// currently hold any non-terminal operation booking or scheduled detective work are left alone
+/// until that responsibility ends; custody never tears up active work implicitly.
 pub fn apply_autonomous_evidence_arrests(
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
@@ -414,22 +415,34 @@ pub fn apply_autonomous_evidence_arrests(
         if state.legal.active_arrest_for_character(character).is_some() {
             continue;
         }
+        if state
+            .legal
+            .work_for_investigator(character)
+            .any(|work| work.status() == InvestigationWorkStatus::Scheduled)
+        {
+            continue;
+        }
 
-        let investigation = match state.legal.get_investigation(investigation_id) {
-            Some(investigation) if investigation.status() == InvestigationStatus::Active => {
-                investigation
-            }
-            _ => continue,
-        };
+        let investigation = state
+            .legal
+            .get_investigation(investigation_id)
+            .ok_or(ArrestError::MissingInvestigation(investigation_id))?;
+        if investigation.status() != InvestigationStatus::Active {
+            // Another arrest earlier in this pass can make a duplicate character candidate
+            // irrelevant, but this pass itself never transitions investigations. An inactive
+            // record in the active-case candidate snapshot therefore signals a broken index.
+            return Err(ArrestError::InactiveInvestigation(investigation_id));
+        }
         let owner = investigation.owner();
         // Single lookup per evidence record decides qualification and the strong/direct
         // bar together, instead of resolving each qualifying item a second time.
         let mut qualifying: Vec<EvidenceId> = Vec::new();
         let mut has_strong = false;
         for evidence_id in investigation.evidence().iter() {
-            let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
-                continue;
-            };
+            let evidence = state
+                .legal
+                .get_evidence(*evidence_id)
+                .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
             if evidence.subject() != EntityRef::Character(character)
                 || evidence.custodian() != owner
                 || evidence.strength() == crate::legal::EvidenceStrength::Weak
@@ -455,20 +468,18 @@ pub fn apply_autonomous_evidence_arrests(
             continue;
         }
 
-        // A candidate whose prerequisites drifted between the pre-filter and validation (a
-        // version bump from earlier same-pass work, a newly scheduled obligation) is skipped,
-        // not fatal: an autonomous pass must never abort the tick.
-        let Ok(arrest) = validate_arrest(
+        // Every modeled temporary blocker was filtered above. The remaining draft is assembled
+        // from current case/evidence state, so validation or allocation failure is exceptional
+        // and must surface rather than being mistaken for "not enough evidence yet".
+        let arrest = validate_arrest(
             state,
             ArrestDraft {
                 character,
                 investigation: investigation_id,
                 evidence: qualifying.into_iter().collect(),
             },
-        )
-        .and_then(|validated| validated.commit(state)) else {
-            continue;
-        };
+        )?
+        .commit(state)?;
         arrests.push(arrest);
     }
     Ok(arrests)

@@ -14,6 +14,9 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::informant_system::{informant_reliability, informant_strength};
+use crate::legal::legal_representation_system::{
+    ended_representation_summary, retained_representation_summary,
+};
 use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
     InvestigationWorkStatus, LegalRepresentationStatus,
@@ -132,7 +135,7 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             .legal
             .get_arrest(representation.arrest())
             .ok_or_else(invalid)?;
-        let _ = state
+        let defendant = state
             .world
             .get_character(representation.defendant())
             .ok_or_else(invalid)?;
@@ -200,6 +203,13 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             }
             (None, Some(_)) | (Some(_), None) => false,
         };
+        let expected_retained_summary = retained_representation_summary(
+            sponsor.name(),
+            counsel.name(),
+            firm.name(),
+            defendant.name(),
+            representation.fee(),
+        );
         let retained_report_is_valid = retained_report.recipient() == representation.sponsor()
             && retained_report.kind() == ReportKind::Legal
             && retained_report.title() == "Legal representation retained"
@@ -259,7 +269,7 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             || retained_information.reliability() != Reliability::DirectAccess
             || retained_information.specificity() != Specificity::Precise
             || !retained_information.derived_from().is_empty()
-            || retained_information.summary().trim().is_empty()
+            || retained_information.summary() != expected_retained_summary
             || !retained_report_is_valid
             || !payments.insert(representation.payment())
             || !information_ids.insert(representation.information())
@@ -304,6 +314,11 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
                     return Err(invalid());
                 };
                 let ended_entities = &ended_entry.entities;
+                let expected_ended_summary = ended_representation_summary(
+                    counsel.name(),
+                    defendant.name(),
+                    representation.end_reason().ok_or_else(invalid)?,
+                );
                 if representation.version() != 2
                     || ended_at < representation.retained_at()
                     || ended_at > state.now()
@@ -325,7 +340,7 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
                     || ended_information.reliability() != Reliability::DirectAccess
                     || ended_information.specificity() != Specificity::Precise
                     || !ended_information.derived_from().is_empty()
-                    || ended_information.summary().trim().is_empty()
+                    || ended_information.summary() != expected_ended_summary
                     || ended_report.recipient() != representation.sponsor()
                     || ended_report.kind() != ReportKind::Legal
                     || ended_report.title() != "Legal representation ended"

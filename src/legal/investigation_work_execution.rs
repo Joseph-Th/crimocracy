@@ -49,6 +49,11 @@ pub enum InvestigationWorkError {
     },
     #[error("scheduled investigation work {work} already covers this case focus")]
     DuplicateScheduledWork { work: InvestigationWorkId },
+    #[error("investigator {investigator} already has scheduled investigation work {work}")]
+    InvestigatorBusy {
+        investigator: CharacterId,
+        work: InvestigationWorkId,
+    },
     #[error("investigation evidence set is too large to persist as one work item")]
     SourceEvidenceCountOverflow,
     #[error(
@@ -142,6 +147,7 @@ impl ValidatedInvestigationWorkSchedule {
         }
         validate_case_and_investigator(state, self.draft.investigation, self.draft.investigator)?;
         validate_no_duplicate_work(state, self.draft)?;
+        validate_investigator_capacity(state, self.draft.investigator)?;
         // The investigation version snapshot above is authoritative for evidence-set
         // staleness: every evidence mutation bumps the investigation version, so no separate
         // source-set comparison is needed (and one could not report a meaningful
@@ -181,6 +187,7 @@ pub fn validate_schedule_investigation_work(
 ) -> Result<ValidatedInvestigationWorkSchedule, InvestigationWorkError> {
     validate_case_and_investigator(state, draft.investigation, draft.investigator)?;
     validate_no_duplicate_work(state, draft)?;
+    validate_investigator_capacity(state, draft.investigator)?;
     let source_evidence = resolve_work_sources(state, draft)?;
     let investigation = state
         .legal
@@ -320,6 +327,27 @@ fn validate_no_duplicate_work(
             .scheduled_work_for_focus(draft.investigation, draft.kind, draft.focus)
     {
         return Err(InvestigationWorkError::DuplicateScheduledWork { work: work.id() });
+    }
+    Ok(())
+}
+
+fn scheduled_work_for_investigator(
+    state: &AppState,
+    investigator: CharacterId,
+) -> Option<InvestigationWorkId> {
+    state
+        .legal
+        .work_for_investigator(investigator)
+        .find(|work| work.status() == InvestigationWorkStatus::Scheduled)
+        .map(|work| work.id())
+}
+
+fn validate_investigator_capacity(
+    state: &AppState,
+    investigator: CharacterId,
+) -> Result<(), InvestigationWorkError> {
+    if let Some(work) = scheduled_work_for_investigator(state, investigator) {
+        return Err(InvestigationWorkError::InvestigatorBusy { investigator, work });
     }
     Ok(())
 }
@@ -484,21 +512,76 @@ pub(crate) fn resolve_work_factors_and_margin(
     let source_evidence_count = u8::try_from(work.source_evidence().len())
         .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
     let difficulty = resolve_work_difficulty(definition, source_evidence_count);
-    let support_adjustment =
-        i16::from(source_support.value()) * i16::from(definition.source_support_weight()) / 100;
-    let margin =
-        i16::from(investigation_capability.value()) + support_adjustment + i16::from(variance)
-            - i16::from(difficulty);
+    let factors = InvestigationWorkFactors {
+        investigation_capability,
+        source_support,
+        source_evidence_count,
+        difficulty,
+        variance,
+    };
     Ok((
-        InvestigationWorkFactors {
-            investigation_capability,
-            source_support,
-            source_evidence_count,
-            difficulty,
-            variance,
-        },
-        margin,
+        factors,
+        resolve_work_margin_from_factors(definition, factors),
     ))
+}
+
+/// Recomputes only the arithmetic encoded by a frozen work-factor snapshot. Historical
+/// validation uses this instead of asking mutable world state what the source support is now.
+pub(crate) fn resolve_work_margin_from_factors(
+    definition: &InvestigationWorkDefinition,
+    factors: InvestigationWorkFactors,
+) -> i16 {
+    let support_adjustment = i16::from(factors.source_support().value())
+        * i16::from(definition.source_support_weight())
+        / 100;
+    i16::from(factors.investigation_capability().value())
+        + support_adjustment
+        + i16::from(factors.variance())
+        - i16::from(factors.difficulty())
+}
+
+/// Validates a completed work record against the authored rules without rewriting history from
+/// mutable present-day facts. Evidence assessments and investigator capabilities are immutable in
+/// the current model and can still be re-derived. Witness cooperation is deliberately mutable, so
+/// an interview's persisted support is validated as one of the canonical cooperation bands rather
+/// than compared with the witness's current attitude.
+pub(crate) fn validate_historical_work_factors(
+    definition: &InvestigationWorkDefinition,
+    state: &AppState,
+    work: &InvestigationWorkRecord,
+    factors: InvestigationWorkFactors,
+) -> Result<i16, InvestigationWorkError> {
+    let investigator = state.world.get_character(work.investigator()).ok_or(
+        InvestigationWorkError::MissingInvestigator(work.investigator()),
+    )?;
+    let investigation_capability = investigator
+        .capability(CapabilityKind::Investigation)
+        .ok_or(InvestigationWorkError::MissingInvestigationCapability(
+            work.investigator(),
+        ))?;
+    let source_evidence_count = u8::try_from(work.source_evidence().len())
+        .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
+    let expected_difficulty = resolve_work_difficulty(definition, source_evidence_count);
+    let support_valid = match work.kind() {
+        InvestigationWorkKind::EvidenceReview => {
+            factors.source_support() == resolve_source_support(state, work)?
+        }
+        InvestigationWorkKind::WitnessInterview => [
+            WitnessCooperation::Hostile,
+            WitnessCooperation::Reluctant,
+            WitnessCooperation::Cooperative,
+        ]
+        .into_iter()
+        .any(|cooperation| factors.source_support() == witness_cooperation_support(cooperation)),
+    };
+    if factors.investigation_capability() != investigation_capability
+        || factors.source_evidence_count() != source_evidence_count
+        || factors.difficulty() != expected_difficulty
+        || !support_valid
+    {
+        return Err(InvestigationWorkError::StaleResolutionContext { work: work.id() });
+    }
+    Ok(resolve_work_margin_from_factors(definition, factors))
 }
 
 pub(crate) fn resolve_source_support(
@@ -515,12 +598,7 @@ pub(crate) fn resolve_source_support(
             .legal
             .get_case_witness(case_witness)
             .ok_or(InvestigationWorkError::InvalidFocus)?;
-        let score = match witness.cooperation() {
-            WitnessCooperation::Hostile => 20_u8,
-            WitnessCooperation::Reluctant => 50,
-            WitnessCooperation::Cooperative => 85,
-        };
-        return Rating::try_new(score).map_err(|_| InvestigationWorkError::InvalidFocus);
+        return Ok(witness_cooperation_support(witness.cooperation()));
     }
     let mut total = 0_u32;
     let mut count = 0_u32;
@@ -543,6 +621,15 @@ pub(crate) fn resolve_source_support(
         Rating::try_new(u8::try_from(average).expect("evidence support average must fit u8"))
             .expect("bounded evidence support average must be a valid rating"),
     )
+}
+
+fn witness_cooperation_support(cooperation: WitnessCooperation) -> Rating {
+    let score = match cooperation {
+        WitnessCooperation::Hostile => 20,
+        WitnessCooperation::Reluctant => 50,
+        WitnessCooperation::Cooperative => 85,
+    };
+    Rating::try_new(score).expect("canonical witness support scores are valid ratings")
 }
 
 fn strength_score(strength: EvidenceStrength) -> u8 {
@@ -789,25 +876,15 @@ pub fn apply_witness_interview_scheduling(
             .legal
             .get_investigation(investigation_id)
             .expect("indexed active investigation must exist");
-        // Deterministic investigator choice: the lead when present and available, otherwise
-        // the lowest assigned ID. Detained investigators are skipped so an autonomous pass
-        // never schedules work they could not perform; cases without an available
-        // investigator wait for a later minute or the staffing pass.
-        let lead = investigation.lead_investigator();
-        let investigator: Option<CharacterId> =
-            if lead.is_some_and(|lead| state.legal.active_arrest_for_character(lead).is_none()) {
-                lead
-            } else {
-                // The lead is detained or absent; fall through to the lowest assigned ID.
-                investigation
-                    .assigned_investigators()
-                    .iter()
-                    .copied()
-                    .find(|id| state.legal.active_arrest_for_character(*id).is_none())
-            };
+        let investigator = available_case_investigator(state, investigation);
         let Some(investigator) = investigator else {
             continue;
         };
+        // Investigation work has authored duration and occupies the case's single detective.
+        // A busy lead finishes that work before beginning another task on the case.
+        if scheduled_work_for_investigator(state, investigator).is_some() {
+            continue;
+        }
         let witnesses: Vec<_> = state
             .legal
             .case_witnesses_for_investigation(investigation_id)
@@ -836,10 +913,10 @@ pub fn apply_witness_interview_scheduling(
             {
                 continue;
             }
-            // An autonomous pass must not abort the tick: a canonical rejection (for example
-            // an investigator detained between selection and validation) leaves this witness
-            // for a later minute, like the staffing pass's unstaffed cases.
-            let Ok(work) = validate_schedule_investigation_work(
+            // The case, available investigator, witness attempt budget, and duplicate-focus
+            // predicate all came from current authoritative state. A canonical rejection now
+            // is a state/allocator failure, not an ordinary "try again later" outcome.
+            let work = validate_schedule_investigation_work(
                 registry,
                 state,
                 InvestigationWorkDraft {
@@ -848,64 +925,107 @@ pub fn apply_witness_interview_scheduling(
                     kind: InvestigationWorkKind::WitnessInterview,
                     focus,
                 },
-            ) else {
-                continue;
-            };
-            let Ok(work) = work.commit(state) else {
-                continue;
-            };
+            )?
+            .commit(state)?;
             scheduled.push(work);
+            // The work just scheduled occupies this investigator. Remaining witnesses stay
+            // eligible and are considered again after it resolves, in stable witness-ID order.
+            break;
         }
     }
     Ok(scheduled)
 }
 
+/// The investigator an autonomous casework scheduler may currently use. The lead owns the
+/// single modeled case seat; the assigned-ID fallback preserves old persisted assignments that
+/// may temporarily lack a lead while remaining deterministic. Detention pauses work rather than
+/// silently assigning a different institution or character.
+fn available_case_investigator(
+    state: &AppState,
+    investigation: &crate::legal::InvestigationRecord,
+) -> Option<CharacterId> {
+    let lead = investigation.lead_investigator();
+    if lead.is_some_and(|lead| state.legal.active_arrest_for_character(lead).is_none()) {
+        return lead;
+    }
+    investigation
+        .assigned_investigators()
+        .iter()
+        .copied()
+        .find(|id| state.legal.active_arrest_for_character(*id).is_none())
+}
+
 pub(crate) fn apply_initial_evidence_reviews(
     registry: &Registry,
     state: &mut AppState,
-    staffed: &[(InvestigationId, CharacterId)],
-) -> Vec<InvestigationWorkId> {
+) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
+    // Evidence can enter a case long after staffing through incident intake, informants, or
+    // explicit evidence additions. Scan the active-case index every minute instead of only the
+    // cases staffed this minute, otherwise a staffed case that initially had no reviewable
+    // evidence can remain permanently inert after useful evidence later arrives.
+    let investigations: Vec<InvestigationId> = state
+        .legal
+        .active_investigations()
+        .map(|investigation| investigation.id())
+        .collect();
     let mut scheduled = Vec::new();
-    for (investigation_id, investigator) in staffed {
+    for investigation_id in investigations {
+        let investigation = state
+            .legal
+            .get_investigation(investigation_id)
+            .expect("indexed active investigation must exist");
+        let Some(investigator) = available_case_investigator(state, investigation) else {
+            continue;
+        };
+        // A case's single detective cannot perform overlapping authored-duration tasks. Since
+        // this phase runs before witness scheduling, a newly available case starts its evidence
+        // review first; evidence that arrives during an interview waits until that interview ends.
+        if scheduled_work_for_investigator(state, investigator).is_some() {
+            continue;
+        }
+        // "Initial" means one evidence-review work item for the case, not "the first work of
+        // any kind". A pending or completed witness interview must not consume this lane.
         if state
             .legal
-            .work_for_investigation(*investigation_id)
-            .next()
-            .is_some()
+            .work_for_investigation(investigation_id)
+            .any(|work| work.kind() == InvestigationWorkKind::EvidenceReview)
         {
             continue;
         }
-        let source = state
-            .legal
-            .get_investigation(*investigation_id)
-            .into_iter()
-            .flat_map(|investigation| investigation.evidence().iter())
-            .filter_map(|id| state.legal.get_evidence(*id))
-            .find(|evidence| is_reviewable_evidence_kind(evidence.kind()))
-            .map(|evidence| evidence.id());
+        let mut source = None;
+        for evidence_id in investigation.evidence() {
+            // The investigation owns this evidence reference. A missing backing record is a
+            // broken case graph, not "no reviewable evidence yet"; surface it at the autonomous
+            // consumer instead of silently deferring until end-of-tick invariant validation.
+            let evidence = state
+                .legal
+                .get_evidence(*evidence_id)
+                .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
+            if is_reviewable_evidence_kind(evidence.kind()) {
+                source = Some(evidence.id());
+                break;
+            }
+        }
         let Some(source) = source else {
             continue;
         };
-        // An autonomous pass must not abort the tick: like witness-interview scheduling, a
-        // canonical rejection leaves this case's initial review for a later minute.
-        let Ok(work) = validate_schedule_investigation_work(
+        // Every dependency above came from current authoritative indexes. A canonical
+        // rejection here therefore signals broken state or allocator capacity and must surface
+        // rather than erasing the case's only route into evidence review.
+        let work = validate_schedule_investigation_work(
             registry,
             state,
             InvestigationWorkDraft {
-                investigation: *investigation_id,
-                investigator: *investigator,
+                investigation: investigation_id,
+                investigator,
                 kind: InvestigationWorkKind::EvidenceReview,
                 focus: InvestigationWorkFocus::evidence(source),
             },
-        ) else {
-            continue;
-        };
-        let Ok(work) = work.commit(state) else {
-            continue;
-        };
+        )?
+        .commit(state)?;
         scheduled.push(work);
     }
-    scheduled
+    Ok(scheduled)
 }
 
 pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {

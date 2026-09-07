@@ -1,8 +1,6 @@
 //! Casework validation: investigations, scheduled detective work, witnesses and statements,
 //! and the evidence graph they produce.
 
-//! Release-safe structural validation for the legal subsystems plus persisted reports and history.
-
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
@@ -166,6 +164,7 @@ pub(super) fn validate_investigation_work_records(
     state: &AppState,
     derived_evidence_from_work: &mut BTreeSet<EvidenceId>,
 ) -> Result<(), StateValidationError> {
+    let mut scheduled_investigators = BTreeSet::new();
     for work in state.legal.investigation_work() {
         let investigation = state
             .legal
@@ -219,6 +218,7 @@ pub(super) fn validate_investigation_work_records(
             InvestigationWorkStatus::Scheduled => {
                 if work.version() != 1
                     || work.resolution().is_some()
+                    || !scheduled_investigators.insert(work.investigator())
                     || investigation.status() != InvestigationStatus::Active
                     || !investigation
                         .assigned_investigators()

@@ -896,6 +896,24 @@ struct ReferralArtifactContext<'a> {
     initial: bool,
 }
 
+pub(crate) fn prosecution_referral_summary(
+    source_authority: &str,
+    defendant: &str,
+    prosecutor_office: &str,
+    evidence_count: usize,
+    initial: bool,
+) -> String {
+    if initial {
+        format!(
+            "{source_authority} referred the arrest matter for {defendant} to {prosecutor_office}, sharing {evidence_count} evidence record(s)."
+        )
+    } else {
+        format!(
+            "{source_authority} supplemented the prosecution matter for {defendant} with {evidence_count} additional evidence record(s)."
+        )
+    }
+}
+
 fn validate_referral_artifacts(
     state: &AppState,
     context: ReferralArtifactContext<'_>,
@@ -925,22 +943,13 @@ fn validate_referral_artifacts(
         .get_organization(prosecutor_office)
         .expect("validated prosecutor office must exist")
         .name();
-    let summary = if initial {
-        format!(
-            "{} referred the arrest matter for {} to {}, sharing {} evidence record(s).",
-            source_name,
-            defendant_name,
-            office_name,
-            evidence.len(),
-        )
-    } else {
-        format!(
-            "{} supplemented the prosecution matter for {} with {} additional evidence record(s).",
-            source_name,
-            defendant_name,
-            evidence.len(),
-        )
-    };
+    let summary = prosecution_referral_summary(
+        source_name,
+        defendant_name,
+        office_name,
+        evidence.len(),
+        initial,
+    );
     let information = validate_record_information(
         state,
         InformationDraft {

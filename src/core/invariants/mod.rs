@@ -18,7 +18,7 @@ use crate::core::state::AppState;
 use crate::core::state::CURRENT_STATE_SCHEMA_VERSION;
 use crate::decisions::DecisionResponse;
 use crate::enterprises::EnterpriseLocation;
-use crate::legal::investigation_work_execution::resolve_work_factors_and_margin;
+use crate::legal::investigation_work_execution::validate_historical_work_factors;
 use crate::legal::{InvestigationWorkKind, InvestigationWorkOutcome};
 use crate::operations::operation_economics::resolve_property_proceeds;
 use crate::operations::operation_execution::{
@@ -820,20 +820,17 @@ fn validate_investigation_work_against_registry(
             continue;
         };
         let factors = resolution.factors();
-        let (expected_factors, expected_margin) =
-            resolve_work_factors_and_margin(definition, state, work, factors.variance())
-                .map_err(|_| StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-        if factors != expected_factors
-            || factors.variance().unsigned_abs() > definition.variance_limit()
+        let expected_margin = validate_historical_work_factors(definition, state, work, factors)
+            .map_err(|_| StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+        if factors.variance().unsigned_abs() > definition.variance_limit()
             || resolution.margin() != expected_margin
         {
             return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
         }
         match resolution.outcome() {
             InvestigationWorkOutcome::Connected => {
-                // Only a witness interview resolves as Connected; its economics were
-                // re-derived above and its testimony provenance is checked in
-                // `invariants::legal`.
+                // Only a witness interview resolves as Connected; its frozen arithmetic was
+                // validated above and its testimony provenance is checked in `invariants::legal`.
                 if work.kind() != InvestigationWorkKind::WitnessInterview
                     || expected_margin < definition.connected_margin()
                 {
@@ -875,24 +872,34 @@ fn validate_business_cycles_against_registry(
             .get_business(cycle.business())
             .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
         let economics = registry.get_business(business.kind()).economics();
+        let (expected_gross, expected_cost, expected_net) =
+            crate::economy::business_economy_system::resolve_historical_business_cycle_financials(
+                registry, state, cycle,
+            )
+            .map_err(|_| StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        // Every authored financial value must agree with the production arithmetic. Structural
+        // validation already proves net = gross - cost and that the ledger mirrors net; this
+        // registry-aware pass additionally proves those internally coherent numbers are the ones
+        // the authored business/district economics and historical disruption input can produce.
+        if cycle.gross_revenue() != expected_gross
+            || cycle.operating_cost() != expected_cost
+            || cycle.net_cash() != expected_net
+        {
+            return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+        }
         // Notability must agree with the production rule in `business_economy_system`: a
-        // notable variance or a net-losing settlement is accountant-worthy.
+        // notable variance, a net-losing settlement, or disruption that actually applied to
+        // this historical cycle is accountant-worthy.
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
-        let disrupted = state
-            .economy
-            .get_business_economy(cycle.business())
-            .is_some_and(|economy| economy.is_disrupted(cycle.occurred_at()));
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
             || cycle.net_cash() < crate::finance::Money::ZERO
-            || disrupted
+            || cycle.disrupted()
         {
             AttentionClass::Notable
         } else {
             AttentionClass::Routine
         };
-        if variance > u32::from(economics.gross_variance_basis_points())
-            || cycle.attention() != expected_attention
-        {
+        if cycle.attention() != expected_attention {
             return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
         }
     }
@@ -952,6 +959,16 @@ fn validate_enterprises_against_registry(
             .get_enterprise(cycle.enterprise())
             .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
         let economics = registry.get_enterprise(enterprise.kind()).economics();
+        let (expected_gross, expected_cost, expected_net) = crate::enterprises::enterprise_execution::resolve_historical_enterprise_cycle_financials(
+            registry, state, cycle,
+        )
+        .map_err(|_| StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+        if cycle.gross_revenue() != expected_gross
+            || cycle.operating_cost() != expected_cost
+            || cycle.net_cash() != expected_net
+        {
+            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+        }
         let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
         // Notability must agree with the production rule in `enterprise_execution`: a notable
         // variance, a net-losing settlement, a drawn vice inquiry, or street heat that appeared

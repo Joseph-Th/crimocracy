@@ -18,7 +18,9 @@ use crate::legal::{EvidenceDraft, InvestigationDraft};
 use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
 };
-use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use crate::world::{
+    AutonomyLevel, CharacterDraft, DriveKind, OrganizationDraft, OrganizationKind, Rating,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -475,6 +477,97 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     );
     validate_state(&fixture.state).expect("post-pass state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn informant_id_exhaustion_rejects_before_consuming_recruitment_rng() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let detainee = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "High Safety Detainee".to_owned(),
+            organization: Some(fixture.criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::from([(
+                DriveKind::Safety,
+                Rating::try_new(100).expect("maximum Safety drive should validate"),
+            )]),
+        },
+    )
+    .expect("high-Safety detainee should validate");
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Allocator exhaustion custody inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detainee)]),
+        },
+    )
+    .expect("subject case should validate")
+    .commit(&mut fixture.state)
+    .expect("subject case should commit");
+    let evidence = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("case evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("case evidence should commit");
+    crate::legal::arrest_system::validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: detainee,
+            investigation: case,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("custody arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("custody arrest should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().informant_decision_delay().as_minutes(),
+    ));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Informant, u32::MAX);
+    let mut untouched = fixture.state.clone();
+
+    let error = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
+        .expect_err("a successful flip must surface informant allocator exhaustion");
+    assert!(matches!(
+        error,
+        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "informant",
+            ..
+        })
+    ));
+    assert_eq!(fixture.state.legal().informants().count(), 0);
+
+    let after_failure =
+        crate::core::simulation::draw_index(fixture.state.investigation_rng_mut(), 100)
+            .expect("comparison draw should succeed");
+    let untouched_draw =
+        crate::core::simulation::draw_index(untouched.investigation_rng_mut(), 100)
+            .expect("control draw should succeed");
+    assert_eq!(
+        after_failure, untouched_draw,
+        "a rejected informant establishment must not advance the investigation RNG"
+    );
 }
 
 #[test]

@@ -478,7 +478,10 @@ fn resolve_contact_kind(
 /// Whether both human endpoints of the channel are out of custody. The pending-disclosure
 /// offer surface and the disclosure commit gate share this rule so their answers can never
 /// disagree.
-fn are_channel_endpoints_available(state: &AppState, contact: &InstitutionalContactRecord) -> bool {
+pub(crate) fn are_channel_endpoints_available(
+    state: &AppState,
+    contact: &InstitutionalContactRecord,
+) -> bool {
     state
         .legal
         .active_arrest_for_character(contact.handler())

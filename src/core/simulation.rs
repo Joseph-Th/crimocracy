@@ -1,12 +1,12 @@
 //! Deterministic top-level simulation tick and state-owned random decision helpers.
 //!
-//! `run_tick` is the only authoritative minute (14 phases, contractual order).
+//! `run_tick` is the only authoritative minute (contractual phase order).
 //! See `AGENTS.md:§7` for the phase diagram and `ARCHITECTURE.md` for the tower.
 //! New autonomous work must slot explicitly here with a "runs after X so Y" comment.
 
 use crate::core::id::{
     BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,
-    OperationId, OpportunityId, OrganizationId, PoliceResponseId, RecruitmentAttemptId, ReportId,
+    OperationId, OpportunityId, PoliceResponseId, RecruitmentAttemptId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
@@ -90,8 +90,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
-    let scheduled_investigation_work =
-        apply_initial_evidence_reviews(registry, state, &staffed_investigations);
+    // Initial evidence review scans every active staffed case, not only cases staffed this
+    // minute: evidence can arrive later through incident intake or disclosure and must still
+    // enter institutional casework instead of becoming inert case history.
+    let scheduled_investigation_work = apply_initial_evidence_reviews(registry, state)
+        .expect("valid state should schedule first reviewable evidence for active staffed cases");
     // Witness interviews are scheduled after evidence reviews so a witness registered by an
     // operation resolving earlier in this same minute is interviewable as soon as its case
     // has an investigator.
@@ -131,15 +134,18 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
     // already in place when a rival pitches them.
-    let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state);
-    let recruitment = apply_due_autonomous_recruitment(registry, state);
+    let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
+        .expect("valid state should settle every due criminal-organization payroll");
+    let recruitment = apply_due_autonomous_recruitment(registry, state)
+        .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     let recruitment_approval_requests = recruitment.approval_requests;
     // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
     // minute governs with its current roster. Selection consumes no randomness, so matched
     // branches observe identical rival growth unless their own actions touched rival state.
     let autonomous_enterprises =
-        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state);
+        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state)
+            .expect("valid state should resolve every due autonomous enterprise expansion");
     apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
@@ -399,19 +405,21 @@ fn apply_reputation_phase(
         )
         .expect("valid state should apply operation reputation consequences");
     }
-    let vice_inquiry_owners: Vec<OrganizationId> = enterprise_cycles
-        .iter()
-        .filter_map(|cycle_id| {
-            let cycle = state.enterprises().get_cycle(*cycle_id)?;
-            if !cycle.drew_vice_attention() {
-                return None;
-            }
-            state
-                .enterprises()
-                .get_enterprise(cycle.enterprise())
-                .map(|enterprise| enterprise.organization())
-        })
-        .collect();
+    let mut vice_inquiry_owners = Vec::new();
+    for cycle_id in enterprise_cycles {
+        let cycle = state
+            .enterprises()
+            .get_cycle(*cycle_id)
+            .expect("settled enterprise cycle must exist for reputation consequences");
+        if !cycle.drew_vice_attention() {
+            continue;
+        }
+        let enterprise = state
+            .enterprises()
+            .get_enterprise(cycle.enterprise())
+            .expect("settled enterprise cycle must reference its enterprise");
+        vice_inquiry_owners.push(enterprise.organization());
+    }
     for organization in vice_inquiry_owners {
         crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
             registry,

@@ -99,6 +99,9 @@ pub(super) struct BusinessCycleFinancials {
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+    /// Whether sabotage damage actually applied to this settlement. Persisted on the cycle so
+    /// later disruptions cannot rewrite historical economics during invariant validation.
+    disrupted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,6 +146,9 @@ impl BusinessCycleRecord {
     }
     pub fn variance_basis_points(&self) -> i16 {
         self.financials.variance_basis_points
+    }
+    pub fn disrupted(&self) -> bool {
+        self.financials.disrupted
     }
     pub fn attention(&self) -> AttentionClass {
         self.artifacts.attention

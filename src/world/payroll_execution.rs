@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-enum PayrollError {
+pub(crate) enum PayrollError {
     #[error("payroll member count exceeds supported range")]
     MemberCountOverflow,
     #[error("payroll arithmetic overflowed")]
@@ -79,9 +79,16 @@ fn is_payroll_due(now: SimTime) -> bool {
 /// Autonomous payroll pass over every active criminal organization, in stable organization-ID
 /// order. A short treasury is distributed evenly across active members, to the cent, instead of
 /// turning an almost-funded payroll into a total nonpayment. Financial mutation remains atomic.
-pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<PayrollOutcome> {
+///
+/// Unexpected validation or allocation failures are propagated. Silently skipping an owed
+/// payroll would forgive that day's wage obligation while still advancing campaign time, which
+/// is neither retryable nor causally coherent.
+pub(crate) fn apply_daily_payroll(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<PayrollOutcome>, PayrollError> {
     if !is_payroll_due(state.now()) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let organizations: Vec<OrganizationId> = state
         .world
@@ -91,26 +98,17 @@ pub fn apply_daily_payroll(registry: &Registry, state: &mut AppState) -> Vec<Pay
         .collect();
     let mut outcomes = Vec::with_capacity(organizations.len());
     for organization in organizations {
-        let outcome = match apply_organization_payroll(
+        let outcome = apply_organization_payroll(
             registry,
             state,
             organization,
             &find_funding_accounts(state, organization),
-        ) {
-            Ok(outcome) => outcome,
-            Err(_error) => {
-                // Payroll is autonomous routine work. A ledger or allocation failure for one
-                // organization must not crash the whole tick; the invariant suite will flag
-                // the underlying state inconsistency, and payroll retries next day boundary.
-                // No stderr side effect: external effects stay behind adapter boundaries.
-                continue;
-            }
-        };
+        )?;
         if let Some(outcome) = outcome {
             outcomes.push(outcome);
         }
     }
-    outcomes
+    Ok(outcomes)
 }
 
 fn apply_organization_payroll(

@@ -132,7 +132,8 @@ fn funded_payroll_moves_wages_into_member_pockets() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let outcomes = apply_daily_payroll(&registry, &mut fixture.state);
+    let outcomes =
+        apply_daily_payroll(&registry, &mut fixture.state).expect("funded payroll should settle");
 
     assert_eq!(outcomes.len(), 1);
     let outcome = &outcomes[0];
@@ -191,7 +192,8 @@ fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let outcomes = apply_daily_payroll(&registry, &mut fixture.state);
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("short payroll should settle proportionally");
 
     let outcome = outcomes
         .iter()
@@ -247,6 +249,7 @@ fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
     let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("one-cent-short payroll should settle")
         .into_iter()
         .find(|outcome| outcome.organization() == fixture.organization)
         .expect("staffed organization must run payroll");
@@ -308,7 +311,8 @@ fn repeated_shortfalls_clamp_resentment_at_the_authored_rail() {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-        apply_daily_payroll(&registry, &mut fixture.state);
+        apply_daily_payroll(&registry, &mut fixture.state)
+            .expect("repeated shortfall payroll should settle");
     }
     let at_rail = fixture
         .state
@@ -322,7 +326,8 @@ fn repeated_shortfalls_clamp_resentment_at_the_authored_rail() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    apply_daily_payroll(&registry, &mut fixture.state);
+    apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("clamped shortfall payroll should settle");
     let clamped = fixture
         .state
         .social
@@ -346,7 +351,8 @@ fn organization_without_any_funding_accounts_still_incurs_full_shortfall() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let outcomes = apply_daily_payroll(&registry, &mut fixture.state);
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("unfunded payroll should still record the shortfall");
 
     let outcome = outcomes
         .iter()
@@ -380,7 +386,8 @@ fn shortfall_reports_once_to_the_player_organization_only() {
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
 
-    let outcomes = apply_daily_payroll(&registry, &mut fixture.state);
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("player shortfall payroll should settle and report");
     assert!(!outcomes.is_empty());
 
     let payroll_reports: Vec<_> = fixture

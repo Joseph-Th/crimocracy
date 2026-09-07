@@ -2,8 +2,10 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::invariants::{
+    validate_invariants, validate_state, validate_state_against_registry,
+};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
     DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
@@ -11,14 +13,16 @@ use crate::decisions::decision_system::{
 use crate::decisions::{
     DecisionContext, DecisionResponse, DecisionStatus, RecruitmentApprovalRequestDraft,
 };
-use crate::delegation::delegation_system::validate_assign_mandate;
+use crate::delegation::delegation_system::{validate_assign_mandate, validate_revoke_mandate};
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
 use crate::reports::ReportKind;
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
-use crate::world::world_system::{insert_character, insert_organization, set_policy};
+use crate::world::world_system::{
+    insert_character, insert_organization, set_policy, validate_reassign_character,
+};
 use crate::world::{
     ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
     PolicyKind, PolicySetting, Rating,
@@ -33,6 +37,39 @@ struct Fixture {
     incumbent: CharacterId,
     recruiter: CharacterId,
     candidate: CharacterId,
+}
+
+fn tamper_serialized_summary(
+    envelope: SaveEnvelope,
+    summary: &str,
+    expected_occurrences: usize,
+) -> SaveEnvelope {
+    assert!(!summary.is_empty());
+    assert!(
+        summary.is_ascii(),
+        "fixture summaries must be byte-stable ASCII"
+    );
+    let needle = summary.as_bytes();
+    let mut bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let mut cursor = 0;
+    let mut replaced = 0;
+    while cursor + needle.len() <= bytes.len() {
+        let Some(relative) = bytes[cursor..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        else {
+            break;
+        };
+        let start = cursor + relative;
+        bytes[start..start + needle.len()].fill(b'X');
+        cursor = start + needle.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, expected_occurrences,
+        "test must corrupt exactly the intended persisted summary copies"
+    );
+    bincode::deserialize(&bytes).expect("equal-length summary corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -283,11 +320,13 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
         .advance_clock(SimDuration::from_minutes(1_439));
     assert!(
         apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+            .expect("non-due autonomous recruitment should still validate")
             .attempts
             .is_empty()
     );
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
-    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("due autonomous recruitment should validate");
     let attempts = outcome.attempts;
     assert_eq!(attempts.len(), 1);
     let attempt = fixture
@@ -310,10 +349,60 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     ));
     assert!(
         apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+            .expect("post-cadence autonomous recruitment should validate")
             .attempts
             .is_empty()
     );
     validate_state(&fixture.state).expect("autonomous recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn failed_delegated_autonomous_recruitment_does_not_consume_selection_rng() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::RecruitmentAttempt, u32::MAX);
+    let mut untouched = fixture.state.clone();
+
+    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect_err("attempt allocator exhaustion must reject autonomous recruitment");
+    assert!(matches!(
+        error,
+        AutonomousRecruitmentError::Recruitment(RecruitmentError::IdExhaustion(
+            crate::core::id::IdExhaustionError::Exhausted {
+                kind: "recruitment attempt",
+                ..
+            }
+        ))
+    ));
+    assert_eq!(fixture.state.recruitment().attempts().count(), 0);
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist after rejected autonomous attempt")
+            .organization(),
+        Some(fixture.source)
+    );
+
+    let after_failure =
+        crate::core::simulation::draw_index(fixture.state.recruitment_rng_mut(), 100)
+            .expect("comparison draw should succeed");
+    let untouched_draw = crate::core::simulation::draw_index(untouched.recruitment_rng_mut(), 100)
+        .expect("control draw should succeed");
+    assert_eq!(
+        after_failure, untouched_draw,
+        "a rejected autonomous attempt must not advance the recruitment RNG"
+    );
+    validate_state(&fixture.state).expect("rejected autonomous recruitment must leave valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -926,6 +1015,173 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
 }
 
 #[test]
+fn recruitment_outcome_information_rejects_unauthored_persisted_summary() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(15, 25, 20, 10, 20, 75, 0),
+    )
+    .expect("incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    let attempt = validate_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        protection_draft(&fixture),
+    )
+    .expect("accepted recruitment should validate")
+    .commit(&mut fixture.state)
+    .expect("accepted recruitment should commit");
+    let summary = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("attempt should persist")
+        .outcome_information();
+    let summary = fixture
+        .state
+        .intelligence()
+        .get_information(summary)
+        .expect("recruitment outcome information should persist")
+        .summary()
+        .to_owned();
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid recruitment outcome should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 1);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten recruitment outcome must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: invalid,
+                }
+            ) if invalid == attempt
+        ),
+        "expected invalid recruitment attempt, got {error:?}"
+    );
+}
+
+#[test]
+fn accepted_recruitment_history_rejects_unauthored_persisted_summary() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(15, 25, 20, 10, 20, 75, 0),
+    )
+    .expect("incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    let attempt = validate_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        protection_draft(&fixture),
+    )
+    .expect("accepted recruitment should validate")
+    .commit(&mut fixture.state)
+    .expect("accepted recruitment should commit");
+    let history = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("attempt should persist")
+        .history_event()
+        .expect("accepted recruitment should persist history");
+    let summary = fixture
+        .state
+        .history()
+        .get_event(history)
+        .expect("accepted recruitment history should persist")
+        .summary()
+        .to_owned();
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid recruitment history should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 1);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten recruitment history must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: invalid,
+                }
+            ) if invalid == attempt
+        ),
+        "expected invalid recruitment attempt, got {error:?}"
+    );
+}
+
+#[test]
+fn later_reassignment_does_not_rewrite_accepted_recruitment_history() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(15, 25, 20, 10, 20, 75, 0),
+    )
+    .expect("incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    let attempt = validate_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        protection_draft(&fixture),
+    )
+    .expect("accepted recruitment should validate")
+    .commit(&mut fixture.state)
+    .expect("accepted recruitment should commit");
+    let resulting_version = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("accepted attempt should persist")
+        .resulting_candidate_version();
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .version(),
+        resulting_version
+    );
+
+    validate_reassign_character(
+        &fixture.state,
+        fixture.candidate,
+        Some(fixture.source),
+        Some(fixture.incumbent),
+    )
+    .expect("a later canonical membership change should be allowed")
+    .commit(&mut fixture.state)
+    .expect("later membership change should commit");
+    validate_state(&fixture.state)
+        .expect("later membership must not invalidate accepted recruitment history");
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("accepted recruitment history must remain registry-valid after reassignment");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("reassigned accepted-recruitment state should save"),
+    )
+    .expect("reassigned accepted-recruitment state should restore");
+    assert!(restored.recruitment().get_attempt(attempt).is_some());
+    assert!(
+        restored
+            .world()
+            .get_character(fixture.candidate)
+            .expect("restored candidate should persist")
+            .version()
+            > resulting_version
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn persisted_relationship_snapshots_keep_recruitment_history_valid_after_social_change() {
     let mut fixture = fixture();
     let recruiter_dimensions = relationship(55, 65, 10, 35, 15, 5, 10);
@@ -1042,6 +1298,68 @@ fn strong_incumbent_attachment_can_produce_refusal_without_membership_mutation()
         None
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn later_reassignment_does_not_rewrite_refused_recruitment_history() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state);
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    let attempt = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("refused recruitment should validate")
+        .commit(&mut fixture.state)
+        .expect("refused recruitment should persist");
+    let resulting_version = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("refused attempt should persist")
+        .resulting_candidate_version();
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .version(),
+        resulting_version,
+        "refusal itself performs no membership reassignment"
+    );
+
+    validate_reassign_character(&fixture.state, fixture.candidate, None, None)
+        .expect("a later canonical departure should be allowed")
+        .commit(&mut fixture.state)
+        .expect("later departure should commit");
+    validate_state(&fixture.state)
+        .expect("later departure must not invalidate refused recruitment history");
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("refused recruitment history must remain registry-valid after departure");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("reassigned refused-recruitment state should save"),
+    )
+    .expect("reassigned refused-recruitment state should restore");
+    assert!(restored.recruitment().get_attempt(attempt).is_some());
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -1310,9 +1628,11 @@ fn require_approval_manager_autonomously_raises_and_leadership_resolves_its_own_
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
-    // A non-player organization resolves its own queue in-pass: the pitch the assessment
-    // says will land is approved and executed with the ApprovedDecision authority.
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("autonomous approval should resolve atomically");
+    // A non-player organization resolves its own queue in-pass. Leadership approves the
+    // manager's proposal without consulting the candidate's future response, and this fixture's
+    // actual pitch then succeeds under the ApprovedDecision authority.
     assert_eq!(outcome.approval_requests.len(), 1);
     assert_eq!(outcome.attempts.len(), 1);
     let decision = fixture
@@ -1356,6 +1676,122 @@ fn require_approval_manager_autonomously_raises_and_leadership_resolves_its_own_
 }
 
 #[test]
+fn npc_approval_does_not_oracle_candidate_refusal() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state);
+
+    let autonomous_draft = RecruitmentDraft {
+        target_organization: fixture.target,
+        recruiter: fixture.recruiter,
+        candidate: fixture.candidate,
+        approach: RecruitmentApproach::PersonalAppeal,
+    };
+    let plan = decide_recruitment_attempt(&registry, &fixture.state, autonomous_draft)
+        .expect("the manager may still make a weak recruitment pitch");
+    assert_eq!(plan.context.outcome, RecruitmentOutcome::Refused);
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("NPC approval and refused pitch should resolve atomically");
+    assert_eq!(outcome.approval_requests.len(), 1);
+    assert_eq!(outcome.attempts.len(), 1);
+    let decision = fixture
+        .state
+        .decisions()
+        .get_decision(outcome.approval_requests[0])
+        .expect("NPC approval should persist");
+    assert_eq!(decision.status(), DecisionStatus::Resolved);
+    assert_eq!(
+        decision
+            .resolution()
+            .expect("NPC approval should carry a resolution")
+            .response(),
+        DecisionResponse::Approve
+    );
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("the approved pitch should persist even when refused");
+    assert_eq!(attempt.outcome(), RecruitmentOutcome::Refused);
+    assert!(matches!(
+        attempt.authority(),
+        RecruitmentAuthority::ApprovedDecision {
+            policy: ApprovalPolicy::RequireApproval,
+            ..
+        }
+    ));
+    let candidate = fixture
+        .state
+        .world()
+        .get_character(fixture.candidate)
+        .expect("refusing candidate should persist");
+    assert_eq!(candidate.organization(), Some(fixture.source));
+    assert_eq!(candidate.supervisor(), Some(fixture.incumbent));
+
+    // The approval and refused pitch are historical after this point. Revoking their authority
+    // releases the manager, and a later organization change must not rewrite either record's
+    // authority snapshot into an invalid present-day membership requirement.
+    validate_revoke_mandate(&fixture.state, mandate)
+        .expect("resolved recruitment work should leave the mandate revocable")
+        .commit(&mut fixture.state)
+        .expect("mandate revocation should commit");
+    validate_reassign_character(
+        &fixture.state,
+        fixture.recruiter,
+        Some(fixture.source),
+        None,
+    )
+    .expect("revoked recruitment authority should release the former manager")
+    .commit(&mut fixture.state)
+    .expect("former recruiting manager should transfer");
+
+    validate_state(&fixture.state).expect("refused approved pitch should remain valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("resolved approval history should save after manager transfer"),
+    )
+    .expect("resolved approval history should restore after manager transfer");
+    assert_eq!(
+        restored
+            .decisions()
+            .get_decision(outcome.approval_requests[0])
+            .expect("resolved approval should survive restore")
+            .status(),
+        DecisionStatus::Resolved
+    );
+    assert_eq!(
+        restored
+            .recruitment()
+            .get_attempt(outcome.attempts[0])
+            .expect("refused approved attempt should survive restore")
+            .outcome(),
+        RecruitmentOutcome::Refused
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn player_organization_approval_requests_wait_for_the_player() {
     let registry = build_registry();
     let mut fixture = fixture();
@@ -1367,7 +1803,8 @@ fn player_organization_approval_requests_wait_for_the_player() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state);
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("player approval request should validate");
     assert!(outcome.attempts.is_empty());
     assert_eq!(outcome.approval_requests.len(), 1);
     assert_eq!(
@@ -1388,6 +1825,63 @@ fn player_organization_approval_requests_wait_for_the_player() {
         Some(fixture.source)
     );
     validate_state(&fixture.state).expect("pending request state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_character_id() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    fixture.state.set_player_organization(fixture.target);
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+
+    let stronger_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Trusted Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second candidate should validate");
+    assert!(
+        stronger_candidate > fixture.candidate,
+        "fixture must prove that a later-created candidate can outrank an earlier ID"
+    );
+    validate_set_relationship(
+        &fixture.state,
+        stronger_candidate,
+        fixture.recruiter,
+        relationship(95, 95, 0, 80, 15, 0, 50),
+    )
+    .expect("strong candidate relationship should validate")
+    .commit(&mut fixture.state);
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("relationship-ranked approval request should validate");
+    assert_eq!(outcome.approval_requests.len(), 1);
+    let request = fixture
+        .state
+        .decisions()
+        .get_decision(outcome.approval_requests[0])
+        .expect("relationship-ranked approval request should persist");
+    match request.context() {
+        DecisionContext::RecruitmentApproval(context) => {
+            assert_eq!(context.candidate(), stronger_candidate);
+        }
+        DecisionContext::OperationPoliceArrival { .. } => {
+            panic!("personnel pass produced the wrong decision context")
+        }
+    }
+    assert_eq!(request.status(), DecisionStatus::Pending);
+    validate_state(&fixture.state).expect("relationship-ranked approval state should validate");
     validate_invariants(&fixture.state);
 }
 

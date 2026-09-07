@@ -3,7 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_reporting::{
@@ -21,6 +21,7 @@ use crate::world::{
     NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
     OrganizationDraft, OrganizationKind, Rating,
 };
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 struct BusinessEconomyFixture {
@@ -29,6 +30,94 @@ struct BusinessEconomyFixture {
     organization: crate::core::id::OrganizationId,
     operating: FinancialAccountId,
     settlement: FinancialAccountId,
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessCycleContextWire {
+    business: BusinessId,
+    business_version: u32,
+    owner: BusinessOwner,
+    occurred_at: SimTime,
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessCycleFinancialsWire {
+    gross_revenue: Money,
+    operating_cost: Money,
+    net_cash: Money,
+    variance_basis_points: i16,
+    disrupted: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessCycleArtifactsWire {
+    attention: AttentionClass,
+    transaction: Option<crate::core::id::LedgerTransactionId>,
+    information: Option<crate::core::id::InformationId>,
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessCycleRecordWire {
+    id: BusinessCycleId,
+    context: BusinessCycleContextWire,
+    financials: BusinessCycleFinancialsWire,
+    artifacts: BusinessCycleArtifactsWire,
+}
+
+fn business_cycle_wire(record: &crate::economy::BusinessCycleRecord) -> BusinessCycleRecordWire {
+    BusinessCycleRecordWire {
+        id: record.id(),
+        context: BusinessCycleContextWire {
+            business: record.business(),
+            business_version: record.business_version(),
+            owner: record.owner(),
+            occurred_at: record.occurred_at(),
+        },
+        financials: BusinessCycleFinancialsWire {
+            gross_revenue: record.gross_revenue(),
+            operating_cost: record.operating_cost(),
+            net_cash: record.net_cash(),
+            variance_basis_points: record.variance_basis_points(),
+            disrupted: record.disrupted(),
+        },
+        artifacts: BusinessCycleArtifactsWire {
+            attention: record.attention(),
+            transaction: record.transaction(),
+            information: record.information(),
+        },
+    }
+}
+
+fn replace_serialized_cycle(
+    envelope: SaveEnvelope,
+    original: &crate::economy::BusinessCycleRecord,
+    replacement: &BusinessCycleRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("business cycle should serialize");
+    let mirror = business_cycle_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("business cycle mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement business cycle should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized cycle must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout business cycle corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -635,6 +724,107 @@ fn save_round_trip_preserves_business_schedule_and_deterministic_tick_resolution
     );
     validate_invariants(&fixture.state);
     validate_invariants(&restored);
+}
+
+#[test]
+fn later_sabotage_does_not_rewrite_prior_cycle_disruption_history() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("normal due cycle should decide");
+    assert_eq!(plan.attention(), AttentionClass::Routine);
+    let cycle = validate_business_cycle_plan(&fixture.state, plan)
+        .expect("normal cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("normal cycle should commit");
+    assert!(
+        !fixture
+            .state
+            .economy()
+            .get_cycle(cycle)
+            .expect("normal cycle should persist")
+            .disrupted()
+    );
+
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("later sabotage should validate")
+        .commit(&mut fixture.state)
+        .expect("later sabotage should commit");
+
+    let prior = fixture
+        .state
+        .economy()
+        .get_cycle(cycle)
+        .expect("prior cycle should persist");
+    assert!(!prior.disrupted());
+    assert_eq!(prior.attention(), AttentionClass::Routine);
+    crate::core::invariants::validate_state_against_registry(&registry, &fixture.state)
+        .expect("later sabotage must not retroactively invalidate an earlier normal cycle");
+    build_save(&registry, &fixture.state)
+        .expect("state with later sabotage and prior normal cycle should remain save-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn registry_validation_rejects_internally_balanced_unauthored_cycle_financials() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let cycle = validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+            .expect("due business cycle should decide"),
+    )
+    .expect("business cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("business cycle should commit");
+
+    // Preserve net and therefore preserve the exact ledger postings while making gross and
+    // operating cost equally too large. Corrupt the persisted wire representation rather than
+    // bypassing the economy owner: the real load boundary must reject economics that are
+    // internally balanced but impossible under authored content.
+    let delta = Money::from_cents(100);
+    let record = fixture
+        .state
+        .economy()
+        .get_cycle(cycle)
+        .expect("cycle fixture should persist");
+    let mut corrupted = business_cycle_wire(record);
+    corrupted.financials.gross_revenue = corrupted
+        .financials
+        .gross_revenue
+        .checked_add(delta)
+        .expect("fixture corruption should fit money");
+    corrupted.financials.operating_cost = corrupted
+        .financials
+        .operating_cost
+        .checked_add(delta)
+        .expect("fixture corruption should fit money");
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("valid business cycle should save before corruption");
+    let corrupted_envelope = replace_serialized_cycle(envelope, record, &corrupted);
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("unauthored business economics must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidBusinessCycle {
+                    cycle: invalid,
+                }
+            ) if invalid == cycle
+        ),
+        "expected invalid business cycle, got {error:?}"
+    );
 }
 
 #[test]

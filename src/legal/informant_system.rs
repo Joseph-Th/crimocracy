@@ -22,6 +22,8 @@ use thiserror::Error;
 pub enum InformantError {
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
+    #[error("character organization {0} does not exist")]
+    MissingOrganization(OrganizationId),
     #[error("handler organization {0} does not exist")]
     MissingHandler(OrganizationId),
     #[error("organization {0} cannot handle confidential informants")]
@@ -388,9 +390,9 @@ pub(crate) const fn informant_reliability(reliability: Reliability) -> EvidenceR
 const BASE_FLIP_CHANCE_PERCENT: u32 = 25;
 
 /// Runs the police institution's detainee-to-informant pipeline: exactly one recruitment
-/// draw per detained criminal member, one cadence window after their arrest. Members with
-/// something personal to hide behind stay quiet; scared ones talk.
-pub fn apply_detainee_informant_recruitment(
+/// draw per detained criminal member, one cadence window after their arrest. Members who are
+/// not sufficiently afraid stay quiet; stronger Safety pressure makes cooperation likelier.
+pub(crate) fn apply_detainee_informant_recruitment(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<InformantId>, InformantError> {
@@ -402,7 +404,7 @@ pub fn apply_detainee_informant_recruitment(
     // runs first: a detainee not reaching their decision minute this tick skips every
     // record lookup below. Predicates are pure reads, so evaluating them in this order
     // selects exactly the same candidates.
-    let candidates: Vec<(CharacterId, OrganizationId)> = state
+    let due_arrests: Vec<_> = state
         .legal
         .detained_arrests()
         .filter(|arrest| {
@@ -415,32 +417,40 @@ pub fn apply_detainee_informant_recruitment(
             // would need a persisted decided-marker instead.
             minutes_in_custody == u64::from(decision_delay)
         })
-        .filter_map(|arrest| {
-            let handler = arrest.authority();
-            let character = arrest.character();
-            let record = state.world.get_character(character)?;
-            // Only members of criminal organizations have an organization to inform on,
-            // and only while they still belong to one.
-            let org = record.organization()?;
-            let org_record = state.world.get_organization(org)?;
-            if org_record.kind() != OrgKind::Criminal {
-                return None;
-            }
-            if org == handler {
-                return None;
-            }
-            // An informant already working this handler keeps that arrangement; a second
-            // establishment would be rejected as a duplicate, so no new decision is drawn.
-            if state
-                .legal
-                .active_informant_for(character, handler)
-                .is_some()
-            {
-                return None;
-            }
-            Some((character, handler))
-        })
+        .map(|arrest| (arrest.character(), arrest.authority()))
         .collect();
+
+    let mut candidates = Vec::new();
+    for (character, handler) in due_arrests {
+        let record = state
+            .world
+            .get_character(character)
+            .ok_or(InformantError::MissingCharacter(character))?;
+        // Only members of criminal organizations have an organization to inform on, and only
+        // while they still belong to one. Being independent is a legitimate non-candidate;
+        // pointing at a missing organization is broken authoritative state and must not erase
+        // the detainee's single scheduled decision silently.
+        let Some(organization) = record.organization() else {
+            continue;
+        };
+        let organization_record = state
+            .world
+            .get_organization(organization)
+            .ok_or(InformantError::MissingOrganization(organization))?;
+        if organization_record.kind() != OrgKind::Criminal || organization == handler {
+            continue;
+        }
+        // An informant already working this handler keeps that arrangement; a second
+        // establishment would be rejected as a duplicate, so no new decision is drawn.
+        if state
+            .legal
+            .active_informant_for(character, handler)
+            .is_some()
+        {
+            continue;
+        }
+        candidates.push((character, handler));
+    }
 
     let mut recruited = Vec::new();
     for (character, handler) in candidates {
@@ -451,26 +461,21 @@ pub fn apply_detainee_informant_recruitment(
             .map(|rating| u32::from(rating.value()))
             .unwrap_or(0);
         let chance = BASE_FLIP_CHANCE_PERCENT + safety / 2;
-        // Validation precedes the draw so a drifted candidate never consumes randomness:
-        // the investigation stream advances only when a real decision is made.
-        let Ok(validated) =
-            validate_establish_informant(state, InformantDraft { character, handler })
-        else {
-            continue;
-        };
-        let roll = {
-            let rng = state.investigation_rng_mut();
-            crate::core::simulation::draw_index(rng, 100)
-                .expect("percentile draw over a nonempty 1..=100 range cannot fail")
-        };
+        // Draw speculatively so an ordinary failed flip still consumes its authored decision
+        // draw, while a successful flip only publishes that advanced RNG state after the
+        // establishment commits. Allocation or freshness failure therefore rejects without
+        // perturbing future investigation randomness.
+        let validated = validate_establish_informant(state, InformantDraft { character, handler })?;
+        let mut advanced_rng = state.investigation_rng_mut().clone();
+        let roll = crate::core::simulation::draw_index(&mut advanced_rng, 100)
+            .expect("percentile draw over a nonempty 1..=100 range cannot fail");
         if roll as u32 >= chance {
+            *state.investigation_rng_mut() = advanced_rng;
             continue;
         }
-        // A candidate whose prerequisites changed between validation and commit is skipped,
-        // not fatal: an autonomous pass must never abort the tick.
-        if let Ok(informant) = validated.commit(state) {
-            recruited.push(informant);
-        }
+        let informant = validated.commit(state)?;
+        *state.investigation_rng_mut() = advanced_rng;
+        recruited.push(informant);
     }
     Ok(recruited)
 }
@@ -479,7 +484,7 @@ pub fn apply_detainee_informant_recruitment(
 /// each piece of personally-held information whose subject matches a case's origin operation
 /// is disclosed at most once (the disclosure index rejects duplicates). This is what makes an
 /// informant more than a flag: their knowledge becomes InformantStatement evidence.
-pub fn apply_informant_disclosures(
+pub(crate) fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
     // Disclosures need a live informant relationship on one side and an active case on the
@@ -539,20 +544,19 @@ pub fn apply_informant_disclosures(
 
     let mut disclosures = Vec::new();
     for (informant, information, investigation) in candidates {
-        // A disclosure whose prerequisites drifted between the pre-filter and validation is
-        // skipped, not fatal: an autonomous pass must never abort the tick.
-        if let Ok(disclosure) = validate_record_informant_disclosure(
+        // Every candidate was derived from current active indexes in this pass. A validation or
+        // commit failure therefore signals state/allocator drift and must surface rather than
+        // silently losing evidence that the handler was due to receive.
+        let disclosure = validate_record_informant_disclosure(
             state,
             InformantDisclosureDraft {
                 informant,
                 investigation,
                 source_information: information,
             },
-        )
-        .and_then(|validated| validated.commit(state))
-        {
-            disclosures.push(disclosure);
-        }
+        )?
+        .commit(state)?;
+        disclosures.push(disclosure);
     }
     Ok(disclosures)
 }

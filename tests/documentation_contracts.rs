@@ -81,10 +81,8 @@ fn cargo_aliases() -> BTreeSet<&'static str> {
         if line.starts_with('[') {
             in_alias_table = false;
         }
-        if in_alias_table {
-            if let Some((name, _)) = line.split_once('=') {
-                aliases.insert(name.trim());
-            }
+        if in_alias_table && let Some((name, _)) = line.split_once('=') {
+            aliases.insert(name.trim());
         }
     }
     aliases
@@ -240,4 +238,41 @@ fn published_state_schema_matches_the_source_owner() {
         crimocracy::content::CURRENT_CONTENT_REVISION,
         "STATUS.md authored content revision is stale"
     );
+}
+
+fn numeric_value_follows_marker(line: &str, marker: &str) -> bool {
+    let Some((_, suffix)) = line.split_once(marker) else {
+        return false;
+    };
+    suffix
+        .trim_start_matches(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, '=' | ':' | '(' | '{' | '[')
+        })
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+}
+
+#[test]
+fn mutable_persistence_versions_are_numeric_only_in_status() {
+    const VERSION_MARKERS: &[&str] = &[
+        "CURRENT_CONTENT_REVISION",
+        "CURRENT_STATE_SCHEMA_VERSION",
+        "content_revision:",
+        "schema check",
+        "revision check",
+    ];
+    for (relative, document) in CURRENT_DOCUMENTS {
+        if *relative == "STATUS.md" {
+            continue;
+        }
+        for line in document.lines() {
+            for marker in VERSION_MARKERS {
+                assert!(
+                    !numeric_value_follows_marker(line, marker),
+                    "{relative} duplicates a mutable persistence version after `{marker}`; publish the number only in STATUS.md and reference the source symbol elsewhere: `{line}`"
+                );
+            }
+        }
+    }
 }

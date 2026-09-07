@@ -158,6 +158,16 @@ pub struct DecisionRequestRecord {
 }
 
 impl DecisionRequestRecord {
+    pub(crate) fn from_resolved(
+        parts: DecisionRecordParts,
+        resolution: DecisionResolution,
+    ) -> Self {
+        let mut record = Self::from(parts);
+        record.lifecycle = DecisionLifecycle::Resolved(resolution);
+        record.version = 2;
+        record
+    }
+
     pub fn id(&self) -> DecisionRequestId {
         self.id
     }
@@ -288,22 +298,37 @@ impl DecisionState {
     }
 
     pub(crate) fn insert(&mut self, record: DecisionRequestRecord) {
+        debug_assert_eq!(record.status(), DecisionStatus::Pending);
+        self.insert_record(record, true);
+    }
+
+    /// Inserts a decision that was requested and resolved as one atomic autonomous action.
+    /// Resolved records are historical evidence only and must never enter pending indexes.
+    pub(crate) fn insert_resolved(&mut self, record: DecisionRequestRecord) {
+        debug_assert_eq!(record.status(), DecisionStatus::Resolved);
+        self.insert_record(record, false);
+    }
+
+    fn insert_record(&mut self, record: DecisionRequestRecord, pending: bool) {
         let id = record.id();
         let recipient = record.recipient();
         let operation = record.context().operation();
-        let pending_key = record.context().pending_key();
         if let Some(operation) = operation {
             self.by_operation.entry(operation).or_default().insert(id);
         }
-        self.pending_by_recipient
-            .entry(recipient)
-            .or_default()
-            .insert(id);
-        let previous_context = self.pending_by_context.insert(pending_key, id);
-        debug_assert!(
-            previous_context.is_none(),
-            "Index Uniqueness: decision context already has a pending decision"
-        );
+        if pending {
+            self.pending_by_recipient
+                .entry(recipient)
+                .or_default()
+                .insert(id);
+            let previous_context = self
+                .pending_by_context
+                .insert(record.context().pending_key(), id);
+            debug_assert!(
+                previous_context.is_none(),
+                "Index Uniqueness: decision context already has a pending decision"
+            );
+        }
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),

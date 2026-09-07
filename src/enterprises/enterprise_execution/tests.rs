@@ -6,7 +6,7 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::delegation::delegation_system::{
     DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
@@ -36,13 +36,14 @@ use crate::operations::{
 };
 use crate::world::world_system::{
     WorldError, insert_business, insert_character, insert_neighborhood, insert_organization,
-    validate_transfer_business_ownership,
+    validate_reassign_character, validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
     NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
     OrganizationDraft, OrganizationKind,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct EnterpriseFixture {
@@ -52,6 +53,103 @@ struct EnterpriseFixture {
     location: EnterpriseLocation,
     cash: FinancialAccountId,
     settlement: FinancialAccountId,
+}
+
+#[derive(Clone, Serialize)]
+struct EnterpriseCycleContextWire {
+    enterprise: EnterpriseId,
+    occurred_at: SimTime,
+}
+
+#[derive(Clone, Serialize)]
+struct EnterpriseCycleFinancialsWire {
+    gross_revenue: Money,
+    operating_cost: Money,
+    net_cash: Money,
+    variance_basis_points: i16,
+    investigation_heat: Money,
+}
+
+#[derive(Clone, Serialize)]
+struct EnterpriseCycleArtifactsWire {
+    attention: AttentionClass,
+    drew_vice_attention: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct EnterpriseCycleProvenanceWire {
+    transaction: Option<crate::core::id::LedgerTransactionId>,
+    information: Option<crate::core::id::InformationId>,
+    vice_information: Option<crate::core::id::InformationId>,
+}
+
+#[derive(Clone, Serialize)]
+struct EnterpriseCycleRecordWire {
+    id: EnterpriseCycleId,
+    context: EnterpriseCycleContextWire,
+    financials: EnterpriseCycleFinancialsWire,
+    artifacts: EnterpriseCycleArtifactsWire,
+    provenance: EnterpriseCycleProvenanceWire,
+}
+
+fn enterprise_cycle_wire(
+    record: &crate::enterprises::EnterpriseCycleRecord,
+) -> EnterpriseCycleRecordWire {
+    EnterpriseCycleRecordWire {
+        id: record.id(),
+        context: EnterpriseCycleContextWire {
+            enterprise: record.enterprise(),
+            occurred_at: record.occurred_at(),
+        },
+        financials: EnterpriseCycleFinancialsWire {
+            gross_revenue: record.gross_revenue(),
+            operating_cost: record.operating_cost(),
+            net_cash: record.net_cash(),
+            variance_basis_points: record.variance_basis_points(),
+            investigation_heat: record.investigation_heat(),
+        },
+        artifacts: EnterpriseCycleArtifactsWire {
+            attention: record.attention(),
+            drew_vice_attention: record.drew_vice_attention(),
+        },
+        provenance: EnterpriseCycleProvenanceWire {
+            transaction: record.transaction(),
+            information: record.information(),
+            vice_information: record.vice_information(),
+        },
+    }
+}
+
+fn replace_serialized_cycle(
+    envelope: SaveEnvelope,
+    original: &crate::enterprises::EnterpriseCycleRecord,
+    replacement: &EnterpriseCycleRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("enterprise cycle should serialize");
+    let mirror = enterprise_cycle_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("enterprise cycle mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement enterprise cycle should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized cycle must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout enterprise cycle corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -428,6 +526,65 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
     assert_eq!(cash_balance, cycle_record.net_cash());
     assert_eq!(settlement_balance, Money::from_cents(-cash_balance.cents()));
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financials() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("due enterprise cycle should resolve");
+    let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
+        .expect("enterprise cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("enterprise cycle should commit");
+
+    // Keep net and its ledger transaction unchanged while shifting gross and cost together.
+    // Corrupt the persisted wire representation rather than bypassing the enterprise owner:
+    // the real load boundary must reject internally balanced economics that authored content
+    // could not have produced.
+    let delta = Money::from_cents(100);
+    let record = fixture
+        .state
+        .enterprises()
+        .get_cycle(cycle)
+        .expect("cycle fixture should persist");
+    let mut corrupted = enterprise_cycle_wire(record);
+    corrupted.financials.gross_revenue = corrupted
+        .financials
+        .gross_revenue
+        .checked_add(delta)
+        .expect("fixture corruption should fit money");
+    corrupted.financials.operating_cost = corrupted
+        .financials
+        .operating_cost
+        .checked_add(delta)
+        .expect("fixture corruption should fit money");
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("valid enterprise cycle should save before corruption");
+    let corrupted_envelope = replace_serialized_cycle(envelope, record, &corrupted);
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("unauthored enterprise economics must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidEnterpriseCycle {
+                    cycle: invalid,
+                }
+            ) if invalid == cycle
+        ),
+        "expected invalid enterprise cycle, got {error:?}"
+    );
 }
 
 #[test]
@@ -1448,6 +1605,22 @@ fn active_enterprise_blocks_authority_removal_until_suspended() {
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
     let mandate = fixture.authority.mandate;
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let historical_cycle = validate_enterprise_cycle_plan(
+        &fixture.state,
+        decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect("pre-suspension cycle should decide"),
+    )
+    .expect("pre-suspension cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("pre-suspension cycle should commit");
 
     let revoke_error = validate_revoke_mandate(&fixture.state, mandate)
         .expect_err("active routine work must block mandate revocation");
@@ -1496,7 +1669,46 @@ fn active_enterprise_blocks_authority_removal_until_suspended() {
         resume_error,
         EnterpriseError::Delegation(DelegationError::InactiveMandate(mandate))
     );
-    validate_invariants(&fixture.state);
+
+    let later_organization = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Former Manager Employer".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("later organization should validate");
+    validate_reassign_character(
+        &fixture.state,
+        fixture.authority.manager,
+        Some(later_organization),
+        None,
+    )
+    .expect("suspended enterprise and revoked mandate should release the former manager")
+    .commit(&mut fixture.state)
+    .expect("former enterprise manager should transfer");
+
+    validate_state(&fixture.state)
+        .expect("suspended enterprise history must tolerate later manager membership");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("historical enterprise economics must remain valid after manager transfer");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("suspended enterprise history should save after manager transfer"),
+    )
+    .expect("suspended enterprise history should restore after manager transfer");
+    assert!(restored.enterprises().get_cycle(historical_cycle).is_some());
+    assert_eq!(
+        restored
+            .world()
+            .get_character(fixture.authority.manager)
+            .expect("restored former manager should persist")
+            .organization(),
+        Some(later_organization)
+    );
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -1669,7 +1881,8 @@ fn autonomous_expansion_serves_governed_rivals_and_never_the_player_organization
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("autonomous expansion should resolve");
     assert_eq!(
         established.len(),
         1,
@@ -1700,13 +1913,55 @@ fn autonomous_expansion_is_a_daily_cadence_gate() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
-    assert!(apply_due_autonomous_enterprises(&registry, &mut fixture.state).is_empty());
+    assert!(
+        apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+            .expect("off-cadence autonomous expansion should resolve")
+            .is_empty()
+    );
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
     assert_eq!(
-        apply_due_autonomous_enterprises(&registry, &mut fixture.state).len(),
+        apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+            .expect("due autonomous expansion should resolve")
+            .len(),
         1,
         "the pass fires exactly on the day boundary"
     );
+}
+
+#[test]
+fn autonomous_expansion_surfaces_enterprise_id_exhaustion_without_partial_establishment() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let enterprise_count_before = fixture.state.enterprises().enterprises().count();
+    let account_count_before = fixture.state.finance().accounts().count();
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Enterprise, u32::MAX);
+
+    let error = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect_err("autonomous expansion must surface enterprise allocator exhaustion");
+    assert!(matches!(
+        error,
+        crate::enterprises::autonomous_expansion::AutonomousExpansionError::Enterprise(
+            EnterpriseError::IdExhaustion(_)
+        )
+    ));
+    assert_eq!(
+        fixture.state.enterprises().enterprises().count(),
+        enterprise_count_before,
+        "failed expansion must not insert an enterprise"
+    );
+    assert_eq!(
+        fixture.state.finance().accounts().count(),
+        account_count_before,
+        "failed expansion must not consume or open finance records"
+    );
+    validate_state(&fixture.state).expect("failed autonomous expansion must leave valid state");
+    validate_invariants(&fixture.state);
 }
 
 #[test]
@@ -1733,7 +1988,8 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let first_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let first_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("day-one autonomous expansion should resolve");
     assert_eq!(first_day.len(), 1);
     let first_kind = {
         let first = fixture
@@ -1752,7 +2008,8 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let second_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let second_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("day-two autonomous expansion should resolve");
     assert_eq!(second_day.len(), 1);
     // The asset-free kind fills its district slot first, then hosts at the owned venue.
     let second_kind = {
@@ -1768,7 +2025,8 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let third_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let third_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("day-three autonomous expansion should resolve");
     assert_eq!(third_day.len(), 1);
     let third = fixture
         .state
@@ -1817,7 +2075,9 @@ fn police_fear_above_the_authored_ceiling_stalls_expansion_until_it_cools() {
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
     assert!(
-        apply_due_autonomous_enterprises(&registry, &mut fixture.state).is_empty(),
+        apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+            .expect("hot-posture autonomous expansion should resolve")
+            .is_empty(),
         "an outfit above the fear ceiling must keep its head down"
     );
 
@@ -1841,7 +2101,8 @@ fn police_fear_above_the_authored_ceiling_stalls_expansion_until_it_cools() {
             &mut fixture.state,
         );
     }
-    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("autonomous expansion should resolve");
     assert_eq!(
         established.len(),
         1,
@@ -1948,7 +2209,8 @@ fn expansion_consolidates_led_districts_before_contested_ones() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state);
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("autonomous expansion should resolve");
     assert_eq!(established.len(), 1);
     let location = fixture
         .state

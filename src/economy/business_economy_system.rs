@@ -263,6 +263,7 @@ struct BusinessCycleEconomics {
     operating_cost: Money,
     net_cash: Money,
     variance_basis_points: i16,
+    disrupted: bool,
     attention: AttentionClass,
 }
 
@@ -329,47 +330,25 @@ pub fn decide_business_cycle(
     )?;
     let definition = registry.get_business(business_record.kind());
     let economics = definition.economics();
-    let variance_limit = economics.gross_variance_basis_points();
-    if i32::from(variance_basis_points).unsigned_abs() > u32::from(variance_limit) {
-        return Err(BusinessEconomyError::VarianceOutOfRange {
-            basis_points: variance_basis_points,
-            limit: variance_limit,
-        });
-    }
     let neighborhood = state
         .world
         .get_neighborhood(business_record.neighborhood())
         .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
     let profile = neighborhood.profile();
-    let gross_before_variance = resolve_gross_before_variance(business, economics, profile)?;
-    // Sabotage damage degrades earning power for the authored horizon; costs keep running.
-    let gross_before_variance = if economy.is_disrupted(state.now()) {
-        resolve_disrupted_gross(
-            business,
-            gross_before_variance,
-            registry.business_disruption().gross_basis_points(),
-        )?
-    } else {
-        gross_before_variance
-    };
-    let gross_revenue =
-        resolve_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
-    let police_cost = weighted_rating(
+    // Freeze the disruption fact into this cycle. The economy retains only the current horizon,
+    // so historical cycle validation must never infer past disruption from a later sabotage hit.
+    let disrupted = economy.is_disrupted(state.now());
+    let (gross_revenue, operating_cost, net_cash) = resolve_cycle_financials(
         business,
-        economics.police_cost_per_point(),
-        profile.institutions.police_presence.value(),
+        economics,
+        profile,
+        registry.business_disruption().gross_basis_points(),
+        disrupted,
+        variance_basis_points,
     )?;
-    let operating_cost = economics
-        .base_operating_cost()
-        .checked_add(police_cost)
-        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
-    let net_cash = gross_revenue
-        .checked_sub(operating_cost)
-        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
     // A losing cycle or a sabotage-degraded gross is always accountant-worthy: chronic
     // silent losses and invisible sabotage are exactly what the owner must see before the
     // authored suspension threshold stops the bleeding.
-    let disrupted = economy.is_disrupted(state.now());
     let attention = if net_cash < Money::ZERO
         || disrupted
         || i32::from(variance_basis_points).unsigned_abs()
@@ -405,6 +384,7 @@ pub fn decide_business_cycle(
             operating_cost,
             net_cash,
             variance_basis_points,
+            disrupted,
             attention,
         },
         accounts: BusinessCycleAccounts {
@@ -521,6 +501,7 @@ impl ValidatedBusinessCycle {
                     operating_cost: self.plan.economics.operating_cost,
                     net_cash: self.plan.economics.net_cash,
                     variance_basis_points: self.plan.economics.variance_basis_points,
+                    disrupted: self.plan.economics.disrupted,
                 },
                 artifacts: super::BusinessCycleArtifacts {
                     attention: self.plan.economics.attention,
@@ -921,6 +902,71 @@ fn resolve_gross_before_variance(
         .checked_add(wealth)
         .and_then(|gross| gross.checked_add(commerce))
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
+}
+
+/// One owner for the authored business-cycle arithmetic used by both live settlement and
+/// persistence re-derivation. `disrupted` is supplied explicitly so historical validation uses
+/// the cycle's frozen sabotage fact rather than the economy's mutable current disruption horizon.
+fn resolve_cycle_financials(
+    business: BusinessId,
+    economics: &BusinessEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    disruption_gross_basis_points: u32,
+    disrupted: bool,
+    variance_basis_points: i16,
+) -> Result<(Money, Money, Money), BusinessEconomyError> {
+    let variance_limit = economics.gross_variance_basis_points();
+    if i32::from(variance_basis_points).unsigned_abs() > u32::from(variance_limit) {
+        return Err(BusinessEconomyError::VarianceOutOfRange {
+            basis_points: variance_basis_points,
+            limit: variance_limit,
+        });
+    }
+    let normal_gross = resolve_gross_before_variance(business, economics, profile)?;
+    let gross_before_variance = if disrupted {
+        resolve_disrupted_gross(business, normal_gross, disruption_gross_basis_points)?
+    } else {
+        normal_gross
+    };
+    let gross_revenue =
+        resolve_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
+    let police_cost = weighted_rating(
+        business,
+        economics.police_cost_per_point(),
+        profile.institutions.police_presence.value(),
+    )?;
+    let operating_cost = economics
+        .base_operating_cost()
+        .checked_add(police_cost)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
+    let net_cash = gross_revenue
+        .checked_sub(operating_cost)
+        .ok_or(BusinessEconomyError::ArithmeticOverflow(business))?;
+    Ok((gross_revenue, operating_cost, net_cash))
+}
+
+/// Re-derives persisted business-cycle financials from immutable business/district authorship,
+/// the live registry, and the cycle's frozen historical disruption/variance inputs.
+pub(crate) fn resolve_historical_business_cycle_financials(
+    registry: &Registry,
+    state: &AppState,
+    cycle: &super::BusinessCycleRecord,
+) -> Result<(Money, Money, Money), BusinessEconomyError> {
+    let business = validate_business(state, cycle.business())?;
+    let neighborhood = state
+        .world
+        .get_neighborhood(business.neighborhood())
+        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(
+            cycle.business(),
+        ))?;
+    resolve_cycle_financials(
+        cycle.business(),
+        registry.get_business(business.kind()).economics(),
+        neighborhood.profile(),
+        registry.business_disruption().gross_basis_points(),
+        cycle.disrupted(),
+        cycle.variance_basis_points(),
+    )
 }
 
 /// Authored sabotage damage: disrupted cycles earn the authored fraction of normal gross,

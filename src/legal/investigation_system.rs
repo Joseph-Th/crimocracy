@@ -365,6 +365,17 @@ pub(crate) fn apply_cold_case_decay(
         if record.origin().is_none() {
             continue;
         }
+        // Scheduled work is a modeled reason for an apparently cold case to remain active:
+        // the institution has already committed resources even if the old inactivity deadline
+        // was present in the index snapshot. Defer explicitly; every other transition failure
+        // below is exceptional and must surface.
+        if state
+            .legal
+            .work_for_investigation(investigation)
+            .any(|work| work.status() == crate::legal::InvestigationWorkStatus::Scheduled)
+        {
+            continue;
+        }
         // An operation-originated case whose every identified subject is in custody is fully
         // worked: the institutional trail ends, so the case closes rather than sitting active
         // forever. Closing is allowed while arrests hold (cleared by arrest); cases with
@@ -394,30 +405,20 @@ pub(crate) fn apply_cold_case_decay(
                     .is_some()
             })
         {
-            if let Ok(transition) = validate_transition_investigation(
+            validate_transition_investigation(
                 state,
                 investigation,
                 InvestigationTransition::Close,
-            ) {
-                transition
-                    .commit(state)
-                    .expect("validated cold-case closure must commit atomically");
-                closed.push(investigation);
-            }
+            )?
+            .commit(state)?;
+            closed.push(investigation);
             continue;
         }
         if !identified_subjects.is_empty() {
             continue;
         }
-        let transition = validate_transition_investigation(
-            state,
-            investigation,
-            InvestigationTransition::Suspend,
-        );
-        let Ok(transition) = transition else { continue };
-        transition
-            .commit(state)
-            .expect("validated cold-case suspension must commit atomically");
+        validate_transition_investigation(state, investigation, InvestigationTransition::Suspend)?
+            .commit(state)?;
         // The transition commit refreshes the lead's personal knowledge to "shelved".
         suspended.push(investigation);
     }
@@ -477,13 +478,19 @@ impl ValidatedInvestigatorAssignment {
             crate::legal::case_knowledge::CaseActivityStatus::Active,
             self.investigator,
         )?;
+        if knowledge.is_some() {
+            // Case staffing and its lead's first-hand activity knowledge are one logical
+            // transaction. Preflight the only allocation before the lead/index mutation so
+            // allocator exhaustion cannot leave a staffed case behind an error return.
+            state.ids.reserve(IdKind::Information, 1)?;
+        }
         state
             .legal
             .set_lead_investigator(self.investigation, self.investigator);
         if let Some(knowledge) = knowledge {
             knowledge
                 .commit(state)
-                .map_err(InvestigationError::CaseKnowledge)?;
+                .expect("case-activity information ID was preflighted before staffing mutation");
         }
         Ok(())
     }
@@ -525,26 +532,43 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             .get_investigation(investigation_id)
             .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
         let owner = investigation.owner();
-        let assigned_candidate = investigation
-            .assigned_investigators()
-            .iter()
-            .filter_map(|investigator| {
-                let record = state.world.get_character(*investigator)?;
-                let capability = record.capability(CapabilityKind::Investigation)?;
-                // Investigators already attached to this case are exempt from the one-case
-                // exclusion; attachment to any other active case disqualifies them.
-                let case_is_this_one = state
+        let mut assigned_available = Vec::new();
+        for investigator in investigation.assigned_investigators() {
+            // Existing assignments are authoritative case state. Missing personnel, lost
+            // capability, or foreign membership is malformed staffing, not ordinary
+            // unavailability; fail at the autonomous consumer instead of silently choosing a
+            // different detective and postponing the error until invariant validation.
+            let record = state
+                .world
+                .get_character(*investigator)
+                .ok_or(InvestigationError::MissingCharacter(*investigator))?;
+            let capability = record.capability(CapabilityKind::Investigation).ok_or(
+                InvestigationError::MissingInvestigationCapability(*investigator),
+            )?;
+            if record.organization() != Some(owner) {
+                return Err(InvestigationError::InvestigatorOwnerMismatch {
+                    investigator: *investigator,
+                    owner,
+                });
+            }
+            // Investigators already attached to this case are exempt from the one-case
+            // exclusion; attachment to any other active case disqualifies them. Detention is a
+            // modeled temporary blocker, so either condition simply leaves the detective out.
+            let case_is_this_one = state
+                .legal
+                .active_investigation_for_investigator(*investigator)
+                .is_none_or(|active| active.id() == investigation_id);
+            if case_is_this_one
+                && state
                     .legal
-                    .active_investigation_for_investigator(*investigator)
-                    .is_none_or(|active| active.id() == investigation_id);
-                (case_is_this_one
-                    && record.organization() == Some(owner)
-                    && state
-                        .legal
-                        .active_arrest_for_character(*investigator)
-                        .is_none())
-                .then_some((*investigator, capability.value()))
-            })
+                    .active_arrest_for_character(*investigator)
+                    .is_none()
+            {
+                assigned_available.push((*investigator, capability.value()));
+            }
+        }
+        let assigned_candidate = assigned_available
+            .into_iter()
             .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
             .map(|(investigator, _)| investigator);
 
@@ -574,15 +598,10 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             continue;
         };
 
-        // An autonomous staffing pass must not abort the tick: a case whose best candidate
-        // fails canonical validation stays unstaffed for a later minute, like cold-case decay.
-        let Ok(assignment) = validate_assign_investigator(state, investigation_id, investigator)
-        else {
-            continue;
-        };
-        if assignment.commit(state).is_err() {
-            continue;
-        }
+        // Selection used the same current authoritative indexes and predicates as the canonical
+        // validator. A rejection now is not a modeled "no investigator available" outcome; it
+        // means state or allocator capacity is broken and must surface instead of disappearing.
+        validate_assign_investigator(state, investigation_id, investigator)?.commit(state)?;
         // The assignment commit records the new lead's personal case-activity knowledge, so
         // contact channels can disclose it without any case-graph read.
         staffed.push((investigation_id, investigator));

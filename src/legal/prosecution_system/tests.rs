@@ -3,7 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::{
@@ -28,6 +28,39 @@ struct Fixture {
     arrest: ArrestId,
     arrest_evidence: EvidenceId,
     supplemental_evidence: EvidenceId,
+}
+
+fn tamper_serialized_summary(
+    envelope: SaveEnvelope,
+    summary: &str,
+    expected_occurrences: usize,
+) -> SaveEnvelope {
+    assert!(!summary.is_empty());
+    assert!(
+        summary.is_ascii(),
+        "fixture summaries must be byte-stable ASCII"
+    );
+    let needle = summary.as_bytes();
+    let mut bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let mut cursor = 0;
+    let mut replaced = 0;
+    while cursor + needle.len() <= bytes.len() {
+        let Some(relative) = bytes[cursor..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        else {
+            break;
+        };
+        let start = cursor + relative;
+        bytes[start..start + needle.len()].fill(b'X');
+        cursor = start + needle.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, expected_occurrences,
+        "test must corrupt exactly the intended persisted summary copies"
+    );
+    bincode::deserialize(&bytes).expect("equal-length summary corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -267,6 +300,49 @@ fn referral_preserves_police_custody_and_survives_save_before_supplement() {
     );
     validate_state(&restored).expect("supplemented restored prosecution case should validate");
     validate_invariants(&restored);
+}
+
+#[test]
+fn prosecution_referral_rejects_matching_but_unauthored_persisted_summary() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    let (referral_id, summary) = {
+        let case_record = fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("prosecution case should persist");
+        let referral_id = case_record.initial_referral();
+        let referral = fixture
+            .state
+            .legal()
+            .get_prosecution_referral(referral_id)
+            .expect("initial referral should persist");
+        let summary = fixture
+            .state
+            .intelligence()
+            .get_information(referral.information())
+            .expect("referral information should persist")
+            .summary()
+            .to_owned();
+        (referral_id, summary)
+    };
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid prosecution referral should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 2);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten referral narrative must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidProsecutionReferral {
+                    referral: invalid,
+                }
+            ) if invalid == referral_id
+        ),
+        "expected invalid prosecution referral, got {error:?}"
+    );
 }
 
 #[test]

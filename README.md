@@ -10,7 +10,7 @@ page routes you to the cheapest correct proof for any change.
 
 ```text
 Registry (immutable, build_registry)  ─┐
-AppState  (15 substates + 5 RNG streams + clocks) ─┤─► run_tick (1 min, 14 phases)
+AppState  (domain state + 5 RNG streams + clocks) ─┤─► run_tick (1 min, ordered phases)
 Harness   (smoke/full, player-visible only)        ─┘
 ```
 
@@ -58,7 +58,7 @@ Layer 0  core::{id,time,entity,attention,state,simulation,persistence,invariants
 - `AppState` — serializable mutable campaign state, typed IDs, clocks, and 5 independent `ChaCha8Rng` streams.
 - Domain systems — validate requests, commit mutations, and maintain owned indexes and records.
 
-Canonical execution boundary is [`core::simulation::run_tick`](src/core/simulation.rs). It advances one simulated minute and resolves due work in deterministic order (14 phases — see `ARCHITECTURE.md` for the sequence). Adapters, the harness, tests, and reports observe or request through the same production systems.
+Canonical execution boundary is [`core::simulation::run_tick`](src/core/simulation.rs). It advances one simulated minute and resolves due work in the deterministic order documented in `ARCHITECTURE.md`. Adapters, the harness, tests, and reports observe or request through the same production systems.
 
 Full ownership map, phase diagram, RNG streams, and persistence envelope are in [`ARCHITECTURE.md`](ARCHITECTURE.md); the quick-ref table of `validate_*`/`decide_*` entry points is in [`AGENTS.md:§3`](AGENTS.md#3-canonical-operations--quick-reference).
 

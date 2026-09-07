@@ -2,9 +2,12 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::validate_invariants;
+use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::persistence::{build_save, restore_save};
 use crate::delegation::ResponsibilityFunction;
-use crate::world::world_system::{insert_character, insert_organization};
+use crate::world::world_system::{
+    insert_character, insert_organization, validate_reassign_character,
+};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 
 fn make_authority_fixture() -> (crate::Registry, AppState, MandateAuthority) {
@@ -76,6 +79,62 @@ fn resolves_authority_with_versioned_dependencies() {
     assert_eq!(resolved.mandate_version(), 1);
     assert_eq!(resolved.manager_version(), 1);
     validate_invariants(&state);
+}
+
+#[test]
+fn revoked_mandate_remains_valid_after_former_manager_changes_organization() {
+    let (registry, mut state, authority) = make_authority_fixture();
+    validate_revoke_mandate(&state, authority.mandate)
+        .expect("active mandate should revoke")
+        .commit(&mut state)
+        .expect("mandate revocation should commit");
+    let next_organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Later Employer".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("later organization fixture should validate");
+
+    validate_reassign_character(&state, authority.manager, Some(next_organization), None)
+        .expect("revoked authority must release the former manager")
+        .commit(&mut state)
+        .expect("former manager transfer should commit");
+
+    assert_eq!(
+        state
+            .delegation()
+            .get_mandate(authority.mandate)
+            .expect("revoked mandate should remain durable history")
+            .status(),
+        MandateStatus::Revoked
+    );
+    assert_eq!(
+        state
+            .world()
+            .get_character(authority.manager)
+            .expect("former manager should persist")
+            .organization(),
+        Some(next_organization)
+    );
+    validate_state(&state).expect("revoked mandate history must tolerate later membership");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state)
+            .expect("revoked mandate followed by transfer should remain save-valid"),
+    )
+    .expect("revoked mandate history should restore after manager transfer");
+    assert_eq!(
+        restored
+            .world()
+            .get_character(authority.manager)
+            .expect("restored former manager should persist")
+            .organization(),
+        Some(next_organization)
+    );
+    validate_invariants(&restored);
 }
 
 #[test]

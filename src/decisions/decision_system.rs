@@ -2,7 +2,7 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, IdExhaustionError, OperationId, OrganizationId,
+    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
     PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
@@ -372,13 +372,6 @@ pub struct ValidatedRecruitmentApprovalRequest {
 }
 
 impl ValidatedRecruitmentApprovalRequest {
-    /// The pre-resolved pitch outcome carried by this request. An autonomous leadership pass
-    /// approves pitches whose outcome is already `Accepted` and declines the rest, so a
-    /// non-player organization resolves its own approval queue deterministically.
-    pub fn proposed_outcome(&self) -> crate::recruitment::RecruitmentOutcome {
-        self.proposal.proposed_outcome()
-    }
-
     pub fn commit(self, state: &mut AppState) -> Result<DecisionRequestOutcome, DecisionError> {
         let context = match self.draft.context {
             DecisionContext::RecruitmentApproval(context) => context,
@@ -412,6 +405,100 @@ impl ValidatedRecruitmentApprovalRequest {
             decision: id,
             requests_pause,
         })
+    }
+
+    /// Commits a non-player approval request and its deterministic leadership response as one
+    /// transaction. The resolved decision remains durable history, but never exists in pending
+    /// indexes where a later failure could strand it indefinitely.
+    pub(crate) fn commit_autonomous_resolution(
+        self,
+        registry: &Registry,
+        state: &mut AppState,
+        response: DecisionResponse,
+    ) -> Result<(DecisionRequestOutcome, DecisionResolutionOutcome), DecisionError> {
+        let context = match self.draft.context {
+            DecisionContext::RecruitmentApproval(context) => context,
+            DecisionContext::OperationPoliceArrival { .. } => {
+                unreachable!("validated recruitment approval must retain recruitment context")
+            }
+        };
+        debug_assert_ne!(state.player_organization(), Some(self.recipient));
+        let predicted_decision =
+            DecisionRequestId::from_raw(state.ids.next_raw(IdKind::DecisionRequest));
+        if !self.options.contains(&response) {
+            return Err(DecisionError::InvalidResponse {
+                decision: predicted_decision,
+                response,
+            });
+        }
+        if let Some(decision) = state
+            .decisions
+            .pending_for_recruitment_approval(context.target_organization(), context.candidate())
+        {
+            return Err(DecisionError::ExistingPendingRecruitmentApproval { decision });
+        }
+        validate_recruitment_approval_authority_snapshot(state, context)?;
+        self.proposal.revalidate_state(state)?;
+
+        let attempt = match response {
+            DecisionResponse::Approve => Some(validate_approved_recruitment_attempt(
+                registry,
+                state,
+                predicted_decision,
+                context.authority().authority(),
+                RecruitmentDraft {
+                    target_organization: context.target_organization(),
+                    recruiter: context.recruiter(),
+                    candidate: context.candidate(),
+                    approach: context.approach(),
+                },
+            )?),
+            DecisionResponse::Reject => None,
+            DecisionResponse::Continue | DecisionResponse::Abort => {
+                return Err(DecisionError::InvalidResponse {
+                    decision: predicted_decision,
+                    response,
+                });
+            }
+        };
+
+        // Reserve every fallible allocation before the first mutation. The attempt's own
+        // commit repeats its budget check defensively, but cannot exhaust after this preflight.
+        state.ids.reserve(IdKind::DecisionRequest, 1)?;
+        if let Some(attempt) = attempt.as_ref() {
+            attempt.preflight_ids(state)?;
+        }
+
+        let recruitment_attempt = attempt.map(|attempt| {
+            attempt
+                .commit(state)
+                .expect("autonomous recruitment attempt was revalidated and fully preflighted")
+        });
+        let decision = state
+            .ids
+            .next_decision_request()
+            .expect("autonomous decision ID was preflighted before mutation");
+        debug_assert_eq!(decision, predicted_decision);
+        let record = DecisionRequestRecord::from_resolved(
+            DecisionRecordParts {
+                id: decision,
+                recipient: self.recipient,
+                requested_at: state.now(),
+                options: self.options,
+                draft: self.draft,
+            },
+            build_resolution(response, state.now(), self.recipient),
+        );
+        state.decisions.insert_resolved(record);
+        Ok((
+            DecisionRequestOutcome {
+                decision,
+                requests_pause: false,
+            },
+            DecisionResolutionOutcome {
+                recruitment_attempt,
+            },
+        ))
     }
 }
 

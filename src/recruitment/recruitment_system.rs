@@ -8,9 +8,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::decisions::decision_system::{
-    validate_request_recruitment_approval, validate_resolve_decision,
-};
+use crate::decisions::decision_system::{DecisionError, validate_request_recruitment_approval};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, ResolvedPolicy, ensure_mandate_authority_current,
     resolve_mandate_authority, resolve_policy_for_manager,
@@ -28,9 +26,10 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::recruitment::scoring::{
-    candidate_pressure_information_ids, resolve_perceived_legal_pressure_at,
-    resolve_perceived_legal_pressure_from_ids, resolve_recruitment_factors_from_context,
-    resolve_recruitment_margin, resolve_recruitment_outcome,
+    candidate_pressure_information_ids, recruitment_relationship_support,
+    resolve_perceived_legal_pressure_at, resolve_perceived_legal_pressure_from_ids,
+    resolve_recruitment_factors_from_context, resolve_recruitment_margin,
+    resolve_recruitment_outcome,
 };
 use crate::recruitment::{
     RecruitmentApproach, RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors,
@@ -79,6 +78,11 @@ pub enum RecruitmentError {
     PendingRecruitmentApproval { decision: DecisionRequestId },
     #[error("candidate {0} does not exist")]
     MissingCandidate(CharacterId),
+    #[error("candidate {candidate} references missing organization {organization}")]
+    MissingCandidateOrganization {
+        candidate: CharacterId,
+        organization: OrganizationId,
+    },
     #[error("a character cannot recruit themselves")]
     SelfRecruitment,
     #[error("candidate {candidate} is already a member of target organization {organization}")]
@@ -204,13 +208,6 @@ pub(crate) struct ValidatedRecruitmentProposal {
 }
 
 impl ValidatedRecruitmentProposal {
-    /// The pitch outcome this proposal already resolved deterministically. Leadership
-    /// approval decisions use it to decline pitches the organization's own assessment says
-    /// will not land, without a second scoring pass.
-    pub(crate) fn proposed_outcome(&self) -> RecruitmentOutcome {
-        self.plan.context.outcome
-    }
-
     pub(crate) fn revalidate_state(&self, state: &AppState) -> Result<(), RecruitmentError> {
         validate_plan_state_snapshot(state, &self.plan)?;
         if self.plan.context.outcome == RecruitmentOutcome::Accepted {
@@ -275,24 +272,36 @@ pub fn find_recruitment_candidates(
     let mut candidates = Vec::new();
     for relationship in state.social.relationships_to(recruiter) {
         let candidate = relationship.from();
-        let Some(record) = state.world.get_character(candidate) else {
+        let record = state
+            .world
+            .get_character(candidate)
+            .ok_or(RecruitmentError::MissingCandidate(candidate))?;
+        if record.organization() == Some(target_organization) {
             continue;
-        };
-        if record.organization() == Some(target_organization)
-            || !candidate_organization_is_recruitable(state, record.organization())
-            || recruitment_is_on_cooldown(
-                registry.recruitment(),
-                state,
-                candidate,
-                target_organization,
-            )
-            || validate_reassign_character(
-                state,
-                candidate,
-                Some(target_organization),
-                Some(recruiter),
-            )
-            .is_err()
+        }
+        if let Some(organization) = record.organization() {
+            let organization_record = state.world.get_organization(organization).ok_or(
+                RecruitmentError::MissingCandidateOrganization {
+                    candidate,
+                    organization,
+                },
+            )?;
+            if organization_record.kind() != OrganizationKind::Criminal {
+                continue;
+            }
+        }
+        if recruitment_is_on_cooldown(
+            registry.recruitment(),
+            state,
+            candidate,
+            target_organization,
+        ) || validate_reassign_character(
+            state,
+            candidate,
+            Some(target_organization),
+            Some(recruiter),
+        )
+        .is_err()
         {
             continue;
         }
@@ -306,18 +315,28 @@ pub fn find_recruitment_candidates(
 /// canonical validated commits, hence `apply_` rather than a read-only `resolve_`.
 /// One autonomous-recruitment pass's surfaced work: pitches actually made (delegated or
 /// leadership-approved) and durable approval requests raised for the organization's decision
-/// surface. Player-organization requests stay pending until resolved; non-player requests
-/// resolve inside the same pass through the pre-resolved pitch assessment.
+/// surface. Player-organization requests stay pending until resolved; non-player leadership
+/// resolves the approval and executes the authorized pitch atomically in the same pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutonomousRecruitmentOutcome {
     pub attempts: Vec<RecruitmentAttemptId>,
     pub approval_requests: Vec<crate::core::id::DecisionRequestId>,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum AutonomousRecruitmentError {
+    #[error(transparent)]
+    Delegation(#[from] DelegationError),
+    #[error(transparent)]
+    Recruitment(#[from] RecruitmentError),
+    #[error(transparent)]
+    Decision(#[from] DecisionError),
+}
+
 pub(crate) fn apply_due_autonomous_recruitment(
     registry: &Registry,
     state: &mut AppState,
-) -> AutonomousRecruitmentOutcome {
+) -> Result<AutonomousRecruitmentOutcome, AutonomousRecruitmentError> {
     let cadence = u64::from(
         registry
             .recruitment()
@@ -325,7 +344,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
             .as_minutes(),
     );
     if state.now() == SimTime::ZERO || !state.now().as_minutes().is_multiple_of(cadence) {
-        return AutonomousRecruitmentOutcome::default();
+        return Ok(AutonomousRecruitmentOutcome::default());
     }
 
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
@@ -339,9 +358,10 @@ pub(crate) fn apply_due_autonomous_recruitment(
     // this guard one minute could bounce a character between organizations with zero dwell time.
     let mut recruited_this_pass = std::collections::BTreeSet::new();
     for (mandate, organization, manager) in authorities {
-        let Some(manager_record) = state.world().get_character(manager) else {
-            continue;
-        };
+        let manager_record = state
+            .world()
+            .get_character(manager)
+            .ok_or(RecruitmentError::MissingRecruiter(manager))?;
         if state.legal().active_arrest_for_character(manager).is_some() {
             continue;
         }
@@ -351,16 +371,12 @@ pub(crate) fn apply_due_autonomous_recruitment(
         ) {
             continue;
         }
-        // A single mandate that currently cannot resolve (policy, candidate availability, or a
-        // transient commit rejection) must not abort every other mandate's due work in the same
-        // minute: each eligible authority is evaluated independently.
+        // The mandate and manager came from current authoritative indexes. Missing policy or
+        // invalid candidate-discovery dependencies are state-contract failures, not a reason to
+        // erase this cadence's autonomous work silently.
         let policy =
-            match resolve_policy_for_manager(state, manager, PolicyKind::IndependentRecruitment) {
-                Ok(policy) => policy,
-                Err(_) => continue,
-            };
-        let mut candidates =
-            find_recruitment_candidates(registry, state, organization, manager).unwrap_or_default();
+            resolve_policy_for_manager(state, manager, PolicyKind::IndependentRecruitment)?;
+        let mut candidates = find_recruitment_candidates(registry, state, organization, manager)?;
         candidates.retain(|candidate| !recruited_this_pass.contains(candidate));
         // Stabilize order before selection so neither channel's choice depends on BTree
         // iteration quirks.
@@ -376,15 +392,16 @@ pub(crate) fn apply_due_autonomous_recruitment(
                     continue;
                 };
                 let approach = resolve_autonomous_recruitment_approach(manager_record);
-                // The draw must address the sorted candidate list; the list is non-empty
-                // here, so an empty-choice error is impossible by construction.
-                let index = crate::core::simulation::draw_index(
-                    state.recruitment_rng_mut(),
-                    candidates.len(),
-                )
-                .expect("non-empty sorted candidate list must draw");
+                // Draw speculatively on a cloned stream. Candidate-specific validation and the
+                // attempt's full ID-budget preflight may still reject, and a rejected autonomous
+                // action must not perturb later recruitment outcomes. Publish the advanced RNG
+                // only after the selected attempt commits atomically.
+                let mut advanced_rng = state.recruitment_rng_mut().clone();
+                let index =
+                    crate::core::simulation::draw_index(&mut advanced_rng, candidates.len())
+                        .expect("non-empty sorted candidate list must draw");
                 let candidate = candidates[index];
-                let attempt = match validate_delegated_recruitment_attempt(
+                let attempt = validate_delegated_recruitment_attempt(
                     registry,
                     state,
                     authority,
@@ -394,13 +411,9 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         candidate,
                         approach,
                     },
-                ) {
-                    Ok(validated) => match validated.commit(state) {
-                        Ok(attempt) => attempt,
-                        Err(_) => continue,
-                    },
-                    Err(_) => continue,
-                };
+                )?
+                .commit(state)?;
+                *state.recruitment_rng_mut() = advanced_rng;
                 recruited_this_pass.insert(candidate);
                 outcome.attempts.push(attempt);
             }
@@ -413,13 +426,21 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         .pending_for_recruitment_approval(organization, *candidate)
                         .is_none()
                 });
-                // Leadership review is a governance act, not a luck draw: the request covers
-                // the most senior candidate id and consumes no randomness.
+                // Leadership review is a governance act, not a luck draw. Prefer the prospect
+                // with the strongest candidate-to-manager relationship support, then use the
+                // character ID only as a deterministic tie-breaker. Creation order is not
+                // seniority and must not decide whom a manager brings to leadership.
+                sort_approval_candidates_by_relationship(
+                    registry.recruitment(),
+                    state,
+                    manager,
+                    &mut candidates,
+                );
                 let Some(&candidate) = candidates.first() else {
                     continue;
                 };
                 let summary = approval_request_summary(state, manager, candidate);
-                let Ok(request) = validate_request_recruitment_approval(
+                let request = validate_request_recruitment_approval(
                     registry,
                     state,
                     crate::decisions::RecruitmentApprovalRequestDraft {
@@ -431,34 +452,25 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         attention: crate::core::attention::AttentionClass::Exception,
                         summary,
                     },
-                ) else {
-                    continue;
-                };
-                // A non-player organization resolves its own queue in the same breath:
-                // approve pitches whose pre-resolved assessment says they land, decline the
-                // rest. The player's own requests wait on the player.
-                let response = if request.proposed_outcome() == RecruitmentOutcome::Accepted {
-                    crate::decisions::DecisionResponse::Approve
+                )?;
+                // The player's own requests wait on the player. NPC leadership authorizes a
+                // manager's valid proposal without reading the candidate's future response:
+                // acceptance or refusal is resolved only when the approved pitch is actually
+                // attempted, preserving causal information boundaries.
+                if state.player_organization() == Some(organization) {
+                    let committed = request.commit(state)?;
+                    outcome.approval_requests.push(committed.decision);
                 } else {
-                    crate::decisions::DecisionResponse::Reject
-                };
-                let Ok(committed) = request.commit(state) else {
-                    continue;
-                };
-                outcome.approval_requests.push(committed.decision);
-                if state.player_organization() != Some(organization) {
-                    let resolution = match validate_resolve_decision(
+                    // NPC leadership creates the historical approval record and applies the
+                    // approved pitch as one composite transaction. No pending request is exposed
+                    // between the two halves, so an allocation failure cannot strand a queue
+                    // entry that future candidate discovery refuses to revisit.
+                    let (committed, resolution) = request.commit_autonomous_resolution(
                         registry,
                         state,
-                        committed.decision,
-                        organization,
-                        response,
-                    )
-                    .and_then(|validated| validated.commit(state))
-                    {
-                        Ok(resolution) => resolution,
-                        Err(_) => continue,
-                    };
+                        crate::decisions::DecisionResponse::Approve,
+                    )?;
+                    outcome.approval_requests.push(committed.decision);
                     if let Some(attempt) = resolution.recruitment_attempt {
                         recruited_this_pass.insert(candidate);
                         outcome.attempts.push(attempt);
@@ -470,7 +482,27 @@ pub(crate) fn apply_due_autonomous_recruitment(
             PolicySetting::AssociateLegalSupport(_) => {}
         }
     }
-    outcome
+    Ok(outcome)
+}
+
+fn sort_approval_candidates_by_relationship(
+    definition: &RecruitmentDefinition,
+    state: &AppState,
+    recruiter: CharacterId,
+    candidates: &mut [CharacterId],
+) {
+    candidates.sort_unstable_by(|left, right| {
+        let support = |candidate: CharacterId| {
+            let relationship = state
+                .social()
+                .get_relationship(candidate, recruiter)
+                .expect("autonomous recruitment candidates must retain their relationship edge");
+            recruitment_relationship_support(definition, relationship.dimensions())
+        };
+        support(*right)
+            .cmp(&support(*left))
+            .then_with(|| left.cmp(right))
+    });
 }
 
 fn approval_request_summary(
@@ -779,11 +811,43 @@ fn validate_recruitment_plan_with_authority(
     })
 }
 
+pub(crate) fn recruitment_defection_history_summary(candidate: &str) -> String {
+    format!("{candidate} left their former organization.")
+}
+
+pub(crate) fn recruitment_join_history_summary(
+    candidate: &str,
+    organization: &str,
+    recruiter: &str,
+) -> String {
+    format!("{candidate} joined {organization} after recruitment by {recruiter}.")
+}
+
+pub(crate) fn recruitment_outcome_summary(
+    candidate: &str,
+    recruiter: &str,
+    organization: &str,
+    outcome: RecruitmentOutcome,
+) -> String {
+    match outcome {
+        RecruitmentOutcome::Accepted => {
+            format!(
+                "{candidate} accepted {recruiter}'s recruitment approach and joined {organization}."
+            )
+        }
+        RecruitmentOutcome::Refused => {
+            format!(
+                "{candidate} refused {recruiter}'s recruitment approach on behalf of {organization}."
+            )
+        }
+    }
+}
+
 /// Campaign history for an accepted attempt. When the candidate is poached from another
 /// organization, history must not leak the hidden recruiting organization: the defector's
 /// former organization is told only that the member left, and the player discovers the
 /// destination through surveillance, not a global history read. So a defection event omits
-/// the destination organization entity and its name â€” and also the recruiter, whose
+/// the destination organization entity and its name — and also the recruiter, whose
 /// membership would resolve straight back to that organization.
 fn validate_recruitment_history_event(
     state: &AppState,
@@ -800,7 +864,7 @@ fn validate_recruitment_history_event(
         HistoryEventDraft {
             occurred_at: plan.context.occurred_at,
             kind: HistoryEventKind::Recruitment,
-            summary: format!("{} left their former organization.", candidate.name()),
+            summary: recruitment_defection_history_summary(candidate.name()),
             entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
         }
     } else {
@@ -815,11 +879,10 @@ fn validate_recruitment_history_event(
         HistoryEventDraft {
             occurred_at: plan.context.occurred_at,
             kind: HistoryEventKind::Recruitment,
-            summary: format!(
-                "{} joined {} after recruitment by {}.",
+            summary: recruitment_join_history_summary(
                 candidate.name(),
                 organization.name(),
-                recruiter.name()
+                recruiter.name(),
             ),
             entities: BTreeSet::from([
                 EntityRef::Character(plan.draft.candidate),
@@ -859,20 +922,12 @@ fn validate_recruitment_outcome_information(
             observed_at: plan.context.occurred_at,
             reliability: Reliability::DirectAccess,
             specificity: Specificity::Precise,
-            summary: match plan.context.outcome {
-                RecruitmentOutcome::Accepted => format!(
-                    "{} accepted {}'s recruitment approach and joined {}.",
-                    candidate.name(),
-                    recruiter.name(),
-                    organization.name()
-                ),
-                RecruitmentOutcome::Refused => format!(
-                    "{} refused {}'s recruitment approach on behalf of {}.",
-                    candidate.name(),
-                    recruiter.name(),
-                    organization.name()
-                ),
-            },
+            summary: recruitment_outcome_summary(
+                candidate.name(),
+                recruiter.name(),
+                organization.name(),
+                plan.context.outcome,
+            ),
         },
     )?)
 }
@@ -982,7 +1037,7 @@ pub struct ValidatedRecruitmentAttempt {
 }
 
 impl ValidatedRecruitmentAttempt {
-    pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
+    fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = Vec::new();
         if self.history.is_some() {
             budget.push((IdKind::HistoryEvent, 1));
@@ -992,7 +1047,16 @@ impl ValidatedRecruitmentAttempt {
             budget.push((IdKind::Report, 1));
         }
         budget.push((IdKind::RecruitmentAttempt, 1));
-        state.ids.reserve_many(&budget)?;
+        budget
+    }
+
+    pub(crate) fn preflight_ids(&self, state: &AppState) -> Result<(), RecruitmentError> {
+        state.ids.reserve_many(&self.id_budget())?;
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
+        self.preflight_ids(state)?;
         if let Some(guard) = self.delegated_guard {
             ensure_mandate_authority_current(state, guard.authority)?;
             let current_policy = resolve_policy_for_manager(
@@ -1010,22 +1074,30 @@ impl ValidatedRecruitmentAttempt {
             }
         }
         validate_plan_state_snapshot(state, &self.plan)?;
-        let history_event = match self.plan.context.outcome {
+        let (history_event, resulting_candidate_version) = match self.plan.context.outcome {
             RecruitmentOutcome::Accepted => {
                 self.reassignment
                     .expect("accepted recruitment must carry a reassignment token")
                     .commit(state)?;
-                Some(
-                    self.history
-                        .expect("accepted recruitment must carry a history token")
-                        .commit(state)
-                        .expect("recruitment history ID was preflighted before reassignment"),
+                let version = state
+                    .world
+                    .get_character(self.plan.draft.candidate)
+                    .expect("reassigned recruitment candidate must still exist")
+                    .version();
+                (
+                    Some(
+                        self.history
+                            .expect("accepted recruitment must carry a history token")
+                            .commit(state)
+                            .expect("recruitment history ID was preflighted before reassignment"),
+                    ),
+                    version,
                 )
             }
             RecruitmentOutcome::Refused => {
                 debug_assert!(self.reassignment.is_none());
                 debug_assert!(self.history.is_none());
-                None
+                (None, self.plan.dependencies.expected_candidate_version)
             }
         };
         let outcome_information = self
@@ -1059,6 +1131,7 @@ impl ValidatedRecruitmentAttempt {
                     factors: self.plan.context.factors,
                     margin: self.plan.context.margin,
                     outcome: self.plan.context.outcome,
+                    resulting_candidate_version,
                     outcome_information,
                     history_event,
                 },
@@ -1186,18 +1259,6 @@ fn validate_recruitment_request_base(
         .get_character(draft.recruiter)
         .expect("validated recruiter must exist");
     Ok((candidate, recruiter))
-}
-
-fn candidate_organization_is_recruitable(
-    state: &AppState,
-    organization: Option<OrganizationId>,
-) -> bool {
-    organization.is_none_or(|organization| {
-        state
-            .world
-            .get_organization(organization)
-            .is_some_and(|record| record.kind() == OrganizationKind::Criminal)
-    })
 }
 
 /// One cooldown rule, two shapes: the discovery filter asks the predicate form, the

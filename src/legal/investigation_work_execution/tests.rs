@@ -249,9 +249,10 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
             1,
             "attempt {attempt} should schedule exactly one interview"
         );
+        let interview = scheduled[0];
         loop {
             let outcome = run_tick(&registry, &mut fixture.state);
-            if !outcome.resolved_investigation_work.is_empty() {
+            if outcome.resolved_investigation_work.contains(&interview) {
                 break;
             }
         }
@@ -277,6 +278,339 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
     validate_state(&fixture.state).expect("capped interview state should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("capped interview state should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn late_reviewable_evidence_is_scheduled_after_case_was_already_staffed() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1A7E_1A7E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Late Evidence Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Late Evidence Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let investigator = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Detective Later".to_owned(),
+            organization: Some(police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Investigation, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("investigator fixture should validate");
+    let suspect = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Late Evidence Suspect".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("suspect fixture should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Early Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Evidence arrives later".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(suspect)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        crate::legal::CaseWitnessDraft {
+            investigation,
+            witness,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness registration should validate")
+    .commit(&mut state)
+    .expect("witness registration should commit");
+
+    // The first authoritative minute staffs the case and schedules its witness interview, but
+    // there is no reviewable evidence yet. This is exactly the state that used to strand a later
+    // fingerprint because initial reviews only inspected the `staffed_investigations` output.
+    let first_tick = run_tick(&registry, &mut state);
+    assert_eq!(
+        first_tick.staffed_investigations,
+        vec![(investigation, investigator)]
+    );
+    assert!(first_tick.scheduled_investigation_work.is_empty());
+    assert_eq!(first_tick.scheduled_witness_interviews.len(), 1);
+    let interview = first_tick.scheduled_witness_interviews[0];
+
+    let fingerprint = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Fingerprint,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("late fingerprint should validate")
+    .commit(&mut state)
+    .expect("late fingerprint should commit");
+
+    let second_tick = run_tick(&registry, &mut state);
+    assert!(
+        second_tick.staffed_investigations.is_empty(),
+        "the case was already staffed before the evidence arrived"
+    );
+    assert!(
+        second_tick.scheduled_investigation_work.is_empty(),
+        "late evidence must wait while the case's single detective is interviewing a witness"
+    );
+    assert!(second_tick.scheduled_witness_interviews.is_empty());
+
+    let mut interview_resolved = second_tick.resolved_investigation_work.contains(&interview);
+    while !interview_resolved {
+        interview_resolved = run_tick(&registry, &mut state)
+            .resolved_investigation_work
+            .contains(&interview);
+    }
+
+    // Scheduling phases run before due work resolves, so the newly idle detective picks up the
+    // deferred evidence review on the following authoritative minute. Evidence review has phase
+    // priority over witness scheduling and therefore owns the detective for its authored duration.
+    let review_tick = run_tick(&registry, &mut state);
+    assert_eq!(review_tick.scheduled_investigation_work.len(), 1);
+    assert!(review_tick.scheduled_witness_interviews.is_empty());
+    let review = state
+        .legal()
+        .get_investigation_work(review_tick.scheduled_investigation_work[0])
+        .expect("late-evidence review should persist");
+    assert_eq!(review.kind(), InvestigationWorkKind::EvidenceReview);
+    assert_eq!(
+        review.focus(),
+        InvestigationWorkFocus::evidence(fingerprint)
+    );
+    assert_eq!(
+        state
+            .legal()
+            .work_for_investigation(investigation)
+            .filter(|work| work.kind() == InvestigationWorkKind::WitnessInterview)
+            .count(),
+        1,
+        "the completed interview remains history while the deferred review starts"
+    );
+    validate_state(&state).expect("late evidence scheduling state should validate");
+    validate_state_against_registry(&registry, &state)
+        .expect("late evidence scheduling should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn later_witness_pressure_does_not_rewrite_completed_interview_support() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.first,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("cooperative witness should register")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect("witness interview should schedule")
+    .commit(&mut fixture.state)
+    .expect("witness interview should commit");
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::WitnessInterview)
+        .duration();
+    fixture.state.advance_clock(duration);
+    let plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        work,
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("due cooperative interview should resolve");
+    assert_eq!(plan.outcome(), InvestigationWorkOutcome::Connected);
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, plan)
+        .expect("fresh interview resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("interview resolution should commit");
+    let historical_support = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .and_then(|record| record.resolution())
+        .expect("completed interview should retain its resolution")
+        .factors()
+        .source_support();
+    assert_eq!(historical_support.value(), 85);
+
+    crate::legal::witness_system::validate_set_witness_cooperation(
+        &fixture.state,
+        case_witness,
+        crate::legal::WitnessCooperation::Hostile,
+    )
+    .expect("later witness pressure should be able to change cooperation")
+    .commit(&mut fixture.state)
+    .expect("later cooperation change should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_case_witness(case_witness)
+            .expect("witness should persist")
+            .cooperation(),
+        crate::legal::WitnessCooperation::Hostile
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(work)
+            .and_then(|record| record.resolution())
+            .expect("historical interview should persist")
+            .factors()
+            .source_support(),
+        historical_support,
+        "later intimidation must affect future interviews, not the completed interview"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("later cooperation changes must not retroactively invalidate completed work");
+    build_save(&registry, &fixture.state)
+        .expect("completed interview followed by later pressure should remain save-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn witness_scheduler_surfaces_work_id_exhaustion_without_partial_schedule() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.first,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness should register")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let work_before = fixture
+        .state
+        .legal()
+        .work_for_investigation(fixture.investigation)
+        .count();
+    let investigation_before = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist")
+        .clone();
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::InvestigationWork, u32::MAX);
+
+    let error = apply_witness_interview_scheduling(&registry, &mut fixture.state)
+        .expect_err("autonomous witness scheduling must surface allocator exhaustion");
+    assert!(matches!(error, InvestigationWorkError::IdExhaustion(_)));
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .work_for_investigation(fixture.investigation)
+            .count(),
+        work_before,
+        "failed scheduling must not insert a partial work record"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .scheduled_work_for_focus(
+                fixture.investigation,
+                InvestigationWorkKind::WitnessInterview,
+                InvestigationWorkFocus::witness(case_witness),
+            )
+            .is_none()
+    );
+    let investigation_after = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist");
+    assert_eq!(
+        investigation_after.version(),
+        investigation_before.version()
+    );
+    assert_eq!(
+        investigation_after.last_activity_at(),
+        investigation_before.last_activity_at()
+    );
+    validate_state(&fixture.state).expect("failed witness scheduling must leave valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -444,6 +778,137 @@ fn scheduling_is_versioned_and_deduplicated_per_focus() {
         InvestigationWorkError::DuplicateScheduledWork { work }
     );
     validate_state(&fixture.state).expect("scheduled work dependencies should remain valid");
+}
+
+#[test]
+fn investigator_cannot_hold_two_scheduled_casework_tasks() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let witness = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Capacity Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let review = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect("first detective task should validate")
+    .commit(&mut fixture.state)
+    .expect("first detective task should schedule");
+
+    let error = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect_err("one detective cannot start overlapping authored-duration work");
+    assert_eq!(
+        error,
+        InvestigationWorkError::InvestigatorBusy {
+            investigator: fixture.investigator,
+            work: review,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .work_for_investigator(fixture.investigator)
+            .filter(|work| work.status() == InvestigationWorkStatus::Scheduled)
+            .count(),
+        1
+    );
+    validate_state(&fixture.state).expect("busy-investigator rejection should preserve state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_witness_scheduler_starts_only_one_interview_per_detective() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        85,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    for name in ["First Capacity Witness", "Second Capacity Witness"] {
+        let witness = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("witness fixture should validate");
+        crate::legal::witness_system::validate_register_case_witness(
+            &fixture.state,
+            crate::legal::CaseWitnessDraft {
+                investigation: fixture.investigation,
+                witness,
+                cooperation: crate::legal::WitnessCooperation::Cooperative,
+            },
+        )
+        .expect("witness registration should validate")
+        .commit(&mut fixture.state)
+        .expect("witness registration should commit");
+    }
+
+    let scheduled = apply_witness_interview_scheduling(&registry, &mut fixture.state)
+        .expect("autonomous witness scheduling should resolve");
+    assert_eq!(scheduled.len(), 1);
+    assert!(
+        apply_witness_interview_scheduling(&registry, &mut fixture.state)
+            .expect("busy detective should be a normal scheduling deferral")
+            .is_empty()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .work_for_investigator(fixture.investigator)
+            .filter(|work| work.status() == InvestigationWorkStatus::Scheduled)
+            .count(),
+        1,
+        "a single detective must not interview multiple witnesses in parallel"
+    );
+    validate_state(&fixture.state).expect("serialized witness scheduling should validate");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

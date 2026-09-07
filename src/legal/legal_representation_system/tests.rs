@@ -6,7 +6,7 @@ use crate::contacts::contact_system::{
     ContactError, InstitutionalContactDraft, validate_establish_contact, validate_terminate_contact,
 };
 use crate::core::invariants::{validate_invariants, validate_state};
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
@@ -43,6 +43,39 @@ struct Fixture {
     arrest: ArrestId,
     payer: FinancialAccountId,
     provider: FinancialAccountId,
+}
+
+fn tamper_serialized_summary(
+    envelope: SaveEnvelope,
+    summary: &str,
+    expected_occurrences: usize,
+) -> SaveEnvelope {
+    assert!(!summary.is_empty());
+    assert!(
+        summary.is_ascii(),
+        "fixture summaries must be byte-stable ASCII"
+    );
+    let needle = summary.as_bytes();
+    let mut bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let mut cursor = 0;
+    let mut replaced = 0;
+    while cursor + needle.len() <= bytes.len() {
+        let Some(relative) = bytes[cursor..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        else {
+            break;
+        };
+        let start = cursor + relative;
+        bytes[start..start + needle.len()].fill(b'X');
+        cursor = start + needle.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, expected_occurrences,
+        "test must corrupt exactly the intended persisted summary copies"
+    );
+    bincode::deserialize(&bytes).expect("equal-length summary corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -367,6 +400,145 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
 }
 
 #[test]
+fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_counsel() {
+    let mut fx = fixture();
+    set_policy(
+        &fx.registry,
+        &mut fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate");
+    let payer_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer account should persist")
+        .balance();
+    fx.state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let error = apply_automatic_legal_support(&mut fx.state)
+        .expect_err("automatic support must surface a canonical commit failure");
+    assert!(matches!(error, LegalRepresentationError::IdExhaustion(_)));
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer account should persist")
+            .balance(),
+        payer_before,
+        "failed automatic retention must not move retainer funds"
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none(),
+        "failed automatic retention must not manufacture representation state"
+    );
+}
+
+#[test]
+fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
+    let mut fx = fixture();
+    set_policy(
+        &fx.registry,
+        &mut fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate");
+
+    let replacement_counsel = insert_character(
+        &mut fx.state,
+        CharacterDraft {
+            name: "Clara Voss".to_owned(),
+            organization: Some(fx.firm),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(82))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("replacement counsel should validate");
+    validate_set_relationship(&fx.state, fx.handler, replacement_counsel, relationship())
+        .expect("replacement counsel relationship should validate")
+        .commit(&mut fx.state);
+    let replacement_contact = validate_establish_contact(
+        &fx.state,
+        InstitutionalContactDraft {
+            sponsor: fx.sponsor,
+            handler: fx.handler,
+            contact: replacement_counsel,
+        },
+    )
+    .expect("replacement legal contact should validate")
+    .commit(&mut fx.state)
+    .expect("replacement legal contact should commit");
+    assert!(replacement_contact > fx.contact);
+
+    let police = fx
+        .state
+        .legal()
+        .get_arrest(fx.arrest)
+        .expect("fixture arrest should persist")
+        .authority();
+    let counsel_case = validate_open_investigation(
+        &fx.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Counsel detention inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fx.counsel)]),
+        },
+    )
+    .expect("counsel investigation should validate")
+    .commit(&mut fx.state)
+    .expect("counsel investigation should commit");
+    let counsel_evidence = validate_add_evidence(
+        &fx.state,
+        EvidenceDraft {
+            investigation: counsel_case,
+            custodian: police,
+            subject: EntityRef::Character(fx.counsel),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fx.state.now(),
+        },
+    )
+    .expect("counsel evidence should validate")
+    .commit(&mut fx.state)
+    .expect("counsel evidence should commit");
+    validate_arrest(
+        &fx.state,
+        ArrestDraft {
+            character: fx.counsel,
+            investigation: counsel_case,
+            evidence: BTreeSet::from([counsel_evidence]),
+        },
+    )
+    .expect("counsel detention should validate")
+    .commit(&mut fx.state)
+    .expect("counsel detention should commit");
+
+    let retained = apply_automatic_legal_support(&mut fx.state)
+        .expect("automatic support should continue past an unavailable older channel");
+    assert_eq!(retained.len(), 1);
+    let representation = fx
+        .state
+        .legal()
+        .get_legal_representation(retained[0])
+        .expect("replacement representation should persist");
+    assert_eq!(representation.contact(), replacement_contact);
+    assert_eq!(representation.counsel(), replacement_counsel);
+    validate_state(&fx.state).expect("replacement legal channel state should validate");
+    validate_invariants(&fx.state);
+}
+
+#[test]
 fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
     let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
     let supervisor = fx
@@ -599,6 +771,89 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     );
     validate_state(&restored).expect("restored replacement-counsel state should validate");
     validate_invariants(&restored);
+}
+
+#[test]
+fn retained_representation_rejects_matching_but_unauthored_persisted_summary() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 12_000, None);
+    let summary = {
+        let record = fixture
+            .state
+            .legal()
+            .get_legal_representation(representation)
+            .expect("representation should persist");
+        fixture
+            .state
+            .intelligence()
+            .get_information(record.information())
+            .expect("retained representation information should persist")
+            .summary()
+            .to_owned()
+    };
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid retained representation should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 2);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten retained narrative must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidLegalRepresentation {
+                    representation: invalid,
+                }
+            ) if invalid == representation
+        ),
+        "expected invalid representation, got {error:?}"
+    );
+}
+
+#[test]
+fn ended_representation_rejects_matching_but_unauthored_persisted_summary() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 12_000, None);
+    validate_end_legal_representation(
+        &fixture.state,
+        representation,
+        LegalRepresentationEndReason::CounselWithdrawn,
+    )
+    .expect("representation ending should validate")
+    .commit(&mut fixture.state)
+    .expect("representation ending should commit");
+    let summary = {
+        let record = fixture
+            .state
+            .legal()
+            .get_legal_representation(representation)
+            .expect("ended representation should persist");
+        let information = record
+            .ended_information()
+            .expect("ended representation should retain ending information");
+        fixture
+            .state
+            .intelligence()
+            .get_information(information)
+            .expect("ended representation information should persist")
+            .summary()
+            .to_owned()
+    };
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid ended representation should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 2);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten ending narrative must fail the real load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidLegalRepresentation {
+                    representation: invalid,
+                }
+            ) if invalid == representation
+        ),
+        "expected invalid representation, got {error:?}"
+    );
 }
 
 #[test]

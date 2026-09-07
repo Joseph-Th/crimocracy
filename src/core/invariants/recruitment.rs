@@ -9,7 +9,10 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::recruitment::recruitment_system::RecruitmentFactorContext;
+use crate::recruitment::recruitment_system::{
+    RecruitmentFactorContext, recruitment_defection_history_summary,
+    recruitment_join_history_summary, recruitment_outcome_summary,
+};
 use crate::recruitment::scoring::{
     resolve_perceived_legal_pressure_at, resolve_recruitment_factors_from_context,
     resolve_recruitment_margin, resolve_recruitment_outcome,
@@ -283,6 +286,12 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
             .ok_or(StateValidationError::InvalidRecruitmentAttempt {
                 attempt: attempt.id(),
             })?;
+        let expected_outcome_summary = recruitment_outcome_summary(
+            candidate.name(),
+            recruiter.name(),
+            target.name(),
+            attempt.outcome(),
+        );
         if !recruitment_outcome_information.insert(attempt.outcome_information())
             || outcome_information.holder()
                 != KnowledgeHolder::Organization(attempt.target_organization())
@@ -296,7 +305,7 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
             || outcome_information.reliability() != Reliability::DirectAccess
             || outcome_information.specificity() != Specificity::Precise
             || !outcome_information.derived_from().is_empty()
-            || outcome_information.summary().trim().is_empty()
+            || outcome_information.summary() != expected_outcome_summary
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {
                 attempt: attempt.id(),
@@ -304,7 +313,9 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
         }
 
         let factors = attempt.factors();
-        if factors.recruiter_influence() > 100
+        if attempt.resulting_candidate_version() == 0
+            || attempt.resulting_candidate_version() > candidate.version()
+            || factors.recruiter_influence() > 100
             || factors.drive_alignment() > 100
             || factors.relationship_support() > 100
             || factors.incumbent_attachment() > 100
@@ -343,8 +354,18 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                         attempt: attempt.id(),
                     },
                 )?;
+                let expected_history_summary = if attempt.previous_organization().is_some() {
+                    recruitment_defection_history_summary(candidate.name())
+                } else {
+                    recruitment_join_history_summary(
+                        candidate.name(),
+                        target.name(),
+                        recruiter.name(),
+                    )
+                };
                 if history.kind() != HistoryEventKind::Recruitment
                     || history.occurred_at() != attempt.occurred_at()
+                    || history.summary() != expected_history_summary
                     || !history
                         .entities()
                         .contains(&EntityRef::Character(attempt.candidate()))
@@ -368,16 +389,13 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                         attempt: attempt.id(),
                     });
                 }
-                // The membership consequence of an accepted attempt is part of the persisted
-                // outcome: the candidate must now belong to the target organization under the
-                // recruiter.
-                let candidate = state.world.get_character(attempt.candidate()).ok_or(
-                    StateValidationError::InvalidRecruitmentAttempt {
-                        attempt: attempt.id(),
-                    },
-                )?;
-                if candidate.organization() != Some(attempt.target_organization())
-                    || candidate.supervisor() != Some(attempt.recruiter())
+                // Character versions advance only on membership/supervisor reassignment. While
+                // the version produced by this attempt is still current, enforce its immediate
+                // consequence exactly. A later version means a later canonical reassignment
+                // superseded it; history must not force the old membership forever.
+                if candidate.version() == attempt.resulting_candidate_version()
+                    && (candidate.organization() != Some(attempt.target_organization())
+                        || candidate.supervisor() != Some(attempt.recruiter()))
                 {
                     return Err(StateValidationError::InvalidRecruitmentAttempt {
                         attempt: attempt.id(),
@@ -390,14 +408,12 @@ pub(super) fn validate_recruitment(state: &AppState) -> Result<(), StateValidati
                         attempt: attempt.id(),
                     });
                 }
-                // A refused attempt must leave membership unchanged: the candidate remains in
-                // their pre-attempt organization (or stays independent).
-                let candidate = state.world.get_character(attempt.candidate()).ok_or(
-                    StateValidationError::InvalidRecruitmentAttempt {
-                        attempt: attempt.id(),
-                    },
-                )?;
-                if candidate.organization() != attempt.previous_organization() {
+                // Refusal performs no reassignment. Enforce that immediate no-change result
+                // only while no later character reassignment has advanced the version.
+                if candidate.version() == attempt.resulting_candidate_version()
+                    && (candidate.organization() != attempt.previous_organization()
+                        || candidate.supervisor() != attempt.previous_supervisor())
+                {
                     return Err(StateValidationError::InvalidRecruitmentAttempt {
                         attempt: attempt.id(),
                     });

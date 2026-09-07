@@ -9,7 +9,7 @@ use crate::core::state::AppState;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::legal::prosecution_system::write_resolution_summary;
+use crate::legal::prosecution_system::{prosecution_referral_summary, write_resolution_summary};
 use crate::legal::{ArrestStatus, ProsecutionCaseResolution, ProsecutionCaseStatus};
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, OrganizationKind};
@@ -201,6 +201,13 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
             } else {
                 "Prosecution evidence supplement"
             };
+            let expected_summary = prosecution_referral_summary(
+                source_authority.name(),
+                defendant.name(),
+                office.name(),
+                referral.evidence().len(),
+                is_initial,
+            );
             if !seen_referrals.insert(referral.id())
                 || referral.prosecution_case() != case.id()
                 || referral.source_investigation() != case.source_investigation()
@@ -236,7 +243,7 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                 || information.reliability() != Reliability::DirectAccess
                 || information.specificity() != Specificity::Precise
                 || !information.derived_from().is_empty()
-                || information.summary().trim().is_empty()
+                || information.summary() != expected_summary
                 || !seen_reports.insert(referral.report())
                 || report.recipient() != case.prosecutor_office()
                 || report.kind() != ReportKind::Legal

@@ -15,7 +15,7 @@ evidence rules are in [`TESTING.md`](TESTING.md); intent is in
 
 ```text
 Registry (immutable, build_registry)  ─┐
-AppState  (mutable, 15 substates + 5 RNG streams + clocks) ─┤─► run_tick (1 min, 14 phases, deterministic)
+AppState  (mutable domain state + 5 RNG streams + clocks) ─┤─► run_tick (1 min, deterministic ordered phases)
 Harness   (evaluation surface, smoke/full, player-visible only) ─┘
 ```
 
@@ -48,7 +48,7 @@ Layer 2 — Leaf / low-dependency domains (no cross-domain writes)
   world  social  intelligence  history  reports
               \    |        |         |       /
 Layer 1 — Immutable authoring
-  registry  ◄──  content::build_registry  (CURRENT_CONTENT_REVISION = 38)
+  registry  ◄──  content::build_registry  (content::CURRENT_CONTENT_REVISION)
                \
 Layer 0 — Foundations (everyone depends on these)
   core::{id, time, entity, attention, state, simulation, persistence, invariants}
@@ -65,12 +65,12 @@ intelligence ──► operations, contacts, recruitment, legal, reports
 social ──► recruitment
 legal ──► operations(police_response, investigation) ◄──► enterprises(vice inquiries)
 registry/content ──► everything reads it; nothing writes it after build_registry
-AppState (state.rs) owns all 15 substates; simulation.rs orchestrates all
+AppState (state.rs) owns all domain state; simulation.rs orchestrates all
 ```
 
-**File inventory:** `src/lib.rs` enumerates all 20 modules — start there.
+**File inventory:** `src/lib.rs` is the authoritative top-level module inventory — start there.
 
-### AppState ownership cockpit — 15 substates
+### AppState ownership cockpit
 
 | # | Field `state.*` | Owns | Canonical mutation | File |
 |---|---|---|---|---|
@@ -89,10 +89,10 @@ AppState (state.rs) owns all 15 substates; simulation.rs orchestrates all
 | 13 | `legal` | jurisdictions, patrols, investigations, evidence, arrests, custody, representation, prosecution, witnesses, informants | `jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, … via `legal_state` | `src/legal/` |
 | 14 | `contacts` | institutional contacts & disclosures | `contact_system` | `src/contacts/` |
 | 15 | `recruitment` | recruitment, cooldowns, approvals, scoring | `recruitment_system`, `scoring` | `src/recruitment/` |
-| — | `reputation` | per-audience standing (Fear/Reliability/Competence/Treachery) | `reputation_system::apply_reputation_delta` (single score path) | `src/reputation/` |
+| 16 | `reputation` | per-audience standing (Fear/Reliability/Competence/Treachery) | `reputation_system::apply_reputation_delta` (single score path) | `src/reputation/` |
 
 Persistence envelope: `src/core/persistence.rs` (`SaveEnvelope { format_version:1, content_revision, state }`);
-ID allocator: `src/core/id.rs` (31 kinds, `IdCounters`, `reserve` before multi-record commits).
+ID allocator: `src/core/id.rs` (`IdCounters`, `reserve` before multi-record commits).
 
 ---
 
@@ -210,7 +210,7 @@ Did you touch persistence, invariants, cross-domain behavior, or verification in
 | Broad local gate | `.\scripts\verify.cmd` | ~2-3s | **fmt → lib+integration → harness units → smoke (fail-closed) → full n=1 → clippy** |
 
 **Watch your lanes:** `tests/documentation_contracts.rs` guards alias names, doc links,
-and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION (66) / CURRENT_CONTENT_REVISION (38)`
+and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION / CURRENT_CONTENT_REVISION`
 agreement — they run in stage 2/3.
 
 ---
@@ -244,12 +244,12 @@ Before handoff, every change that touches state must satisfy all three:
   references, lifecycle agreement, and future timestamps. `validate_state_against_registry`
   re-derives authored-content-dependent values (margins, exposure, proceeds, schedules).
   `run_tick` calls `validate_invariants` at `src/core/simulation.rs` after every
-  14-phase minute. The soak (`cargo soak` / `--skip soak`) exercises mixed state
+  authoritative minute. The soak (`cargo soak` / `--skip soak`) exercises mixed state
   under full invariant validation.
 
 ---
 
-## 7. Runtime flow — the 14-phase tick
+## 7. Runtime flow — the authoritative tick
 
 `core::simulation::run_tick` (`src/core/simulation.rs`) is the **only**
 authoritative minute. Phase order is contractual — comments explain “runs after X so…”.
@@ -258,7 +258,7 @@ authoritative minute. Phase order is contractual — comments explain “runs af
  1  apply_opportunity_expiry               (durable lifecycle report before consumers)
  2  run_operations_phase                   (start → deadline aborts → police arrivals → resolution)
  3  apply_autonomous_investigator_staffing
- 4  apply_initial_evidence_reviews
+ 4  apply_initial_evidence_reviews             (first reviewable evidence on active staffed cases)
  5  apply_witness_interview_scheduling
  6  run_investigation_work_phase           (resolve due work with pre-drawn variance)
  7  apply_autonomous_evidence_arrests      (threshold: 2 independent evidence items)
