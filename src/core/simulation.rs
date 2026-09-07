@@ -83,8 +83,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // available to every same-minute consumer; then operations (start, deadline aborts, police
     // arrivals, resolution), legal institutional work (staffing, detective work, custody,
     // informants, representation, cold decay), economy cycles (businesses, enterprises),
-    // personnel passes (payroll, recruitment, delegated expansion), reputation (decay before
-    // consequences), and executive synthesis last so the due brief sees everything above.
+    // personnel passes (payroll, recruitment), reputation (decay before consequences), delegated
+    // expansion (which consumes the resulting current police-fear posture), and executive
+    // synthesis last so the due brief sees everything above.
     let expired_opportunities = apply_opportunity_expiry(registry, state);
     let (started_operations, arrived_police_responses, decision_requests, resolved_operations) =
         run_operations_phase(registry, state);
@@ -140,13 +141,19 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     let recruitment_approval_requests = recruitment.approval_requests;
-    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
-    // minute governs with its current roster. Selection consumes no randomness, so matched
-    // branches observe identical rival growth unless their own actions touched rival state.
+    // Reputation runs before delegated expansion because expansion consumes police fear. Daily
+    // decay first cools yesterday's posture, then this minute's operation and vice consequences
+    // land; the expansion gate therefore sees the current state rather than one tick of stale
+    // standing.
+    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
+    // Delegated rival expansion still runs after recruitment so a mandate whose crew changed
+    // this minute governs with its current roster, and now also after reputation so a vice hit
+    // this minute can make the organization keep its head down immediately. Selection consumes
+    // no randomness, so matched branches observe identical rival growth unless their own actions
+    // touched rival state.
     let autonomous_enterprises =
         crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state)
             .expect("valid state should resolve every due autonomous enterprise expansion");
-    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
     // same simulation minute.

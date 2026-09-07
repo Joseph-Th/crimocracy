@@ -5,12 +5,15 @@ use crate::core::entity::EntityRef;
 use crate::core::id::LedgerTransactionId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
-use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
+use crate::delegation::MandateStatus;
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
-use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
-use crate::world::BusinessOwner;
+use crate::intelligence::{
+    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+};
+use crate::legal::{Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength};
+use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateValidationError> {
@@ -316,22 +319,19 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
 
         match enterprise.status() {
             EnterpriseStatus::Active => {
-                let authority_covers_location = match authority.scope {
-                    ResponsibilityScope::Function(ResponsibilityFunction::Enterprise) => true,
-                    ResponsibilityScope::Function(
-                        ResponsibilityFunction::Territory
-                        | ResponsibilityFunction::Operations
-                        | ResponsibilityFunction::Intelligence
-                        | ResponsibilityFunction::Finance
-                        | ResponsibilityFunction::Legal
-                        | ResponsibilityFunction::Political
-                        | ResponsibilityFunction::Personnel,
-                    ) => false,
-                    ResponsibilityScope::Neighborhood(id) => id == neighborhood_id,
-                    ResponsibilityScope::Business(id) => {
-                        matches!(enterprise.location(), EnterpriseLocation::Business(location_id) if location_id == id)
-                    }
-                };
+                let authority_covers_location =
+                    crate::enterprises::enterprise_execution::can_authority_cover_location(
+                        authority.scope,
+                        enterprise.location(),
+                        neighborhood_id,
+                    );
+                let authority_covers_support = supporting_businesses.iter().all(|business| {
+                    crate::enterprises::enterprise_execution::can_authority_cover_location(
+                        authority.scope,
+                        EnterpriseLocation::Business(business.id()),
+                        business.neighborhood(),
+                    )
+                });
                 let next_cycle_at = enterprise.next_cycle_at().ok_or(
                     StateValidationError::InvalidEnterpriseSchedule {
                         enterprise: enterprise.id(),
@@ -341,6 +341,7 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                     || mandate.status() != MandateStatus::Active
                     || !mandate.scopes().contains(&authority.scope)
                     || !authority_covers_location
+                    || !authority_covers_support
                     || !location_is_active
                     || supporting_businesses.iter().any(|business| {
                         business.owner() != BusinessOwner::Organization(enterprise.organization())
@@ -366,6 +367,54 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                         enterprise: enterprise.id(),
                     });
                 }
+            }
+        }
+    }
+
+    // Derive every timestamp that can legitimately back a persisted vice-drawing cycle in one
+    // pass over case history. Re-checking one enterprise's case/evidence graph separately for
+    // every historical cycle would become quadratic when a long-lived vice file repeatedly
+    // shelves and resumes. The set turns the cycle-side proof into an O(log n) lookup while
+    // preserving the exact canonical incident shape.
+    let mut vice_incident_times = BTreeSet::new();
+    for investigation in state.legal.investigations() {
+        let Some(EntityRef::Enterprise(enterprise_id)) = investigation.origin() else {
+            continue;
+        };
+        if !investigation
+            .subjects()
+            .contains(&EntityRef::Enterprise(enterprise_id))
+        {
+            continue;
+        }
+        let Some(enterprise) = state.enterprises.get_enterprise(enterprise_id) else {
+            continue;
+        };
+        if !investigation
+            .notified_organizations()
+            .contains(&enterprise.organization())
+            || !state
+                .world
+                .get_organization(investigation.owner())
+                .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+        {
+            continue;
+        }
+        for evidence_id in investigation.evidence() {
+            let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
+                continue;
+            };
+            if evidence.investigation() == investigation.id()
+                && evidence.custodian() == investigation.owner()
+                && evidence.subject() == EntityRef::Enterprise(enterprise_id)
+                && evidence.origin() == Some(EntityRef::Enterprise(enterprise_id))
+                && evidence.source().is_none()
+                && evidence.kind() == EvidenceKind::Surveillance
+                && evidence.strength() == EvidenceStrength::Weak
+                && evidence.reliability() == EvidenceReliability::Questionable
+                && evidence.admissibility() == Admissibility::Unknown
+            {
+                vice_incident_times.insert((enterprise_id, evidence.discovered_at()));
             }
         }
     }
@@ -400,6 +449,7 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                     .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
                 if information.holder() != KnowledgeHolder::Organization(enterprise.organization())
                     || information.source_kind() != InformationSourceKind::AfterAction
+                    || information.topic() != InformationTopic::FinancialPerformance
                     || information.source_entity()
                         != Some(EntityRef::Character(enterprise.manager()))
                     || information.subject() != EntityRef::Enterprise(enterprise.id())
@@ -412,6 +462,43 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
                 }
             }
             AttentionClass::Exception | AttentionClass::Crisis => {
+                return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+            }
+        }
+
+        // Vice attention is a causal bundle, not a free-standing flag. A cycle that says it
+        // drew a vice inquiry must carry the organization-facing LegalActivity record produced
+        // by that event, and that knowledge must be backed by the police case/evidence persisted
+        // at the same instant. Conversely, a cycle that did not draw attention cannot smuggle in
+        // vice knowledge. Backing incident timestamps were derived once above, so each historical
+        // cycle only performs an ordered-set lookup instead of rescanning case history.
+        match (cycle.drew_vice_attention(), cycle.vice_information()) {
+            (false, None) => {}
+            (true, Some(information_id)) => {
+                let vice_information = state
+                    .intelligence
+                    .get_information(information_id)
+                    .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
+                if vice_information.holder()
+                    != KnowledgeHolder::Organization(enterprise.organization())
+                    || vice_information.source_kind() != InformationSourceKind::AfterAction
+                    || vice_information.topic() != InformationTopic::LegalActivity
+                    || vice_information.source_entity()
+                        != Some(EntityRef::Character(enterprise.manager()))
+                    || vice_information.subject() != EntityRef::Enterprise(enterprise.id())
+                    || vice_information.observed_at() != cycle.occurred_at()
+                    || vice_information.recorded_at() != cycle.occurred_at()
+                    || vice_information.reliability() != Reliability::DirectAccess
+                    || vice_information.specificity() != Specificity::Specific
+                {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+
+                if !vice_incident_times.contains(&(enterprise.id(), cycle.occurred_at())) {
+                    return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
+                }
+            }
+            (false, Some(_)) | (true, None) => {
                 return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
             }
         }

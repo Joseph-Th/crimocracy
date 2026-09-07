@@ -979,6 +979,8 @@ pub fn persist_run_artifact(
         "raw": {
             "second_opportunity_discovered": metrics.second_opportunity_discovered,
             "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),
+            "self_heat_case_opened": metrics.self_heat_case_opened,
+            "self_heat_case_active": metrics.self_heat_case_active,
             "defector_trail_confirmed": metrics.defector_trail_confirmed,
         }
     });

@@ -340,9 +340,8 @@ fn repeated_shortfalls_clamp_resentment_at_the_authored_rail() {
     validate_invariants(&fixture.state);
 }
 
-/// An organization holding no general cash accounts at all is fully short on payroll,
-/// exactly like one whose accounts hold too little; only enterprise floats are exempt
-/// because they are delegated working capital governed by mandate authority.
+/// An organization holding no liquid cash accounts at all is fully short on payroll,
+/// exactly like one whose accounts hold too little.
 #[test]
 fn organization_without_any_funding_accounts_still_incurs_full_shortfall() {
     let registry = build_registry();
@@ -475,4 +474,93 @@ fn player_shortfall_report_exhaustion_rejects_before_money_or_resentment_moves()
             .accounts_for(FinancialOwner::Character(fixture.member))
             .all(|account| account.kind() != AccountKind::StreetCash)
     );
+}
+
+#[test]
+fn player_shortfall_ledger_exhaustion_rejects_before_money_accounts_resentment_or_report_move() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 10);
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("criminal organization should be eligible as the player organization");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let funding = find_funding_accounts(&fixture.state, fixture.organization);
+    let treasury_before = fixture
+        .state
+        .finance()
+        .get_account(fixture.treasury)
+        .expect("treasury should persist")
+        .balance();
+    let account_next_before = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let report_next_before = fixture.state.ids.next_raw(IdKind::Report);
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::LedgerTransaction, u32::MAX);
+
+    let error = apply_organization_payroll(
+        &registry,
+        &mut fixture.state,
+        fixture.organization,
+        &funding,
+    )
+    .expect_err("ledger exhaustion must reject the whole shortfall composite");
+    assert!(matches!(
+        error,
+        PayrollError::Finance(FinanceError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "ledger transaction",
+            ..
+        }))
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.treasury)
+            .expect("treasury should persist")
+            .balance(),
+        treasury_before
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::FinancialAccount),
+        account_next_before,
+        "failed payroll must not consume planned wage-account IDs"
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::Report),
+        report_next_before,
+        "report capacity preflight is read-only and must not consume its ID"
+    );
+    assert!(
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.member, fixture.boss)
+            .is_none(),
+        "failed payroll must not publish shortfall resentment"
+    );
+    assert!(
+        fixture
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Character(fixture.member))
+            .all(|account| account.kind() != AccountKind::StreetCash),
+        "failed payroll must not leave an empty planned wage account"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .reports()
+            .reports_for(fixture.organization)
+            .filter(|report| report.title() == "Payroll ran short")
+            .count(),
+        0,
+        "failed payroll must not publish the shortfall report"
+    );
+    validate_invariants(&fixture.state);
 }

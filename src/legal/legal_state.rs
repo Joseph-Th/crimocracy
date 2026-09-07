@@ -318,7 +318,7 @@ impl LegalState {
             .flatten()
             .filter_map(|id| self.evidence.get(id))
     }
-    /// Test-only observation surface; production reads go through case-scoped getters.
+    /// Test-only observation surface over the maintained subject index.
     #[cfg(test)]
     pub fn investigations_for_subject(
         &self,

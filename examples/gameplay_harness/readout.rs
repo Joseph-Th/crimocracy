@@ -23,6 +23,33 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
     let target = scenario.variation.alternate_target_name();
     match strategy {
         Strategy::Rush | Strategy::Recon => {
+            if strategy == Strategy::Recon
+                && metrics.self_heat_case_opened
+                && metrics.self_heat_case_active != Some(false)
+                && metrics.second_burglary.is_none()
+            {
+                let lapsed_at = metrics
+                    .second_opportunity
+                    .and_then(|opportunity| {
+                        scenario.state.opportunities().get_opportunity(opportunity)
+                    })
+                    .and_then(|record| record.resolution())
+                    .map(|resolution| resolution.at().as_minutes().to_string())
+                    .unwrap_or_else(|| "-".to_owned());
+                let case_read = if metrics.self_heat_case_active == Some(true) {
+                    "the police contact confirmed it remained active"
+                } else {
+                    "the police contact could not give a dependable clearing read"
+                };
+                println!(
+                    "\n[ACT 2] {target} second score lapsed at minute {lapsed_at}: fresh surveillance opened a case, {case_read}, and RECON declined to compound the heat."
+                );
+                println!(
+                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s); its legal consequence changed the decision before another burglary was authorized.",
+                    metrics.second_act_recon_information
+                );
+                return;
+            }
             let outcome = metrics
                 .second_burglary_outcome
                 .map(|outcome| format!("{outcome:?}"))
@@ -44,7 +71,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                 );
             } else {
                 println!(
-                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s) and the burglary used a patrol-safe window.",
+                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s), its case check cleared, and the burglary used a patrol-safe window.",
                     metrics.second_act_recon_information
                 );
             }
@@ -806,7 +833,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (case hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
+        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (follow-up hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
         metrics.strategy.expect("strategy must be set").label(),
         metrics
             .variation
@@ -1117,13 +1144,19 @@ pub fn print_experience_readout(
     print_loop_checkpoint(
         "second wind",
         recon.second_act_recon_information > 0
-            && recon.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
-        "an organization that re-invests in planning can recover value on a reopened window",
+            && (recon.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
+                || (recon.self_heat_case_opened
+                    && recon.self_heat_case_active != Some(false)
+                    && recon.second_burglary.is_none()
+                    && recon.second_opportunity_expired)),
+        "fresh planning changes the next move: RECON takes the reopened score when clear and gives it up when its own casing creates a case the channel cannot affirmatively clear",
     );
     print_loop_checkpoint(
         "own heat",
-        recon.self_heat_case_opened && recon.self_heat_case_active == Some(true),
-        "casing carries risk both ways: after the organization's own surveillance draws a case, it reads that case through its standing police contact - no extra street exposure, provenance-bearing disclosure",
+        recon.self_heat_case_opened
+            && recon.self_heat_case_active != Some(false)
+            && recon.second_burglary.is_none(),
+        "casing carries risk both ways: after the organization's own surveillance draws a case, it checks that case through its standing police contact and stands down unless the channel explicitly says it is shelved",
     );
     print_loop_checkpoint(
         "witness chain",

@@ -234,11 +234,11 @@ pub fn validate_win_back_evidence(metrics: &RunMetrics) -> Result<(), HarnessCon
 }
 
 /// Full-mode narrative sessions must close the second-wind arc through canonical production paths:
-/// every branch discovers the reopened second score at the same minute, then either rebuilds and
-/// recovers value from it (RUSH via executive recruitment + morning-lull hit, RECON via fresh
-/// recon + patrol-safe window) or deliberately lets it lapse as the price of standing down (PRESS).
-/// A RECON branch whose own casing drew a police case must also read that case's activity through
-/// its standing police contact before the window closes.
+/// every branch discovers the reopened second score at the same minute. RUSH rebuilds and works
+/// it, PRESS deliberately lets it lapse, and RECON acts on what its fresh casing actually reveals:
+/// work the patrol-safe window when the casing stays clean or its case is explicitly shelved;
+/// otherwise query its standing police contact and stand down when that casing opens a case that
+/// the channel cannot affirmatively clear.
 pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     let strategy = metrics
         .strategy
@@ -268,21 +268,23 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             }
         }
         Strategy::Recon => {
-            if metrics.second_opportunity_discovered
+            let recovered_when_clear = metrics.second_opportunity_discovered
                 && metrics.second_burglary.is_some()
                 && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
                 && metrics.second_act_recon_information > 0
                 && metrics.second_burglary_terminal_minute.is_some()
-                // Self-inflicted heat closes its loop: a case drawn by the branch's own
-                // surveillance must be read through a player-visible channel (the standing
-                // police contact), and a session whose casing drew no case must not fabricate
-                // a read.
-                && metrics.self_heat_case_active.is_some() == metrics.self_heat_case_opened
-            {
+                && (!metrics.self_heat_case_opened || metrics.self_heat_case_active == Some(false));
+            let stood_down_on_self_heat = metrics.second_opportunity_discovered
+                && metrics.second_act_recon_information > 0
+                && metrics.self_heat_case_opened
+                && metrics.self_heat_case_active != Some(false)
+                && metrics.second_burglary.is_none()
+                && metrics.second_opportunity_expired;
+            if recovered_when_clear || stood_down_on_self_heat {
                 None
             } else {
                 Some(
-                    "the RECON second act must discover the reopened score, re-run surveillance on the alternate target, complete the burglary inside a fresh patrol-safe window, and read any surveillance-drawn case through its police contact",
+                    "the RECON second act must discover the reopened score and re-run surveillance; a clean or explicitly shelved casing case permits the patrol-safe burglary, while a casing case that the police contact confirms active or cannot dependably clear must make the branch stand down until the opportunity expires",
                 )
             }
         }

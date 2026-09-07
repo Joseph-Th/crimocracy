@@ -580,9 +580,17 @@ fn mixed_scenario_soak_preserves_invariants() {
     .expect("delegated routine enterprise should commit");
 
     let mut rival_recruitment = None;
+    let mut player_payroll_paid = Money::ZERO;
     for minute in 1..=5_000_u64 {
         let outcome = run_tick(&registry, &mut state);
         assert_eq!(outcome.now.as_minutes(), minute);
+        for payroll in &outcome.payrolls {
+            if payroll.organization() == player_organization {
+                player_payroll_paid = player_payroll_paid
+                    .checked_add(payroll.paid())
+                    .expect("soak payroll total should not overflow");
+            }
+        }
         match minute {
             10 => assert_eq!(outcome.started_operations, vec![operation]),
             20 => {
@@ -785,6 +793,8 @@ fn mixed_scenario_soak_preserves_invariants() {
             .expect("enterprise cash account should exist")
             .balance(),
         enterprise_net
+            .checked_sub(player_payroll_paid)
+            .expect("soak enterprise earnings should cover player payroll")
     );
     assert_eq!(
         state

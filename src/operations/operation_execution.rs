@@ -22,7 +22,10 @@ use crate::intelligence::{
 use crate::legal::investigation_system::{
     InvestigationError, ValidatedIncidentIntake, validate_incident_intake,
 };
-use crate::legal::jurisdiction_system::resolve_case_intake_authority;
+use crate::legal::jurisdiction_system::{
+    CaseIntakeAuthoritySnapshot, CaseIntakeAuthoritySnapshotError,
+    resolve_case_intake_authority_snapshot, validate_case_intake_authority_snapshot,
+};
 use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
     resolve_patrol_presence_snapshot,
@@ -470,7 +473,7 @@ pub(crate) fn decide_operation_resolution(
 pub(crate) struct ValidatedOperationResolution {
     plan: OperationResolutionPlan,
     incident: Option<ValidatedIncidentIntake>,
-    incident_authority: Option<IncidentAuthoritySnapshot>,
+    incident_authority: Option<CaseIntakeAuthoritySnapshot>,
     surveillance_information: Vec<ValidatedInformation>,
     legal_activity_information: Option<ValidatedInformation>,
     information: ValidatedInformation,
@@ -480,13 +483,6 @@ pub(crate) struct ValidatedOperationResolution {
     witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
     business_disruption: Option<ValidatedBusinessDisruption>,
     participant_information: Vec<ValidatedInformation>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct IncidentAuthoritySnapshot {
-    neighborhood: NeighborhoodId,
-    organization: Option<crate::core::id::OrganizationId>,
-    jurisdiction_version: Option<u32>,
 }
 
 impl ValidatedOperationResolution {
@@ -537,31 +533,30 @@ impl ValidatedOperationResolution {
         state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan)?;
         if let Some(snapshot) = self.incident_authority {
-            let found = resolve_case_intake_authority(state, snapshot.neighborhood);
-            if found != snapshot.organization {
-                return Err(OperationResolutionError::StaleIncidentRouting {
-                    neighborhood: snapshot.neighborhood,
-                    expected: snapshot.organization,
-                    found,
-                });
-            }
-            if let Some(organization) = snapshot.organization {
-                let found_version = state
-                    .legal
-                    .get_jurisdiction(organization)
-                    .map(|jurisdiction| jurisdiction.version());
-                let expected_version = snapshot
-                    .jurisdiction_version
-                    .expect("routed incident snapshot must contain a jurisdiction version");
-                if found_version != Some(expected_version) {
-                    return Err(OperationResolutionError::StaleIncidentJurisdictionVersion {
-                        neighborhood: snapshot.neighborhood,
+            validate_case_intake_authority_snapshot(state, snapshot).map_err(
+                |error| match error {
+                    CaseIntakeAuthoritySnapshotError::Routing {
+                        neighborhood,
+                        expected,
+                        found,
+                    } => OperationResolutionError::StaleIncidentRouting {
+                        neighborhood,
+                        expected,
+                        found,
+                    },
+                    CaseIntakeAuthoritySnapshotError::JurisdictionVersion {
+                        neighborhood,
                         organization,
                         expected_version,
                         found_version,
-                    });
-                }
-            }
+                    } => OperationResolutionError::StaleIncidentJurisdictionVersion {
+                        neighborhood,
+                        organization,
+                        expected_version,
+                        found_version,
+                    },
+                },
+            )?;
         }
         // Tail effects own other domains and can stale independently of the operation record.
         // Re-check all of them before the incident or any artifact can mutate state. Nothing
@@ -1060,7 +1055,7 @@ fn validate_exposure_incident(
 ) -> Result<
     (
         Option<ValidatedIncidentIntake>,
-        Option<IncidentAuthoritySnapshot>,
+        Option<CaseIntakeAuthoritySnapshot>,
     ),
     OperationResolutionError,
 > {
@@ -1070,21 +1065,10 @@ fn validate_exposure_incident(
     let Some(neighborhood) = exposure.neighborhood else {
         return Ok((None, None));
     };
-    let Some(owner) = resolve_case_intake_authority(state, neighborhood) else {
-        return Ok((
-            None,
-            Some(IncidentAuthoritySnapshot {
-                neighborhood,
-                organization: None,
-                jurisdiction_version: None,
-            }),
-        ));
+    let authority_snapshot = resolve_case_intake_authority_snapshot(state, neighborhood);
+    let Some(owner) = authority_snapshot.organization else {
+        return Ok((None, Some(authority_snapshot)));
     };
-    let jurisdiction_version = state
-        .legal
-        .get_jurisdiction(owner)
-        .expect("resolved legal intake authority must have a jurisdiction record")
-        .version();
     let subject = exposure
         .identified_character
         .map(EntityRef::Character)
@@ -1133,14 +1117,7 @@ fn validate_exposure_incident(
             witness,
         },
     )?;
-    Ok((
-        Some(incident),
-        Some(IncidentAuthoritySnapshot {
-            neighborhood,
-            organization: Some(owner),
-            jurisdiction_version: Some(jurisdiction_version),
-        }),
-    ))
+    Ok((Some(incident), Some(authority_snapshot)))
 }
 
 pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<OperationId> {

@@ -536,12 +536,10 @@ pub fn play_session_with_fixture_view(
         metrics.exposure_level = Some(resolution.exposure().level());
         metrics.investigation_created = resolution.exposure().investigation().is_some();
         metrics.evidence_count = resolution.exposure().evidence().len();
-        // The case ID itself is developer-audit-only; the player only ever sees the surfaced
-        // legal-activity knowledge and their own later surveillance observations.
+        // The case ID itself is developer-audit-only. It may feed audit metrics below, but never
+        // action selection; the acting branch learns case existence and timing from its own
+        // LegalActivity information after this resolution is surfaced.
         scenario.investigation = resolution.exposure().investigation();
-        metrics.case_open_minute = scenario
-            .investigation
-            .map(|_| scenario.state.now().as_minutes());
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
         metrics.property_acquired_value_cents = resolution
@@ -698,7 +696,7 @@ pub fn play_session_with_fixture_view(
         )?;
     }
 
-    metrics.player_legal_activity_information = scenario
+    let player_case_information = scenario
         .state
         .intelligence()
         .information_for_holder_by_topic(
@@ -706,7 +704,12 @@ pub fn play_session_with_fixture_view(
             InformationTopic::LegalActivity,
         )
         .filter(|information| information.subject() == EntityRef::Operation(burglary))
-        .count();
+        .collect::<Vec<_>>();
+    metrics.player_legal_activity_information = player_case_information.len();
+    metrics.case_open_minute = player_case_information
+        .iter()
+        .map(|information| information.observed_at().as_minutes())
+        .min();
     if narrative {
         print_player_knowledge_gap(&scenario, burglary);
     }
@@ -734,7 +737,7 @@ pub fn play_session_with_fixture_view(
     // exposure risk like any street work.
     let mut pending_witness_pressure: Option<OperationId> = None;
     if strategy == Strategy::Press
-        && metrics.investigation_created
+        && metrics.player_legal_activity_information > 0
         && matches!(
             metrics.exposure_level,
             Some(
@@ -1078,11 +1081,12 @@ pub fn play_session_with_fixture_view(
                         }
                         last_absorbed = day_absorbed;
                     } else {
-                        // Sweep the racket's street-cash float each day. Cycle settlements flow
-                        // gross in and costs out through the paired settlement account, so the
-                        // float needs no positive reserve; the family treasury stays reserved
-                        // for wages. A concealed till cannot route through a front's ledgers at
-                        // all, which is why concealed-till worlds stand down on survival alone.
+                        // Sweep the racket's street-cash float each day after the day-boundary
+                        // simulation pass has already settled any due payroll. Payroll can draw
+                        // from any organization-owned liquid cash, including this float, so the
+                        // sweep only launders the balance that actually remains. A concealed till
+                        // cannot route through a front's ledgers at all, which is why concealed-
+                        // till worlds stand down on survival alone.
                         if narrative && first_laundry {
                             println!(
                                 "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
@@ -1488,17 +1492,24 @@ pub fn run_second_act(
                 .expect("second-score surveillance must persist")
                 .resolution()
                 .expect("completed second-score surveillance must have a resolution");
-            metrics.second_act_recon_information = resolution.discovered_information().len();
+            let discovered_information = resolution.discovered_information().clone();
+            metrics.second_act_recon_information = discovered_information.len();
             // Casing carries risk both ways: if the surveillance itself drew a police case, the
-            // organization knows it only through the surfaced after-action report. RECON's
-            // answer is quieter than PRESS's precinct watch: ask the institutional contact it
-            // keeps inside the precinct instead of putting more eyes on the street.
-            let self_heat_investigation = resolution.exposure().investigation();
-            metrics.self_heat_case_opened = self_heat_investigation.is_some();
+            // organization knows it only through its own LegalActivity record. This visible
+            // signal, never the hidden investigation id on the resolution, governs whether the
+            // cautious branch asks its institutional contact before authorizing another crime.
+            metrics.self_heat_case_opened = scenario
+                .state
+                .intelligence()
+                .information_for_holder_by_topic(
+                    KnowledgeHolder::Organization(scenario.player),
+                    InformationTopic::LegalActivity,
+                )
+                .any(|information| information.subject() == EntityRef::Operation(recon));
             let mut burglary_intelligence =
                 BTreeSet::from([scenario.alternate_opportunity_information]);
             let mut learned_patrol_summary = None;
-            for information in resolution.discovered_information() {
+            for information in &discovered_information {
                 let record = scenario
                     .state
                     .intelligence()
@@ -1516,6 +1527,52 @@ pub fn run_second_act(
                     learned_patrol_summary = Some(record.summary().to_owned());
                 }
                 burglary_intelligence.insert(*information);
+            }
+            // Close self-inflicted heat before committing the next operation. The production
+            // after-action told leadership a case exists, so RECON asks its standing contact what
+            // the precinct is doing. A confirmed hot case, or an inconclusive channel read, means
+            // the cautious branch stands down and lets the opportunity expire. Only an explicit
+            // shelved read clears a known case for further work.
+            if metrics.self_heat_case_opened {
+                let police_name = scenario
+                    .state
+                    .world()
+                    .get_organization(scenario.police)
+                    .expect("police organization must persist")
+                    .name()
+                    .to_owned();
+                if narrative {
+                    println!(
+                        "[DECIDE]  The after-action on our own casing says it drew a case. Before another job touches {neighborhood_name}, leadership uses its channel inside {police_name}."
+                    );
+                }
+                metrics.self_heat_case_active = read_police_contact(scenario, narrative, metrics)?
+                    .map(|(sightline, _)| sightline);
+                match metrics.self_heat_case_active {
+                    Some(false) => {
+                        if narrative {
+                            println!(
+                                "[VERIFY]  The channel says {police_name} has already shelved the casing case. RECON can keep evaluating the score from the information it gathered."
+                            );
+                        }
+                    }
+                    Some(true) => {
+                        if narrative {
+                            println!(
+                                "[VERIFY]  Detectives are actively developing the case our casing opened. RECON stands down; the second score will lapse rather than compound fresh heat."
+                            );
+                        }
+                        return Ok(());
+                    }
+                    None => {
+                        if narrative {
+                            println!(
+                                "[VERIFY]  The channel gave no dependable read on the casing case. RECON treats uncertainty as risk and stands down; the second score will lapse."
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
             }
             let patrol_summary = learned_patrol_summary.as_deref().ok_or(
                 "second-score recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
@@ -1578,48 +1635,6 @@ pub fn run_second_act(
             run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
             record_second_act_burglary_terminal(scenario, burglary, metrics);
             liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
-            // Close the self-inflicted-heat loop through the contact channel: the after-action
-            // on the casing reported an opened case, so leadership asks its precinct channel
-            // what detectives are doing rather than surveilling the precinct again. The
-            // detective's knowledge of his own case is production state - recorded when he took
-            // the case as lead - and the acting decision, disclosure, and everything the
-            // organization learns flow through the canonical contact and information paths.
-            if let Some(_investigation) = self_heat_investigation {
-                let neighborhood_name = scenario
-                    .state
-                    .world()
-                    .get_neighborhood(scenario.neighborhood)
-                    .expect("neighborhood must persist")
-                    .name()
-                    .to_owned();
-                let police_name = scenario
-                    .state
-                    .world()
-                    .get_organization(scenario.police)
-                    .expect("police organization must persist")
-                    .name()
-                    .to_owned();
-                if narrative {
-                    println!(
-                        "[DECIDE]  The after-action on our own casing says it drew attention: {police_name} opened a case out of that surveillance. Before anything else touches {neighborhood_name}, leadership uses the channel it keeps inside the precinct."
-                    );
-                }
-                metrics.self_heat_case_active = read_police_contact(scenario, narrative, metrics)?
-                    .map(|(sightline, _)| sightline);
-                if narrative {
-                    match metrics.self_heat_case_active {
-                        Some(true) => println!(
-                            "[VERIFY]  The channel confirms detectives are still developing the case our casing opened; {neighborhood_name} stays quiet past this window."
-                        ),
-                        Some(false) => println!(
-                            "[VERIFY]  The channel says {police_name} has already shelved the case our casing opened."
-                        ),
-                        None => println!(
-                            "[VERIFY]  The channel gave no dependable read on the case our casing opened."
-                        ),
-                    }
-                }
-            }
         }
         Strategy::Press => {
             // PRESS already discovered the second score during the cold-case wait and deliberately

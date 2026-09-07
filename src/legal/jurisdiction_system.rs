@@ -128,6 +128,83 @@ pub fn resolve_case_intake_authority(
     resolve_jurisdiction_priority(state, neighborhood, &[OrganizationKind::LawEnforcement])
 }
 
+/// Versioned snapshot of deterministic police case-intake routing. Systems that plan an
+/// incident and commit it later must pin both the winning authority and that authority's
+/// jurisdiction version: priority can change because another jurisdiction appears, while an
+/// unchanged winner can still have its own jurisdiction record edited between phases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CaseIntakeAuthoritySnapshot {
+    pub(crate) neighborhood: NeighborhoodId,
+    pub(crate) organization: Option<OrganizationId>,
+    pub(crate) jurisdiction_version: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaseIntakeAuthoritySnapshotError {
+    Routing {
+        neighborhood: NeighborhoodId,
+        expected: Option<OrganizationId>,
+        found: Option<OrganizationId>,
+    },
+    JurisdictionVersion {
+        neighborhood: NeighborhoodId,
+        organization: OrganizationId,
+        expected_version: u32,
+        found_version: Option<u32>,
+    },
+}
+
+pub(crate) fn resolve_case_intake_authority_snapshot(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+) -> CaseIntakeAuthoritySnapshot {
+    let organization = resolve_case_intake_authority(state, neighborhood);
+    let jurisdiction_version = organization.map(|organization| {
+        state
+            .legal
+            .get_jurisdiction(organization)
+            .expect("resolved case-intake authority must have a jurisdiction record")
+            .version()
+    });
+    CaseIntakeAuthoritySnapshot {
+        neighborhood,
+        organization,
+        jurisdiction_version,
+    }
+}
+
+pub(crate) fn validate_case_intake_authority_snapshot(
+    state: &AppState,
+    snapshot: CaseIntakeAuthoritySnapshot,
+) -> Result<(), CaseIntakeAuthoritySnapshotError> {
+    let found = resolve_case_intake_authority(state, snapshot.neighborhood);
+    if found != snapshot.organization {
+        return Err(CaseIntakeAuthoritySnapshotError::Routing {
+            neighborhood: snapshot.neighborhood,
+            expected: snapshot.organization,
+            found,
+        });
+    }
+    if let Some(organization) = snapshot.organization {
+        let found_version = state
+            .legal
+            .get_jurisdiction(organization)
+            .map(JurisdictionRecord::version);
+        let expected_version = snapshot
+            .jurisdiction_version
+            .expect("routed case-intake snapshot must contain a jurisdiction version");
+        if found_version != Some(expected_version) {
+            return Err(CaseIntakeAuthoritySnapshotError::JurisdictionVersion {
+                neighborhood: snapshot.neighborhood,
+                organization,
+                expected_version,
+                found_version,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub fn resolve_police_response_authority(
     state: &AppState,
     neighborhood: NeighborhoodId,

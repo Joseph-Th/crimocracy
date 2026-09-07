@@ -348,10 +348,19 @@ pub(crate) fn apply_cold_case_decay(
     state: &mut AppState,
     cold_case_window: SimDuration,
 ) -> Result<ColdCaseDecayOutcome, InvestigationError> {
-    let threshold_minutes = state
-        .now()
-        .as_minutes()
-        .saturating_sub(u64::from(cold_case_window.as_minutes()));
+    let now_minutes = state.now().as_minutes();
+    let window_minutes = u64::from(cold_case_window.as_minutes());
+    // Before a complete inactivity window has elapsed, no timestamp can possibly be cold.
+    // Saturating subtraction would incorrectly turn that interval into threshold minute zero,
+    // causing cases opened at campaign start to qualify on the first tick because the activity
+    // index query is inclusive.
+    if now_minutes < window_minutes {
+        return Ok(ColdCaseDecayOutcome {
+            suspended: Vec::new(),
+            closed: Vec::new(),
+        });
+    }
+    let threshold_minutes = now_minutes - window_minutes;
     let candidates = state
         .legal
         .find_active_cases_inactive_since(SimTime::from_minutes(threshold_minutes));

@@ -4,7 +4,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, CharacterId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
-    IdExhaustionError, IdKind, OrganizationId,
+    IdExhaustionError, IdKind, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -30,8 +30,14 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::investigation_system::validate_incident_intake;
+use crate::legal::jurisdiction_system::{
+    CaseIntakeAuthoritySnapshot, CaseIntakeAuthoritySnapshotError,
+    resolve_case_intake_authority_snapshot, validate_case_intake_authority_snapshot,
+};
 use crate::registry::{EnterpriseDefinition, EnterpriseEconomicsDefinition, Registry};
-use crate::world::{BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, Rating};
+use crate::world::{
+    BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, OrganizationKind, Rating,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -52,6 +58,11 @@ pub enum EnterpriseError {
     AuthorityLocationMismatch {
         scope: ResponsibilityScope,
         location: EnterpriseLocation,
+    },
+    #[error("authority scope {scope:?} does not cover supporting business {business}")]
+    AuthoritySupportingBusinessMismatch {
+        scope: ResponsibilityScope,
+        business: BusinessId,
     },
     #[error("enterprise location {0:?} does not exist or is inactive")]
     InvalidLocation(EnterpriseLocation),
@@ -154,6 +165,25 @@ pub enum EnterpriseError {
         "enterprise cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleCycleTime { expected: SimTime, found: SimTime },
+    #[error(
+        "enterprise {enterprise} vice intake routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
+    )]
+    StaleViceIntakeRouting {
+        enterprise: EnterpriseId,
+        neighborhood: NeighborhoodId,
+        expected: Option<OrganizationId>,
+        found: Option<OrganizationId>,
+    },
+    #[error(
+        "enterprise {enterprise} vice intake jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
+    )]
+    StaleViceIntakeJurisdictionVersion {
+        enterprise: EnterpriseId,
+        neighborhood: NeighborhoodId,
+        organization: OrganizationId,
+        expected_version: u32,
+        found_version: Option<u32>,
+    },
     #[error(transparent)]
     Delegation(#[from] DelegationError),
     #[error(transparent)]
@@ -186,6 +216,7 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.organization,
             self.draft.authority,
             self.draft.location,
+            &self.draft.supporting_businesses,
         )?;
         // One racket of a kind per spot is re-checked at commit: a second token validated
         // before an identical establishment committed (or held across one) must reject here
@@ -305,7 +336,13 @@ fn validate_establish_enterprise_with_optional_openings(
 ) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
     let definition = registry.get_enterprise(draft.kind);
     let authority = resolve_mandate_authority(state, draft.authority)?;
-    validate_enterprise_environment(state, draft.organization, draft.authority, draft.location)?;
+    validate_enterprise_environment(
+        state,
+        draft.organization,
+        draft.authority,
+        draft.location,
+        &draft.supporting_businesses,
+    )?;
     // One racket of a kind per spot — including suspended ones. A suspended racket stays
     // on its location's books until manually resumed, so a fresh identical racket would
     // resurrect losses the chronic-loss threshold already shut down.
@@ -389,9 +426,10 @@ struct EnterpriseCycleEconomics {
     net_cash: Money,
     variance_basis_points: i16,
     /// Street-heat portion of `operating_cost`. Heat that appears or changes makes the cycle
-    /// notable so the organization hears why its racket got more expensive; a sustained
-    /// identical surcharge settles as routine.
+    /// notable so the organization hears both escalation and recovery; a sustained identical
+    /// surcharge settles as routine.
     investigation_heat: Money,
+    previous_investigation_heat: Option<Money>,
     attention: AttentionClass,
 }
 
@@ -409,6 +447,10 @@ pub struct EnterpriseCyclePlan {
     /// Validated at commit through the canonical intake path when this cycle's visibility
     /// roll converted sustained district casework into a vice inquiry on this racket.
     vice_incident: Option<crate::legal::IncidentIntakeDraft>,
+    /// Routing/version snapshot captured whenever the visibility roll hits, including an
+    /// unroutable `None` authority. A held cycle token must re-decide if case-intake eligibility
+    /// changes after planning, even when no incident draft existed initially.
+    vice_authority: Option<CaseIntakeAuthoritySnapshot>,
 }
 
 /// Explicit per-cycle randomness injected by the tick pipeline so decide stays read-only and
@@ -495,6 +537,7 @@ pub fn decide_enterprise_cycle(
         record.organization(),
         record.authority(),
         record.location(),
+        record.supporting_businesses(),
     )?;
     validate_enterprise_business_dependencies(
         definition,
@@ -535,8 +578,10 @@ pub fn decide_enterprise_cycle(
     )?;
     let operating_cost = cost.total;
     // Active casework converts into vice attention: every cycle run under an active case
-    // risks a dedicated inquiry on this racket. Clean districts never draw one, so lying
-    // low or moving the book are real counter-play.
+    // risks a dedicated inquiry on this racket. An already-active inquiry keeps contributing
+    // district heat but cannot recursively open another concurrent inquiry into the same
+    // racket; clean districts never draw one, so lying low or moving the book remain real
+    // counter-play.
     let vice_chance_basis_points = u32::from(
         definition
             .economics()
@@ -544,13 +589,20 @@ pub fn decide_enterprise_cycle(
     )
     .saturating_mul(active_district_cases)
     .min(10_000);
-    let draws_vice_attention = active_district_cases > 0
+    let vice_roll_hits = active_district_cases > 0
+        && !has_active_enterprise_inquiry(state, enterprise)
         && u32::from(randomness.vice_attention_roll()) < vice_chance_basis_points;
-    let vice_incident = if draws_vice_attention {
-        build_vice_incident_draft(state, enterprise, record, district, state.now())?
-    } else {
-        None
-    };
+    let vice_authority =
+        vice_roll_hits.then(|| resolve_case_intake_authority_snapshot(state, district));
+    let vice_incident = vice_authority.and_then(|authority| {
+        authority
+            .organization
+            .map(|owner| build_vice_incident_draft(state, enterprise, record, owner, state.now()))
+    });
+    // A visibility roll is only an actual vice event when an institution currently exists to
+    // own the case. Hot districts can retain pressure from old cases after jurisdiction moves
+    // away; in that state the roll is unspent rather than becoming a phantom notable event.
+    let draws_vice_attention = vice_incident.is_some();
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
@@ -564,16 +616,14 @@ pub fn decide_enterprise_cycle(
     // every cycle would bury real exceptions in alert noise, so it settles as routine and
     // stays visible through the financial summaries instead.
     let previous_heat = latest_cycle_investigation_heat(state, enterprise);
-    let heat_changed = previous_heat != Some(cost.investigation_heat);
-    let attention = if variance_notable
-        || net_cash < Money::ZERO
-        || draws_vice_attention
-        || (cost.investigation_heat > Money::ZERO && heat_changed)
-    {
-        AttentionClass::Notable
-    } else {
-        AttentionClass::Routine
-    };
+    let heat_reportable =
+        enterprise_heat_change_is_reportable(previous_heat, cost.investigation_heat);
+    let attention =
+        if variance_notable || net_cash < Money::ZERO || draws_vice_attention || heat_reportable {
+            AttentionClass::Notable
+        } else {
+            AttentionClass::Routine
+        };
     let trailing_losing_cycles = count_trailing_losing_cycles(
         state,
         enterprise,
@@ -617,6 +667,7 @@ pub fn decide_enterprise_cycle(
             net_cash,
             variance_basis_points,
             investigation_heat: cost.investigation_heat,
+            previous_investigation_heat: previous_heat,
             attention,
         },
         accounts: EnterpriseCycleAccounts {
@@ -624,6 +675,7 @@ pub fn decide_enterprise_cycle(
             settlement_account: record.settlement_account(),
         },
         vice_incident,
+        vice_authority,
     })
 }
 
@@ -634,6 +686,49 @@ fn latest_cycle_investigation_heat(state: &AppState, enterprise: EnterpriseId) -
         .enterprises
         .latest_cycle(enterprise)
         .map(|cycle| cycle.investigation_heat())
+}
+
+fn validate_vice_intake_authority_snapshot(
+    state: &AppState,
+    enterprise: EnterpriseId,
+    snapshot: CaseIntakeAuthoritySnapshot,
+) -> Result<(), EnterpriseError> {
+    validate_case_intake_authority_snapshot(state, snapshot).map_err(|error| match error {
+        CaseIntakeAuthoritySnapshotError::Routing {
+            neighborhood,
+            expected,
+            found,
+        } => EnterpriseError::StaleViceIntakeRouting {
+            enterprise,
+            neighborhood,
+            expected,
+            found,
+        },
+        CaseIntakeAuthoritySnapshotError::JurisdictionVersion {
+            neighborhood,
+            organization,
+            expected_version,
+            found_version,
+        } => EnterpriseError::StaleViceIntakeJurisdictionVersion {
+            enterprise,
+            neighborhood,
+            organization,
+            expected_version,
+            found_version,
+        },
+    })
+}
+
+/// One owner for whether a heat transition deserves a fresh manager report. The first positive
+/// surcharge is new information, any change between positive levels is new information, and a
+/// drop from positive heat to zero is recovery worth surfacing. A never-hot zero cycle and an
+/// unchanged surcharge stay routine.
+pub(crate) fn enterprise_heat_change_is_reportable(
+    previous_heat: Option<Money>,
+    current_heat: Money,
+) -> bool {
+    previous_heat != Some(current_heat)
+        && (current_heat > Money::ZERO || previous_heat.is_some_and(|heat| heat > Money::ZERO))
 }
 
 /// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
@@ -817,6 +912,13 @@ impl ValidatedEnterpriseCycle {
             self.plan.accounts.settlement_account,
             Some(record.id()),
         )?;
+        if let Some(snapshot) = self.plan.vice_authority {
+            validate_vice_intake_authority_snapshot(
+                state,
+                self.plan.snapshot.enterprise,
+                snapshot,
+            )?;
+        }
         if let Some(incident) = &self.incident {
             incident.ensure_current(state)?;
         }
@@ -947,6 +1049,18 @@ pub fn validate_enterprise_cycle_plan(
         plan.accounts.settlement_account,
         Some(record.id()),
     )?;
+    if let Some(snapshot) = plan.vice_authority {
+        validate_vice_intake_authority_snapshot(state, plan.snapshot.enterprise, snapshot)?;
+    }
+    debug_assert!(
+        match (&plan.vice_incident, plan.vice_authority) {
+            (Some(incident), Some(snapshot)) => snapshot.organization == Some(incident.owner),
+            (None, Some(snapshot)) => snapshot.organization.is_none(),
+            (None, None) => true,
+            (Some(_), None) => false,
+        },
+        "vice planning must pair incidents with their routed authority and unroutable hits with an explicit absent-authority snapshot"
+    );
     let drew_vice_attention = plan.vice_incident.is_some();
     let incident = match &plan.vice_incident {
         Some(draft) => Some(validate_incident_intake(state, draft.clone())?),
@@ -1085,6 +1199,7 @@ impl ValidatedEnterpriseStatusChange {
                 record.organization(),
                 record.authority(),
                 record.location(),
+                record.supporting_businesses(),
             )?;
             validate_supporting_business_versions(state, &self.supporting_business_versions)?;
             if let Some((business_id, expected)) = self.host_business_version {
@@ -1178,6 +1293,7 @@ pub fn validate_resume_enterprise(
         record.organization(),
         record.authority(),
         record.location(),
+        record.supporting_businesses(),
     )?;
     let definition = registry.get_enterprise(record.kind());
     validate_enterprise_business_dependencies(
@@ -1244,6 +1360,7 @@ fn validate_enterprise_environment(
     organization: OrganizationId,
     authority: MandateAuthority,
     location: EnterpriseLocation,
+    supporting_businesses: &BTreeSet<BusinessId>,
 ) -> Result<(), EnterpriseError> {
     let _ = state
         .world
@@ -1263,10 +1380,30 @@ fn validate_enterprise_environment(
             location,
         });
     }
+    // Supporting businesses are live organizational assets, not passive flavor tags. An active
+    // racket locks their ownership and charges their recurring support cost, so binding one must
+    // require the same authority coverage as binding the hosted location itself. Without this
+    // gate a district manager could consume and lock infrastructure in another district.
+    for business_id in supporting_businesses {
+        let business = state
+            .world
+            .get_business(*business_id)
+            .ok_or(EnterpriseError::InvalidSupportingBusiness(*business_id))?;
+        if !can_authority_cover_location(
+            authority.scope,
+            EnterpriseLocation::Business(*business_id),
+            business.neighborhood(),
+        ) {
+            return Err(EnterpriseError::AuthoritySupportingBusinessMismatch {
+                scope: authority.scope,
+                business: *business_id,
+            });
+        }
+    }
     Ok(())
 }
 
-fn can_authority_cover_location(
+pub(crate) fn can_authority_cover_location(
     scope: ResponsibilityScope,
     location: EnterpriseLocation,
     neighborhood: crate::core::id::NeighborhoodId,
@@ -1558,7 +1695,10 @@ fn resolve_operating_cost(
     active_district_cases: u32,
     enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
-    let heat = resolve_investigation_heat_surcharge(enterprise, economics, active_district_cases)?;
+    let heat = economics
+        .heat_surcharge_per_active_case()
+        .checked_mul(i64::from(active_district_cases))
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     resolve_operating_cost_with_heat(
         economics,
         profile,
@@ -1575,24 +1715,60 @@ fn resolve_operating_cost_with_heat(
     investigation_heat: Money,
     enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
-    let base = economics.base_operating_cost().checked_add(weighted_rating(
-        enterprise,
-        economics.police_cost_per_point(),
-        profile.institutions.police_presence,
-    )?);
-    let base = base.ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let support_surcharge = economics
-        .support_surcharge_per_business()
-        .checked_mul(i64::try_from(supporting_business_count).expect("usize must fit i64"))
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let total = base
+    let predictable =
+        resolve_predictable_operating_cost(economics, profile, supporting_business_count)
+            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    let total = predictable
         .checked_add(investigation_heat)
-        .and_then(|sum| sum.checked_add(support_surcharge))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     Ok(OperatingCostBreakdown {
         total,
         investigation_heat,
     })
+}
+
+/// Current one-cycle operating runway for a proposed enterprise configuration, before any gross
+/// is earned. Unlike the base authored cost, this includes the district's police burden, every
+/// selected support-business surcharge, and the currently active originated-case heat. Autonomous
+/// expansion uses this exact production-cost composition instead of maintaining parallel math.
+pub(crate) fn resolve_current_enterprise_operating_cost(
+    registry: &Registry,
+    state: &AppState,
+    kind: EnterpriseKind,
+    location: EnterpriseLocation,
+    supporting_business_count: usize,
+) -> Option<Money> {
+    let profile = resolve_location_profile(state, location).ok()?;
+    let neighborhood = resolve_location_neighborhood(state, location).ok()?;
+    let economics = registry.get_enterprise(kind).economics();
+    let predictable =
+        resolve_predictable_operating_cost(economics, profile, supporting_business_count)?;
+    let heat = economics
+        .heat_surcharge_per_active_case()
+        .checked_mul(i64::from(count_district_originated_cases(
+            state,
+            neighborhood,
+        )))?;
+    predictable.checked_add(heat)
+}
+
+fn resolve_predictable_operating_cost(
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    supporting_business_count: usize,
+) -> Option<Money> {
+    let police = crate::finance::helpers::weighted_rating(
+        economics.police_cost_per_point(),
+        profile.institutions.police_presence.value(),
+    )?;
+    let supporting_business_count = i64::try_from(supporting_business_count).ok()?;
+    let support = economics
+        .support_surcharge_per_business()
+        .checked_mul(supporting_business_count)?;
+    economics
+        .base_operating_cost()
+        .checked_add(police)?
+        .checked_add(support)
 }
 
 /// Re-derives a persisted enterprise cycle from immutable enterprise/district authorship plus
@@ -1651,10 +1827,9 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
     Ok((gross_revenue, operating_cost, net_cash))
 }
 
-/// The manager's cycle report to leadership. Heat-bearing cycles must say *why* cost rose —
-/// the crew pays the street premium while police work stays heavy in their district — so the
-/// player can connect their own exposed operations to the racket's shrinking margin without
-/// any hidden case detail leaking into organization knowledge.
+/// The manager's cycle report to leadership. Heat-bearing cycles say why cost rose, while a
+/// reportable drop to zero says the street surcharge cleared. This lets leadership observe both
+/// escalation and recovery without leaking hidden case detail.
 fn build_cycle_report_summary(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,
@@ -1671,6 +1846,14 @@ fn build_cycle_report_summary(
         format!(
             ", including a {} street surcharge while police work stays heavy in {}",
             crate::finance::helpers::format_money_cents(economics.investigation_heat.cents()),
+            resolve_enterprise_district_name(state, record),
+        )
+    } else if economics
+        .previous_investigation_heat
+        .is_some_and(|previous| previous > Money::ZERO)
+    {
+        format!(
+            ", with the prior street surcharge cleared as police work eased in {}",
             resolve_enterprise_district_name(state, record),
         )
     } else {
@@ -1713,52 +1896,70 @@ fn resolve_enterprise_district_name(
         .unwrap_or_else(|| "the district".to_owned())
 }
 
-/// Active originated cases (operation exposure or enterprise vice attention) targeting this
-/// neighborhood under its intake authority: the shared pressure signal behind street-heat
-/// surcharges and vice attention.
+/// Active law-enforcement originated cases (operation exposure or enterprise vice attention)
+/// targeting this neighborhood: the shared pressure signal behind street-heat surcharges and vice
+/// attention. Case pressure follows the live case, not today's intake-priority winner; otherwise a
+/// jurisdiction handoff would make an old bureau's still-active investigation disappear from the
+/// street overnight.
 fn count_district_originated_cases(
     state: &crate::core::state::AppState,
     neighborhood: crate::core::id::NeighborhoodId,
 ) -> u32 {
-    let Some(authority) =
-        crate::legal::jurisdiction_system::resolve_case_intake_authority(state, neighborhood)
-    else {
-        return 0;
-    };
-    state
+    let count = state
         .legal
-        .investigations_for_owner(authority)
+        .active_investigations()
         .filter(|investigation| {
-            investigation.status() == crate::legal::InvestigationStatus::Active
+            state
+                .world
+                .get_organization(investigation.owner())
+                .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
                 && investigation.origin().is_some()
                 && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
                 state, investigation,
             )
             .contains(&neighborhood)
         })
-        .count() as u32
+        .count();
+    // The authored probability saturates at 10_000 bp and monetary multiplication is checked, so
+    // a pathological campaign with more live cases than u32 can represent should saturate this
+    // bounded pressure count rather than wrap it back toward zero.
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Whether this racket already has an active dedicated inquiry under any authority. Jurisdiction
+/// priority can change while an existing investigation remains owned by the authority that opened
+/// it, so restricting this lookup to the district's current intake authority would allow a second
+/// simultaneous inquiry after a jurisdiction handoff. District pressure still counts the existing
+/// case for heat; this query only prevents the visibility loop from manufacturing duplicates.
+fn has_active_enterprise_inquiry(
+    state: &crate::core::state::AppState,
+    enterprise: EnterpriseId,
+) -> bool {
+    state.legal.active_investigations().any(|investigation| {
+        state
+            .world
+            .get_organization(investigation.owner())
+            .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+            && investigation.origin() == Some(EntityRef::Enterprise(enterprise))
+            && investigation
+                .subjects()
+                .contains(&EntityRef::Enterprise(enterprise))
+    })
 }
 
 /// Builds the intake draft for a vice inquiry opened onto this racket: one questionable
 /// surveillance item against the enterprise itself, originated by the enterprise so the
 /// district heat loop and cold-case decay treat it exactly like any other street case.
-/// Returns `None` when no intake authority covers the district, so no institution exists to
-/// open an inquiry and the visibility roll is simply unspent this cycle.
 fn build_vice_incident_draft(
     state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
     record: &crate::enterprises::EnterpriseRecord,
-    neighborhood: crate::core::id::NeighborhoodId,
+    owner: OrganizationId,
     discovered_at: crate::core::time::SimTime,
-) -> Result<Option<crate::legal::IncidentIntakeDraft>, EnterpriseError> {
-    let Some(owner) =
-        crate::legal::jurisdiction_system::resolve_case_intake_authority(state, neighborhood)
-    else {
-        return Ok(None);
-    };
+) -> crate::legal::IncidentIntakeDraft {
     use crate::core::entity::EntityRef;
     let location_name = resolve_enterprise_location_name(state, record);
-    Ok(Some(crate::legal::IncidentIntakeDraft {
+    crate::legal::IncidentIntakeDraft {
         owner,
         title: format!("Vice inquiry into {location_name}"),
         subjects: BTreeSet::from([EntityRef::Enterprise(record.id())]),
@@ -1774,7 +1975,7 @@ fn build_vice_incident_draft(
         origin: Some(EntityRef::Enterprise(enterprise)),
         notified_organizations: BTreeSet::from([record.organization()]),
         witness: None,
-    }))
+    }
 }
 
 /// Human-facing venue description used in vice-inquiry titles.
@@ -1789,23 +1990,6 @@ fn resolve_enterprise_location_name(
             .map(|business| business.name().to_owned())
             .unwrap_or_else(|| format!("enterprise {}", record.id())),
         EnterpriseLocation::Neighborhood(_) => resolve_enterprise_district_name(state, record),
-    }
-}
-
-fn resolve_investigation_heat_surcharge(
-    enterprise: EnterpriseId,
-    economics: &EnterpriseEconomicsDefinition,
-    active: u32,
-) -> Result<Money, EnterpriseError> {
-    if active == 0 {
-        Ok(Money::ZERO)
-    } else {
-        // Street heat makes the racket more expensive to run (bribes, lookouts, missed nights);
-        // the authored per-case rate must erode daily net without instantly bankrupting it.
-        economics
-            .heat_surcharge_per_active_case()
-            .checked_mul(i64::from(active))
-            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
     }
 }
 

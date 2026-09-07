@@ -171,7 +171,8 @@ pub(super) struct EnterpriseCycleFinancials {
 pub(super) struct EnterpriseCycleArtifacts {
     attention: AttentionClass,
     /// Set when this settlement drew a vice inquiry onto the racket: sustained district
-    /// casework converted into a new police investigation owned by the intake authority.
+    /// casework opened a police investigation or reactivated a matching suspended shelf under
+    /// the current intake authority.
     drew_vice_attention: bool,
 }
 
@@ -180,7 +181,7 @@ pub(super) struct EnterpriseCycleProvenance {
     transaction: Option<LedgerTransactionId>,
     information: Option<InformationId>,
     /// Organization-facing legal-activity knowledge created when this cycle drew a vice
-    /// inquiry; `None` whenever no inquiry was opened.
+    /// inquiry; `None` whenever no inquiry was opened or resumed.
     vice_information: Option<InformationId>,
 }
 

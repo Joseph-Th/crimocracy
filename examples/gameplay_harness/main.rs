@@ -243,7 +243,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         } else {
             for metrics in [&rush, &press, &recon] {
                 println!(
-                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act 2 worked {}",
+                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act-2 burglary {}",
                     metrics.strategy.expect("strategy must be set").label(),
                     terminal_label(metrics),
                     metrics.police_arrived,
@@ -362,6 +362,7 @@ mod tests {
         Strategy, bounded_policy_choice, choose_safe_start_from_patrol_report, parse_options,
         parse_patrol_windows, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
         validate_branch_financial_isolation, validate_press_witness_counterplay,
+        validate_second_act_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::operations::OperationObjectiveOutcome;
@@ -755,6 +756,61 @@ mod tests {
         let uncased = branch_metrics(Strategy::Press, false, None);
         validate_press_witness_counterplay(&uncased)
             .expect("a session without a case has nothing to counter");
+    }
+
+    fn persisted_operation_id(raw: u32) -> crimocracy::core::id::OperationId {
+        serde_json::from_value(serde_json::Value::from(raw))
+            .expect("persistent operation IDs deserialize from their raw integer representation")
+    }
+
+    #[test]
+    fn recon_second_act_accepts_clean_recovery_or_uncleared_case_stand_down() {
+        let mut clean = branch_metrics(Strategy::Recon, false, None);
+        clean.second_opportunity_discovered = true;
+        clean.second_act_recon_information = 2;
+        clean.second_burglary = Some(persisted_operation_id(77));
+        clean.second_burglary_outcome = Some(OperationObjectiveOutcome::Achieved);
+        clean.second_burglary_terminal_minute = Some(2_095);
+        validate_second_act_evidence(&clean)
+            .expect("clean fresh recon may proceed into a successful second score");
+
+        let mut hot = branch_metrics(Strategy::Recon, false, None);
+        hot.second_opportunity_discovered = true;
+        hot.second_opportunity_expired = true;
+        hot.second_act_recon_information = 2;
+        hot.self_heat_case_opened = true;
+        hot.self_heat_case_active = Some(true);
+        validate_second_act_evidence(&hot)
+            .expect("a confirmed hot casing case must make cautious recon stand down");
+
+        let mut inconclusive = branch_metrics(Strategy::Recon, false, None);
+        inconclusive.second_opportunity_discovered = true;
+        inconclusive.second_opportunity_expired = true;
+        inconclusive.second_act_recon_information = 2;
+        inconclusive.self_heat_case_opened = true;
+        inconclusive.self_heat_case_active = None;
+        validate_second_act_evidence(&inconclusive)
+            .expect("an uncleared casing case must also make cautious recon stand down");
+    }
+
+    #[test]
+    fn recon_second_act_rejects_compounding_a_confirmed_hot_case() {
+        let mut metrics = branch_metrics(Strategy::Recon, false, None);
+        metrics.second_opportunity_discovered = true;
+        metrics.second_act_recon_information = 2;
+        metrics.self_heat_case_opened = true;
+        metrics.self_heat_case_active = Some(true);
+        metrics.second_burglary = Some(persisted_operation_id(78));
+        metrics.second_burglary_outcome = Some(OperationObjectiveOutcome::Achieved);
+        metrics.second_burglary_terminal_minute = Some(2_095);
+
+        let error = validate_second_act_evidence(&metrics).expect_err(
+            "RECON must not work another burglary after confirming its casing case is hot",
+        );
+        assert!(matches!(
+            error,
+            HarnessContractError::MissingStrategyEvidence { .. }
+        ));
     }
 
     fn branch_metrics(

@@ -1,4 +1,4 @@
-﻿//! Release-safe structural validation for the decisions and delegation subsystems.
+//! Release-safe structural validation for the decisions and delegation subsystems.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;

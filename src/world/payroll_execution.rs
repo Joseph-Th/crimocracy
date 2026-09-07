@@ -27,7 +27,6 @@ use crate::social::relationship_system::{
     RelationshipError, ValidatedRelationship, validate_set_relationship,
 };
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -140,8 +139,11 @@ fn apply_organization_payroll(
         .checked_mul(i64::try_from(members.len()).map_err(|_| PayrollError::MemberCountOverflow)?)
         .ok_or(PayrollError::ArithmeticOverflow)?;
 
-    // Funding drains the organization's general cash accounts only. Enterprise floats are
-    // delegated working capital under mandate authority. We only need availability up to the
+    // Payroll is an organization-level obligation, so every organization-owned liquid cash
+    // account is eligible. Enterprise records may reference the same cash account as one
+    // another or as the general treasury; those references do not create account ownership or
+    // segregation. Excluding a referenced account would therefore let bookkeeping metadata
+    // make real organization cash disappear from payroll. We only need availability up to the
     // amount owed, so the i128 accumulator cannot overflow even if a campaign has many very
     // large positive accounts.
     let owed_cents = i128::from(owed.cents());
@@ -333,16 +335,6 @@ fn find_funding_accounts(
     organization: OrganizationId,
 ) -> Vec<FinancialAccountId> {
     let owner = FinancialOwner::Organization(organization);
-    // Enterprise floats are delegated working capital governed by a manager's mandate; payroll
-    // funds from the boss's general cash only. Raiding a book is an explicit governance act
-    // (a mandate revision or ledger transfer), never an automatic wage drain.
-    let mut enterprise_floats: BTreeSet<FinancialAccountId> = BTreeSet::new();
-    for record in state
-        .enterprises()
-        .enterprises_for_organization(organization)
-    {
-        enterprise_floats.insert(record.cash_account());
-    }
     let mut accounts: Vec<_> = state
         .finance()
         .accounts_for(owner)
@@ -352,7 +344,6 @@ fn find_funding_accounts(
                 AccountKind::StreetCash | AccountKind::ConcealedCash
             )
         })
-        .filter(|account| !enterprise_floats.contains(&account.id()))
         .map(|account| (account.balance(), account.id()))
         .collect();
     accounts.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));

@@ -1,4 +1,4 @@
-﻿//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
+//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
 
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;

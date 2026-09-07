@@ -114,8 +114,9 @@ determinism and harness contracts.
 15  apply_cold_case_decay                   originated cases only, window 10080, no RNG
 16  run_business_cycle_phase                per due business (RNG: business stream)
 17  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
-18  apply_daily_payroll  →  apply_due_autonomous_recruitment  →  apply_due_autonomous_enterprises
+18  apply_daily_payroll  →  apply_due_autonomous_recruitment
     ──► apply_reputation_phase            decay first, then operation + vice consequences
+    ──► apply_due_autonomous_enterprises  reads current police-fear posture
     ──► synthesize_executive_brief        sees every report/decision made this minute, last
     ──► validate_invariants               structural + registry re-derivation
 ```

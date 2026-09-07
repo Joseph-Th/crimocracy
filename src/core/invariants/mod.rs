@@ -991,8 +991,11 @@ fn validate_enterprises_against_registry(
             .enterprises
             .prior_cycle(cycle.enterprise(), cycle.id())
             .map(|prior| prior.investigation_heat());
-        let heat_reportable = cycle.investigation_heat() > crate::finance::Money::ZERO
-            && previous_heat != Some(cycle.investigation_heat());
+        let heat_reportable =
+            crate::enterprises::enterprise_execution::enterprise_heat_change_is_reportable(
+                previous_heat,
+                cycle.investigation_heat(),
+            );
         let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
             || heat_reportable
             || cycle.net_cash() < crate::finance::Money::ZERO

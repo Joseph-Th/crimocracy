@@ -1563,7 +1563,29 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
     .commit(&mut state)
     .expect("identified incident intake should commit")
     .investigation;
-    state.advance_clock(SimDuration::from_minutes(121));
+    // A case opened at campaign minute zero must remain live until the full inactivity window
+    // has elapsed. This protects the inclusive activity-index query from treating minute zero
+    // as cold merely because a pre-window threshold would otherwise saturate to zero.
+    state.advance_clock(SimDuration::from_minutes(119));
+    let premature = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect("pre-window cold-case pass should resolve");
+    assert_eq!(
+        premature,
+        ColdCaseDecayOutcome {
+            suspended: Vec::new(),
+            closed: Vec::new()
+        }
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(case)
+            .expect("pre-window case should persist")
+            .status(),
+        InvestigationStatus::Active
+    );
+
+    state.advance_clock(SimDuration::ONE_MINUTE);
     let suspended = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
         .expect("cold-case decay should resolve");
     assert_eq!(

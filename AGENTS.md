@@ -268,8 +268,9 @@ authoritative minute. Phase order is contractual — comments explain “runs af
 11  apply_cold_case_decay                  (only originated cases; window = 10080 min)
 12  run_business_cycle_phase               (gross variance per due economy)
 13  run_enterprise_cycle_phase             (gross variance + vice roll unconditionally)
-14  apply_daily_payroll  →  apply_due_autonomous_recruitment  →  apply_due_autonomous_enterprises
+14  apply_daily_payroll  →  apply_due_autonomous_recruitment
     ──► apply_reputation_phase (decay first, then operation + vice consequences)
+    ──► apply_due_autonomous_enterprises (reads the resulting current police-fear posture)
     ──► synthesize_executive_brief (sees everything above, last)
     ──► validate_invariants
 ```

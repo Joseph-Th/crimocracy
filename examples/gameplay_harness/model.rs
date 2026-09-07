@@ -585,8 +585,9 @@ pub struct RunMetrics {
     /// case, so branch-heating contracts must use this session-wide signal rather than the
     /// burglary's own resolution record.
     pub session_case_staffed: bool,
-    /// Whether the branch's own act-2 surveillance drew a police case: self-inflicted heat the
-    /// organization only knows about through its surfaced after-action report.
+    /// Whether the organization received player-visible LegalActivity information that its own
+    /// act-2 surveillance drew a police case. This is an acting-policy signal, not a hidden audit
+    /// read from the operation resolution.
     pub self_heat_case_opened: bool,
     /// What the organization's player-visible channel read about that self-inflicted case
     /// before the window closed: Some(true) still active, Some(false) shelved, None no read.
@@ -632,8 +633,10 @@ pub struct RunMetrics {
     /// On refusal, production rules deliver a loyalty report to the recruiting organization
     /// naming our recruiter: reaching out carries an intelligence cost. `None` when not refused.
     pub win_back_refusal_leaked_to_rival: Option<bool>,
-    // Act-2 (second wind) evidence: the narrative branches either rebuild and recover value on a
-    // reopened second score or deliberately let it lapse as the price of standing down.
+    // Act-2 (second wind) evidence: RUSH rebuilds and works the reopened score, PRESS deliberately
+    // lets it lapse, and RECON follows fresh evidence, recovering value only when clear or
+    // explicitly shelved and standing down when its own casing creates a case the channel cannot
+    // affirmatively clear.
     pub second_opportunity: Option<OpportunityId>,
     pub second_opportunity_discovered: bool,
     pub second_opportunity_expired: bool,
@@ -891,7 +894,7 @@ impl Aggregate {
             "{label:<6} samples {:>2}  fixtures {:?}
        outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}
        pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
-                 surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  case hot {:>5.1}%  case cold {:>5.1}%
+                 surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
        rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}  vice hits {:>3}
                  payroll paid {:>7.0}c  unpaid {:>6.0}c
