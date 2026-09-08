@@ -844,6 +844,49 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
 }
 
 #[test]
+fn autonomous_expansion_honors_organization_wide_enterprise_function_authority() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let enterprise_scope = ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
+    validate_revise_mandate(
+        &fixture.state,
+        fixture.authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([enterprise_scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("enterprise-function mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("enterprise-function mandate should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("broad enterprise authority should support autonomous expansion");
+    assert_eq!(established.len(), 1);
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(established[0])
+        .expect("function-authorized enterprise should persist");
+    assert_eq!(record.authority().scope, enterprise_scope);
+    assert_eq!(
+        record.location(),
+        EnterpriseLocation::Neighborhood(neighborhood)
+    );
+    validate_state(&fixture.state).expect("function-authorized expansion state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financials() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -1918,6 +1961,92 @@ fn suspension_removes_enterprise_from_due_work_and_resume_reschedules_it() {
 }
 
 #[test]
+fn due_enterprises_preserve_schedule_chronology_before_id_order() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let later_due_lower_id = establish_protection(&registry, &mut fixture);
+
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Chronology Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("second settlement account should validate");
+    let earlier_due_higher_id = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: second_settlement,
+        },
+    )
+    .expect("second enterprise should validate")
+    .commit(&mut fixture.state)
+    .expect("second enterprise should commit");
+    assert!(later_due_lower_id < earlier_due_higher_id);
+
+    // Both rackets were created at the same instant. Rescheduling only the lower-ID racket
+    // makes its next cycle later. Once both are overdue, scheduler order must remain
+    // (due time, ID), not collapse back to raw creation order.
+    validate_suspend_enterprise(&fixture.state, later_due_lower_id)
+        .expect("lower-ID enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("lower-ID suspension should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    validate_resume_enterprise(&registry, &fixture.state, later_due_lower_id)
+        .expect("lower-ID enterprise should resume")
+        .commit(&mut fixture.state)
+        .expect("lower-ID resume should commit");
+
+    let first_due_at = fixture
+        .state
+        .enterprises()
+        .get_enterprise(earlier_due_higher_id)
+        .and_then(|record| record.next_cycle_at())
+        .expect("higher-ID enterprise should remain scheduled");
+    let second_due_at = fixture
+        .state
+        .enterprises()
+        .get_enterprise(later_due_lower_id)
+        .and_then(|record| record.next_cycle_at())
+        .expect("resumed lower-ID enterprise should be scheduled");
+    assert!(first_due_at < second_due_at);
+    let catch_up_minutes =
+        u32::try_from(second_due_at.as_minutes() - fixture.state.now().as_minutes())
+            .expect("fixture catch-up duration must fit SimDuration");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(catch_up_minutes));
+
+    assert_eq!(
+        find_due_enterprises(&fixture.state),
+        vec![earlier_due_higher_id, later_due_lower_id],
+        "older overdue work must consume the earlier deterministic cycle slot even when its ID is higher"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn enterprise_establishment_schedule_starts_at_commit_time() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -2358,7 +2487,7 @@ fn autonomous_expansion_requires_one_current_cycle_of_working_capital() {
 }
 
 #[test]
-fn autonomous_expansion_skips_unaffordable_kind_for_later_affordable_kind() {
+fn autonomous_expansion_skips_unaffordable_candidate_for_best_affordable_kind() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let protection = establish_protection(&registry, &mut fixture);
@@ -2378,10 +2507,11 @@ fn autonomous_expansion_skips_unaffordable_kind_for_later_affordable_kind() {
             .expect("fixture funding should fit"),
     );
 
-    // This venue makes Gambling a valid earlier candidate, but its current-cycle runway is
+    // This venue makes Gambling a valid high-return candidate, but its current-cycle runway is
     // above the $62 uncommitted treasury after reserving the existing Protection runway.
-    // Bookmaking remains affordable with the same venue, so financing-aware selection must
-    // continue instead of abandoning the pass.
+    // LoanSharking is both affordable and the strongest zero-variance net among the affordable
+    // venue-backed choices, so financing-aware ranking must continue instead of abandoning the
+    // pass or falling back to enum order.
     let organization = fixture.organization;
     insert_support_business(
         &registry,
@@ -2409,7 +2539,7 @@ fn autonomous_expansion_skips_unaffordable_kind_for_later_affordable_kind() {
             .get_enterprise(established[0])
             .expect("selected enterprise should persist")
             .kind(),
-        EnterpriseKind::Bookmaking
+        EnterpriseKind::LoanSharking
     );
     assert!(
         fixture
@@ -2455,13 +2585,50 @@ fn autonomous_expansion_does_not_spend_existing_racket_runway_twice() {
 }
 
 #[test]
-fn autonomous_expansion_reserves_new_runway_across_same_day_mandates() {
+fn autonomous_expansion_can_reenter_a_slot_released_by_retirement() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
-    let first_neighborhood = match fixture.location {
-        EnterpriseLocation::Neighborhood(id) => id,
-        EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
-    };
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let retired = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, retired)
+        .expect("active enterprise should suspend before retirement")
+        .commit(&mut fixture.state)
+        .expect("enterprise suspension should commit");
+    crate::enterprises::enterprise_execution::validate_retire_enterprise(&fixture.state, retired)
+        .expect("suspended enterprise should retire")
+        .commit(&mut fixture.state)
+        .expect("enterprise retirement should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("retired history should not block autonomous re-entry");
+    assert_eq!(established.len(), 1);
+    let replacement = fixture
+        .state
+        .enterprises()
+        .get_enterprise(established[0])
+        .expect("replacement enterprise should persist");
+    assert_eq!(replacement.kind(), EnterpriseKind::Protection);
+    assert_eq!(replacement.location(), fixture.location);
+    assert_ne!(replacement.id(), retired);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(retired)
+            .expect("retired enterprise remains durable history")
+            .status(),
+        EnterpriseStatus::Retired
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
     let one_runway = resolve_current_enterprise_operating_cost(
         &registry,
         &fixture.state,
@@ -2470,32 +2637,40 @@ fn autonomous_expansion_reserves_new_runway_across_same_day_mandates() {
         0,
     )
     .expect("protection runway should fit");
-    fund_enterprise_fixture_cash(
-        &mut fixture,
-        one_runway
-            .cents()
-            .checked_mul(2)
-            .and_then(|cents| cents.checked_sub(1))
-            .expect("fixture funding should fit"),
-    );
 
     let second_neighborhood = insert_neighborhood(
         &mut fixture.state,
         NeighborhoodDraft {
-            name: "Second Governed Ward".to_owned(),
+            name: "Stronger Governed Ward".to_owned(),
             profile: NeighborhoodProfile {
                 economy: NeighborhoodEconomyProfile {
-                    wealth: rating(60),
-                    commercial_activity: rating(70),
-                    illicit_demand: rating(50),
+                    wealth: rating(100),
+                    commercial_activity: rating(100),
+                    illicit_demand: rating(100),
                 },
                 institutions: NeighborhoodInstitutionProfile {
-                    police_presence: rating(40),
+                    police_presence: rating(0),
                 },
             },
         },
     )
     .expect("second neighborhood should validate");
+    let second_runway = resolve_current_enterprise_operating_cost(
+        &registry,
+        &fixture.state,
+        EnterpriseKind::Protection,
+        EnterpriseLocation::Neighborhood(second_neighborhood),
+        0,
+    )
+    .expect("second protection runway should fit");
+    fund_enterprise_fixture_cash(
+        &mut fixture,
+        one_runway
+            .cents()
+            .checked_add(second_runway.cents())
+            .and_then(|cents| cents.checked_sub(1))
+            .expect("fixture funding should fit"),
+    );
     let second_manager = insert_character(
         &mut fixture.state,
         CharacterDraft {
@@ -2538,10 +2713,10 @@ fn autonomous_expansion_reserves_new_runway_across_same_day_mandates() {
             .state
             .enterprises()
             .get_enterprise(established[0])
-            .expect("first establishment should persist")
+            .expect("selected establishment should persist")
             .location(),
-        EnterpriseLocation::Neighborhood(first_neighborhood),
-        "stable mandate order should award the scarce runway to the earlier mandate"
+        EnterpriseLocation::Neighborhood(second_neighborhood),
+        "shared treasury must fund the stronger current opportunity instead of the earlier-created mandate"
     );
     validate_invariants(&fixture.state);
 }
@@ -2902,8 +3077,8 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
     };
     assert_eq!(
         first_kind.0,
-        EnterpriseKind::Protection,
-        "authored kind order puts asset-free rackets first"
+        EnterpriseKind::LoanSharking,
+        "the strongest current zero-variance net should outrank incidental enum order"
     );
 
     fixture
@@ -2912,8 +3087,8 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
     let second_day = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
         .expect("day-two autonomous expansion should resolve");
     assert_eq!(second_day.len(), 1);
-    // Asset-free rackets occupy district scope only. The next day therefore advances to the
-    // first venue-backed kind instead of duplicating Protection at the card room.
+    // The strongest remaining profitable configuration is gambling at the same venue. A second
+    // loan-sharking record at the occupied location is not a valid candidate.
     let second_kind = {
         let second_probe = fixture
             .state
@@ -2966,6 +3141,38 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
     };
+    let expansion_neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Clean Expansion Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(60),
+                    commercial_activity: rating(70),
+                    illicit_demand: rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(20),
+                },
+            },
+        },
+    )
+    .expect("clean expansion district should validate");
+    validate_revise_mandate(
+        &fixture.state,
+        fixture.authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Neighborhood(neighborhood),
+                ResponsibilityScope::Neighborhood(expansion_neighborhood),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("two-district mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("two-district mandate should commit");
     let organization = fixture.organization;
     insert_support_business(
         &registry,
@@ -3042,15 +3249,26 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         .advance_clock(SimDuration::from_minutes(1_439));
 
     // Prove the organization really would expand at this boundary if it read the stale
-    // pre-consequence posture. This control clone deliberately invokes only the expansion pass.
+    // pre-consequence posture. Heavy case pressure makes the source district economically
+    // unattractive, so the control must choose the separate clean governed district rather than
+    // relying on the very pressure that is supposed to trigger the reputation gate.
     let mut stale_posture_control = fixture.state.clone();
     stale_posture_control.advance_clock(SimDuration::ONE_MINUTE);
+    let stale_expansion = apply_due_autonomous_enterprises(&registry, &mut stale_posture_control)
+        .expect("pre-consequence posture should support expansion");
     assert_eq!(
-        apply_due_autonomous_enterprises(&registry, &mut stale_posture_control)
-            .expect("pre-consequence posture should support expansion")
-            .len(),
+        stale_expansion.len(),
         1,
         "the regression requires a genuinely eligible expansion under the old posture"
+    );
+    assert_eq!(
+        stale_posture_control
+            .enterprises()
+            .get_enterprise(stale_expansion[0])
+            .expect("control expansion should persist")
+            .location(),
+        EnterpriseLocation::Neighborhood(expansion_neighborhood),
+        "profit-aware planning should move the expansion away from the heavily pressured district"
     );
 
     let outcome = run_tick(&registry, &mut fixture.state);
@@ -3272,16 +3490,91 @@ fn expansion_consolidates_led_districts_before_contested_ones() {
     let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
         .expect("autonomous expansion should resolve");
     assert_eq!(established.len(), 1);
-    let location = fixture
+    let established_record = fixture
         .state
         .enterprises()
         .get_enterprise(established[0])
-        .expect("establishment should persist")
-        .location();
+        .expect("establishment should persist");
     assert_eq!(
-        location,
-        EnterpriseLocation::Neighborhood(led),
-        "consolidation preference must outrank raw district id order"
+        established_record.authority().scope,
+        ResponsibilityScope::Neighborhood(led),
+        "consolidation preference must choose authority in the led district before contested territory"
+    );
+    let selected_neighborhood = match established_record.location() {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(business) => fixture
+            .state
+            .world()
+            .get_business(business)
+            .expect("selected host business must persist")
+            .neighborhood(),
+    };
+    assert_eq!(
+        selected_neighborhood, led,
+        "economics may choose either a district racket or a hosted racket, but it must remain inside the led district"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn expansion_uses_economics_within_the_same_influence_tier() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+
+    let lower_id_district = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use district locations"),
+    };
+    let richer_higher_id_district = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Prosperous Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(100),
+                    commercial_activity: rating(100),
+                    illicit_demand: rating(100),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(0),
+                },
+            },
+        },
+    )
+    .expect("richer neighborhood should validate");
+    assert!(richer_higher_id_district > lower_id_district);
+    validate_revise_mandate(
+        &fixture.state,
+        fixture.authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Neighborhood(lower_id_district),
+                ResponsibilityScope::Neighborhood(richer_higher_id_district),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("two-district mandate revision should validate")
+    .commit(&mut fixture.state)
+    .expect("two-district mandate revision should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("same-tier economic ranking should resolve");
+    assert_eq!(established.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(established[0])
+            .expect("same-tier expansion should persist")
+            .location(),
+        EnterpriseLocation::Neighborhood(richer_higher_id_district),
+        "district ID must not outrank stronger current economics inside one influence tier"
     );
     validate_invariants(&fixture.state);
 }

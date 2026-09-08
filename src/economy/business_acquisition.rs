@@ -5,9 +5,9 @@
 //! storefront — legitimate expansion is gated on laundering throughput, so the money
 //! loop closes: illicit proceeds are laundered into accounted wealth, and accounted
 //! wealth converts into earning capacity (and, for cash-intensive fronts, more
-//! laundering capacity). Independently owned businesses have no organizational
-//! counterparty to pay, so the full price capitalizes the acquired business's own
-//! operating books.
+//! laundering capacity). Purchase consideration leaves the buyer's spendable control:
+//! the acquired business's settlement account is the ledger counterparty representing
+//! payment to the outside seller, never a capitalization of the asset's operating cash.
 //!
 //! Commit composes three canonical paths in one validated step: world ownership
 //! transfer, business-economy establishment when the target has never operated (or
@@ -162,7 +162,7 @@ impl ValidatedBusinessAcquisition {
                 acquisition_payment_draft(
                     state,
                     &self.funding_accounts,
-                    economy.operating_account(),
+                    economy.settlement_account(),
                     self.price,
                     &self.business_name,
                 ),
@@ -207,7 +207,7 @@ impl ValidatedBusinessAcquisition {
                 acquisition_payment_draft(
                     state,
                     &self.funding_accounts,
-                    operating_account,
+                    settlement_account,
                     self.price,
                     &self.business_name,
                 ),
@@ -280,7 +280,7 @@ impl ValidatedBusinessAcquisition {
 fn acquisition_payment_draft(
     state: &AppState,
     funding_accounts: &BTreeSet<FinancialAccountId>,
-    operating_account: FinancialAccountId,
+    seller_settlement_account: FinancialAccountId,
     price: Money,
     business_name: &str,
 ) -> LedgerTransactionDraft {
@@ -311,7 +311,7 @@ fn acquisition_payment_draft(
     }
     debug_assert_eq!(remaining, Money::ZERO);
     postings.push(LedgerPosting {
-        account: operating_account,
+        account: seller_settlement_account,
         amount: price,
     });
     LedgerTransactionDraft {
@@ -397,8 +397,9 @@ pub fn validate_acquire_business(
     )?;
     // Suspended books do not block a purchase: chronic losses suspend an independent
     // business automatically, and with no organizational counterparty to resume them the
-    // books would otherwise stay dead forever. The buyer capitalizes the purchase into a
-    // going concern — commit resumes suspended books right after the ownership transfer.
+    // books would otherwise stay dead forever. Acquisition changes the responsible owner,
+    // so commit resumes suspended books right after the ownership transfer without treating
+    // the seller's purchase consideration as operating capital.
     Ok(ValidatedBusinessAcquisition {
         economy_cycle_duration: registry
             .get_business(business_record.kind())
@@ -554,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_buys_an_independent_business_and_capitalizes_its_books() {
+    fn acquisition_buys_an_independent_business_without_returning_price_to_operating_cash() {
         let mut fixture = make_independent_fixture();
         let price = hospitality_price(&fixture);
         fund_accounted_from_street(&mut fixture, price.cents());
@@ -583,8 +584,9 @@ mod tests {
             BusinessOwner::Organization(fixture.organization)
         );
 
-        // The full price capitalized the fresh operating books; accounted funds dropped by
-        // exactly the authored price.
+        // The price leaves the buyer's spendable control. Fresh operating books begin at zero;
+        // the non-liquid settlement account carries the external seller counterparty, and
+        // accounted funds dropped by exactly the authored price.
         let economy = fixture
             .state
             .economy()
@@ -596,6 +598,15 @@ mod tests {
                 .finance()
                 .get_account(economy.operating_account())
                 .expect("operating account must persist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(economy.settlement_account())
+                .expect("seller settlement account must persist")
                 .balance(),
             price
         );
@@ -1066,14 +1077,24 @@ mod tests {
             economy.next_cycle_at(),
             Some(fixture.state.now() + cycle_duration)
         );
-        // The full price capitalized the acquired books' own operating account.
+        // Purchase consideration must not refill a chronically losing business. Its operating
+        // balance is preserved while the outside-seller counterparty receives the price.
         let operating_balance = fixture
             .state
             .finance()
             .get_account(operating)
             .expect("operating account must persist")
             .balance();
-        assert!(operating_balance >= price);
+        assert_eq!(operating_balance, Money::ZERO);
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(settlement)
+                .expect("settlement account must persist")
+                .balance(),
+            price
+        );
         // Ownership moved, so the same acquisition cannot run twice.
         assert!(matches!(
             validate_acquire_business(

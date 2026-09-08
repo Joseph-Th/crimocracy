@@ -244,13 +244,10 @@ impl EconomyState {
     }
 
     pub(crate) fn due_at_or_before(&self, now: SimTime) -> Vec<BusinessId> {
-        let mut due: Vec<BusinessId> = self
-            .active_by_next_cycle
+        self.active_by_next_cycle
             .range(..=now)
             .flat_map(|(_, businesses)| businesses.iter().copied())
-            .collect();
-        due.sort_unstable();
-        due
+            .collect()
     }
 
     pub(crate) fn business_economies(&self) -> impl Iterator<Item = &BusinessEconomyRecord> {

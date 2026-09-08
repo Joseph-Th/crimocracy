@@ -839,6 +839,18 @@ fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str {
 /// is made in the organization's name beyond what the policy promises.
 const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
 
+#[derive(Clone, Copy, Debug)]
+struct AutomaticLegalSupportCandidate {
+    arrest: ArrestId,
+    sponsor: OrganizationId,
+    authorization: Option<MandateAuthority>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedAutomaticLegalSupport {
+    authorization: Option<MandateAuthority>,
+}
+
 /// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
 /// organization that runs the Automatic policy gets counsel retained through the canonical
 /// representation path. Organization policy may aggregate sponsor liquidity; a mandate-sourced
@@ -849,9 +861,6 @@ const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
 pub(crate) fn apply_automatic_legal_support(
     state: &mut AppState,
 ) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
-    use crate::finance::{AccountKind, FinancialOwner};
-    use crate::world::{OrganizationKind as OrgKind, PolicyKind, PolicySetting};
-
     // Automatic support concludes when the matter it covers does: a representation this pass
     // retained for a detainee who has left custody ends with `MatterConcluded`, so concluded
     // matters stop blocking contact termination. A contact may carry several concurrent
@@ -869,6 +878,28 @@ pub(crate) fn apply_automatic_legal_support(
     {
         return Ok(Vec::new());
     }
+    conclude_inactive_automatic_representations(state)?;
+    let candidates = resolve_automatic_legal_support_candidates(state)?;
+    let mut retained = Vec::new();
+    for candidate in candidates {
+        let fee = Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
+        let Some(payer_accounts) = resolve_automatic_support_payer_accounts(state, candidate, fee)?
+        else {
+            continue;
+        };
+        let Some(validated_representation) =
+            validate_first_usable_automatic_counsel(state, candidate, fee, &payer_accounts)?
+        else {
+            continue;
+        };
+        retained.push(validated_representation.commit(state)?);
+    }
+    Ok(retained)
+}
+
+fn conclude_inactive_automatic_representations(
+    state: &mut AppState,
+) -> Result<(), LegalRepresentationError> {
     let concluded: Vec<LegalRepresentationId> = state
         .legal
         .active_automatic_policy_representations()
@@ -891,7 +922,12 @@ pub(crate) fn apply_automatic_legal_support(
         )?
         .commit(state)?;
     }
+    Ok(())
+}
 
+fn resolve_automatic_legal_support_candidates(
+    state: &AppState,
+) -> Result<Vec<AutomaticLegalSupportCandidate>, LegalRepresentationError> {
     let mut candidates = Vec::new();
     for arrest in state.legal.detained_arrests() {
         if state
@@ -913,163 +949,200 @@ pub(crate) fn apply_automatic_legal_support(
             .world
             .get_organization(organization)
             .ok_or(LegalRepresentationError::MissingSponsor(organization))?;
-        if record.kind() != OrgKind::Criminal {
+        if record.kind() != OrganizationKind::Criminal {
             continue;
         }
-        // The supervisor's standing order governs first. A detained supervisor cannot exercise
-        // delegated authority, so the organization's standing default takes over. Every other
-        // delegation error denotes malformed current governance and must surface rather than be
-        // disguised as an ordinary policy fallback.
-        let (setting, authorization) = if let Some(supervisor) = defendant_record.supervisor() {
+        let Some(resolved) =
+            resolve_automatic_support_for_defendant(state, defendant_record, record)?
+        else {
+            continue;
+        };
+        candidates.push(AutomaticLegalSupportCandidate {
+            arrest: arrest.id(),
+            sponsor: organization,
+            authorization: resolved.authorization,
+        });
+    }
+    Ok(candidates)
+}
+
+fn resolve_automatic_support_for_defendant(
+    state: &AppState,
+    defendant: &crate::world::CharacterRecord,
+    sponsor: &crate::world::OrganizationRecord,
+) -> Result<Option<ResolvedAutomaticLegalSupport>, LegalRepresentationError> {
+    use crate::world::{LegalSupportPolicy, PolicyKind, PolicySetting};
+
+    // The supervisor's standing order governs first. A detained supervisor cannot exercise
+    // delegated authority, so the organization's standing default takes over. Every other
+    // delegation error denotes malformed current governance and must surface rather than be
+    // disguised as an ordinary policy fallback.
+    let (setting, authorization) = match defendant.supervisor() {
+        None => (sponsor.policy(PolicyKind::AssociateLegalSupport), None),
+        Some(supervisor) => {
             match resolve_policy_for_manager(state, supervisor, PolicyKind::AssociateLegalSupport) {
                 Ok(resolved) => {
                     let authorization = match resolved.source {
                         PolicySource::Organization(_) => None,
                         PolicySource::Mandate(mandate) => {
-                            let legal_scope =
-                                ResponsibilityScope::Function(ResponsibilityFunction::Legal);
-                            let mandate_record = state
-                                .delegation
-                                .get_mandate(mandate)
-                                .expect("resolved mandate policy must reference a live mandate");
-                            // A mandate standing order can decide only inside authority the
-                            // mandate actually grants. Legal retention also spends money, so a
-                            // mandate with no Legal scope or no budget cannot turn an
-                            // organization-level CaseByCase policy into unrestricted spending.
-                            if !mandate_record.scopes().contains(&legal_scope)
-                                || mandate_record.budget().is_none()
-                            {
-                                continue;
-                            }
-                            Some(MandateAuthority {
-                                mandate,
-                                manager: supervisor,
-                                scope: legal_scope,
-                            })
+                            let Some(authority) = resolve_automatic_legal_support_authority(
+                                state, supervisor, mandate,
+                            ) else {
+                                return Ok(None);
+                            };
+                            Some(authority)
                         }
                     };
                     (Some(resolved.setting), authorization)
                 }
                 Err(DelegationError::DetainedManager { .. }) => {
-                    (record.policy(PolicyKind::AssociateLegalSupport), None)
+                    (sponsor.policy(PolicyKind::AssociateLegalSupport), None)
                 }
                 Err(error) => return Err(error.into()),
             }
-        } else {
-            (record.policy(PolicyKind::AssociateLegalSupport), None)
-        };
-        if matches!(
-            setting,
-            Some(PolicySetting::AssociateLegalSupport(
-                crate::world::LegalSupportPolicy::Automatic,
-            )),
-        ) {
-            candidates.push((arrest.id(), organization, authorization));
         }
+    };
+    if !matches!(
+        setting,
+        Some(PolicySetting::AssociateLegalSupport(
+            LegalSupportPolicy::Automatic
+        )),
+    ) {
+        return Ok(None);
     }
+    Ok(Some(ResolvedAutomaticLegalSupport { authorization }))
+}
 
-    let mut retained = Vec::new();
-    for (arrest_id, sponsor, authorization) in candidates {
-        let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
-        // Organization policy can draw across the sponsor's liquid reserves. A mandate-sourced
-        // policy must instead use exactly its configured budget account and stay inside the
-        // current budget window, matching explicit delegated retention.
-        let payer_accounts: BTreeSet<_> = if let Some(authority) = authorization {
-            let mandate = state
-                .delegation
-                .get_mandate(authority.mandate)
-                .expect("automatic delegated policy must retain its mandate");
-            let budget = mandate
-                .budget()
-                .expect("automatic delegated support candidate requires a mandate budget");
-            let usage = resolve_budget_usage(state, authority.mandate, state.now())?;
-            let funding = state
-                .finance
-                .get_account(budget.funding_account)
-                .expect("validated mandate budget account must persist");
-            if usage.remaining < fee || funding.balance() < fee {
-                continue;
-            }
-            BTreeSet::from([budget.funding_account])
-        } else {
+fn resolve_automatic_legal_support_authority(
+    state: &AppState,
+    supervisor: CharacterId,
+    mandate: crate::core::id::MandateId,
+) -> Option<MandateAuthority> {
+    let legal_scope = ResponsibilityScope::Function(ResponsibilityFunction::Legal);
+    let mandate_record = state
+        .delegation
+        .get_mandate(mandate)
+        .expect("resolved mandate policy must reference a live mandate");
+    // A mandate standing order can decide only inside authority the mandate actually grants.
+    // Legal retention also spends money, so a mandate with no Legal scope or no budget cannot
+    // turn an organization-level CaseByCase policy into unrestricted spending.
+    if !mandate_record.scopes().contains(&legal_scope) || mandate_record.budget().is_none() {
+        return None;
+    }
+    Some(MandateAuthority {
+        mandate,
+        manager: supervisor,
+        scope: legal_scope,
+    })
+}
+
+fn resolve_automatic_support_payer_accounts(
+    state: &AppState,
+    candidate: AutomaticLegalSupportCandidate,
+    fee: Money,
+) -> Result<Option<BTreeSet<FinancialAccountId>>, LegalRepresentationError> {
+    // Organization policy can draw across the sponsor's liquid reserves. A mandate-sourced
+    // policy must instead use exactly its configured budget account and stay inside the
+    // current budget window, matching explicit delegated retention.
+    let payer_accounts: BTreeSet<_> = if let Some(authority) = candidate.authorization {
+        let mandate = state
+            .delegation
+            .get_mandate(authority.mandate)
+            .expect("automatic delegated policy must retain its mandate");
+        let budget = mandate
+            .budget()
+            .expect("automatic delegated support candidate requires a mandate budget");
+        let usage = resolve_budget_usage(state, authority.mandate, state.now())?;
+        let funding = state
+            .finance
+            .get_account(budget.funding_account)
+            .expect("validated mandate budget account must persist");
+        if usage.remaining < fee || funding.balance() < fee {
+            return Ok(None);
+        }
+        BTreeSet::from([budget.funding_account])
+    } else {
+        state
+            .finance
+            .accounts_for(FinancialOwner::Organization(candidate.sponsor))
+            .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
+            .map(|account| account.id())
+            .collect()
+    };
+    let available = payer_accounts
+        .iter()
+        .map(|account| {
             state
                 .finance
-                .accounts_for(FinancialOwner::Organization(sponsor))
-                .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
-                .map(|account| account.id())
-                .collect()
-        };
-        let available = payer_accounts
-            .iter()
-            .map(|account| {
-                state
-                    .finance
-                    .get_account(*account)
-                    .expect("funding account came from finance owner index")
-                    .balance()
-                    .cents()
-                    .max(0)
-            })
-            .fold(0_i128, |total, cents| {
-                (total + i128::from(cents)).min(i128::from(fee.cents()))
-            });
-        if available < i128::from(fee.cents()) {
+                .get_account(*account)
+                .expect("funding account came from finance owner index")
+                .balance()
+                .cents()
+                .max(0)
+        })
+        .fold(0_i128, |total, cents| {
+            (total + i128::from(cents)).min(i128::from(fee.cents()))
+        });
+    if available < i128::from(fee.cents()) {
+        return Ok(None);
+    }
+    Ok(Some(payer_accounts))
+}
+
+fn validate_first_usable_automatic_counsel(
+    state: &AppState,
+    candidate: AutomaticLegalSupportCandidate,
+    fee: Money,
+    payer_accounts: &BTreeSet<FinancialAccountId>,
+) -> Result<Option<ValidatedLegalRepresentation>, LegalRepresentationError> {
+    // Legal contacts are broader than retained counsel: prosecutors and legal authorities
+    // also expose Legal channels. Walk contacts in stable ID order until a live LegalServices
+    // lawyer with an operating account can actually carry this representation. A detained
+    // endpoint or non-lawyer is an ordinary temporary/institutional mismatch, not a reason to
+    // let an older unusable contact block a later viable one.
+    for contact in state.contacts.contacts_for_sponsor(candidate.sponsor) {
+        if contact.status() != ContactStatus::Active
+            || contact.kind() != ContactKind::Legal
+            || !crate::contacts::contact_system::are_channel_endpoints_available(state, contact)
+        {
             continue;
         }
-
-        // Legal contacts are broader than retained counsel: prosecutors and legal authorities
-        // also expose Legal channels. Walk contacts in stable ID order until a live LegalServices
-        // lawyer with an operating account can actually carry this representation. A detained
-        // endpoint or non-lawyer is an ordinary temporary/institutional mismatch, not a reason to
-        // let an older unusable contact block a later viable one.
-        let mut validated_representation = None;
-        for contact in state.contacts.contacts_for_sponsor(sponsor) {
-            if contact.status() != crate::contacts::ContactStatus::Active
-                || contact.kind() != crate::contacts::ContactKind::Legal
-                || !crate::contacts::contact_system::are_channel_endpoints_available(state, contact)
-            {
-                continue;
-            }
-            let institution = state.world.get_organization(contact.institution()).ok_or(
-                LegalRepresentationError::MissingCounselInstitution(contact.institution()),
-            )?;
-            if institution.kind() != OrgKind::LegalServices {
-                continue;
-            }
-            let counsel = state
-                .world
-                .get_character(contact.contact())
-                .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
-            if counsel.capability(CapabilityKind::LegalKnowledge).is_none() {
-                continue;
-            }
-            let Some(provider_account) = state
-                .finance
-                .accounts_for(FinancialOwner::Organization(contact.institution()))
-                .find(|account| account.kind() == AccountKind::LegitimateOperating)
-            else {
-                continue;
-            };
-            let draft = LegalRepresentationDraft {
-                arrest: arrest_id,
-                sponsor,
+        let institution = state.world.get_organization(contact.institution()).ok_or(
+            LegalRepresentationError::MissingCounselInstitution(contact.institution()),
+        )?;
+        if institution.kind() != OrganizationKind::LegalServices {
+            continue;
+        }
+        let counsel = state
+            .world
+            .get_character(contact.contact())
+            .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
+        if counsel.capability(CapabilityKind::LegalKnowledge).is_none() {
+            continue;
+        }
+        let Some(provider_account) = state
+            .finance
+            .accounts_for(FinancialOwner::Organization(contact.institution()))
+            .find(|account| account.kind() == AccountKind::LegitimateOperating)
+        else {
+            continue;
+        };
+        return validate_retain_legal_representation(
+            state,
+            LegalRepresentationDraft {
+                arrest: candidate.arrest,
+                sponsor: candidate.sponsor,
                 contact: contact.id(),
                 fee,
                 payer_accounts: payer_accounts.clone(),
                 provider_account: provider_account.id(),
-                authorization,
+                authorization: candidate.authorization,
                 origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
-            };
-            validated_representation = Some(validate_retain_legal_representation(state, draft)?);
-            break;
-        }
-        let Some(validated_representation) = validated_representation else {
-            continue;
-        };
-        let representation = validated_representation.commit(state)?;
-        retained.push(representation);
+            },
+        )
+        .map(Some);
     }
-    Ok(retained)
+    Ok(None)
 }
 
 #[cfg(test)]

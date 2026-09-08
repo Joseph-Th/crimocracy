@@ -978,7 +978,7 @@ pub fn apply_witness_interview_scheduling(
         if scheduled_work_for_investigator(state, investigator).is_some() {
             continue;
         }
-        let witnesses: Vec<_> = state
+        let mut witnesses: Vec<_> = state
             .legal
             .case_witnesses_for_investigation(investigation_id)
             .filter(|witness| witness.statements().is_empty())
@@ -988,9 +988,15 @@ pub fn apply_witness_interview_scheduling(
             .filter(|witness| {
                 witness.interview_attempts() < registry.legal().witness_interview_attempt_limit()
             })
-            .map(|witness| witness.id())
+            .map(|witness| (witness.interview_attempts(), witness.id()))
             .collect();
-        for case_witness in witnesses {
+        // Spend institutional attention on fresh witnesses before retrying someone who already
+        // failed to produce a statement. Otherwise stable witness-ID order makes one early
+        // hostile witness consume their entire attempt budget while later untouched witnesses
+        // wait idle. Attempt count is the practical priority; ID remains the deterministic
+        // tie-breaker among equally attempted witnesses.
+        witnesses.sort_unstable();
+        for (_, case_witness) in witnesses {
             let focus = InvestigationWorkFocus::witness(case_witness);
             // A pending scheduled interview covers this witness; a completed interview was
             // counted against the witness's attempt budget above, so only witnesses with
@@ -1041,14 +1047,15 @@ fn available_case_investigator(
         .filter(|lead| state.legal.active_arrest_for_character(*lead).is_none())
 }
 
-pub(crate) fn apply_initial_evidence_reviews(
+pub(crate) fn apply_evidence_review_scheduling(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
     // Evidence can enter a case long after staffing through incident intake, informants, or
-    // explicit evidence additions. Scan the active-case index every minute instead of only the
-    // cases staffed this minute, otherwise a staffed case that initially had no reviewable
-    // evidence can remain permanently inert after useful evidence later arrives.
+    // explicit evidence additions. Scan the active-case index every minute and schedule the
+    // next reviewable source that has not already received an actual review attempt. Scheduled
+    // and completed review work consume that source's autonomous attempt; custody-cancelled work
+    // does not, because no review occurred and a replacement detective must be able to resume it.
     let investigations: Vec<InvestigationId> = state
         .legal
         .active_investigations()
@@ -1069,30 +1076,7 @@ pub(crate) fn apply_initial_evidence_reviews(
         if scheduled_work_for_investigator(state, investigator).is_some() {
             continue;
         }
-        // "Initial" means one evidence-review work item for the case, not "the first work of
-        // any kind". A pending or completed witness interview must not consume this lane.
-        if state
-            .legal
-            .work_for_investigation(investigation_id)
-            .any(|work| work.kind() == InvestigationWorkKind::EvidenceReview)
-        {
-            continue;
-        }
-        let mut source = None;
-        for evidence_id in investigation.evidence() {
-            // The investigation owns this evidence reference. A missing backing record is a
-            // broken case graph, not "no reviewable evidence yet"; surface it at the autonomous
-            // consumer instead of silently deferring until end-of-tick invariant validation.
-            let evidence = state
-                .legal
-                .get_evidence(*evidence_id)
-                .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
-            if is_reviewable_evidence_kind(evidence.kind()) {
-                source = Some(evidence.id());
-                break;
-            }
-        }
-        let Some(source) = source else {
+        let Some(source) = next_unattempted_review_source(state, investigation)? else {
             continue;
         };
         // Every dependency above came from current authoritative indexes. A canonical
@@ -1112,6 +1096,39 @@ pub(crate) fn apply_initial_evidence_reviews(
         scheduled.push(work);
     }
     Ok(scheduled)
+}
+
+/// Returns the oldest case-owned reviewable evidence that has not received a real autonomous
+/// review attempt. Scheduled and completed work consume the source; cancelled work does not.
+/// Evidence IDs are creation ordered inside the case's `BTreeSet`, so the oldest untouched
+/// source wins deterministically without introducing a second priority vocabulary.
+fn next_unattempted_review_source(
+    state: &AppState,
+    investigation: &crate::legal::InvestigationRecord,
+) -> Result<Option<EvidenceId>, InvestigationWorkError> {
+    for evidence_id in investigation.evidence() {
+        // The investigation owns this evidence reference. A missing backing record is a broken
+        // case graph, not "no reviewable evidence yet"; surface it at the autonomous consumer.
+        let evidence = state
+            .legal
+            .get_evidence(*evidence_id)
+            .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
+        if !is_reviewable_evidence_kind(evidence.kind()) {
+            continue;
+        }
+        let attempted = state
+            .legal
+            .work_for_investigation(investigation.id())
+            .any(|work| {
+                work.kind() == InvestigationWorkKind::EvidenceReview
+                    && work.focus() == InvestigationWorkFocus::evidence(evidence.id())
+                    && work.status() != InvestigationWorkStatus::Cancelled
+            });
+        if !attempted {
+            return Ok(Some(evidence.id()));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {

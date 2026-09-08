@@ -217,26 +217,20 @@ impl OperationState {
     }
 
     pub(crate) fn find_due_authorized(&self, now: SimTime) -> Vec<OperationId> {
-        // BTreeMap + BTreeSet iteration is already sorted by (time, id) but make the
-        // contract explicit: due operations start in stable order regardless of backing
-        // collection choice. Matches the sorted scan for missed deadlines.
-        let mut due: Vec<OperationId> = self
-            .authorized_by_start
+        // Preserve the schedule index's natural (due time, id) order. Re-sorting the flattened
+        // IDs would be deterministic but would let a newer lower-ID operation run before older
+        // overdue work after a legitimate catch-up boundary.
+        self.authorized_by_start
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
-            .collect();
-        due.sort_unstable();
-        due
+            .collect()
     }
 
     pub(crate) fn find_due_in_progress(&self, now: SimTime) -> Vec<OperationId> {
-        let mut due: Vec<OperationId> = self
-            .in_progress_by_resolution_due
+        self.in_progress_by_resolution_due
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
-            .collect();
-        due.sort_unstable();
-        due
+            .collect()
     }
 
     pub(crate) fn insert(&mut self, record: OperationRecord) {

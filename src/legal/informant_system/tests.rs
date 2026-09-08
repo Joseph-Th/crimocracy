@@ -415,6 +415,77 @@ fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins
 }
 
 #[test]
+fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
+    let mut fixture = fixture();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let information = record_personal_information(&mut fixture);
+    let second_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Parallel harbor organization inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(fixture.criminal)]),
+        },
+    )
+    .expect("parallel case with the same subject should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel case should commit");
+    assert!(fixture.investigation < second_case);
+
+    let first_pass = apply_informant_disclosures(&mut fixture.state)
+        .expect("first disclosure pass should resolve");
+    assert_eq!(first_pass.len(), 1);
+    let first = fixture
+        .state
+        .legal()
+        .get_informant_disclosure(first_pass[0])
+        .expect("first disclosure should persist");
+    assert_eq!(first.informant(), informant);
+    assert_eq!(first.source_information(), information);
+    assert_eq!(first.investigation(), fixture.investigation);
+
+    let second_pass = apply_informant_disclosures(&mut fixture.state)
+        .expect("second disclosure pass should resolve");
+    assert_eq!(second_pass.len(), 1);
+    let second = fixture
+        .state
+        .legal()
+        .get_informant_disclosure(second_pass[0])
+        .expect("second disclosure should persist");
+    assert_eq!(second.informant(), informant);
+    assert_eq!(second.source_information(), information);
+    assert_eq!(second.investigation(), second_case);
+
+    assert!(
+        apply_informant_disclosures(&mut fixture.state)
+            .expect("exhausted disclosure pass should resolve")
+            .is_empty(),
+        "one personal fact should be disclosed once to each relevant active case, then stop"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .filter(|record| record.source_information() == information)
+            .map(|record| record.investigation())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([fixture.investigation, second_case])
+    );
+    validate_state(&fixture.state).expect("multi-case disclosure state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn generic_evidence_path_cannot_forge_informant_statement() {
     let fixture = fixture();
     let error = match validate_add_evidence(

@@ -136,6 +136,116 @@ fn make_test_draft(
     }
 }
 
+fn insert_test_operation_leader(
+    state: &mut AppState,
+    organization: OrganizationId,
+    name: &str,
+) -> CharacterId {
+    insert_character(
+        state,
+        CharacterDraft {
+            name: name.to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("additional operation leader should validate")
+}
+
+#[test]
+fn due_authorized_operations_preserve_start_chronology_before_id_order() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let second_leader =
+        insert_test_operation_leader(&mut state, organization, "Earlier Scheduled Leader");
+
+    let mut later = make_test_draft(organization, leader, target);
+    later.scheduled_for = SimTime::from_minutes(20);
+    let later_due_lower_id = validate_authorize_operation(&registry, &state, later)
+        .expect("later lower-ID operation should validate")
+        .commit(&mut state)
+        .expect("later lower-ID operation should commit");
+    let mut earlier = make_test_draft(organization, second_leader, target);
+    earlier.scheduled_for = SimTime::from_minutes(10);
+    let earlier_due_higher_id = validate_authorize_operation(&registry, &state, earlier)
+        .expect("earlier higher-ID operation should validate")
+        .commit(&mut state)
+        .expect("earlier higher-ID operation should commit");
+    assert!(later_due_lower_id < earlier_due_higher_id);
+
+    state.advance_clock(SimDuration::from_minutes(20));
+    assert_eq!(
+        find_due_authorized_operations(&state),
+        vec![earlier_due_higher_id, later_due_lower_id],
+        "an older scheduled start must run before a later-due lower operation ID"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn due_in_progress_operations_preserve_resolution_chronology_before_id_order() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let second_leader =
+        insert_test_operation_leader(&mut state, organization, "Earlier Resolution Leader");
+
+    let mut later = make_test_draft(organization, leader, target);
+    later.scheduled_for = SimTime::from_minutes(10);
+    let later_due_lower_id = validate_authorize_operation(&registry, &state, later)
+        .expect("later lower-ID operation should validate")
+        .commit(&mut state)
+        .expect("later lower-ID operation should commit");
+    let earlier_due_higher_id = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, second_leader, target),
+    )
+    .expect("earlier higher-ID operation should validate")
+    .commit(&mut state)
+    .expect("earlier higher-ID operation should commit");
+    assert!(later_due_lower_id < earlier_due_higher_id);
+
+    apply_transition(
+        &registry,
+        &mut state,
+        earlier_due_higher_id,
+        OperationTransition::Begin,
+    )
+    .expect("higher-ID operation should begin first");
+    state.advance_clock(SimDuration::from_minutes(10));
+    apply_transition(
+        &registry,
+        &mut state,
+        later_due_lower_id,
+        OperationTransition::Begin,
+    )
+    .expect("lower-ID operation should begin later");
+
+    let earlier_due_at = state
+        .operations()
+        .get_operation(earlier_due_higher_id)
+        .and_then(|record| record.resolution_due_at())
+        .expect("earlier operation should have a resolution time");
+    let later_due_at = state
+        .operations()
+        .get_operation(later_due_lower_id)
+        .and_then(|record| record.resolution_due_at())
+        .expect("later operation should have a resolution time");
+    assert!(earlier_due_at < later_due_at);
+    let catch_up_minutes = u32::try_from(later_due_at.as_minutes() - state.now().as_minutes())
+        .expect("fixture catch-up duration must fit SimDuration");
+    state.advance_clock(SimDuration::from_minutes(catch_up_minutes));
+
+    assert_eq!(
+        crate::operations::operation_execution::find_due_in_progress_operations(&state),
+        vec![earlier_due_higher_id, later_due_lower_id],
+        "an earlier resolution must consume RNG before a later-due lower operation ID"
+    );
+    validate_invariants(&state);
+}
+
 #[test]
 fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() {
     // A plan scheduled for the current minute begins on the next canonical tick, so a
@@ -839,6 +949,63 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
             .contains("before execution could complete")
     );
     validate_state(&state).expect("deadline abort should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn missed_deadline_scan_preserves_deadline_chronology_before_operation_id() {
+    let (registry, mut state, organization, first_leader, target) = make_test_operation_state();
+    let second_leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Second Deadline Leader".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second leader fixture should validate");
+
+    let mut later_deadline = make_test_draft(organization, first_leader, target);
+    later_deadline.title = "Later deadline lower id".to_owned();
+    later_deadline
+        .constraints
+        .push(crate::operations::OperationConstraint::CompleteBefore(
+            SimTime::from_minutes(20),
+        ));
+    let lower_id = validate_authorize_operation(&registry, &state, later_deadline)
+        .expect("later-deadline operation should validate")
+        .commit(&mut state)
+        .expect("later-deadline operation should commit");
+
+    let mut earlier_deadline = make_test_draft(organization, second_leader, target);
+    earlier_deadline.title = "Earlier deadline higher id".to_owned();
+    earlier_deadline
+        .constraints
+        .push(crate::operations::OperationConstraint::CompleteBefore(
+            SimTime::from_minutes(10),
+        ));
+    let higher_id = validate_authorize_operation(&registry, &state, earlier_deadline)
+        .expect("earlier-deadline operation should validate")
+        .commit(&mut state)
+        .expect("earlier-deadline operation should commit");
+    assert!(lower_id < higher_id);
+
+    apply_transition(&registry, &mut state, lower_id, OperationTransition::Begin)
+        .expect("lower-ID operation should begin");
+    apply_transition(&registry, &mut state, higher_id, OperationTransition::Begin)
+        .expect("higher-ID operation should begin");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(21));
+
+    assert_eq!(
+        find_due_operations_with_missed_deadlines(&state),
+        vec![higher_id, lower_id],
+        "the older missed deadline must be handled before a newer deadline even when its operation ID is higher"
+    );
+    validate_state(&state).expect("overdue operation fixture should remain structurally valid");
     validate_invariants(&state);
 }
 

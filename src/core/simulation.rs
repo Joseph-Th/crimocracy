@@ -24,7 +24,7 @@ use crate::enterprises::enterprise_execution::{
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
 use crate::legal::investigation_work_execution::{
-    InvestigationWorkRandomness, apply_initial_evidence_reviews,
+    InvestigationWorkRandomness, apply_evidence_review_scheduling,
     decide_investigation_work_resolution, find_due_scheduled_investigation_work,
     validate_investigation_work_resolution_plan,
 };
@@ -95,11 +95,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
-    // Initial evidence review scans every active staffed case, not only cases staffed this
-    // minute: evidence can arrive later through incident intake or disclosure and must still
-    // enter institutional casework instead of becoming inert case history.
-    let scheduled_investigation_work = apply_initial_evidence_reviews(registry, state)
-        .expect("valid state should schedule first reviewable evidence for active staffed cases");
+    // Evidence-review scheduling scans every active staffed case, not only cases staffed this
+    // minute: later reviewable evidence must enter institutional casework sequentially rather
+    // than becoming inert after the case's first forensic attempt.
+    let scheduled_investigation_work = apply_evidence_review_scheduling(registry, state)
+        .expect("valid state should schedule due reviewable evidence for active staffed cases");
     // Witness interviews are scheduled after evidence reviews so a witness registered by an
     // operation resolving earlier in this same minute is interviewable as soon as its case
     // has an investigator.

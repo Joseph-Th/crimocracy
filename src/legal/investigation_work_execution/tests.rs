@@ -7,10 +7,11 @@ use crate::core::invariants::{
 };
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::run_tick;
+use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_assign_investigator, validate_open_investigation,
 };
-use crate::legal::{EvidenceDraft, InvestigationDraft, InvestigationWorkFocus};
+use crate::legal::{ArrestDraft, EvidenceDraft, InvestigationDraft, InvestigationWorkFocus};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -217,6 +218,215 @@ fn review_draft(fixture: &WorkFixture, evidence: EvidenceId) -> InvestigationWor
 }
 
 #[test]
+fn autonomous_evidence_review_advances_to_each_reviewable_source_once() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let later_source = add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: fixture.investigation,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: EntityRef::Character(fixture.middle),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+
+    let first = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("first autonomous review should schedule");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(first[0])
+            .expect("first review should persist")
+            .focus(),
+        InvestigationWorkFocus::evidence(fixture.first_evidence)
+    );
+
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .duration();
+    fixture.state.advance_clock(duration);
+    let first_plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        first[0],
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("first review should resolve");
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, first_plan)
+        .expect("first resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("first resolution should commit");
+
+    let second = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("later reviewable evidence should remain actionable");
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(second[0])
+            .expect("second review should persist")
+            .focus(),
+        InvestigationWorkFocus::evidence(later_source),
+        "a completed review of one source must not make later reviewable evidence inert"
+    );
+
+    fixture.state.advance_clock(duration);
+    let second_plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        second[0],
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("second review should resolve");
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, second_plan)
+        .expect("second resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("second resolution should commit");
+    assert!(
+        apply_evidence_review_scheduling(&registry, &mut fixture.state)
+            .expect("exhausted review scheduling should resolve")
+            .is_empty(),
+        "each reviewable source receives one autonomous attempt"
+    );
+    validate_state(&fixture.state).expect("multi-source review state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_evidence_review_does_not_repeat_an_inconclusive_attempt() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        0,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Questionable,
+        Admissibility::Inadmissible,
+    );
+    let scheduled = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("weak reviewable evidence should still receive one review attempt");
+    assert_eq!(scheduled.len(), 1);
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .duration();
+    fixture.state.advance_clock(duration);
+    let plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        scheduled[0],
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("weak review should resolve");
+    assert_eq!(plan.outcome(), InvestigationWorkOutcome::Inconclusive);
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, plan)
+        .expect("inconclusive resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("inconclusive resolution should commit");
+
+    assert!(
+        apply_evidence_review_scheduling(&registry, &mut fixture.state)
+            .expect("completed inconclusive source should be exhausted")
+            .is_empty(),
+        "autonomous casework must not retry one inconclusive source forever and keep the case artificially active"
+    );
+    validate_state(&fixture.state).expect("inconclusive review state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn custody_cancelled_evidence_review_is_retryable_after_restaffing() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let first_review = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("initial review should schedule")[0];
+
+    let misconduct_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Detective misconduct inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.investigator)]),
+        },
+    )
+    .expect("misconduct case should validate")
+    .commit(&mut fixture.state)
+    .expect("misconduct case should commit");
+    let misconduct_evidence = add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: misconduct_case,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.investigator),
+            origin: EntityRef::Character(fixture.first),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+    validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.investigator,
+            investigation: misconduct_case,
+            evidence: BTreeSet::from([misconduct_evidence]),
+        },
+    )
+    .expect("detective arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("detective arrest should cancel scheduled work");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(first_review)
+            .expect("cancelled review should remain history")
+            .status(),
+        InvestigationWorkStatus::Cancelled
+    );
+    validate_assign_investigator(
+        &fixture.state,
+        fixture.investigation,
+        fixture.second_investigator,
+    )
+    .expect("replacement detective should validate")
+    .commit(&mut fixture.state)
+    .expect("replacement detective should commit");
+
+    let retried = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("cancelled source should be retryable after restaffing");
+    assert_eq!(retried.len(), 1);
+    let retry = fixture
+        .state
+        .legal()
+        .get_investigation_work(retried[0])
+        .expect("retried review should persist");
+    assert_eq!(retry.investigator(), fixture.second_investigator);
+    assert_eq!(
+        retry.focus(),
+        InvestigationWorkFocus::evidence(fixture.first_evidence)
+    );
+    validate_state(&fixture.state).expect("retried review state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
     // Regression: a completed interview produces a statement only when it connects, so a
     // hostile witness facing an incapable investigator used to be re-scheduled forever,
@@ -297,6 +507,83 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
     validate_state(&fixture.state).expect("capped interview state should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("capped interview state should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn witness_interview_scheduling_prioritizes_unattempted_witness_before_retry() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        0,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let first_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.first,
+            cooperation: crate::legal::WitnessCooperation::Hostile,
+        },
+    )
+    .expect("first witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("first witness registration should commit");
+    let first_interview = apply_witness_interview_scheduling(&registry, &mut fixture.state)
+        .expect("first interview scheduling should resolve")[0];
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::WitnessInterview)
+        .duration();
+    fixture.state.advance_clock(duration);
+    let first_plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        first_interview,
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("hostile low-skill interview should resolve");
+    assert_eq!(first_plan.outcome(), InvestigationWorkOutcome::Inconclusive);
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, first_plan)
+        .expect("first interview resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("first interview resolution should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_case_witness(first_witness)
+            .expect("first witness should persist")
+            .interview_attempts(),
+        1
+    );
+
+    let untouched_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.middle,
+            cooperation: crate::legal::WitnessCooperation::Hostile,
+        },
+    )
+    .expect("second witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("second witness registration should commit");
+
+    let scheduled = apply_witness_interview_scheduling(&registry, &mut fixture.state)
+        .expect("fresh-witness scheduling should resolve");
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(scheduled[0])
+            .expect("scheduled interview should persist")
+            .focus(),
+        InvestigationWorkFocus::witness(untouched_witness),
+        "an untouched witness should be interviewed before retrying an earlier failed witness"
+    );
+    validate_state(&fixture.state).expect("fresh-witness priority state should validate");
     validate_invariants(&fixture.state);
 }
 

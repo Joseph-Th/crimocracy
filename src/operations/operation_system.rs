@@ -1069,12 +1069,19 @@ pub(crate) fn find_due_operations_with_missed_deadlines(state: &AppState) -> Vec
             resolve_earliest_operation_deadline(operation)
                 .is_some_and(|deadline| state.now() > deadline)
         })
-        .map(|operation| operation.id())
+        .map(|operation| {
+            (
+                resolve_earliest_operation_deadline(operation)
+                    .expect("filtered overdue operation must retain a completion deadline"),
+                operation.id(),
+            )
+        })
         .collect::<Vec<_>>();
-    // The status indexes are separate, so restore one global stable order before any
-    // deadline abort creates IDs or reports that later work can observe.
+    // The status indexes are separate, so restore one global chronological order before any
+    // deadline abort creates IDs or reports that later work can observe. ID breaks ties only
+    // among operations whose deadline is the same instant.
     due.sort_unstable();
-    due
+    due.into_iter().map(|(_, operation)| operation).collect()
 }
 
 pub(crate) fn resolve_earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {

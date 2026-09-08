@@ -909,6 +909,104 @@ fn business_economy_is_unique_and_suspension_removes_due_work() {
 }
 
 #[test]
+fn due_businesses_preserve_schedule_chronology_before_id_order() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let later_due_lower_id = fixture.business;
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(later_due_lower_id)
+        .expect("first business should persist")
+        .neighborhood();
+    let earlier_due_higher_id = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Chronology Corner Store".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .expect("second business should validate");
+    let second_operating = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(earlier_due_higher_id),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("second operating account should validate");
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(earlier_due_higher_id),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("second settlement account should validate");
+    validate_establish_business_economy(
+        &registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business: earlier_due_higher_id,
+            operating_account: second_operating,
+            settlement_account: second_settlement,
+        },
+    )
+    .expect("second business economy should validate")
+    .commit(&mut fixture.state)
+    .expect("second business economy should commit");
+    assert!(later_due_lower_id < earlier_due_higher_id);
+
+    // Both businesses started together. Rescheduling only the lower-ID economy makes it due
+    // later, so a catch-up scan must preserve (due time, business ID) rather than flattening
+    // everything back to creation order.
+    validate_suspend_business_economy(&fixture.state, later_due_lower_id)
+        .expect("lower-ID economy should suspend")
+        .commit(&mut fixture.state)
+        .expect("lower-ID economy suspension should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    validate_resume_business_economy(&registry, &fixture.state, later_due_lower_id)
+        .expect("lower-ID economy should resume")
+        .commit(&mut fixture.state)
+        .expect("lower-ID economy resume should commit");
+
+    let earlier_due_at = fixture
+        .state
+        .economy()
+        .get_business_economy(earlier_due_higher_id)
+        .and_then(|record| record.next_cycle_at())
+        .expect("higher-ID economy should remain scheduled");
+    let later_due_at = fixture
+        .state
+        .economy()
+        .get_business_economy(later_due_lower_id)
+        .and_then(|record| record.next_cycle_at())
+        .expect("resumed lower-ID economy should be scheduled");
+    assert!(earlier_due_at < later_due_at);
+    let catch_up_minutes =
+        u32::try_from(later_due_at.as_minutes() - fixture.state.now().as_minutes())
+            .expect("fixture catch-up duration must fit SimDuration");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(catch_up_minutes));
+
+    assert_eq!(
+        find_due_businesses(&fixture.state),
+        vec![earlier_due_higher_id, later_due_lower_id],
+        "older overdue business work must settle before a later-due lower ID"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn save_round_trip_preserves_business_schedule_and_deterministic_tick_resolution() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();

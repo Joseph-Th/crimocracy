@@ -446,13 +446,10 @@ impl EnterpriseState {
     }
 
     pub(crate) fn find_due_cycles(&self, now: SimTime) -> Vec<EnterpriseId> {
-        let mut due: Vec<EnterpriseId> = self
-            .active_by_next_cycle
+        self.active_by_next_cycle
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
-            .collect();
-        due.sort_unstable();
-        due
+            .collect()
     }
 
     pub(crate) fn enterprises(&self) -> impl Iterator<Item = &EnterpriseRecord> {

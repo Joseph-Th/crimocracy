@@ -522,21 +522,25 @@ pub(crate) fn apply_informant_disclosures(
         return Ok(Vec::new());
     }
     // Active cases owned by each handler, keyed by entities that make information relevant to
-    // the case. Built in investigation-id order so overlapping cases pick the smallest case id
-    // deterministically for one disclosure pass rather than multiplying one fact automatically.
+    // the case. Keep every matching case instead of collapsing the key to its smallest ID: one
+    // fact still feeds at most one case per pass, but later passes may carry it into another
+    // relevant active case once the earlier case already received it.
     let mut cases_by_handler_subject: BTreeMap<
         OrganizationId,
-        BTreeMap<EntityRef, InvestigationId>,
+        BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     > = BTreeMap::new();
     for investigation in state.legal.active_investigations() {
         let cases = cases_by_handler_subject
             .entry(investigation.owner())
             .or_default();
         if let Some(origin) = investigation.origin() {
-            cases.entry(origin).or_insert(investigation.id());
+            cases.entry(origin).or_default().insert(investigation.id());
         }
         for subject in investigation.subjects() {
-            cases.entry(*subject).or_insert(investigation.id());
+            cases
+                .entry(*subject)
+                .or_default()
+                .insert(investigation.id());
         }
     }
 
@@ -551,19 +555,20 @@ pub(crate) fn apply_informant_disclosures(
                 .intelligence
                 .information_for_holder(KnowledgeHolder::Character(character))
             {
-                if let Some(&investigation) = cases_by_handler_subject
+                if let Some(investigations) = cases_by_handler_subject
                     .get(&handler)
                     .and_then(|cases| cases.get(&information.subject()))
+                    && let Some(investigation) = investigations.iter().copied().find(|case| {
+                        state
+                            .legal
+                            .informant_disclosure_for_case_information(*case, information.id())
+                            .is_none()
+                    })
                 {
-                    // Skip knowledge already traded into this case; the disclosure index is
-                    // the authority on what has been disclosed.
-                    let already_disclosed = state
-                        .legal
-                        .informant_disclosure_for_case_information(investigation, information.id())
-                        .is_some();
-                    if !already_disclosed {
-                        pairs.push((informant.id(), information.id(), investigation));
-                    }
+                    // BTreeSet order makes the first not-yet-informed case deterministic. The
+                    // persisted disclosure then causes the next pass to move on to the next
+                    // relevant case rather than repeating or permanently starving it.
+                    pairs.push((informant.id(), information.id(), investigation));
                 }
             }
             pairs

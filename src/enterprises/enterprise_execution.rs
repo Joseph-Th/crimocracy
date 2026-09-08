@@ -395,7 +395,7 @@ fn validate_establish_enterprise_with_optional_openings(
     })
 }
 
-fn enterprise_location_is_occupied(
+pub(crate) fn enterprise_location_is_occupied(
     state: &AppState,
     kind: EnterpriseKind,
     location: EnterpriseLocation,
@@ -1375,7 +1375,7 @@ pub fn validate_retire_enterprise(
 }
 
 pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
-    let mut due: Vec<EnterpriseId> = state
+    state
         .enterprises
         .find_due_cycles(state.now())
         .into_iter()
@@ -1389,9 +1389,7 @@ pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
                 .active_arrest_for_character(record.manager())
                 .is_none()
         })
-        .collect();
-    due.sort_unstable();
-    due
+        .collect()
 }
 
 fn validate_enterprise_environment(
@@ -1689,35 +1687,44 @@ fn resolve_gross_before_variance(
     profile: NeighborhoodProfile,
     management: Option<Rating>,
 ) -> Result<Money, EnterpriseError> {
+    resolve_gross_before_variance_value(economics, profile, management)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
+}
+
+/// Enterprise gross at zero variance, independent of an already-persisted enterprise ID.
+/// Production settlement and delegated expansion both use this exact composition so a planner
+/// cannot rank proposed rackets with economics that differ from the cycle they will actually run.
+fn resolve_gross_before_variance_value(
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    management: Option<Rating>,
+) -> Option<Money> {
     let components = [
-        weighted_rating(
-            enterprise,
+        crate::finance::helpers::weighted_rating(
             economics.demand_revenue_per_point(),
-            profile.economy.illicit_demand,
+            profile.economy.illicit_demand.value(),
         )?,
-        weighted_rating(
-            enterprise,
+        crate::finance::helpers::weighted_rating(
             economics.commerce_revenue_per_point(),
-            profile.economy.commercial_activity,
+            profile.economy.commercial_activity.value(),
         )?,
-        weighted_rating(
-            enterprise,
+        crate::finance::helpers::weighted_rating(
             economics.wealth_revenue_per_point(),
-            profile.economy.wealth,
+            profile.economy.wealth.value(),
         )?,
-        weighted_optional_rating(
-            enterprise,
-            economics.management_revenue_per_point(),
-            management,
-        )?,
+        match management {
+            Some(value) => crate::finance::helpers::weighted_rating(
+                economics.management_revenue_per_point(),
+                value.value(),
+            )?,
+            None => Money::ZERO,
+        },
     ];
     let mut gross = economics.base_gross();
     for component in components {
-        gross = gross
-            .checked_add(component)
-            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+        gross = gross.checked_add(component)?;
     }
-    Ok(gross)
+    Some(gross)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1789,6 +1796,32 @@ pub(crate) fn resolve_current_enterprise_operating_cost(
             neighborhood,
         )))?;
     predictable.checked_add(heat)
+}
+
+/// Zero-variance financial projection for a proposed enterprise under current district pressure.
+/// Returns `(operating_cost, expected_net_cash)`. This is a read-only decision input, not a
+/// persisted forecast: an eventual cycle still draws its authored variance and re-reads current
+/// case pressure through the production settlement path.
+pub(crate) fn resolve_current_enterprise_financial_projection(
+    registry: &Registry,
+    state: &AppState,
+    kind: EnterpriseKind,
+    location: EnterpriseLocation,
+    supporting_business_count: usize,
+    management: Option<Rating>,
+) -> Option<(Money, Money)> {
+    let profile = resolve_location_profile(state, location).ok()?;
+    let economics = registry.get_enterprise(kind).economics();
+    let gross = resolve_gross_before_variance_value(economics, profile, management)?;
+    let operating_cost = resolve_current_enterprise_operating_cost(
+        registry,
+        state,
+        kind,
+        location,
+        supporting_business_count,
+    )?;
+    let expected_net_cash = gross.checked_sub(operating_cost)?;
+    Some((operating_cost, expected_net_cash))
 }
 
 fn resolve_predictable_operating_cost(
@@ -2038,26 +2071,6 @@ fn resolve_enterprise_location_name(
             .to_owned(),
         EnterpriseLocation::Neighborhood(_) => resolve_enterprise_district_name(state, record),
     }
-}
-
-fn weighted_optional_rating(
-    enterprise: EnterpriseId,
-    per_point: Money,
-    rating: Option<Rating>,
-) -> Result<Money, EnterpriseError> {
-    match rating {
-        Some(value) => weighted_rating(enterprise, per_point, value),
-        None => Ok(Money::ZERO),
-    }
-}
-
-fn weighted_rating(
-    enterprise: EnterpriseId,
-    per_point: Money,
-    rating: Rating,
-) -> Result<Money, EnterpriseError> {
-    crate::finance::helpers::weighted_rating(per_point, rating.value())
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))
 }
 
 fn resolve_basis_point_variance(
