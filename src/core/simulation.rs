@@ -6,7 +6,8 @@
 
 use crate::core::id::{
     BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,
-    OperationId, OpportunityId, PoliceResponseId, RecruitmentAttemptId, ReportId,
+    OperationId, OpportunityId, PoliceResponseId, ProsecutionCaseId, RecruitmentAttemptId,
+    ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
@@ -27,6 +28,7 @@ use crate::legal::investigation_work_execution::{
     decide_investigation_work_resolution, find_due_scheduled_investigation_work,
     validate_investigation_work_resolution_plan,
 };
+use crate::operations::operation_abort::validate_deadline_missed_operation;
 use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
     validate_operation_resolution_plan,
@@ -34,7 +36,6 @@ use crate::operations::operation_execution::{
 use crate::operations::operation_system::{
     OperationTransition, apply_transition, find_due_authorized_operations,
     find_due_operations_with_missed_deadlines, has_missed_operation_deadline,
-    validate_deadline_missed_operation,
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
 use crate::opportunities::opportunity_system::apply_opportunity_expiry;
@@ -58,6 +59,7 @@ pub struct TickOutcome {
     pub scheduled_witness_interviews: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub evidence_arrests: Vec<crate::core::id::ArrestId>,
+    pub staffed_prosecution_cases: Vec<(ProsecutionCaseId, CharacterId)>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
@@ -110,6 +112,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // the same minute's arrest decision.
     let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
         .expect("valid state should convert qualifying case evidence into custody");
+    // Custody can remove a prosecutor from every review they were carrying. Restaff immediately
+    // after arrests so one individual's detention cannot freeze unrelated prosecution matters.
+    let staffed_prosecution_cases =
+        crate::legal::prosecution_system::apply_autonomous_prosecution_staffing(state)
+            .expect("valid state should staff available prosecutors onto open reviews");
     // Detainee informant recruitment runs right after custody conversion: a member arrested
     // exactly one cadence window ago faces their single recruitment decision this minute, and
     // active informants disclose personally-held knowledge into their handler's cases.
@@ -170,6 +177,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         scheduled_witness_interviews,
         resolved_investigation_work,
         evidence_arrests,
+        staffed_prosecution_cases,
         informant_recruitments,
         informant_disclosures,
         automatic_legal_support,

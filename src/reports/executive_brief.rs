@@ -246,17 +246,16 @@ fn disposition_report_is_redundant_in_window(
             let EntityRef::Operation(operation_id) = entity else {
                 return false;
             };
-            state
+            let operation = state
                 .operations()
                 .get_operation(*operation_id)
-                .is_some_and(|operation| {
-                    operation
-                        .property_disposition()
-                        .is_some_and(|disposition| disposition.report() == report.id())
-                        && operation.resolution().is_some_and(|resolution| {
-                            previous_brief
-                                .is_none_or(|previous| resolution.after_action_report() > previous)
-                        })
+                .expect("report operation entity must reference a persisted operation");
+            operation
+                .property_disposition()
+                .is_some_and(|disposition| disposition.report() == report.id())
+                && operation.resolution().is_some_and(|resolution| {
+                    previous_brief
+                        .is_none_or(|previous| resolution.after_action_report() > previous)
                 })
         })
     })
@@ -272,9 +271,10 @@ fn refresh_operation_financial_state(
         let EntityRef::Operation(operation_id) = entity else {
             continue;
         };
-        let Some(operation) = state.operations().get_operation(*operation_id) else {
-            continue;
-        };
+        let operation = state
+            .operations()
+            .get_operation(*operation_id)
+            .expect("report operation entity must reference a persisted operation");
         let Some(resolution) = operation.resolution() else {
             continue;
         };
@@ -287,9 +287,10 @@ fn refresh_operation_financial_state(
         ) else {
             continue;
         };
-        let Some(venue) = state.world().get_business(disposition.venue()) else {
-            continue;
-        };
+        let venue = state
+            .world()
+            .get_business(disposition.venue())
+            .expect("property disposition venue must reference a persisted business");
         // The clause pair is produced by one owner (`operation_economics`), so this refresh
         // matches on exact text rather than parsing. The `contains` guard is also the drift
         // alarm: if either clause's wording changes without the other, the unliquidated

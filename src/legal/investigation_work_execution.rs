@@ -10,10 +10,11 @@ use crate::core::time::SimTime;
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
-    InvestigationWorkDraft, InvestigationWorkFactors, InvestigationWorkFocus,
-    InvestigationWorkIdentity, InvestigationWorkKind, InvestigationWorkOutcome,
-    InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkRuntime,
-    InvestigationWorkStatus, WitnessCooperation, WitnessStatementDraft,
+    InvestigationWorkCancellation, InvestigationWorkCancellationReason, InvestigationWorkDraft,
+    InvestigationWorkFactors, InvestigationWorkFocus, InvestigationWorkIdentity,
+    InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkRecord,
+    InvestigationWorkResolution, InvestigationWorkRuntime, InvestigationWorkStatus,
+    WitnessCooperation, WitnessStatementDraft,
 };
 use crate::registry::{InvestigationWorkDefinition, Registry};
 use crate::world::{CapabilityKind, Rating};
@@ -173,11 +174,76 @@ impl ValidatedInvestigationWorkSchedule {
                     due_at,
                     status: InvestigationWorkStatus::Scheduled,
                     resolution: None,
+                    cancellation: None,
                     version: 1,
                 },
             });
         Ok(id)
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedInvestigationWorkCancellation {
+    work: InvestigationWorkId,
+    investigator: CharacterId,
+    expected_version: u32,
+    cancelled_at: SimTime,
+}
+
+impl ValidatedInvestigationWorkCancellation {
+    pub(crate) fn work(&self) -> InvestigationWorkId {
+        self.work
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), InvestigationWorkError> {
+        let work = state
+            .legal
+            .get_investigation_work(self.work)
+            .ok_or(InvestigationWorkError::MissingWork(self.work))?;
+        if work.version() != self.expected_version {
+            return Err(InvestigationWorkError::StaleWork {
+                work: self.work,
+                expected: self.expected_version,
+                found: work.version(),
+            });
+        }
+        if work.status() != InvestigationWorkStatus::Scheduled {
+            return Err(InvestigationWorkError::WorkNotScheduled(self.work));
+        }
+        if work.investigator() != self.investigator || state.now() != self.cancelled_at {
+            return Err(InvestigationWorkError::StaleResolutionContext { work: self.work });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState, arrest: ArrestId) {
+        state.legal.set_investigation_work_cancellation(
+            self.work,
+            InvestigationWorkCancellation {
+                cancelled_at: self.cancelled_at,
+                reason: InvestigationWorkCancellationReason::InvestigatorDetained(arrest),
+            },
+        );
+    }
+}
+
+pub(crate) fn validate_cancel_investigation_work_for_detention(
+    state: &AppState,
+    investigator: CharacterId,
+) -> Result<Option<ValidatedInvestigationWorkCancellation>, InvestigationWorkError> {
+    let Some(work_id) = scheduled_work_for_investigator(state, investigator) else {
+        return Ok(None);
+    };
+    let work = state
+        .legal
+        .get_investigation_work(work_id)
+        .ok_or(InvestigationWorkError::MissingWork(work_id))?;
+    Ok(Some(ValidatedInvestigationWorkCancellation {
+        work: work_id,
+        investigator,
+        expected_version: work.version(),
+        cancelled_at: state.now(),
+    }))
 }
 
 pub fn validate_schedule_investigation_work(
@@ -285,10 +351,7 @@ fn validate_case_and_investigator(
         .world
         .get_character(investigator_id)
         .ok_or(InvestigationWorkError::MissingInvestigator(investigator_id))?;
-    if !investigation
-        .assigned_investigators()
-        .contains(&investigator_id)
-    {
+    if investigation.lead_investigator() != Some(investigator_id) {
         return Err(InvestigationWorkError::InvestigatorNotAssigned {
             investigation: investigation_id,
             investigator: investigator_id,
@@ -819,7 +882,12 @@ fn resolve_interview_statement_draft(
     let subject = investigation
         .evidence()
         .iter()
-        .filter_map(|id| state.legal.get_evidence(*id))
+        .map(|id| {
+            state
+                .legal
+                .get_evidence(*id)
+                .expect("investigation evidence set must reference persisted evidence")
+        })
         .filter(|evidence| matches!(evidence.subject(), EntityRef::Character(_)))
         .max_by_key(|evidence| (evidence.strength(), Reverse(evidence.subject())))
         .map(|evidence| evidence.subject())
@@ -936,23 +1004,16 @@ pub fn apply_witness_interview_scheduling(
     Ok(scheduled)
 }
 
-/// The investigator an autonomous casework scheduler may currently use. The lead owns the
-/// single modeled case seat; the assigned-ID fallback preserves old persisted assignments that
-/// may temporarily lack a lead while remaining deterministic. Detention pauses work rather than
-/// silently assigning a different institution or character.
+/// The investigator an autonomous casework scheduler may currently use. The lead is the single
+/// modeled case seat. Detention pauses work rather than silently assigning a different
+/// institution or character.
 fn available_case_investigator(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
 ) -> Option<CharacterId> {
-    let lead = investigation.lead_investigator();
-    if lead.is_some_and(|lead| state.legal.active_arrest_for_character(lead).is_none()) {
-        return lead;
-    }
     investigation
-        .assigned_investigators()
-        .iter()
-        .copied()
-        .find(|id| state.legal.active_arrest_for_character(*id).is_none())
+        .lead_investigator()
+        .filter(|lead| state.legal.active_arrest_for_character(*lead).is_none())
 }
 
 pub(crate) fn apply_initial_evidence_reviews(

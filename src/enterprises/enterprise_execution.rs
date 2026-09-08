@@ -1125,6 +1125,12 @@ pub fn validate_enterprise_cycle_plan(
     let vice_information = match &plan.vice_incident {
         Some(incident_draft) => {
             let intake_authority = incident_draft.owner;
+            let intake_authority_name = state
+                .world
+                .get_organization(intake_authority)
+                .ok_or(EnterpriseError::InvalidOrganization(intake_authority))?
+                .name()
+                .to_owned();
             Some(validate_record_information(
                 state,
                 InformationDraft {
@@ -1140,11 +1146,7 @@ pub fn validate_enterprise_cycle_plan(
                         "Sustained police activity around {} has drawn a vice inquiry onto the racket at {}. The organization does not know the case's evidence, lead, or detective work beyond what {} shares.",
                         resolve_enterprise_district_name(state, record),
                         resolve_enterprise_location_name(state, record),
-                        state
-                            .world
-                            .get_organization(intake_authority)
-                            .map(|authority| authority.name().to_owned())
-                            .unwrap_or_else(|| "the owning authority".to_owned()),
+                        intake_authority_name,
                     ),
                 },
             )?)
@@ -1340,15 +1342,14 @@ pub(crate) fn find_due_enterprises(state: &AppState) -> Vec<EnterpriseId> {
         .find_due_cycles(state.now())
         .into_iter()
         .filter(|enterprise| {
-            state
+            let record = state
                 .enterprises
                 .get_enterprise(*enterprise)
-                .is_some_and(|record| {
-                    state
-                        .legal
-                        .active_arrest_for_character(record.manager())
-                        .is_none()
-                })
+                .expect("due-enterprise index must reference a persisted enterprise");
+            state
+                .legal
+                .active_arrest_for_character(record.manager())
+                .is_none()
         })
         .collect();
     due.sort_unstable();
@@ -1884,16 +1885,19 @@ fn resolve_enterprise_district_name(
     record: &crate::enterprises::EnterpriseRecord,
 ) -> String {
     let neighborhood = match record.location() {
-        EnterpriseLocation::Neighborhood(id) => Some(id),
+        EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(business_id) => state
             .world
             .get_business(business_id)
-            .map(|business| business.neighborhood()),
+            .expect("enterprise business location must reference a persisted business")
+            .neighborhood(),
     };
-    neighborhood
-        .and_then(|id| state.world.get_neighborhood(id))
-        .map(|profile| profile.name().to_owned())
-        .unwrap_or_else(|| "the district".to_owned())
+    state
+        .world
+        .get_neighborhood(neighborhood)
+        .expect("enterprise location must reference a persisted neighborhood")
+        .name()
+        .to_owned()
 }
 
 /// Active law-enforcement originated cases (operation exposure or enterprise vice attention)
@@ -1912,7 +1916,9 @@ fn count_district_originated_cases(
             state
                 .world
                 .get_organization(investigation.owner())
-                .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+                .expect("active investigation owner must reference a persisted organization")
+                .kind()
+                == OrganizationKind::LawEnforcement
                 && investigation.origin().is_some()
                 && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
                 state, investigation,
@@ -1939,7 +1945,9 @@ fn has_active_enterprise_inquiry(
         state
             .world
             .get_organization(investigation.owner())
-            .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+            .expect("active investigation owner must reference a persisted organization")
+            .kind()
+            == OrganizationKind::LawEnforcement
             && investigation.origin() == Some(EntityRef::Enterprise(enterprise))
             && investigation
                 .subjects()
@@ -1987,8 +1995,9 @@ fn resolve_enterprise_location_name(
         EnterpriseLocation::Business(business_id) => state
             .world
             .get_business(business_id)
-            .map(|business| business.name().to_owned())
-            .unwrap_or_else(|| format!("enterprise {}", record.id())),
+            .expect("enterprise business location must reference a persisted business")
+            .name()
+            .to_owned(),
         EnterpriseLocation::Neighborhood(_) => resolve_enterprise_district_name(state, record),
     }
 }

@@ -90,10 +90,9 @@ impl CaseActivityStatus {
 /// Builds (but does not commit) the validated refresh of a case lead's personal knowledge of
 /// their case's activity. The caller names the incoming status and the seat holder so a
 /// lifecycle transition or staffing commit can prepare the knowledge before mutating anything
-/// and only then commit it, keeping one canonical path per record. Returns `None` when the
-/// case's authority is not law enforcement; an unstaffed authority has no institutional
-/// knower to hold the knowledge. A fresh material state of the same case produces a fresh
-/// information record, so a contact channel can disclose each new development exactly once.
+/// and only then commit it, keeping one canonical path per record. Returns `None` only when the
+/// case's authority is not law enforcement. A fresh material state of the same case produces a
+/// fresh information record, so a contact channel can disclose each new development exactly once.
 pub(crate) fn prepare_case_activity_knowledge(
     state: &AppState,
     investigation: InvestigationId,
@@ -101,13 +100,15 @@ pub(crate) fn prepare_case_activity_knowledge(
     lead: CharacterId,
 ) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
 {
-    let Some(record) = state.legal.get_investigation(investigation) else {
-        return Ok(None);
-    };
+    let record = state
+        .legal
+        .get_investigation(investigation)
+        .expect("case-activity knowledge must reference a persisted investigation");
     let owner = record.owner();
-    let Some(organization) = state.world.get_organization(owner) else {
-        return Ok(None);
-    };
+    let organization = state
+        .world
+        .get_organization(owner)
+        .expect("investigation owner must reference a persisted organization");
     if organization.kind() != OrganizationKind::LawEnforcement {
         return Ok(None);
     }

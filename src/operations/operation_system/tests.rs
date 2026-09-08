@@ -12,10 +12,12 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::{
-    OperationApproach, OperationDraft, OperationKind, OperationObjective, OperationObjectiveKind,
-    RoleKind,
+    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationDraft, OperationKind,
+    OperationObjective, OperationObjectiveKind, RoleKind,
 };
+use crate::reports::ReportKind;
 use crate::world::world_system::{
     insert_business, insert_character, insert_neighborhood, insert_organization,
     validate_reassign_character,

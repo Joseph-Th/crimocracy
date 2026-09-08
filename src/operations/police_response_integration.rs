@@ -20,10 +20,10 @@ use crate::legal::police_response_system::{
     PoliceResponseDispatchDraft, PoliceResponseError, ValidatedPoliceResponseDispatch,
     find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
 };
-use crate::operations::operation_execution::resolve_operation_police_alert_context;
-use crate::operations::operation_system::{
+use crate::operations::operation_abort::{
     police_arrival_can_abort, validate_police_arrival_abort_operation,
 };
+use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::registry::OperationExecutionDefinition;
 use crate::registry::Registry;
@@ -244,7 +244,8 @@ fn validate_participant_police_pressure_information(
     let authority_name = state
         .world
         .get_organization(authority)
-        .map_or("law enforcement", |record| record.name());
+        .expect("validated police response authority must exist")
+        .name();
     let participants = operation.participants();
     participants
         .into_iter()

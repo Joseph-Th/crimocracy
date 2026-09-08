@@ -56,6 +56,20 @@ pub enum AccountKind {
     Settlement,
 }
 
+impl AccountKind {
+    /// Money the account owner can actually spend. Settlement accounts are ledger
+    /// counterparties/clearing sinks and never constitute available operating liquidity.
+    pub const fn is_liquid(self) -> bool {
+        matches!(
+            self,
+            Self::StreetCash
+                | Self::ConcealedCash
+                | Self::AccountedFunds
+                | Self::LegitimateOperating
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FinancialOwner {
     Organization(OrganizationId),
@@ -177,17 +191,60 @@ impl LedgerTransactionRecord {
 pub struct FinanceState {
     accounts: BTreeMap<FinancialAccountId, FinancialAccountRecord>,
     transactions: BTreeMap<LedgerTransactionId, LedgerTransactionRecord>,
+    #[serde(skip)]
     accounts_by_owner: BTreeMap<FinancialOwner, BTreeSet<FinancialAccountId>>,
+    #[serde(skip)]
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
     /// Running per-(mandate, period) charged totals, updated at ledger commit. Budget
     /// authority checks read this O(log n) instead of rescanning the mandate's full
     /// transaction history (which grows for the life of the campaign) on every spend.
+    #[serde(skip)]
     budget_used_by_period: BTreeMap<(MandateId, SimTime, SimTime), Money>,
 }
 
 impl FinanceState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) -> bool {
+        self.accounts_by_owner.clear();
+        self.transactions_by_mandate.clear();
+        self.budget_used_by_period.clear();
+        for account in self.accounts.values() {
+            self.accounts_by_owner
+                .entry(account.owner())
+                .or_default()
+                .insert(account.id());
+        }
+        let mut budget_cents: BTreeMap<(MandateId, SimTime, SimTime), i128> = BTreeMap::new();
+        for transaction in self.transactions.values() {
+            let Some(usage) = transaction.budget_usage() else {
+                continue;
+            };
+            self.transactions_by_mandate
+                .entry(usage.mandate())
+                .or_default()
+                .insert(transaction.id());
+            let key = (usage.mandate(), usage.period_start(), usage.period_end());
+            let Some(total) = budget_cents
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(i128::from(usage.amount().cents()))
+            else {
+                return false;
+            };
+            budget_cents.insert(key, total);
+        }
+        for (key, cents) in budget_cents {
+            let Ok(cents) = i64::try_from(cents) else {
+                return false;
+            };
+            self.budget_used_by_period
+                .insert(key, Money::from_cents(cents));
+        }
+        true
     }
 
     pub fn get_account(&self, id: FinancialAccountId) -> Option<&FinancialAccountRecord> {
@@ -206,7 +263,11 @@ impl FinanceState {
             .get(&owner)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.accounts.get(id))
+            .map(|id| {
+                self.accounts
+                    .get(id)
+                    .expect("financial owner index must reference an account")
+            })
     }
 
     pub fn transactions_for_mandate(
@@ -217,7 +278,11 @@ impl FinanceState {
             .get(&mandate)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.transactions.get(id))
+            .map(|id| {
+                self.transactions
+                    .get(id)
+                    .expect("mandate transaction index must reference a transaction")
+            })
     }
 
     /// The running charged total for one (mandate, period) window, maintained at ledger

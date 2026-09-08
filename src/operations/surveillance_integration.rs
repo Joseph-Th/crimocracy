@@ -122,7 +122,6 @@ enum SurveillanceTargetSnapshot {
         owner_name: String,
         status: InvestigationStatus,
         lead: Option<(CharacterId, String)>,
-        assigned_investigators: BTreeSet<CharacterId>,
     },
     Enterprise {
         id: EnterpriseId,
@@ -468,7 +467,6 @@ fn resolve_target_snapshot(
                 owner_name: owner.name().to_owned(),
                 status: investigation.status(),
                 lead,
-                assigned_investigators: investigation.assigned_investigators().clone(),
             })
         }
         EntityRef::Enterprise(id) => {
@@ -642,21 +640,13 @@ fn build_observations(
             owner_name,
             status,
             lead,
-            assigned_investigators,
             owner: _,
         } => vec![SurveillanceObservation {
             topic: InformationTopic::LegalActivity,
             subject: EntityRef::Investigation(*id),
             reliability,
             specificity,
-            summary: investigation_summary(
-                title,
-                owner_name,
-                *status,
-                lead.as_ref(),
-                assigned_investigators.len(),
-                outcome,
-            ),
+            summary: investigation_summary(title, owner_name, *status, lead.as_ref(), outcome),
             finding: format!("the status of {title}"),
         }],
         SurveillanceTargetSnapshot::Enterprise {
@@ -908,7 +898,6 @@ fn investigation_summary(
     owner_name: &str,
     status: InvestigationStatus,
     lead: Option<&(CharacterId, String)>,
-    assigned_count: usize,
     outcome: OperationObjectiveOutcome,
 ) -> String {
     let lead_clause = if outcome == OperationObjectiveOutcome::Achieved {
@@ -917,16 +906,8 @@ fn investigation_summary(
     } else {
         String::new()
     };
-    let staffing_clause = if outcome == OperationObjectiveOutcome::Achieved && assigned_count > 0 {
-        format!(
-            " At least {assigned_count} investigator{} are visibly assigned.",
-            if assigned_count == 1 { "" } else { "s" }
-        )
-    } else {
-        String::new()
-    };
     format!(
-        "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}{staffing_clause}",
+        "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}",
         investigation_status_label(status)
     )
 }
@@ -948,13 +929,15 @@ fn enterprise_location_name(state: &AppState, location: EnterpriseLocation) -> S
         EnterpriseLocation::Neighborhood(neighborhood) => state
             .world
             .get_neighborhood(neighborhood)
-            .map(|record| record.name().to_owned())
-            .unwrap_or_else(|| format!("neighborhood {neighborhood}")),
+            .expect("enterprise surveillance target must reference a persisted neighborhood")
+            .name()
+            .to_owned(),
         EnterpriseLocation::Business(business) => state
             .world
             .get_business(business)
-            .map(|record| record.name().to_owned())
-            .unwrap_or_else(|| format!("business {business}")),
+            .expect("enterprise surveillance target must reference a persisted business")
+            .name()
+            .to_owned(),
     }
 }
 

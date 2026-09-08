@@ -174,10 +174,13 @@ impl MandateRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DelegationState {
     records: BTreeMap<MandateId, MandateRecord>,
+    #[serde(skip)]
     active_by_manager: BTreeMap<CharacterId, MandateId>,
+    #[serde(skip)]
     active_by_scope: BTreeMap<ResponsibilityScope, BTreeSet<MandateId>>,
     /// Every active mandate by id, so per-day autonomy passes iterate governed mandates
     /// without rescanning the revoked-and-active mandate history.
+    #[serde(skip)]
     active: BTreeSet<MandateId>,
 }
 
@@ -186,14 +189,35 @@ impl DelegationState {
         Self::default()
     }
 
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.active_by_manager.clear();
+        self.active_by_scope.clear();
+        self.active.clear();
+        for record in self.records.values() {
+            if record.status() != MandateStatus::Active {
+                continue;
+            }
+            self.active_by_manager.insert(record.manager(), record.id());
+            for scope in record.scopes() {
+                self.active_by_scope
+                    .entry(*scope)
+                    .or_default()
+                    .insert(record.id());
+            }
+            self.active.insert(record.id());
+        }
+    }
+
     pub fn get_mandate(&self, id: MandateId) -> Option<&MandateRecord> {
         self.records.get(&id)
     }
 
     pub fn active_for_manager(&self, manager: CharacterId) -> Option<&MandateRecord> {
-        self.active_by_manager
-            .get(&manager)
-            .and_then(|id| self.records.get(id))
+        self.active_by_manager.get(&manager).map(|id| {
+            self.records
+                .get(id)
+                .expect("active manager index must reference a mandate")
+        })
     }
 
     pub fn active_for_scope(
@@ -204,7 +228,11 @@ impl DelegationState {
             .get(&scope)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("active scope index must reference a mandate")
+            })
     }
 
     pub(crate) fn mandates(&self) -> impl Iterator<Item = &MandateRecord> {
@@ -213,7 +241,11 @@ impl DelegationState {
     /// Every active mandate in id order; daily autonomy passes scan this instead of the
     /// full revoked-and-active mandate history.
     pub(crate) fn active_mandates(&self) -> impl Iterator<Item = &MandateRecord> {
-        self.active.iter().filter_map(|id| self.records.get(id))
+        self.active.iter().map(|id| {
+            self.records
+                .get(id)
+                .expect("active mandate index must reference a mandate")
+        })
     }
     pub(crate) fn mandate_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()

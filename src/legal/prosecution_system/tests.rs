@@ -203,7 +203,7 @@ fn opening_draft(fixture: &Fixture) -> ProsecutionCaseDraft {
     ProsecutionCaseDraft {
         arrest: fixture.arrest,
         prosecutor_office: fixture.office,
-        lead_prosecutor: fixture.lead,
+        prosecutor: fixture.lead,
         evidence: BTreeSet::from([fixture.arrest_evidence]),
     }
 }
@@ -229,7 +229,7 @@ fn referral_preserves_police_custody_and_survives_save_before_supplement() {
     assert_eq!(record.source_investigation(), fixture.investigation);
     assert_eq!(record.source_authority(), fixture.police);
     assert_eq!(record.prosecutor_office(), fixture.office);
-    assert_eq!(record.lead_prosecutor(), fixture.lead);
+    assert_eq!(record.assigned_prosecutor(), Some(fixture.lead));
     assert_eq!(
         record.evidence(),
         &BTreeSet::from([fixture.arrest_evidence])
@@ -353,7 +353,7 @@ fn initial_referral_must_include_every_evidence_record_that_supported_arrest() {
         ProsecutionCaseDraft {
             arrest: fixture.arrest,
             prosecutor_office: fixture.office,
-            lead_prosecutor: fixture.lead,
+            prosecutor: fixture.lead,
             evidence: BTreeSet::from([fixture.supplemental_evidence]),
         },
     ) {
@@ -454,7 +454,7 @@ fn open_case_is_unique_per_office_but_other_prosecutor_office_may_receive_referr
         ProsecutionCaseDraft {
             arrest: fixture.arrest,
             prosecutor_office: second_office,
-            lead_prosecutor: second_lead,
+            prosecutor: second_lead,
             evidence: BTreeSet::from([fixture.arrest_evidence]),
         },
     )
@@ -712,9 +712,22 @@ fn prosecution_resolution_token_stales_after_new_referral_without_partial_resolu
 }
 
 #[test]
-fn detained_lead_keeps_formal_case_assignment_but_cannot_refer_new_evidence() {
+fn detained_prosecutor_releases_review_for_deterministic_office_restaffing() {
     let mut fixture = fixture();
     let case = open_case(&mut fixture);
+    let backup = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Backup Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(70))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("backup prosecutor fixture should validate");
     let lead_investigation = validate_open_investigation(
         &fixture.state,
         InvestigationDraft {
@@ -741,7 +754,7 @@ fn detained_lead_keeps_formal_case_assignment_but_cannot_refer_new_evidence() {
             evidence: BTreeSet::from([lead_evidence]),
         },
     )
-    .expect("lead prosecutor may be arrested without erasing formal case assignment")
+    .expect("lead prosecutor may be arrested without freezing unrelated prosecution work")
     .commit(&mut fixture.state)
     .expect("lead arrest should commit");
     assert_eq!(
@@ -750,11 +763,12 @@ fn detained_lead_keeps_formal_case_assignment_but_cannot_refer_new_evidence() {
             .legal()
             .get_prosecution_case(case)
             .expect("prosecution case should persist")
-            .lead_prosecutor(),
-        fixture.lead
+            .assigned_prosecutor(),
+        None,
+        "custody must release the current prosecution assignment"
     );
     validate_state(&fixture.state)
-        .expect("detained lead should leave formal prosecution case structurally valid");
+        .expect("unstaffed reviewing case should remain structurally valid");
     validate_invariants(&fixture.state);
 
     let error = match validate_supplement_prosecution_case(
@@ -764,24 +778,29 @@ fn detained_lead_keeps_formal_case_assignment_but_cannot_refer_new_evidence() {
             evidence: BTreeSet::from([fixture.supplemental_evidence]),
         },
     ) {
-        Ok(_) => panic!("detained lead must not perform new prosecutorial work"),
+        Ok(_) => panic!("an unstaffed prosecution case must not perform new work"),
         Err(error) => error,
     };
-    assert_eq!(
-        error,
-        ProsecutionError::DetainedLeadProsecutor(fixture.lead)
-    );
+    assert_eq!(error, ProsecutionError::CaseUnstaffed { case });
     assert_eq!(
         validate_decline_prosecution_case(&fixture.state, case)
             .err()
-            .expect("detained lead must not resolve prosecution case"),
-        ProsecutionError::DetainedLeadProsecutor(fixture.lead)
+            .expect("unstaffed case must not resolve"),
+        ProsecutionError::CaseUnstaffed { case }
     );
 
-    validate_release_arrest(&fixture.state, lead_arrest)
-        .expect("lead detention should release")
-        .commit(&mut fixture.state)
-        .expect("lead release should commit");
+    let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
+        .expect("office should restaff an unassigned review");
+    assert_eq!(staffed, vec![(case, backup)]);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("prosecution case should persist")
+            .assigned_prosecutor(),
+        Some(backup)
+    );
     validate_supplement_prosecution_case(
         &fixture.state,
         ProsecutionReferralDraft {
@@ -789,10 +808,108 @@ fn detained_lead_keeps_formal_case_assignment_but_cannot_refer_new_evidence() {
             evidence: BTreeSet::from([fixture.supplemental_evidence]),
         },
     )
-    .expect("released lead should resume prosecutorial work")
+    .expect("replacement prosecutor should continue the review")
     .commit(&mut fixture.state)
-    .expect("supplement should commit after lead release");
-    validate_state(&fixture.state).expect("released lead prosecution state should validate");
+    .expect("supplement should commit under replacement prosecutor");
+    let latest_referral = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("case should persist")
+        .referrals()
+        .iter()
+        .copied()
+        .max()
+        .and_then(|id| fixture.state.legal().get_prosecution_referral(id))
+        .expect("supplemental referral should persist");
+    assert_eq!(latest_referral.prosecutor(), backup);
+    validate_release_arrest(&fixture.state, lead_arrest)
+        .expect("former lead detention should remain independently releasable")
+        .commit(&mut fixture.state)
+        .expect("former lead release should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("case should persist")
+            .assigned_prosecutor(),
+        Some(backup),
+        "releasing the former lead must not steal the replacement's assignment"
+    );
+    validate_state(&fixture.state).expect("restaffed prosecution state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn arrest_stales_when_prosecutor_acquires_review_after_custody_preflight() {
+    let mut fixture = fixture();
+    let misconduct = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Late prosecutor assignment custody test".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.lead)]),
+        },
+    )
+    .expect("prosecutor misconduct investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("prosecutor misconduct investigation should commit");
+    let misconduct_evidence = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        misconduct,
+        fixture.lead,
+        EvidenceKind::Document,
+    );
+    let stale_arrest = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.lead,
+            investigation: misconduct,
+            evidence: BTreeSet::from([misconduct_evidence]),
+        },
+    )
+    .expect("arrest should validate before the prosecutor acquires review work");
+
+    let case = open_case(&mut fixture);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("prosecution case should persist")
+            .assigned_prosecutor(),
+        Some(fixture.lead)
+    );
+    let error = stale_arrest
+        .commit(&mut fixture.state)
+        .expect_err("new prosecution responsibility must stale the custody preflight");
+    assert!(matches!(
+        error,
+        ArrestError::ProsecutionStaffing(
+            ProsecutionStaffingError::DetentionAssignmentsChanged { prosecutor }
+        ) if prosecutor == fixture.lead
+    ));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.lead)
+            .is_none(),
+        "stale custody must not partially insert an arrest"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("rejected custody must preserve the prosecution case")
+            .assigned_prosecutor(),
+        Some(fixture.lead),
+        "rejected custody must not release the newly acquired prosecution assignment"
+    );
+    validate_state(&fixture.state).expect("stale custody rejection must preserve valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -830,7 +947,7 @@ fn private_legal_services_and_generic_legal_authority_cannot_act_as_prosecutor_o
             ProsecutionCaseDraft {
                 arrest: fixture.arrest,
                 prosecutor_office: invalid_office,
-                lead_prosecutor: invalid_lead,
+                prosecutor: invalid_lead,
                 evidence: BTreeSet::from([fixture.arrest_evidence]),
             },
         ) {

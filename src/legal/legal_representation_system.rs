@@ -102,13 +102,16 @@ pub enum LegalRepresentationError {
         provider: OrganizationId,
     },
     #[error(
-        "payer account {account} has {available_cents} cents but retainer requires {required_cents} cents"
+        "sponsor liquid accounts have {available_cents} cents but retainer requires {required_cents} cents"
     )]
     InsufficientFunds {
-        account: FinancialAccountId,
         available_cents: i64,
         required_cents: i64,
     },
+    #[error("legal retainer must name at least one sponsor funding account")]
+    NoPayerAccounts,
+    #[error("delegated legal retention must be funded only from mandate budget account {required}")]
+    DelegatedFundingAccountMismatch { required: FinancialAccountId },
     #[error("legal retainer fee cannot be represented as a balanced ledger outflow")]
     FeeArithmeticOverflow,
     #[error("delegated legal representation authority must use the Legal responsibility function")]
@@ -268,7 +271,6 @@ impl ValidatedLegalRepresentation {
                 },
                 payment: super::LegalRepresentationPayment {
                     fee: self.draft.fee,
-                    payer_account: self.draft.payer_account,
                     provider_account: self.draft.provider_account,
                     payment,
                     authorization: self.draft.authorization,
@@ -519,27 +521,45 @@ fn validate_retainer_payment(
     if draft.fee <= Money::ZERO {
         return Err(LegalRepresentationError::InvalidFee);
     }
-    let payer = state.finance.get_account(draft.payer_account).ok_or(
-        LegalRepresentationError::MissingAccount(draft.payer_account),
-    )?;
-    if payer.owner() != FinancialOwner::Organization(draft.sponsor)
-        || !matches!(
-            payer.kind(),
-            AccountKind::StreetCash
-                | AccountKind::ConcealedCash
-                | AccountKind::AccountedFunds
-                | AccountKind::LegitimateOperating
-        )
-    {
-        return Err(LegalRepresentationError::InvalidPayerAccount {
-            account: draft.payer_account,
-            sponsor: draft.sponsor,
-        });
+    if draft.payer_accounts.is_empty() {
+        return Err(LegalRepresentationError::NoPayerAccounts);
     }
-    if payer.balance() < draft.fee {
+    if let Some(authority) = draft.authorization {
+        let mandate = state
+            .delegation
+            .get_mandate(authority.mandate)
+            .ok_or(FinanceError::MissingMandate(authority.mandate))?;
+        let funding_account = mandate
+            .budget()
+            .ok_or(FinanceError::MissingBudget(authority.mandate))?
+            .funding_account;
+        if draft.payer_accounts.len() != 1 || !draft.payer_accounts.contains(&funding_account) {
+            return Err(LegalRepresentationError::DelegatedFundingAccountMismatch {
+                required: funding_account,
+            });
+        }
+    }
+
+    let mut available_cents = 0_i128;
+    for account_id in &draft.payer_accounts {
+        let payer = state
+            .finance
+            .get_account(*account_id)
+            .ok_or(LegalRepresentationError::MissingAccount(*account_id))?;
+        if payer.owner() != FinancialOwner::Organization(draft.sponsor) || !payer.kind().is_liquid()
+        {
+            return Err(LegalRepresentationError::InvalidPayerAccount {
+                account: *account_id,
+                sponsor: draft.sponsor,
+            });
+        }
+        available_cents = (available_cents + i128::from(payer.balance().cents().max(0)))
+            .min(i128::from(draft.fee.cents()));
+    }
+    if available_cents < i128::from(draft.fee.cents()) {
         return Err(LegalRepresentationError::InsufficientFunds {
-            account: draft.payer_account,
-            available_cents: payer.balance().cents(),
+            available_cents: i64::try_from(available_cents)
+                .expect("available retainer funding is bounded by fee"),
             required_cents: draft.fee.cents(),
         });
     }
@@ -555,27 +575,42 @@ fn validate_retainer_payment(
             provider,
         });
     }
-    let outflow = draft
-        .fee
-        .cents()
-        .checked_neg()
-        .map(Money::from_cents)
-        .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
+    let mut postings = Vec::with_capacity(draft.payer_accounts.len() + 1);
+    let mut remaining = draft.fee;
+    for account_id in &draft.payer_accounts {
+        if remaining == Money::ZERO {
+            break;
+        }
+        let balance = state
+            .finance
+            .get_account(*account_id)
+            .expect("validated payer account must still exist")
+            .balance();
+        if balance <= Money::ZERO {
+            continue;
+        }
+        let debit = balance.min(remaining);
+        postings.push(LedgerPosting {
+            account: *account_id,
+            amount: debit
+                .checked_neg()
+                .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?,
+        });
+        remaining = remaining
+            .checked_sub(debit)
+            .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
+    }
+    debug_assert_eq!(remaining, Money::ZERO);
+    postings.push(LedgerPosting {
+        account: draft.provider_account,
+        amount: draft.fee,
+    });
     Ok(validate_record_transaction(
         state,
         LedgerTransactionDraft {
             occurred_at: state.now(),
             memo: format!("Legal retainer for arrest {}", draft.arrest),
-            postings: vec![
-                LedgerPosting {
-                    account: draft.payer_account,
-                    amount: outflow,
-                },
-                LedgerPosting {
-                    account: draft.provider_account,
-                    amount: draft.fee,
-                },
-            ],
+            postings,
             authorization: draft.authorization,
         },
     )?)
@@ -908,22 +943,32 @@ pub(crate) fn apply_automatic_legal_support(
     let mut retained = Vec::new();
     for (arrest_id, sponsor) in candidates {
         let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
-        // The payer must be a sponsor-owned liquid account that can cover the flat retainer.
-        let payer_account = state
+        // Organization-level legal support can draw across the sponsor's liquid reserves. The
+        // payment transaction persists the exact deterministic allocation, so no second source
+        // of truth is stored on the representation itself.
+        let payer_accounts: BTreeSet<_> = state
             .finance
             .accounts_for(FinancialOwner::Organization(sponsor))
-            .find(|account| {
-                matches!(
-                    account.kind(),
-                    AccountKind::StreetCash
-                        | AccountKind::ConcealedCash
-                        | AccountKind::AccountedFunds
-                        | AccountKind::LegitimateOperating
-                ) && account.balance() >= fee
+            .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
+            .map(|account| account.id())
+            .collect();
+        let available = payer_accounts
+            .iter()
+            .map(|account| {
+                state
+                    .finance
+                    .get_account(*account)
+                    .expect("funding account came from finance owner index")
+                    .balance()
+                    .cents()
+                    .max(0)
+            })
+            .fold(0_i128, |total, cents| {
+                (total + i128::from(cents)).min(i128::from(fee.cents()))
             });
-        let Some(payer_account) = payer_account else {
+        if available < i128::from(fee.cents()) {
             continue;
-        };
+        }
 
         // Legal contacts are broader than retained counsel: prosecutors and legal authorities
         // also expose Legal channels. Walk contacts in stable ID order until a live LegalServices
@@ -963,7 +1008,7 @@ pub(crate) fn apply_automatic_legal_support(
                 sponsor,
                 contact: contact.id(),
                 fee,
-                payer_account: payer_account.id(),
+                payer_accounts: payer_accounts.clone(),
                 provider_account: provider_account.id(),
                 authorization: None,
                 origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,

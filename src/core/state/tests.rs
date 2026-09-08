@@ -786,15 +786,20 @@ fn mixed_scenario_soak_preserves_invariants() {
             total.checked_add(cycle.net_cash())
         })
         .expect("soak enterprise cycle totals should not overflow");
+    let organization_liquid = state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(player_organization))
+        .filter(|account| account.kind().is_liquid())
+        .try_fold(Money::ZERO, |total, account| {
+            total.checked_add(account.balance())
+        })
+        .expect("soak organization liquid balances should not overflow");
     assert_eq!(
-        state
-            .finance()
-            .get_account(enterprise_cash)
-            .expect("enterprise cash account should exist")
-            .balance(),
+        organization_liquid,
         enterprise_net
             .checked_sub(player_payroll_paid)
-            .expect("soak enterprise earnings should cover player payroll")
+            .expect("soak aggregate liquid balance should reconcile after payroll"),
+        "the delegated budget transfer is liquid-to-liquid and net-zero, while enterprise cycles add liquidity and payroll removes it regardless of which eligible account funds wages"
     );
     assert_eq!(
         state

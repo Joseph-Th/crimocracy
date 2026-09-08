@@ -105,12 +105,22 @@ impl RelationshipRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SocialState {
     relationships: BTreeMap<RelationshipKey, RelationshipRecord>,
+    #[serde(skip)]
     by_target: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
 }
 
 impl SocialState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_target.clear();
+        for record in self.relationships.values() {
+            self.by_target
+                .entry(record.to())
+                .or_default()
+                .insert(record.from());
+        }
     }
     pub fn get_relationship(
         &self,
@@ -124,7 +134,10 @@ impl SocialState {
             .get(&to)
             .into_iter()
             .flatten()
-            .filter_map(move |from| self.get_relationship(*from, to))
+            .map(move |from| {
+                self.get_relationship(*from, to)
+                    .expect("relationship target index must reference a relationship")
+            })
     }
     pub(crate) fn relationships(&self) -> impl Iterator<Item = &RelationshipRecord> {
         self.relationships.values()

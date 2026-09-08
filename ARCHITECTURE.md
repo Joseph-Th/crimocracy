@@ -107,14 +107,15 @@ determinism and harness contracts.
  8  apply_initial_evidence_reviews          first reviewable evidence on active staffed cases
  9  apply_witness_interview_scheduling      after reviews so same-minute witness is interviewable
 10  run_investigation_work_phase            resolve due work (RNG: investigation stream)
-11  apply_autonomous_evidence_arrests       2 independent evidence items → custody
-12  apply_detainee_informant_recruitment    single decision at now − 1440
-13  apply_informant_disclosures             holder-knowledge → handler cases
-14  apply_automatic_legal_support           policy → representation via canonical path
-15  apply_cold_case_decay                   originated cases only, window 10080, no RNG
-16  run_business_cycle_phase                per due business (RNG: business stream)
-17  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
-18  apply_daily_payroll  →  apply_due_autonomous_recruitment
+11  apply_autonomous_evidence_arrests       2 independent evidence items → custody + responsibility preemption
+12  apply_autonomous_prosecution_staffing   refill prosecution seats released by custody
+13  apply_detainee_informant_recruitment    single decision at now − 1440
+14  apply_informant_disclosures             holder-knowledge → handler cases
+15  apply_automatic_legal_support           policy → representation via canonical path
+16  apply_cold_case_decay                   originated cases only, window 10080, no RNG
+17  run_business_cycle_phase                per due business (RNG: business stream)
+18  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
+19  apply_daily_payroll  →  apply_due_autonomous_recruitment
     ──► apply_reputation_phase            decay first, then operation + vice consequences
     ──► apply_due_autonomous_enterprises  reads current police-fear posture
     ──► synthesize_executive_brief        sees every report/decision made this minute, last
@@ -140,13 +141,13 @@ are validated by `src/core/invariants/`. The top-level tick is
 | `reports/` | Player-facing reports, briefs, financial reports | `report_system` | `src/reports/report_system.rs` |
 | `history/` | Durable entity-linked campaign events | `history_system` | `src/history/history_system.rs` |
 | `finance/` | Typed accounts, allocator-neutral planned account openings, balanced ledger, laundering transfers | `finance_system` (all financial mutations, including `validate_launder_funds`) | `src/finance/finance_system.rs` |
-| `operations/` | Operation plans, execution records, participant reservations, surveillance/police/property integrations, take economics | `operation_system` (lifecycle), `operation_execution` (deterministic resolution), and `operation_economics` (proceeds and depletion) | `src/operations/operation_system.rs`, `src/operations/operation_execution.rs` |
+| `operations/` | Operation plans, execution records, participant reservations, abort causality/artifacts, surveillance/police/property integrations, take economics | `operation_system` (authorization/start/scheduling), `operation_abort` (authority/deadline/decision/police/detention abort lifecycle and artifacts), `operation_execution` (deterministic resolution), and `operation_economics` (proceeds and depletion) | `src/operations/operation_system.rs`, `src/operations/operation_abort.rs`, `src/operations/operation_execution.rs` |
 | `opportunities/` | Provenance-backed opportunities with lifecycle | `opportunity_system` | `src/opportunities/opportunity_system.rs` |
 | `decisions/` | Durable typed decision records and pending indexes | `decision_system` | `src/decisions/decision_system.rs` |
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` | `src/delegation/delegation_system.rs` |
 | `enterprises/` | Routine criminal enterprises and cycle history; per-cycle vice-attention rolls convert sustained district casework into an originated inquiry on the racket through canonical incident intake; delegated daily expansion for non-player organizations through canonical establishment | `enterprise_execution` (lifecycle/settlement), `autonomous_expansion` (daily delegated expansion), `enterprise_reporting` (read-only) | `src/enterprises/enterprise_execution.rs` |
-| `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension; acquisition of independently owned businesses at the authored kind price paid in full from accounted funds | `business_economy_system` (establishment/settlement/disruption/suspension), `business_acquisition` (canonical purchase composing ownership transfer, first economy establishment, and payment), `business_reporting` (read-only) | `src/economy/business_acquisition.rs` |
-| `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, …) via `legal_state`; `case_knowledge` records lead-investigator activity knowledge through `intelligence_system` | `src/legal/legal_state.rs` |
+| `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension; acquisition of independently owned businesses at the authored kind price paid by aggregating organization-owned accounted-funds accounts, with exact source debits owned by the ledger | `business_economy_system` (establishment/settlement/disruption/suspension), `business_acquisition` (canonical purchase composing ownership transfer, first economy establishment, and payment), `business_reporting` (read-only) | `src/economy/business_acquisition.rs` |
+| `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold; direct/automatic defense retention can aggregate sponsor liquid accounts while delegated retention remains tied to its mandate budget account | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, `legal_representation_system`, `prosecution_system`, …) via `legal_state`; arrest composes validated responsibility preemption; investigation and prosecution staffing remain current assignments while historical action actors stay on durable artifacts; retainer payment allocation is historical ledger truth, not duplicated representation state | `src/legal/legal_state.rs` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) | `src/contacts/contact_system.rs` |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` (channels and autonomous pass); `scoring` owns the deterministic factor/margin arithmetic shared by decide paths and invariant re-derivation | `src/recruitment/recruitment_system.rs`, `src/recruitment/scoring.rs` |
 | `reputation/` | Contextual per-audience organizational standing with baseline decay; fed by operation consequences and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface atomically with Standing reports | `reputation_system` (`apply_reputation_delta` is the single score mutation path; consequence composition and decay are tick passes) | `src/reputation/reputation_system.rs` |
@@ -197,6 +198,7 @@ Single-owner operations may mutate directly when every return path preserves tha
 ```text
 records: BTreeMap<Id, Record>              // authoritative truth
 derived: BTreeMap<Key, BTreeSet<Id>>       // maintained at every insert/remove
+indexed read -> authoritative record        // missing target is invalid state, never filtered away
 has_consistent_indexes() -> bool           // checked by validate_state, exhaustive
 BTreeMap::insert + debug_assert!(previous.is_none())  // uniqueness guard
 ```
@@ -236,13 +238,16 @@ lifecycle, counters, generated definitions, RNG state, and active durable work.
 
 ```text
 SaveEnvelope { format_version, content_revision, state: AppState(current schema) }
-build_save(registry, state)  ─► validate_state + validate_state_against_registry, then clone
+build_save(registry, state)  ─► validate_state + validate_state_against_registry, then clone;
+                                serde skips all derived lookup/scheduling indexes
 restore_save(registry, envelope) ─► format check → schema check → content revision check
+                                    → rebuild derived indexes from authoritative records
                                     → validate_state → validate_state_against_registry → Ok(state)
 ```
 
 - Cross-references and invariants are validated before loaded state becomes trusted.
-- Derived indexes are rebuilt only from persisted authoritative records and must agree after reconstruction.
+- Derived indexes are not part of save truth. They are omitted from serialized state, rebuilt only
+  from persisted authoritative records, and must agree under normal invariant validation after reconstruction.
 - Missing future-affecting values are not silently defaulted to make old data load.
 - Compatibility policy is in [`STATUS.md`](STATUS.md): current-version only, no implicit migration.
 - Core systems do not perform implicit filesystem IO (`src/core/persistence.rs` returns data; adapters do IO).

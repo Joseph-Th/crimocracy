@@ -5,7 +5,7 @@
 use crate::contacts::ContactStatus;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, EvidenceId};
+use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
@@ -21,22 +21,11 @@ use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
     InvestigationWorkStatus, LegalRepresentationStatus,
 };
-use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationError> {
-    // Characters bound to any non-terminal operation, computed once for the whole arrest
-    // pass: the detained-arm check below only needs membership, so rescanning the live
-    // operation set per detained arrest would be quadratic in custody volume for no
-    // extra coverage.
-    let booked_characters: BTreeSet<CharacterId> = ACTIVE_ASSIGNMENT_STATUSES
-        .into_iter()
-        .flat_map(|status| state.operations.operations_with_status(status))
-        .flat_map(|operation| operation.participants())
-        .collect();
-
     for arrest in state.legal.arrests() {
         let _ = state.world.get_character(arrest.character()).ok_or(
             StateValidationError::InvalidArrest {
@@ -80,9 +69,10 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
         }
         match arrest.status() {
             ArrestStatus::Detained => {
-                // Only live statuses can hold the character; scanning completed operation
-                // history here would grow unbounded with campaign length.
-                let active_operation = booked_characters.contains(&arrest.character());
+                let active_operation = state
+                    .operations
+                    .find_active_operation_booking(arrest.character())
+                    .is_some();
                 if arrest.released_at().is_some()
                     || arrest.version() != 1
                     || !matches!(
@@ -155,10 +145,6 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             .contacts
             .get_contact(representation.contact())
             .ok_or_else(invalid)?;
-        let payer = state
-            .finance
-            .get_account(representation.payer_account())
-            .ok_or_else(invalid)?;
         let provider = state
             .finance
             .get_account(representation.provider_account())
@@ -176,20 +162,28 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             .get_report(representation.report())
             .ok_or_else(invalid)?;
 
-        let Some(outflow) = representation
-            .fee()
-            .cents()
-            .checked_neg()
-            .map(Money::from_cents)
-        else {
-            return Err(invalid());
-        };
-        let has_payer_posting = payment.postings().iter().any(|posting| {
-            posting.account == representation.payer_account() && posting.amount == outflow
-        });
         let has_provider_posting = payment.postings().iter().any(|posting| {
             posting.account == representation.provider_account()
                 && posting.amount == representation.fee()
+        });
+        let payer_postings: Vec<_> = payment
+            .postings()
+            .iter()
+            .filter(|posting| posting.account != representation.provider_account())
+            .collect();
+        let payer_accounts_are_valid = !payer_postings.is_empty()
+            && payer_postings.iter().all(|posting| {
+                posting.amount < Money::ZERO
+                    && state
+                        .finance
+                        .get_account(posting.account)
+                        .is_some_and(|payer| {
+                            payer.owner() == FinancialOwner::Organization(representation.sponsor())
+                                && payer.kind().is_liquid()
+                        })
+            });
+        let payer_outflow_cents = payer_postings.iter().try_fold(0_i128, |total, posting| {
+            total.checked_add(i128::from(posting.amount.cents()).checked_neg()?)
         });
         let authority_is_valid = match (representation.authorization(), payment.budget_usage()) {
             (None, None) => true,
@@ -198,8 +192,14 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
                     && usage.mandate() == authority.mandate
                     && usage.manager() == authority.manager
                     && usage.scope() == authority.scope
-                    && usage.funding_account() == representation.payer_account()
                     && usage.amount() == representation.fee()
+                    && payer_postings.len() == 1
+                    && payer_postings[0].account == usage.funding_account()
+                    && payer_postings[0].amount
+                        == representation
+                            .fee()
+                            .checked_neg()
+                            .expect("positive legal fee must negate")
             }
             (None, Some(_)) | (Some(_), None) => false,
         };
@@ -241,20 +241,13 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             || representation.fee() <= Money::ZERO
             || representation.retained_at() > state.now()
             || representation.version() == 0
-            || payer.owner() != FinancialOwner::Organization(representation.sponsor())
-            || !matches!(
-                payer.kind(),
-                AccountKind::StreetCash
-                    | AccountKind::ConcealedCash
-                    | AccountKind::AccountedFunds
-                    | AccountKind::LegitimateOperating
-            )
             || provider.owner()
                 != FinancialOwner::Organization(representation.counsel_institution())
             || provider.kind() != AccountKind::LegitimateOperating
             || payment.occurred_at() != representation.retained_at()
-            || payment.postings().len() != 2
-            || !has_payer_posting
+            || payment.postings().len() < 2
+            || !payer_accounts_are_valid
+            || payer_outflow_cents != Some(i128::from(representation.fee().cents()))
             || !has_provider_posting
             || !authority_is_valid
             || retained_information.holder()

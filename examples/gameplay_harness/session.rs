@@ -7,10 +7,10 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{FinancialAccountId, OperationId, OrganizationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{SimDuration, SimTime};
-use crimocracy::finance::Money;
 use crimocracy::finance::finance_system::{
     LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
 };
+use crimocracy::finance::{AccountKind, FinancialOwner, Money};
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
 use crimocracy::legal::InvestigationWorkKind;
 use crimocracy::operations::property_disposition::{
@@ -1391,10 +1391,12 @@ pub fn play_session_with_fixture_view(
         scenario
             .state
             .finance()
-            .get_account(scenario.accounted_funds)
-            .expect("accounted-funds account must persist")
-            .balance()
-            .cents(),
+            .accounts_for(FinancialOwner::Organization(scenario.player))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds)
+            .try_fold(0_i64, |total, account| {
+                total.checked_add(account.balance().cents())
+            })
+            .expect("organization accounted-funds total must fit money range"),
     );
 
     Ok(metrics)

@@ -8,7 +8,9 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, FinancialAccountId, IdExhaustionError, IdKind, OrganizationId};
+use crate::core::id::{
+    CharacterId, FinancialAccountId, IdExhaustionError, IdKind, LedgerTransactionId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::finance_system::{
@@ -52,6 +54,7 @@ pub struct PayrollOutcome {
     owed: Money,
     paid: Money,
     short: Money,
+    transaction: Option<LedgerTransactionId>,
 }
 
 impl PayrollOutcome {
@@ -66,6 +69,12 @@ impl PayrollOutcome {
     }
     pub fn short(&self) -> Money {
         self.short
+    }
+    /// Canonical ledger transaction that paid this payroll. `None` means the organization
+    /// had no spendable liquidity, so no money moved even though the wage obligation and
+    /// shortfall consequences still resolved.
+    pub fn transaction(&self) -> Option<LedgerTransactionId> {
+        self.transaction
     }
 }
 
@@ -149,7 +158,12 @@ fn apply_organization_payroll(
     let owed_cents = i128::from(owed.cents());
     let available_cents = funding
         .iter()
-        .filter_map(|account| state.finance().get_account(*account))
+        .map(|account| {
+            state
+                .finance()
+                .get_account(*account)
+                .expect("payroll funding came from the finance owner index")
+        })
         .map(|record| record.balance().cents().max(0))
         .fold(0_i128, |total, cents| {
             (total + i128::from(cents)).min(owed_cents)
@@ -168,8 +182,8 @@ fn apply_organization_payroll(
             let balance = state
                 .finance()
                 .get_account(*account)
-                .map(|record| record.balance())
-                .unwrap_or(Money::ZERO);
+                .expect("payroll funding came from the finance owner index")
+                .balance();
             if balance.cents() <= 0 {
                 continue;
             }
@@ -217,11 +231,12 @@ fn apply_organization_payroll(
     };
 
     let short = owed.checked_sub(paid).expect("paid cannot exceed owed");
-    let outcome = PayrollOutcome {
+    let mut outcome = PayrollOutcome {
         organization,
         owed,
         paid,
         short,
+        transaction: None,
     };
     let consequences = if short.cents() > 0 {
         let underpaid: Vec<_> = allocations
@@ -250,7 +265,7 @@ fn apply_organization_payroll(
         state.ids.reserve(IdKind::Report, 1)?;
     }
     if let Some(transaction) = transaction {
-        transaction.commit(state)?;
+        outcome.transaction = Some(transaction.commit(state)?);
     }
     if let Some(consequences) = consequences {
         consequences.commit(state);
@@ -338,12 +353,7 @@ fn find_funding_accounts(
     let mut accounts: Vec<_> = state
         .finance()
         .accounts_for(owner)
-        .filter(|account| {
-            matches!(
-                account.kind(),
-                AccountKind::StreetCash | AccountKind::ConcealedCash
-            )
-        })
+        .filter(|account| account.kind().is_liquid())
         .map(|account| (account.balance(), account.id()))
         .collect();
     accounts.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));

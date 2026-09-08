@@ -174,9 +174,13 @@ impl OperationOpportunityKey {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OpportunityState {
     records: BTreeMap<OpportunityId, OpportunityRecord>,
+    #[serde(skip)]
     by_report: BTreeMap<ReportId, OpportunityId>,
+    #[serde(skip)]
     open_by_context: BTreeMap<OperationOpportunityKey, OpportunityId>,
+    #[serde(skip)]
     open_by_expiry: BTreeMap<SimTime, BTreeSet<OpportunityId>>,
+    #[serde(skip)]
     by_operation: BTreeMap<OperationId, OpportunityId>,
 }
 
@@ -185,20 +189,54 @@ impl OpportunityState {
         Self::default()
     }
 
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_report.clear();
+        self.open_by_context.clear();
+        self.open_by_expiry.clear();
+        self.by_operation.clear();
+        for record in self.records.values() {
+            let id = record.id();
+            self.by_report.insert(record.report(), id);
+            match record.resolution() {
+                None => {
+                    self.open_by_context
+                        .insert(OperationOpportunityKey::from_record(record), id);
+                    if let Some(valid_until) = record.valid_until() {
+                        self.open_by_expiry
+                            .entry(valid_until)
+                            .or_default()
+                            .insert(id);
+                    }
+                }
+                Some(OpportunityResolution::Expired { report, .. }) => {
+                    self.by_report.insert(report, id);
+                }
+                Some(OpportunityResolution::Converted { operation, .. }) => {
+                    self.by_operation.insert(operation, id);
+                }
+                Some(OpportunityResolution::Dismissed { .. }) => {}
+            }
+        }
+    }
+
     pub fn get_opportunity(&self, id: OpportunityId) -> Option<&OpportunityRecord> {
         self.records.get(&id)
     }
 
     pub fn opportunity_for_report(&self, report: ReportId) -> Option<&OpportunityRecord> {
-        self.by_report
-            .get(&report)
-            .and_then(|id| self.records.get(id))
+        self.by_report.get(&report).map(|id| {
+            self.records
+                .get(id)
+                .expect("opportunity report index must reference an opportunity")
+        })
     }
 
     pub fn opportunity_for_operation(&self, operation: OperationId) -> Option<&OpportunityRecord> {
-        self.by_operation
-            .get(&operation)
-            .and_then(|id| self.records.get(id))
+        self.by_operation.get(&operation).map(|id| {
+            self.records
+                .get(id)
+                .expect("opportunity operation index must reference an opportunity")
+        })
     }
 
     pub fn find_open_operation(
@@ -213,7 +251,11 @@ impl OpportunityState {
                 operation_kind,
                 targets.clone(),
             ))
-            .and_then(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("open opportunity context index must reference an opportunity")
+            })
     }
 
     pub(crate) fn opportunities(&self) -> impl Iterator<Item = &OpportunityRecord> {

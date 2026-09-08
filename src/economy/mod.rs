@@ -165,14 +165,41 @@ impl BusinessCycleRecord {
 pub struct EconomyState {
     businesses: BTreeMap<BusinessId, BusinessEconomyRecord>,
     cycles: BTreeMap<BusinessCycleId, BusinessCycleRecord>,
+    #[serde(skip)]
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<BusinessId>>,
+    #[serde(skip)]
     by_settlement_account: BTreeMap<FinancialAccountId, BusinessId>,
+    #[serde(skip)]
     cycles_by_business: BTreeMap<BusinessId, BTreeSet<BusinessCycleId>>,
 }
 
 impl EconomyState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.active_by_next_cycle.clear();
+        self.by_settlement_account.clear();
+        self.cycles_by_business.clear();
+        for record in self.businesses.values() {
+            self.by_settlement_account
+                .insert(record.settlement_account(), record.business());
+            if record.status() == BusinessOperatingStatus::Active
+                && let Some(next_cycle_at) = record.next_cycle_at()
+            {
+                self.active_by_next_cycle
+                    .entry(next_cycle_at)
+                    .or_default()
+                    .insert(record.business());
+            }
+        }
+        for cycle in self.cycles.values() {
+            self.cycles_by_business
+                .entry(cycle.business())
+                .or_default()
+                .insert(cycle.id());
+        }
     }
 
     pub fn get_business_economy(&self, business: BusinessId) -> Option<&BusinessEconomyRecord> {
@@ -199,19 +226,22 @@ impl EconomyState {
     /// The most recent settled cycle for a business, in O(log n): settlement order is
     /// sequential-ID order, so the last indexed ID is the newest cycle.
     pub fn latest_cycle(&self, business: BusinessId) -> Option<&BusinessCycleRecord> {
-        self.cycles_by_business
-            .get(&business)?
-            .last()
-            .and_then(|id| self.cycles.get(id))
+        self.cycles_by_business.get(&business)?.last().map(|id| {
+            self.cycles
+                .get(id)
+                .expect("business cycle index must reference a cycle")
+        })
     }
 
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,
     ) -> Option<&BusinessEconomyRecord> {
-        self.by_settlement_account
-            .get(&account)
-            .and_then(|business| self.businesses.get(business))
+        self.by_settlement_account.get(&account).map(|business| {
+            self.businesses
+                .get(business)
+                .expect("business settlement-account index must reference an economy")
+        })
     }
 
     pub(crate) fn due_at_or_before(&self, now: SimTime) -> Vec<BusinessId> {

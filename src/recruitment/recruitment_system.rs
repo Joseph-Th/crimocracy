@@ -513,13 +513,13 @@ fn approval_request_summary(
     let recruiter_name = state
         .world()
         .get_character(recruiter)
-        .map(|record| record.name().to_owned())
-        .unwrap_or_else(|| "A manager".to_owned());
+        .expect("recruitment approval requester must reference a persisted manager")
+        .name();
     let candidate_name = state
         .world()
         .get_character(candidate)
-        .map(|record| record.name().to_owned())
-        .unwrap_or_else(|| "a prospect".to_owned());
+        .expect("recruitment approval must reference a persisted candidate")
+        .name();
     format!("{recruiter_name} seeks approval to bring {candidate_name} into the organization.")
 }
 

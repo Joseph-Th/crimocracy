@@ -19,12 +19,13 @@ use crate::core::time::SimTime;
 use crate::legal::records::{
     Admissibility, ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
     InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
-    InvestigationStatus, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
-    InvestigationWorkResolution, InvestigationWorkStatus, JurisdictionRecord, LegalIndexes,
-    LegalRepresentationEndReason, LegalRepresentationOrigin, LegalRepresentationRecord,
-    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
-    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
-    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
+    InvestigationStatus, InvestigationWorkCancellation, InvestigationWorkFocus,
+    InvestigationWorkKind, InvestigationWorkRecord, InvestigationWorkResolution,
+    InvestigationWorkStatus, JurisdictionRecord, LegalIndexes, LegalRepresentationEndReason,
+    LegalRepresentationOrigin, LegalRepresentationRecord, LegalRepresentationStatus,
+    PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord,
+    PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
+    ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,12 +46,236 @@ pub struct LegalState {
     pub(super) legal_representations: BTreeMap<LegalRepresentationId, LegalRepresentationRecord>,
     pub(super) prosecution_cases: BTreeMap<ProsecutionCaseId, ProsecutionCaseRecord>,
     pub(super) prosecution_referrals: BTreeMap<ProsecutionReferralId, ProsecutionReferralRecord>,
+    #[serde(skip)]
     pub(super) indexes: LegalIndexes,
 }
 
 impl LegalState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.indexes = LegalIndexes::default();
+
+        for investigation in self.investigations.values() {
+            let id = investigation.id();
+            self.indexes
+                .investigations
+                .by_owner
+                .entry(investigation.owner())
+                .or_default()
+                .insert(id);
+            for subject in investigation.subjects() {
+                self.indexes
+                    .investigations
+                    .investigations_by_subject
+                    .entry(*subject)
+                    .or_default()
+                    .insert(id);
+            }
+            if let Some(investigator) = investigation.lead_investigator() {
+                self.indexes
+                    .investigations
+                    .investigations_by_investigator
+                    .entry(investigator)
+                    .or_default()
+                    .insert(id);
+            }
+            if investigation.status() == InvestigationStatus::Active {
+                self.indexes.investigations.active.insert(id);
+                self.indexes
+                    .investigations
+                    .cases_by_last_activity
+                    .entry(investigation.last_activity_at())
+                    .or_default()
+                    .insert(id);
+                if investigation.lead_investigator().is_none() {
+                    self.indexes.investigations.active_without_lead.insert(id);
+                }
+            }
+        }
+        for evidence in self.evidence.values() {
+            for source in evidence.derived_from() {
+                self.indexes
+                    .evidence
+                    .derived_evidence_by_source
+                    .entry(*source)
+                    .or_default()
+                    .insert(evidence.id());
+            }
+        }
+        for witness in self.case_witnesses.values() {
+            self.indexes
+                .witnesses
+                .case_witness_by_case_character
+                .insert((witness.investigation(), witness.witness()), witness.id());
+            self.indexes
+                .witnesses
+                .case_witnesses_by_investigation
+                .entry(witness.investigation())
+                .or_default()
+                .insert(witness.id());
+            self.indexes
+                .witnesses
+                .case_witnesses_by_character
+                .entry(witness.witness())
+                .or_default()
+                .insert(witness.id());
+        }
+        for statement in self.witness_statements.values() {
+            self.indexes
+                .witnesses
+                .witness_statement_by_evidence
+                .insert(statement.evidence(), statement.id());
+        }
+        for informant in self.informants.values() {
+            if informant.status() == InformantStatus::Active {
+                self.indexes
+                    .informants
+                    .active_by_character_handler
+                    .insert((informant.character(), informant.handler()), informant.id());
+                self.indexes.informants.active.insert(informant.id());
+            }
+        }
+        for disclosure in self.informant_disclosures.values() {
+            self.indexes
+                .informants
+                .disclosure_by_case_information
+                .insert(
+                    (disclosure.investigation(), disclosure.source_information()),
+                    disclosure.id(),
+                );
+        }
+        for work in self.investigation_work.values() {
+            let id = work.id();
+            self.indexes
+                .work
+                .work_by_investigation
+                .entry(work.investigation())
+                .or_default()
+                .insert(id);
+            self.indexes
+                .work
+                .work_by_investigator
+                .entry(work.investigator())
+                .or_default()
+                .insert(id);
+            if work.status() == InvestigationWorkStatus::Scheduled {
+                self.indexes
+                    .work
+                    .scheduled_work_by_due_at
+                    .entry(work.due_at())
+                    .or_default()
+                    .insert(id);
+                self.indexes
+                    .work
+                    .scheduled_work_by_focus
+                    .insert((work.investigation(), work.kind(), work.focus()), id);
+            }
+        }
+        for jurisdiction in self.jurisdictions.values() {
+            for neighborhood in jurisdiction.neighborhoods() {
+                self.indexes
+                    .jurisdictions
+                    .jurisdictions_by_neighborhood
+                    .entry(*neighborhood)
+                    .or_default()
+                    .insert(jurisdiction.organization());
+            }
+        }
+        for patrol in self.patrol_deployments.values() {
+            if patrol.status() == PatrolDeploymentStatus::Active {
+                self.indexes
+                    .patrols
+                    .active_by_organization_neighborhood
+                    .insert((patrol.organization(), patrol.neighborhood()), patrol.id());
+                self.indexes
+                    .patrols
+                    .active_by_neighborhood
+                    .entry(patrol.neighborhood())
+                    .or_default()
+                    .insert(patrol.id());
+            }
+        }
+        for response in self.police_responses.values() {
+            self.indexes
+                .police_responses
+                .by_source_operation
+                .insert(response.source_operation(), response.id());
+            if response.status() == PoliceResponseStatus::Dispatched {
+                self.indexes
+                    .police_responses
+                    .dispatched_by_arrival_due
+                    .entry(response.arrival_due_at())
+                    .or_default()
+                    .insert(response.id());
+            }
+        }
+        for arrest in self.arrests.values() {
+            self.indexes
+                .arrests
+                .by_investigation
+                .entry(arrest.investigation())
+                .or_default()
+                .insert(arrest.id());
+            if arrest.status() == ArrestStatus::Detained {
+                self.indexes
+                    .arrests
+                    .active_by_character
+                    .insert(arrest.character(), arrest.id());
+                self.indexes.arrests.detained.insert(arrest.id());
+            }
+        }
+        for representation in self.legal_representations.values() {
+            if representation.status() == LegalRepresentationStatus::Active {
+                self.indexes
+                    .representations
+                    .active_by_arrest
+                    .insert(representation.arrest(), representation.id());
+                self.indexes
+                    .representations
+                    .active_by_contact
+                    .entry(representation.contact())
+                    .or_default()
+                    .insert(representation.id());
+                if representation.origin() == LegalRepresentationOrigin::AutomaticPolicy {
+                    self.indexes
+                        .representations
+                        .active_automatic_policy
+                        .insert(representation.id());
+                }
+            }
+        }
+        for case in self.prosecution_cases.values() {
+            if case.status() == ProsecutionCaseStatus::Reviewing {
+                self.indexes
+                    .prosecutions
+                    .open_by_arrest_office
+                    .insert((case.arrest(), case.prosecutor_office()), case.id());
+                if let Some(prosecutor) = case.assigned_prosecutor() {
+                    self.indexes
+                        .prosecutions
+                        .reviewing_cases_by_prosecutor
+                        .entry(prosecutor)
+                        .or_default()
+                        .insert(case.id());
+                } else {
+                    self.indexes
+                        .prosecutions
+                        .reviewing_without_prosecutor
+                        .insert(case.id());
+                }
+            }
+        }
+        for referral in self.prosecution_referrals.values() {
+            self.indexes
+                .prosecutions
+                .referrals_by_case
+                .entry(referral.prosecution_case())
+                .or_default()
+                .insert(referral.id());
+        }
     }
     pub fn get_investigation(&self, id: InvestigationId) -> Option<&InvestigationRecord> {
         self.investigations.get(&id)
@@ -89,7 +314,11 @@ impl LegalState {
             .informants
             .active_by_character_handler
             .get(&(character, handler))
-            .and_then(|id| self.informants.get(id))
+            .map(|id| {
+                self.informants
+                    .get(id)
+                    .expect("active informant index must reference an informant")
+            })
     }
     pub(crate) fn informant_disclosure_for_case_information(
         &self,
@@ -100,7 +329,11 @@ impl LegalState {
             .informants
             .disclosure_by_case_information
             .get(&(investigation, information))
-            .and_then(|id| self.informant_disclosures.get(id))
+            .map(|id| {
+                self.informant_disclosures
+                    .get(id)
+                    .expect("informant disclosure index must reference a disclosure")
+            })
     }
     pub fn get_jurisdiction(&self, organization: OrganizationId) -> Option<&JurisdictionRecord> {
         self.jurisdictions.get(&organization)
@@ -119,7 +352,11 @@ impl LegalState {
             .arrests
             .active_by_character
             .get(&character)
-            .and_then(|id| self.arrests.get(id))
+            .map(|id| {
+                self.arrests
+                    .get(id)
+                    .expect("active-arrest index must reference an arrest")
+            })
     }
     /// Test-only observation surface; production reads go through case-scoped getters.
     #[cfg(test)]
@@ -141,7 +378,11 @@ impl LegalState {
             .get(&investigation)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.arrests.get(id))
+            .map(|id| {
+                self.arrests
+                    .get(id)
+                    .expect("arrest-by-investigation index must reference an arrest")
+            })
     }
     pub fn get_legal_representation(
         &self,
@@ -157,7 +398,11 @@ impl LegalState {
             .representations
             .active_by_arrest
             .get(&arrest)
-            .and_then(|id| self.legal_representations.get(id))
+            .map(|id| {
+                self.legal_representations
+                    .get(id)
+                    .expect("active-representation index must reference a representation")
+            })
     }
     /// Test-only observation surface: production code reads representations through
     /// `active_representation_for_arrest`.
@@ -180,7 +425,11 @@ impl LegalState {
             .get(&contact)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.legal_representations.get(id))
+            .map(|id| {
+                self.legal_representations
+                    .get(id)
+                    .expect("representation-by-contact index must reference a representation")
+            })
     }
     pub fn get_prosecution_case(&self, id: ProsecutionCaseId) -> Option<&ProsecutionCaseRecord> {
         self.prosecution_cases.get(&id)
@@ -200,7 +449,11 @@ impl LegalState {
             .prosecutions
             .open_by_arrest_office
             .get(&(arrest, prosecutor_office))
-            .and_then(|id| self.prosecution_cases.get(id))
+            .map(|id| {
+                self.prosecution_cases
+                    .get(id)
+                    .expect("open-prosecution index must reference a prosecution case")
+            })
     }
     pub(crate) fn has_other_open_prosecution_case(
         &self,
@@ -230,17 +483,31 @@ impl LegalState {
             .values()
             .filter(move |record| record.arrest() == arrest)
     }
-    pub fn prosecution_cases_for_lead(
+    pub fn reviewing_prosecution_cases_for_prosecutor(
         &self,
-        lead: CharacterId,
+        prosecutor: CharacterId,
     ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
         self.indexes
             .prosecutions
-            .cases_by_lead
-            .get(&lead)
+            .reviewing_cases_by_prosecutor
+            .get(&prosecutor)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.prosecution_cases.get(id))
+            .map(|id| {
+                self.prosecution_cases
+                    .get(id)
+                    .expect("prosecutor assignment index must reference a prosecution case")
+            })
+    }
+
+    pub(crate) fn reviewing_prosecution_cases_without_prosecutor(
+        &self,
+    ) -> impl Iterator<Item = ProsecutionCaseId> + '_ {
+        self.indexes
+            .prosecutions
+            .reviewing_without_prosecutor
+            .iter()
+            .copied()
     }
     pub fn police_response_for_operation(
         &self,
@@ -250,7 +517,11 @@ impl LegalState {
             .police_responses
             .by_source_operation
             .get(&operation)
-            .and_then(|id| self.police_responses.get(id))
+            .map(|id| {
+                self.police_responses
+                    .get(id)
+                    .expect("police-response index must reference a response")
+            })
     }
     pub(crate) fn find_police_responses_due_at_or_before(
         &self,
@@ -273,7 +544,11 @@ impl LegalState {
             .get(&neighborhood)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.patrol_deployments.get(id))
+            .map(|id| {
+                self.patrol_deployments
+                    .get(id)
+                    .expect("active-patrol index must reference a deployment")
+            })
     }
     pub(crate) fn active_patrol_for(
         &self,
@@ -284,7 +559,11 @@ impl LegalState {
             .patrols
             .active_by_organization_neighborhood
             .get(&(organization, neighborhood))
-            .and_then(|id| self.patrol_deployments.get(id))
+            .map(|id| {
+                self.patrol_deployments
+                    .get(id)
+                    .expect("active-patrol pair index must reference a deployment")
+            })
     }
     pub fn jurisdictions_for_neighborhood(
         &self,
@@ -296,7 +575,11 @@ impl LegalState {
             .get(&neighborhood)
             .into_iter()
             .flatten()
-            .filter_map(|organization| self.jurisdictions.get(organization))
+            .map(|organization| {
+                self.jurisdictions
+                    .get(organization)
+                    .expect("jurisdiction-neighborhood index must reference a jurisdiction")
+            })
     }
     /// Test-only observation surface: production code reads evidence through case-scoped
     /// getters, so this scans the record set instead of maintaining a by-origin index.
@@ -316,7 +599,11 @@ impl LegalState {
             .get(&source)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.evidence.get(id))
+            .map(|id| {
+                self.evidence
+                    .get(id)
+                    .expect("derived-evidence index must reference evidence")
+            })
     }
     /// Test-only observation surface over the maintained subject index.
     #[cfg(test)]
@@ -330,7 +617,11 @@ impl LegalState {
             .get(&subject)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.investigations.get(id))
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("investigation-subject index must reference an investigation")
+            })
     }
     pub fn case_witness_for(
         &self,
@@ -341,7 +632,11 @@ impl LegalState {
             .witnesses
             .case_witness_by_case_character
             .get(&(investigation, witness))
-            .and_then(|id| self.case_witnesses.get(id))
+            .map(|id| {
+                self.case_witnesses
+                    .get(id)
+                    .expect("case-witness index must reference a witness")
+            })
     }
     pub fn case_witnesses_for_investigation(
         &self,
@@ -353,7 +648,11 @@ impl LegalState {
             .get(&investigation)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.case_witnesses.get(id))
+            .map(|id| {
+                self.case_witnesses
+                    .get(id)
+                    .expect("witness-by-investigation index must reference a witness")
+            })
     }
     /// Canonical statement lookup: each testimony statement owns a unique derived evidence
     /// record, so the by-evidence index is the O(log n) authority for this relation.
@@ -365,7 +664,11 @@ impl LegalState {
             .witnesses
             .witness_statement_by_evidence
             .get(&evidence)
-            .and_then(|id| self.witness_statements.get(id))
+            .map(|id| {
+                self.witness_statements
+                    .get(id)
+                    .expect("statement-evidence index must reference a statement")
+            })
     }
     pub fn work_for_investigation(
         &self,
@@ -377,7 +680,11 @@ impl LegalState {
             .get(&investigation)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.investigation_work.get(id))
+            .map(|id| {
+                self.investigation_work
+                    .get(id)
+                    .expect("work-by-investigation index must reference investigation work")
+            })
     }
     pub fn work_for_investigator(
         &self,
@@ -389,7 +696,11 @@ impl LegalState {
             .get(&investigator)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.investigation_work.get(id))
+            .map(|id| {
+                self.investigation_work
+                    .get(id)
+                    .expect("work-by-investigator index must reference investigation work")
+            })
     }
     pub(crate) fn scheduled_work_for_focus(
         &self,
@@ -401,7 +712,11 @@ impl LegalState {
             .work
             .scheduled_work_by_focus
             .get(&(investigation, kind, focus))
-            .and_then(|id| self.investigation_work.get(id))
+            .map(|id| {
+                self.investigation_work
+                    .get(id)
+                    .expect("scheduled-work focus index must reference investigation work")
+            })
     }
     pub(crate) fn find_investigation_work_due_at_or_before(
         &self,
@@ -434,7 +749,11 @@ impl LegalState {
             .get(&investigator)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.investigations.get(id))
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("investigator-case index must reference an investigation")
+            })
     }
     pub fn investigations_for_owner(
         &self,
@@ -446,7 +765,11 @@ impl LegalState {
             .get(&owner)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.investigations.get(id))
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("investigation-owner index must reference an investigation")
+            })
     }
     pub(crate) fn active_investigation_for_investigator(
         &self,
@@ -470,11 +793,11 @@ impl LegalState {
     /// Every active case in id order; per-tick institutional passes scan this instead of
     /// the full case history.
     pub(crate) fn active_investigations(&self) -> impl Iterator<Item = &InvestigationRecord> {
-        self.indexes
-            .investigations
-            .active
-            .iter()
-            .filter_map(|id| self.investigations.get(id))
+        self.indexes.investigations.active.iter().map(|id| {
+            self.investigations
+                .get(id)
+                .expect("active-investigation index must reference an investigation")
+        })
     }
     pub(crate) fn investigation_work(&self) -> impl Iterator<Item = &InvestigationWorkRecord> {
         self.investigation_work.values()
@@ -494,7 +817,11 @@ impl LegalState {
             .get(&character)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.case_witnesses.get(id))
+            .map(|id| {
+                self.case_witnesses
+                    .get(id)
+                    .expect("witness-character index must reference a witness")
+            })
     }
     pub(crate) fn witness_statements(&self) -> impl Iterator<Item = &WitnessStatementRecord> {
         self.witness_statements.values()
@@ -505,11 +832,11 @@ impl LegalState {
     /// Every active informant in id order; the disclosure pass scans this instead of the
     /// full terminated-and-active informant history.
     pub(crate) fn active_informants(&self) -> impl Iterator<Item = &InformantRecord> {
-        self.indexes
-            .informants
-            .active
-            .iter()
-            .filter_map(|id| self.informants.get(id))
+        self.indexes.informants.active.iter().map(|id| {
+            self.informants
+                .get(id)
+                .expect("active-informant index must reference an informant")
+        })
     }
     /// O(1) emptiness probe over the active-informant index, so per-tick passes that build
     /// cross-referenced views (handler-to-case maps) can skip that work entirely on quiet
@@ -579,11 +906,11 @@ impl LegalState {
     /// Every currently detained arrest in id order; per-tick custody passes scan this
     /// instead of the full arrest history.
     pub(crate) fn detained_arrests(&self) -> impl Iterator<Item = &ArrestRecord> {
-        self.indexes
-            .arrests
-            .detained
-            .iter()
-            .filter_map(|id| self.arrests.get(id))
+        self.indexes.arrests.detained.iter().map(|id| {
+            self.arrests
+                .get(id)
+                .expect("detained-arrest index must reference an arrest")
+        })
     }
     /// O(1) emptiness probes over the custody-cluster indexes, so per-tick passes can skip
     /// their cross-referenced scans entirely on ticks with no live custody work.
@@ -609,7 +936,11 @@ impl LegalState {
             .representations
             .active_automatic_policy
             .iter()
-            .filter_map(|id| self.legal_representations.get(id))
+            .map(|id| {
+                self.legal_representations
+                    .get(id)
+                    .expect("automatic-representation index must reference a representation")
+            })
     }
     pub(crate) fn prosecution_cases(&self) -> impl Iterator<Item = &ProsecutionCaseRecord> {
         self.prosecution_cases.values()
@@ -1019,6 +1350,7 @@ impl LegalState {
             }
             record.runtime.status = InvestigationWorkStatus::Completed;
             record.runtime.resolution = Some(resolution);
+            record.runtime.cancellation = None;
             record.runtime.version = record
                 .runtime
                 .version
@@ -1035,6 +1367,55 @@ impl LegalState {
             .checked_add(1)
             .expect("investigation version counter exhausted");
         self.set_investigation_activity(investigation_id, resolved_at);
+    }
+
+    pub(crate) fn set_investigation_work_cancellation(
+        &mut self,
+        id: InvestigationWorkId,
+        cancellation: InvestigationWorkCancellation,
+    ) {
+        let cancelled_at = cancellation.cancelled_at();
+        let (due_at, focus_key) = {
+            let record = self
+                .investigation_work
+                .get(&id)
+                .expect("validated investigation work disappeared before cancellation");
+            (
+                record.due_at(),
+                (record.investigation(), record.kind(), record.focus()),
+            )
+        };
+        if let Some(ids) = self.indexes.work.scheduled_work_by_due_at.get_mut(&due_at) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.indexes.work.scheduled_work_by_due_at.remove(&due_at);
+            }
+        }
+        self.indexes.work.scheduled_work_by_focus.remove(&focus_key);
+        let investigation_id = {
+            let record = self
+                .investigation_work
+                .get_mut(&id)
+                .expect("validated investigation work disappeared before cancellation");
+            record.runtime.status = InvestigationWorkStatus::Cancelled;
+            record.runtime.resolution = None;
+            record.runtime.cancellation = Some(cancellation);
+            record.runtime.version = record
+                .runtime
+                .version
+                .checked_add(1)
+                .expect("investigation work version counter exhausted");
+            record.investigation()
+        };
+        let investigation = self
+            .investigations
+            .get_mut(&investigation_id)
+            .expect("validated investigation disappeared before work cancellation");
+        investigation.version = investigation
+            .version
+            .checked_add(1)
+            .expect("investigation version counter exhausted");
+        self.set_investigation_activity(investigation_id, cancelled_at);
     }
     pub(crate) fn set_investigation_status(
         &mut self,
@@ -1056,27 +1437,24 @@ impl LegalState {
             .version
             .checked_add(1)
             .expect("investigation version counter exhausted");
-        // Shelving or closing a case releases its investigators: a case nobody works holds no
-        // institutional attention, so its detectives are free for other casework and a resumed
+        // Shelving or closing a case releases its lead: a case nobody works holds no
+        // institutional attention, so its detective is free for other casework and a resumed
         // case re-enters the unstaffed index and is staffed again from available detectives.
-        if status != InvestigationStatus::Active {
-            for released in std::mem::take(&mut investigation.assigned_investigators) {
-                if let Some(cases) = self
-                    .indexes
+        if status != InvestigationStatus::Active
+            && let Some(released) = investigation.lead_investigator.take()
+            && let Some(cases) = self
+                .indexes
+                .investigations
+                .investigations_by_investigator
+                .get_mut(&released)
+        {
+            cases.remove(&investigation_id);
+            if cases.is_empty() {
+                self.indexes
                     .investigations
                     .investigations_by_investigator
-                    .get_mut(&released)
-                {
-                    cases.remove(&investigation_id);
-                    if cases.is_empty() {
-                        self.indexes
-                            .investigations
-                            .investigations_by_investigator
-                            .remove(&released);
-                    }
-                }
+                    .remove(&released);
             }
-            investigation.lead_investigator = None;
         }
         let needs_lead = investigation.status == InvestigationStatus::Active
             && investigation.lead_investigator.is_none();
@@ -1154,7 +1532,6 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before staffing commit");
-        investigation.assigned_investigators.insert(investigator);
         investigation.lead_investigator = Some(investigator);
         investigation.version = investigation
             .version
@@ -1170,6 +1547,51 @@ impl LegalState {
             .entry(investigator)
             .or_default()
             .insert(investigation_id);
+    }
+
+    /// Releases the single active lead seat because custody made that investigator unavailable.
+    /// The case itself remains active and immediately re-enters the unstaffed index so normal
+    /// institutional staffing can assign another eligible detective on the same simulation tick.
+    pub(crate) fn release_lead_investigator_for_detention(
+        &mut self,
+        investigation_id: InvestigationId,
+        investigator: CharacterId,
+        at: SimTime,
+    ) {
+        let record = self
+            .investigations
+            .get_mut(&investigation_id)
+            .expect("validated investigation disappeared before detention staffing release");
+        assert_eq!(record.status, InvestigationStatus::Active);
+        assert_eq!(record.lead_investigator, Some(investigator));
+        record.lead_investigator = None;
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("investigation version counter exhausted");
+        if let Some(cases) = self
+            .indexes
+            .investigations
+            .investigations_by_investigator
+            .get_mut(&investigator)
+        {
+            let removed = cases.remove(&investigation_id);
+            debug_assert!(
+                removed,
+                "detained lead must be present in investigator index"
+            );
+            if cases.is_empty() {
+                self.indexes
+                    .investigations
+                    .investigations_by_investigator
+                    .remove(&investigator);
+            }
+        }
+        self.indexes
+            .investigations
+            .active_without_lead
+            .insert(investigation_id);
+        self.set_investigation_activity(investigation_id, at);
     }
     pub(crate) fn set_jurisdiction(&mut self, record: JurisdictionRecord) {
         let organization = record.organization();
@@ -1548,12 +1970,19 @@ impl LegalState {
         debug_assert_eq!(case.initial_referral(), referral_id);
         debug_assert_eq!(case.referrals(), &BTreeSet::from([referral_id]));
         debug_assert_eq!(case.evidence(), referral.evidence());
-        self.indexes
-            .prosecutions
-            .cases_by_lead
-            .entry(case.lead_prosecutor())
-            .or_default()
-            .insert(case_id);
+        if let Some(prosecutor) = case.assigned_prosecutor() {
+            self.indexes
+                .prosecutions
+                .reviewing_cases_by_prosecutor
+                .entry(prosecutor)
+                .or_default()
+                .insert(case_id);
+        } else {
+            self.indexes
+                .prosecutions
+                .reviewing_without_prosecutor
+                .insert(case_id);
+        }
         let previous_open = self
             .indexes
             .prosecutions
@@ -1601,16 +2030,21 @@ impl LegalState {
         id: ProsecutionCaseId,
         resolution: ProsecutionCaseResolution,
         resolved_at: SimTime,
+        prosecutor: CharacterId,
         information: InformationId,
         report: ReportId,
     ) {
-        let (arrest, office) = {
+        let (arrest, office, assigned) = {
             let case = self
                 .prosecution_cases
                 .get(&id)
                 .expect("validated prosecution case disappeared before resolution commit");
             debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
-            (case.arrest(), case.prosecutor_office())
+            (
+                case.arrest(),
+                case.prosecutor_office(),
+                case.assigned_prosecutor(),
+            )
         };
         let removed = self
             .indexes
@@ -1618,17 +2052,116 @@ impl LegalState {
             .open_by_arrest_office
             .remove(&(arrest, office));
         debug_assert_eq!(removed, Some(id));
+        match assigned {
+            Some(assigned) => {
+                debug_assert_eq!(assigned, prosecutor);
+                if let Some(cases) = self
+                    .indexes
+                    .prosecutions
+                    .reviewing_cases_by_prosecutor
+                    .get_mut(&assigned)
+                {
+                    let removed = cases.remove(&id);
+                    debug_assert!(removed);
+                    if cases.is_empty() {
+                        self.indexes
+                            .prosecutions
+                            .reviewing_cases_by_prosecutor
+                            .remove(&assigned);
+                    }
+                }
+            }
+            None => {
+                debug_assert!(
+                    false,
+                    "validated prosecution resolution must have an assignee"
+                );
+                self.indexes
+                    .prosecutions
+                    .reviewing_without_prosecutor
+                    .remove(&id);
+            }
+        }
         let case = self
             .prosecution_cases
             .get_mut(&id)
             .expect("validated prosecution case disappeared before resolution commit");
+        case.context.assigned_prosecutor = None;
         case.lifecycle.status = resolution.status();
         case.lifecycle.resolved_at = Some(resolved_at);
         case.resolution_artifacts.resolution_information = Some(information);
         case.resolution_artifacts.resolution_report = Some(report);
+        case.resolution_artifacts.resolution_prosecutor = Some(prosecutor);
         case.version = case
             .version
             .checked_add(1)
             .expect("prosecution case version counter exhausted");
+    }
+
+    pub(crate) fn set_prosecution_case_prosecutor(
+        &mut self,
+        id: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    ) {
+        let case = self
+            .prosecution_cases
+            .get_mut(&id)
+            .expect("validated prosecution case disappeared before staffing commit");
+        debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
+        debug_assert!(case.assigned_prosecutor().is_none());
+        case.context.assigned_prosecutor = Some(prosecutor);
+        case.version = case
+            .version
+            .checked_add(1)
+            .expect("prosecution case version counter exhausted");
+        let removed = self
+            .indexes
+            .prosecutions
+            .reviewing_without_prosecutor
+            .remove(&id);
+        debug_assert!(removed);
+        self.indexes
+            .prosecutions
+            .reviewing_cases_by_prosecutor
+            .entry(prosecutor)
+            .or_default()
+            .insert(id);
+    }
+
+    pub(crate) fn release_prosecution_case_prosecutor_for_detention(
+        &mut self,
+        id: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    ) {
+        let case = self
+            .prosecution_cases
+            .get_mut(&id)
+            .expect("validated prosecution case disappeared before detention staffing release");
+        debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
+        debug_assert_eq!(case.assigned_prosecutor(), Some(prosecutor));
+        case.context.assigned_prosecutor = None;
+        case.version = case
+            .version
+            .checked_add(1)
+            .expect("prosecution case version counter exhausted");
+        if let Some(cases) = self
+            .indexes
+            .prosecutions
+            .reviewing_cases_by_prosecutor
+            .get_mut(&prosecutor)
+        {
+            let removed = cases.remove(&id);
+            debug_assert!(removed);
+            if cases.is_empty() {
+                self.indexes
+                    .prosecutions
+                    .reviewing_cases_by_prosecutor
+                    .remove(&prosecutor);
+            }
+        }
+        self.indexes
+            .prosecutions
+            .reviewing_without_prosecutor
+            .insert(id);
     }
 }

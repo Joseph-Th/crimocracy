@@ -42,6 +42,13 @@ pub enum InvestigationError {
         investigator: CharacterId,
         arrest: ArrestId,
     },
+    #[error(
+        "character {investigator} is a subject of investigation {investigation} and cannot lead it"
+    )]
+    InvestigatorIsCaseSubject {
+        investigation: InvestigationId,
+        investigator: CharacterId,
+    },
     #[error("character {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
     #[error("investigation {investigation} already has {lead} as its lead")]
@@ -122,6 +129,67 @@ pub enum InvestigationError {
     IdExhaustion(#[from] IdExhaustionError),
 }
 
+#[derive(Debug)]
+pub(crate) struct ValidatedInvestigatorDetentionRelease {
+    investigation: InvestigationId,
+    investigator: CharacterId,
+    expected_investigation_version: u32,
+    released_at: SimTime,
+}
+
+impl ValidatedInvestigatorDetentionRelease {
+    pub(crate) fn investigation(&self) -> InvestigationId {
+        self.investigation
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), InvestigationError> {
+        let investigation = state
+            .legal
+            .get_investigation(self.investigation)
+            .ok_or(InvestigationError::MissingInvestigation(self.investigation))?;
+        if investigation.version() != self.expected_investigation_version {
+            return Err(InvestigationError::StaleInvestigation {
+                investigation: self.investigation,
+                expected: self.expected_investigation_version,
+                found: investigation.version(),
+            });
+        }
+        if investigation.status() != InvestigationStatus::Active
+            || investigation.lead_investigator() != Some(self.investigator)
+            || state.now() != self.released_at
+        {
+            return Err(InvestigationError::InactiveInvestigation);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        state.legal.release_lead_investigator_for_detention(
+            self.investigation,
+            self.investigator,
+            self.released_at,
+        );
+    }
+}
+
+pub(crate) fn validate_release_investigator_for_detention(
+    state: &AppState,
+    investigator: CharacterId,
+) -> Result<Option<ValidatedInvestigatorDetentionRelease>, InvestigationError> {
+    let Some(investigation) = state
+        .legal
+        .active_investigation_for_investigator(investigator)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ValidatedInvestigatorDetentionRelease {
+        investigation: investigation.id(),
+        investigator,
+        expected_investigation_version: investigation.version(),
+        released_at: state.now(),
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvestigationTransition {
     Suspend,
@@ -142,7 +210,6 @@ impl ValidatedInvestigation {
             title: self.draft.title,
             status: InvestigationStatus::Active,
             lead_investigator: None,
-            assigned_investigators: Default::default(),
             subjects: self.draft.subjects,
             evidence: Default::default(),
             opened_at: state.now(),
@@ -541,68 +608,29 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             .get_investigation(investigation_id)
             .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
         let owner = investigation.owner();
-        let mut assigned_available = Vec::new();
-        for investigator in investigation.assigned_investigators() {
-            // Existing assignments are authoritative case state. Missing personnel, lost
-            // capability, or foreign membership is malformed staffing, not ordinary
-            // unavailability; fail at the autonomous consumer instead of silently choosing a
-            // different detective and postponing the error until invariant validation.
-            let record = state
-                .world
-                .get_character(*investigator)
-                .ok_or(InvestigationError::MissingCharacter(*investigator))?;
-            let capability = record.capability(CapabilityKind::Investigation).ok_or(
-                InvestigationError::MissingInvestigationCapability(*investigator),
-            )?;
-            if record.organization() != Some(owner) {
-                return Err(InvestigationError::InvestigatorOwnerMismatch {
-                    investigator: *investigator,
-                    owner,
-                });
-            }
-            // Investigators already attached to this case are exempt from the one-case
-            // exclusion; attachment to any other active case disqualifies them. Detention is a
-            // modeled temporary blocker, so either condition simply leaves the detective out.
-            let case_is_this_one = state
-                .legal
-                .active_investigation_for_investigator(*investigator)
-                .is_none_or(|active| active.id() == investigation_id);
-            if case_is_this_one
-                && state
+        let investigator = state
+            .world
+            .characters_in_organization(owner)
+            .filter(|record| {
+                state
                     .legal
-                    .active_arrest_for_character(*investigator)
+                    .active_arrest_for_character(record.id())
                     .is_none()
-            {
-                assigned_available.push((*investigator, capability.value()));
-            }
-        }
-        let assigned_candidate = assigned_available
-            .into_iter()
+                    && state
+                        .legal
+                        .active_investigation_for_investigator(record.id())
+                        .is_none()
+                    && !investigation
+                        .subjects()
+                        .contains(&EntityRef::Character(record.id()))
+            })
+            .filter_map(|record| {
+                record
+                    .capability(CapabilityKind::Investigation)
+                    .map(|capability| (record.id(), capability.value()))
+            })
             .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
             .map(|(investigator, _)| investigator);
-
-        let investigator = assigned_candidate.or_else(|| {
-            state
-                .world
-                .characters_in_organization(owner)
-                .filter(|record| {
-                    state
-                        .legal
-                        .active_arrest_for_character(record.id())
-                        .is_none()
-                        && state
-                            .legal
-                            .active_investigation_for_investigator(record.id())
-                            .is_none()
-                })
-                .filter_map(|record| {
-                    record
-                        .capability(CapabilityKind::Investigation)
-                        .map(|capability| (record.id(), capability.value()))
-                })
-                .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
-                .map(|(investigator, _)| investigator)
-        });
         let Some(investigator) = investigator else {
             continue;
         };
@@ -640,19 +668,27 @@ fn validate_investigator_assignment_dependencies(
             arrest: arrest.id(),
         });
     }
+    if investigation
+        .subjects()
+        .contains(&EntityRef::Character(investigator_id))
+    {
+        return Err(InvestigationError::InvestigatorIsCaseSubject {
+            investigation: investigation_id,
+            investigator: investigator_id,
+        });
+    }
     if investigator.organization() != Some(investigation.owner()) {
         return Err(InvestigationError::InvestigatorOwnerMismatch {
             investigator: investigator_id,
             owner: investigation.owner(),
         });
     }
-    // One active case per investigator: an investigator already assigned to another active
-    // investigation cannot take a second active case. The same case is exempt so an
-    // investigator can be promoted to lead of the case they already staff.
+    // One active case per investigator: a detective already leading another active case cannot
+    // take a second active case.
     if state
         .legal
         .active_investigation_for_investigator(investigator_id)
-        .is_some_and(|active| active.id() != investigation_id)
+        .is_some()
     {
         return Err(InvestigationError::InvestigatorAtCaseCapacity {
             investigator: investigator_id,
@@ -873,7 +909,6 @@ impl ValidatedIncidentIntake {
                     title: self.draft.title,
                     status: InvestigationStatus::Active,
                     lead_investigator: None,
-                    assigned_investigators: Default::default(),
                     subjects,
                     evidence: Default::default(),
                     opened_at: state.now(),

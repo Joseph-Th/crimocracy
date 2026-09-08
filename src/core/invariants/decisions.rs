@@ -5,7 +5,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::OperationId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
-use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
+use crate::decisions::{
+    DecisionCancellationReason, DecisionContext, DecisionResponse, DecisionStatus,
+};
 use crate::delegation::{MandateStatus, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::FinancialOwner;
 use crate::legal::PoliceResponseStatus;
@@ -53,31 +55,56 @@ pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidation
             });
         }
 
-        if decision.status() == DecisionStatus::Resolved {
-            let resolution = decision.resolution().ok_or(
-                StateValidationError::ResolvedDecisionWithoutResolution {
-                    decision: decision.id(),
-                },
-            )?;
-            if resolution.resolved_at() < decision.requested_at()
-                || resolution.resolved_at() > state.now()
-            {
-                return Err(StateValidationError::InvalidDecisionChronology {
-                    decision: decision.id(),
-                });
+        match decision.status() {
+            DecisionStatus::Pending => {
+                if decision.resolution().is_some() || decision.cancellation().is_some() {
+                    return Err(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    });
+                }
             }
-            if resolution.resolved_by() != decision.recipient() {
-                return Err(StateValidationError::DecisionResolverMismatch {
-                    decision: decision.id(),
-                    resolver: resolution.resolved_by(),
-                    recipient: decision.recipient(),
-                });
+            DecisionStatus::Resolved => {
+                let resolution = decision.resolution().ok_or(
+                    StateValidationError::ResolvedDecisionWithoutResolution {
+                        decision: decision.id(),
+                    },
+                )?;
+                if decision.cancellation().is_some()
+                    || resolution.resolved_at() < decision.requested_at()
+                    || resolution.resolved_at() > state.now()
+                {
+                    return Err(StateValidationError::InvalidDecisionChronology {
+                        decision: decision.id(),
+                    });
+                }
+                if resolution.resolved_by() != decision.recipient() {
+                    return Err(StateValidationError::DecisionResolverMismatch {
+                        decision: decision.id(),
+                        resolver: resolution.resolved_by(),
+                        recipient: decision.recipient(),
+                    });
+                }
+                if !decision.options().contains(&resolution.response()) {
+                    return Err(StateValidationError::DecisionResponseNotOffered {
+                        decision: decision.id(),
+                        response: resolution.response(),
+                    });
+                }
             }
-            if !decision.options().contains(&resolution.response()) {
-                return Err(StateValidationError::DecisionResponseNotOffered {
-                    decision: decision.id(),
-                    response: resolution.response(),
-                });
+            DecisionStatus::Cancelled => {
+                let cancellation = decision.cancellation().ok_or(
+                    StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    },
+                )?;
+                if decision.resolution().is_some()
+                    || cancellation.cancelled_at() < decision.requested_at()
+                    || cancellation.cancelled_at() > state.now()
+                {
+                    return Err(StateValidationError::InvalidDecisionChronology {
+                        decision: decision.id(),
+                    });
+                }
             }
         }
 
@@ -269,6 +296,30 @@ fn validate_operation_decision(
                 }
             }
         }
+        DecisionStatus::Cancelled => {
+            let cancellation =
+                decision
+                    .cancellation()
+                    .ok_or(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    })?;
+            let DecisionCancellationReason::OperationParticipantDetained(character) =
+                cancellation.reason();
+            let abort = operation.abort_record();
+            if operation.status() != OperationStatus::Aborted
+                || !operation.participants().contains(&character)
+                || !abort.is_some_and(|abort| {
+                    abort.cause() == OperationAbortCause::ParticipantDetained(character)
+                        && abort.phase() == OperationAbortPhase::AwaitingDecision
+                        && abort.aborted_at() == cancellation.cancelled_at()
+                })
+            {
+                return Err(StateValidationError::AbortDecisionOperationMismatch {
+                    decision: decision.id(),
+                    operation: operation_id,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -383,6 +434,11 @@ fn validate_recruitment_approval_decision(
                     });
                 }
             }
+        }
+        DecisionStatus::Cancelled => {
+            return Err(StateValidationError::InvalidDecisionContext {
+                decision: decision.id(),
+            });
         }
     }
     Ok(())

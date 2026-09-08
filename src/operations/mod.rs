@@ -1,5 +1,6 @@
 //! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
 
+pub(crate) mod operation_abort;
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
 pub(crate) mod operation_state;
@@ -226,8 +227,9 @@ pub enum OperationStatus {
 }
 
 /// The live assignment statuses whose participants are booked: a character holding any of
-/// these cannot take overlapping work or enter custody. Terminal operations release their
-/// participants and are excluded from every booking scan.
+/// these cannot take overlapping work. Custody preempts live bookings through the canonical
+/// detention-abort path. Terminal operations release their participants and are excluded from
+/// every booking scan.
 pub const ACTIVE_ASSIGNMENT_STATUSES: [OperationStatus; 3] = [
     OperationStatus::Authorized,
     OperationStatus::InProgress,
@@ -247,6 +249,7 @@ pub enum OperationAbortCause {
     Decision(DecisionRequestId),
     PoliceArrival(PoliceResponseId),
     DeadlineMissed,
+    ParticipantDetained(CharacterId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

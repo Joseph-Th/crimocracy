@@ -149,15 +149,46 @@ impl InformationRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IntelligenceState {
     records: BTreeMap<InformationId, InformationRecord>,
+    #[serde(skip)]
     by_holder: BTreeMap<KnowledgeHolder, BTreeSet<InformationId>>,
+    #[serde(skip)]
     by_holder_topic: BTreeMap<(KnowledgeHolder, InformationTopic), BTreeSet<InformationId>>,
+    #[serde(skip)]
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
+    #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
 }
 
 impl IntelligenceState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_holder.clear();
+        self.by_holder_topic.clear();
+        self.by_subject.clear();
+        self.derived_by_source.clear();
+        for record in self.records.values() {
+            let id = record.id();
+            self.by_holder
+                .entry(record.holder())
+                .or_default()
+                .insert(id);
+            self.by_holder_topic
+                .entry((record.holder(), record.topic()))
+                .or_default()
+                .insert(id);
+            self.by_subject
+                .entry(record.subject())
+                .or_default()
+                .insert(id);
+            for source in record.derived_from() {
+                self.derived_by_source
+                    .entry(*source)
+                    .or_default()
+                    .insert(id);
+            }
+        }
     }
     pub fn get_information(&self, id: InformationId) -> Option<&InformationRecord> {
         self.records.get(&id)
@@ -166,11 +197,11 @@ impl IntelligenceState {
         &self,
         holder: KnowledgeHolder,
     ) -> impl Iterator<Item = &InformationRecord> {
-        self.by_holder
-            .get(&holder)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.records.get(id))
+        self.by_holder.get(&holder).into_iter().flatten().map(|id| {
+            self.records
+                .get(id)
+                .expect("information holder index must reference information")
+        })
     }
     pub fn information_for_holder_by_topic(
         &self,
@@ -181,7 +212,11 @@ impl IntelligenceState {
             .get(&(holder, topic))
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("information holder-topic index must reference information")
+            })
     }
     pub fn information_derived_from(
         &self,
@@ -191,7 +226,11 @@ impl IntelligenceState {
             .get(&source)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("information lineage index must reference information")
+            })
     }
     pub(crate) fn information(&self) -> impl Iterator<Item = &InformationRecord> {
         self.records.values()

@@ -252,18 +252,72 @@ impl EnterpriseCycleRecord {
 pub struct EnterpriseState {
     records: BTreeMap<EnterpriseId, EnterpriseRecord>,
     cycles: BTreeMap<EnterpriseCycleId, EnterpriseCycleRecord>,
+    #[serde(skip)]
     by_organization: BTreeMap<OrganizationId, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     by_location: BTreeMap<EnterpriseLocation, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     by_supporting_business: BTreeMap<BusinessId, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     by_settlement_account: BTreeMap<FinancialAccountId, EnterpriseId>,
+    #[serde(skip)]
     cycles_by_enterprise: BTreeMap<EnterpriseId, BTreeSet<EnterpriseCycleId>>,
 }
 
 impl EnterpriseState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_organization.clear();
+        self.by_location.clear();
+        self.by_supporting_business.clear();
+        self.active_by_mandate.clear();
+        self.active_by_next_cycle.clear();
+        self.by_settlement_account.clear();
+        self.cycles_by_enterprise.clear();
+        for record in self.records.values() {
+            let id = record.id();
+            self.by_organization
+                .entry(record.organization())
+                .or_default()
+                .insert(id);
+            self.by_location
+                .entry(record.location())
+                .or_default()
+                .insert(id);
+            for business in record.supporting_businesses() {
+                self.by_supporting_business
+                    .entry(*business)
+                    .or_default()
+                    .insert(id);
+            }
+            self.by_settlement_account
+                .insert(record.settlement_account(), id);
+            if record.status() == EnterpriseStatus::Active {
+                self.active_by_mandate
+                    .entry(record.authority().mandate)
+                    .or_default()
+                    .insert(id);
+                if let Some(next_cycle_at) = record.next_cycle_at() {
+                    self.active_by_next_cycle
+                        .entry(next_cycle_at)
+                        .or_default()
+                        .insert(id);
+                }
+            }
+        }
+        for cycle in self.cycles.values() {
+            self.cycles_by_enterprise
+                .entry(cycle.enterprise())
+                .or_default()
+                .insert(cycle.id());
+        }
     }
 
     pub fn get_enterprise(&self, id: EnterpriseId) -> Option<&EnterpriseRecord> {
@@ -282,7 +336,11 @@ impl EnterpriseState {
             .get(&organization)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("enterprise organization index must reference an enterprise")
+            })
     }
 
     pub fn enterprises_at(
@@ -293,7 +351,11 @@ impl EnterpriseState {
             .get(&location)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("enterprise location index must reference an enterprise")
+            })
     }
 
     pub fn enterprises_supported_by_business(
@@ -304,7 +366,11 @@ impl EnterpriseState {
             .get(&business)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("enterprise support index must reference an enterprise")
+            })
     }
 
     pub fn cycles_for(
@@ -326,7 +392,11 @@ impl EnterpriseState {
         self.cycles_by_enterprise
             .get(&enterprise)?
             .last()
-            .and_then(|id| self.cycles.get(id))
+            .map(|id| {
+                self.cycles
+                    .get(id)
+                    .expect("enterprise cycle index must reference a cycle")
+            })
     }
 
     /// The settled cycle immediately preceding `cycle` for its enterprise, in O(log n).
@@ -341,7 +411,11 @@ impl EnterpriseState {
             .get(&enterprise)?
             .range(..cycle)
             .next_back()
-            .and_then(|id| self.cycles.get(id))
+            .map(|id| {
+                self.cycles
+                    .get(id)
+                    .expect("enterprise cycle index must reference a cycle")
+            })
     }
 
     pub fn active_for_mandate(
@@ -352,16 +426,22 @@ impl EnterpriseState {
             .get(&mandate)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("active mandate-enterprise index must reference an enterprise")
+            })
     }
 
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,
     ) -> Option<&EnterpriseRecord> {
-        self.by_settlement_account
-            .get(&account)
-            .and_then(|id| self.records.get(id))
+        self.by_settlement_account.get(&account).map(|id| {
+            self.records
+                .get(id)
+                .expect("enterprise settlement-account index must reference an enterprise")
+        })
     }
 
     pub(crate) fn find_due_cycles(&self, now: SimTime) -> Vec<EnterpriseId> {

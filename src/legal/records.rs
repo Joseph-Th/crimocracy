@@ -120,7 +120,6 @@ pub(crate) struct LegalRepresentationParties {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LegalRepresentationPayment {
     pub(super) fee: Money,
-    pub(super) payer_account: FinancialAccountId,
     pub(super) provider_account: FinancialAccountId,
     pub(super) payment: LedgerTransactionId,
     pub(super) authorization: Option<MandateAuthority>,
@@ -184,10 +183,6 @@ impl LegalRepresentationRecord {
 
     pub fn fee(&self) -> Money {
         self.payment.fee
-    }
-
-    pub fn payer_account(&self) -> FinancialAccountId {
-        self.payment.payer_account
     }
 
     pub fn provider_account(&self) -> FinancialAccountId {
@@ -258,7 +253,10 @@ pub struct LegalRepresentationDraft {
     pub sponsor: OrganizationId,
     pub contact: ContactId,
     pub fee: Money,
-    pub payer_account: FinancialAccountId,
+    /// Sponsor-owned liquid accounts permitted to fund the retainer. Direct and automatic
+    /// retention may aggregate them; delegated retention is constrained to the mandate's one
+    /// budget funding account by the canonical payment validator.
+    pub payer_accounts: BTreeSet<FinancialAccountId>,
     pub provider_account: FinancialAccountId,
     pub authorization: Option<MandateAuthority>,
     pub origin: LegalRepresentationOrigin,
@@ -302,7 +300,9 @@ pub(crate) struct ProsecutionCaseContext {
     pub(super) source_investigation: InvestigationId,
     pub(super) source_authority: OrganizationId,
     pub(super) prosecutor_office: OrganizationId,
-    pub(super) lead_prosecutor: CharacterId,
+    /// Current reviewing attorney. Historical actor attribution lives on each referral and
+    /// terminal resolution artifact, so replacing this assignment never rewrites history.
+    pub(super) assigned_prosecutor: Option<CharacterId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -323,6 +323,7 @@ pub(crate) struct ProsecutionCaseLifecycle {
 pub(crate) struct ProsecutionCaseResolutionArtifacts {
     pub(super) resolution_information: Option<InformationId>,
     pub(super) resolution_report: Option<ReportId>,
+    pub(super) resolution_prosecutor: Option<CharacterId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -354,8 +355,8 @@ impl ProsecutionCaseRecord {
     pub fn prosecutor_office(&self) -> OrganizationId {
         self.context.prosecutor_office
     }
-    pub fn lead_prosecutor(&self) -> CharacterId {
-        self.context.lead_prosecutor
+    pub fn assigned_prosecutor(&self) -> Option<CharacterId> {
+        self.context.assigned_prosecutor
     }
     pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
         &self.referrals.evidence
@@ -381,6 +382,9 @@ impl ProsecutionCaseRecord {
     pub fn resolution_report(&self) -> Option<ReportId> {
         self.resolution_artifacts.resolution_report
     }
+    pub fn resolution_prosecutor(&self) -> Option<CharacterId> {
+        self.resolution_artifacts.resolution_prosecutor
+    }
     pub fn version(&self) -> u32 {
         self.version
     }
@@ -393,6 +397,7 @@ pub struct ProsecutionReferralRecord {
     pub(super) source_investigation: InvestigationId,
     pub(super) source_authority: OrganizationId,
     pub(super) prosecutor_office: OrganizationId,
+    pub(super) prosecutor: CharacterId,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) referred_at: SimTime,
     pub(super) information: InformationId,
@@ -415,6 +420,9 @@ impl ProsecutionReferralRecord {
     pub fn prosecutor_office(&self) -> OrganizationId {
         self.prosecutor_office
     }
+    pub fn prosecutor(&self) -> CharacterId {
+        self.prosecutor
+    }
     pub fn evidence(&self) -> &BTreeSet<EvidenceId> {
         &self.evidence
     }
@@ -433,7 +441,7 @@ impl ProsecutionReferralRecord {
 pub struct ProsecutionCaseDraft {
     pub arrest: ArrestId,
     pub prosecutor_office: OrganizationId,
-    pub lead_prosecutor: CharacterId,
+    pub prosecutor: CharacterId,
     pub evidence: BTreeSet<EvidenceId>,
 }
 
@@ -445,7 +453,10 @@ pub struct ProsecutionReferralDraft {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct ProsecutionIndexes {
-    pub(super) cases_by_lead: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
+    /// Reviewing cases currently assigned to each prosecutor. Terminal case history is not
+    /// retained here because actor attribution is stored on referral/resolution records.
+    pub(super) reviewing_cases_by_prosecutor: BTreeMap<CharacterId, BTreeSet<ProsecutionCaseId>>,
+    pub(super) reviewing_without_prosecutor: BTreeSet<ProsecutionCaseId>,
     pub(super) open_by_arrest_office: BTreeMap<(ArrestId, OrganizationId), ProsecutionCaseId>,
     pub(super) referrals_by_case: BTreeMap<ProsecutionCaseId, BTreeSet<ProsecutionReferralId>>,
 }
@@ -504,6 +515,28 @@ impl InvestigationWorkFocus {
 pub enum InvestigationWorkStatus {
     Scheduled,
     Completed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvestigationWorkCancellationReason {
+    InvestigatorDetained(ArrestId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvestigationWorkCancellation {
+    pub(super) cancelled_at: SimTime,
+    pub(super) reason: InvestigationWorkCancellationReason,
+}
+
+impl InvestigationWorkCancellation {
+    pub fn cancelled_at(self) -> SimTime {
+        self.cancelled_at
+    }
+
+    pub fn reason(self) -> InvestigationWorkCancellationReason {
+        self.reason
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +623,7 @@ pub struct InvestigationWorkRuntime {
     pub(super) due_at: SimTime,
     pub(super) status: InvestigationWorkStatus,
     pub(super) resolution: Option<InvestigationWorkResolution>,
+    pub(super) cancellation: Option<InvestigationWorkCancellation>,
     pub(super) version: u32,
 }
 
@@ -647,6 +681,10 @@ impl InvestigationWorkRecord {
 
     pub fn resolution(&self) -> Option<&InvestigationWorkResolution> {
         self.runtime.resolution.as_ref()
+    }
+
+    pub fn cancellation(&self) -> Option<InvestigationWorkCancellation> {
+        self.runtime.cancellation
     }
 
     pub fn version(&self) -> u32 {
@@ -904,7 +942,6 @@ pub struct InvestigationRecord {
     pub(super) title: String,
     pub(super) status: InvestigationStatus,
     pub(super) lead_investigator: Option<CharacterId>,
-    pub(super) assigned_investigators: BTreeSet<CharacterId>,
     pub(super) subjects: BTreeSet<EntityRef>,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) opened_at: SimTime,
@@ -938,9 +975,6 @@ impl InvestigationRecord {
     }
     pub fn lead_investigator(&self) -> Option<CharacterId> {
         self.lead_investigator
-    }
-    pub fn assigned_investigators(&self) -> &BTreeSet<CharacterId> {
-        &self.assigned_investigators
     }
     pub fn subjects(&self) -> &BTreeSet<EntityRef> {
         &self.subjects

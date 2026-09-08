@@ -228,7 +228,12 @@ pub(crate) fn resolve_perceived_legal_pressure_from_ids(
 ) -> (Option<InformationId>, u8) {
     pressure_information_ids
         .iter()
-        .filter_map(|id| state.intelligence.get_information(*id))
+        .map(|id| {
+            state
+                .intelligence
+                .get_information(*id)
+                .expect("recruitment pressure snapshot must reference persisted information")
+        })
         .map(|information| {
             (
                 information.id(),

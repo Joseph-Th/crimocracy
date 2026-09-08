@@ -114,6 +114,7 @@ pub enum DecisionResponse {
 pub enum DecisionStatus {
     Pending,
     Resolved,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,10 +138,32 @@ impl DecisionResolution {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DecisionCancellationReason {
+    OperationParticipantDetained(CharacterId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCancellation {
+    cancelled_at: SimTime,
+    reason: DecisionCancellationReason,
+}
+
+impl DecisionCancellation {
+    pub fn cancelled_at(self) -> SimTime {
+        self.cancelled_at
+    }
+
+    pub fn reason(self) -> DecisionCancellationReason {
+        self.reason
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum DecisionLifecycle {
     Pending,
     Resolved(DecisionResolution),
+    Cancelled(DecisionCancellation),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,13 +227,21 @@ impl DecisionRequestRecord {
         match self.lifecycle {
             DecisionLifecycle::Pending => DecisionStatus::Pending,
             DecisionLifecycle::Resolved(_) => DecisionStatus::Resolved,
+            DecisionLifecycle::Cancelled(_) => DecisionStatus::Cancelled,
         }
     }
 
     pub fn resolution(&self) -> Option<DecisionResolution> {
         match self.lifecycle {
-            DecisionLifecycle::Pending => None,
+            DecisionLifecycle::Pending | DecisionLifecycle::Cancelled(_) => None,
             DecisionLifecycle::Resolved(resolution) => Some(resolution),
+        }
+    }
+
+    pub fn cancellation(&self) -> Option<DecisionCancellation> {
+        match self.lifecycle {
+            DecisionLifecycle::Cancelled(cancellation) => Some(cancellation),
+            DecisionLifecycle::Pending | DecisionLifecycle::Resolved(_) => None,
         }
     }
 
@@ -222,8 +253,11 @@ impl DecisionRequestRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DecisionState {
     records: BTreeMap<DecisionRequestId, DecisionRequestRecord>,
+    #[serde(skip)]
     by_operation: BTreeMap<OperationId, BTreeSet<DecisionRequestId>>,
+    #[serde(skip)]
     pending_by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
+    #[serde(skip)]
     pending_by_context: BTreeMap<DecisionPendingKey, DecisionRequestId>,
 }
 
@@ -241,6 +275,28 @@ impl DecisionState {
         Self::default()
     }
 
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_operation.clear();
+        self.pending_by_recipient.clear();
+        self.pending_by_context.clear();
+        for record in self.records.values() {
+            if let Some(operation) = record.context().operation() {
+                self.by_operation
+                    .entry(operation)
+                    .or_default()
+                    .insert(record.id());
+            }
+            if record.status() == DecisionStatus::Pending {
+                self.pending_by_recipient
+                    .entry(record.recipient())
+                    .or_default()
+                    .insert(record.id());
+                self.pending_by_context
+                    .insert(record.context().pending_key(), record.id());
+            }
+        }
+    }
+
     pub fn get_decision(&self, id: DecisionRequestId) -> Option<&DecisionRequestRecord> {
         self.records.get(&id)
     }
@@ -253,7 +309,11 @@ impl DecisionState {
             .get(&recipient)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("pending-recipient index must reference a decision")
+            })
     }
 
     pub fn pending_for_operation(&self, operation: OperationId) -> Option<DecisionRequestId> {
@@ -270,7 +330,11 @@ impl DecisionState {
             .get(&operation)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("operation-decision index must reference a decision")
+            })
     }
 
     /// One live approval per (target organization, candidate): two managers of the same
@@ -337,11 +401,37 @@ impl DecisionState {
     }
 
     pub(crate) fn resolve(&mut self, id: DecisionRequestId, resolution: DecisionResolution) {
+        self.remove_pending_indexes(id);
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated decision disappeared before resolution commit");
+        record.lifecycle = DecisionLifecycle::Resolved(resolution);
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("decision request version counter exhausted");
+    }
+
+    pub(crate) fn cancel(&mut self, id: DecisionRequestId, cancellation: DecisionCancellation) {
+        self.remove_pending_indexes(id);
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated decision disappeared before cancellation commit");
+        record.lifecycle = DecisionLifecycle::Cancelled(cancellation);
+        record.version = record
+            .version
+            .checked_add(1)
+            .expect("decision request version counter exhausted");
+    }
+
+    fn remove_pending_indexes(&mut self, id: DecisionRequestId) {
         let (recipient, pending_key) = {
             let record = self
                 .records
                 .get(&id)
-                .expect("validated decision disappeared before resolution commit");
+                .expect("validated decision disappeared before pending-index removal");
             (record.recipient(), record.context().pending_key())
         };
 
@@ -357,16 +447,6 @@ impl DecisionState {
             Some(id),
             "Derived Data Consistency: pending decision context index disagrees with record"
         );
-
-        let record = self
-            .records
-            .get_mut(&id)
-            .expect("validated decision disappeared before resolution commit");
-        record.lifecycle = DecisionLifecycle::Resolved(resolution);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("decision request version counter exhausted");
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
@@ -394,7 +474,7 @@ impl DecisionState {
                         return false;
                     }
                 }
-                DecisionStatus::Resolved => {
+                DecisionStatus::Resolved | DecisionStatus::Cancelled => {
                     if self
                         .pending_by_recipient
                         .get(&record.recipient())
@@ -437,6 +517,16 @@ impl DecisionState {
             }
         }
         true
+    }
+}
+
+pub(crate) fn build_cancellation(
+    cancelled_at: SimTime,
+    reason: DecisionCancellationReason,
+) -> DecisionCancellation {
+    DecisionCancellation {
+        cancelled_at,
+        reason,
     }
 }
 

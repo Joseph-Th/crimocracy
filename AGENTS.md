@@ -199,7 +199,7 @@ Did you touch persistence, invariants, cross-domain behavior, or verification in
 | Type-check library | `cargo check-fast` | ~0.06s | `src/` compiles |
 | Type-check all | `cargo check-all` | ~0.45s | `src/` + harness surface |
 | One focused test | `cargo test-focused <filter>` | ~0.11s | owning module's `#[cfg(test)]` |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (324 tests) |
+| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (371 tests) |
 | Auto-rerun on save | `.\scripts\watch.cmd [-Filter <p> \| -Harness \| -Check]` | per lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
 | Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one strategy on `[profile.harness]` |
 | Harness smoke, all | `cargo harness` | ~0.5s | all 3 strategies + legal foundation |
@@ -232,12 +232,14 @@ Before handoff, every change that touches state must satisfy all three:
   | `enterprise_rng` | enterprise gross variance + vice-attention roll (both unconditionally per cycle) | `draw_basis_point_variance` + `draw_index(bound=10000)` |
   | `recruitment_rng` | recruitment scoring variance | `draw_index` |
 
-- [ ] **Persistence.** Every future-affecting value is serialized. Save/load path:
+- [ ] **Persistence.** Every future-affecting authoritative value is serialized. Save/load path:
   `build_save(registry, state)` validates `validate_state` + `validate_state_against_registry`
-  before cloning into `SaveEnvelope`; `restore_save` validates format, schema
-  (`CURRENT_STATE_SCHEMA_VERSION`), content revision, indexes, and high-water marks
-  (`src/core/persistence.rs`). Adding a field? Derive `Serialize/Deserialize` and
-  add a round-trip test. Derived indexes are never persisted — rebuild from records.
+  before cloning into `SaveEnvelope`; derived indexes are `serde(skip)` projections and are
+  absent from save bytes. `restore_save` validates format, schema
+  (`CURRENT_STATE_SCHEMA_VERSION`), and content revision, then rebuilds every derived index
+  from authoritative records before validating indexes, high-water marks, and registry-derived
+  values (`src/core/persistence.rs`). Adding a field? Persist it only if it is authoritative or
+  future-affecting; add a round-trip/rebuild test for new state or indexes.
 
 - [ ] **Invariants.** `validate_state(state)` checks ID allocators (no 0, next > max),
   index consistency (every domain `has_consistent_indexes()`), existence of typed
@@ -261,14 +263,15 @@ authoritative minute. Phase order is contractual — comments explain “runs af
  4  apply_initial_evidence_reviews             (first reviewable evidence on active staffed cases)
  5  apply_witness_interview_scheduling
  6  run_investigation_work_phase           (resolve due work with pre-drawn variance)
- 7  apply_autonomous_evidence_arrests      (threshold: 2 independent evidence items)
- 8  apply_detainee_informant_recruitment   (single decision at now-1440)
- 9  apply_informant_disclosures
-10  apply_automatic_legal_support           (policy → retention via canonical path)
-11  apply_cold_case_decay                  (only originated cases; window = 10080 min)
-12  run_business_cycle_phase               (gross variance per due economy)
-13  run_enterprise_cycle_phase             (gross variance + vice roll unconditionally)
-14  apply_daily_payroll  →  apply_due_autonomous_recruitment
+ 7  apply_autonomous_evidence_arrests      (threshold: 2 independent evidence items; custody preempts live responsibilities)
+ 8  apply_autonomous_prosecution_staffing  (refill review seats released by custody)
+ 9  apply_detainee_informant_recruitment   (single decision at now-1440)
+ 10  apply_informant_disclosures
+ 11  apply_automatic_legal_support           (policy → retention via canonical path)
+ 12  apply_cold_case_decay                  (only originated cases; window = 10080 min)
+ 13  run_business_cycle_phase               (gross variance per due economy)
+ 14  run_enterprise_cycle_phase             (gross variance + vice roll unconditionally)
+ 15  apply_daily_payroll  →  apply_due_autonomous_recruitment
     ──► apply_reputation_phase (decay first, then operation + vice consequences)
     ──► apply_due_autonomous_enterprises (reads the resulting current police-fear posture)
     ──► synthesize_executive_brief (sees everything above, last)

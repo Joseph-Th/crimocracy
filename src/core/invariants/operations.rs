@@ -7,7 +7,9 @@ use crate::core::id::{InformationId, LedgerTransactionId, ReportId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
+use crate::decisions::{
+    DecisionCancellationReason, DecisionContext, DecisionResponse, DecisionStatus,
+};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::history::HistoryEventKind;
 use crate::intelligence::{
@@ -44,6 +46,19 @@ fn resolve_abort_started_due(
         });
     };
     Ok((started_at, due_at))
+}
+
+fn detention_abort_matches_arrest(
+    state: &AppState,
+    operation: &OperationRecord,
+    aborted_at: SimTime,
+    character: crate::core::id::CharacterId,
+) -> bool {
+    operation.participants().contains(&character)
+        && state
+            .legal
+            .arrests()
+            .any(|arrest| arrest.character() == character && arrest.arrested_at() == aborted_at)
 }
 
 /// The earliest authored completion deadline among the persisted constraints, if any.
@@ -967,6 +982,29 @@ fn validate_operation_abort_links(
                 operation_history_events,
             )?;
         }
+        (
+            OperationAbortPhase::BeforeStart,
+            OperationAbortCause::ParticipantDetained(character),
+            Some(artifacts),
+        ) => {
+            if operation.started_at().is_some()
+                || operation.resolution_due_at().is_some()
+                || !detention_abort_matches_arrest(state, operation, abort.aborted_at(), character)
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
         (OperationAbortPhase::InProgress, OperationAbortCause::DeadlineMissed, Some(artifacts)) => {
             let (started_at, due_at) = resolve_abort_started_due(operation)?;
             let deadline = resolve_completion_deadline(operation);
@@ -988,9 +1026,78 @@ fn validate_operation_abort_links(
                 operation_history_events,
             )?;
         }
+        (
+            OperationAbortPhase::InProgress,
+            OperationAbortCause::ParticipantDetained(character),
+            Some(artifacts),
+        ) => {
+            let (started_at, due_at) = resolve_abort_started_due(operation)?;
+            if started_at > due_at
+                || abort.aborted_at() < started_at
+                || !detention_abort_matches_arrest(state, operation, abort.aborted_at(), character)
+            {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
         (OperationAbortPhase::InProgress, OperationAbortCause::AuthorityOrder, Some(artifacts)) => {
             let (started_at, due_at) = resolve_abort_started_due(operation)?;
             if started_at > due_at || abort.aborted_at() < started_at {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            }
+            validate_operation_abort_artifacts(
+                state,
+                operation,
+                abort,
+                artifacts,
+                operation_after_action_information,
+                operation_after_action_reports,
+                operation_history_events,
+            )?;
+        }
+        (
+            OperationAbortPhase::AwaitingDecision,
+            OperationAbortCause::ParticipantDetained(character),
+            Some(artifacts),
+        ) => {
+            let (started_at, due_at) = resolve_abort_started_due(operation)?;
+            let Some(paused_at) = operation.awaiting_decision_since() else {
+                return Err(StateValidationError::InvalidOperationAbort {
+                    operation: operation.id(),
+                });
+            };
+            let cancelled_decisions = state
+                .decisions
+                .decisions_for_operation(operation.id())
+                .filter(|decision| {
+                    decision.status() == DecisionStatus::Cancelled
+                        && decision.cancellation().is_some_and(|cancellation| {
+                            cancellation.cancelled_at() == abort.aborted_at()
+                                && cancellation.reason()
+                                    == DecisionCancellationReason::OperationParticipantDetained(
+                                        character,
+                                    )
+                        })
+                })
+                .count();
+            if started_at > due_at
+                || started_at > paused_at
+                || paused_at > abort.aborted_at()
+                || cancelled_decisions != 1
+                || !detention_abort_matches_arrest(state, operation, abort.aborted_at(), character)
+            {
                 return Err(StateValidationError::InvalidOperationAbort {
                     operation: operation.id(),
                 });
@@ -1214,6 +1321,7 @@ fn validate_operation_abort_links(
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed, None)
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_), None)
         | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_), None)
+        | (OperationAbortPhase::BeforeStart, OperationAbortCause::ParticipantDetained(_), None)
         | (OperationAbortPhase::InProgress, _, None)
         | (OperationAbortPhase::InProgress, OperationAbortCause::Decision(_), Some(_))
         | (OperationAbortPhase::AwaitingDecision, _, None)
@@ -1266,7 +1374,8 @@ fn validate_operation_abort_artifacts(
             .map(|response| (response.authority(), response.neighborhood())),
         OperationAbortCause::AuthorityOrder
         | OperationAbortCause::Decision(_)
-        | OperationAbortCause::DeadlineMissed => None,
+        | OperationAbortCause::DeadlineMissed
+        | OperationAbortCause::ParticipantDetained(_) => None,
     };
     match (
         artifacts.police_activity_information(),
@@ -1343,6 +1452,9 @@ fn validate_operation_abort_artifacts(
                                     .contains(&EntityRef::Neighborhood(response.neighborhood()))
                         }),
                     OperationAbortCause::DeadlineMissed => true,
+                    OperationAbortCause::ParticipantDetained(character) => {
+                        entry.entities.contains(&EntityRef::Character(character))
+                    }
                 }
         })
     {
@@ -1386,6 +1498,9 @@ fn validate_operation_abort_artifacts(
                             .contains(&EntityRef::Neighborhood(response.neighborhood()))
                 }),
             OperationAbortCause::DeadlineMissed => false,
+            OperationAbortCause::ParticipantDetained(character) => !history
+                .entities()
+                .contains(&EntityRef::Character(character)),
         }
     {
         return Err(StateValidationError::InvalidOperationAbort {

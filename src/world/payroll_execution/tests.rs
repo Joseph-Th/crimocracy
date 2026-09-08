@@ -139,6 +139,10 @@ fn funded_payroll_moves_wages_into_member_pockets() {
     let outcome = &outcomes[0];
     assert_eq!(outcome.organization(), fixture.organization);
     assert_eq!(outcome.short(), Money::ZERO);
+    assert!(
+        outcome.transaction().is_some(),
+        "a funded payroll must expose its canonical ledger transaction"
+    );
     assert_eq!(
         outcome.paid(),
         per_member
@@ -178,6 +182,84 @@ fn funded_payroll_moves_wages_into_member_pockets() {
             .social
             .get_relationship(fixture.member, fixture.boss)
             .is_none()
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn accounted_funds_are_available_for_payroll_but_settlement_balances_are_not() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let accounted = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted payroll reserve should validate");
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("settlement fixture should validate");
+    let owed = registry
+        .upkeep()
+        .per_member_daily()
+        .checked_mul(2)
+        .expect("two-member payroll should fit money");
+    credit_account(&mut fixture.state, fixture.boss, accounted, owed.cents());
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        settlement,
+        owed.cents() * 10,
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("accounted funds should fund ordinary wages")
+        .into_iter()
+        .find(|outcome| outcome.organization() == fixture.organization)
+        .expect("staffed organization should run payroll");
+
+    assert_eq!(outcome.paid(), owed);
+    assert_eq!(outcome.short(), Money::ZERO);
+    let transaction = fixture
+        .state
+        .finance()
+        .get_transaction(
+            outcome
+                .transaction()
+                .expect("funded payroll must expose its ledger transaction"),
+        )
+        .expect("payroll ledger transaction should persist");
+    assert!(transaction.postings().iter().any(|posting| {
+        posting.account == accounted && posting.amount == owed.checked_neg().expect("owed negates")
+    }));
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(accounted)
+            .expect("accounted reserve should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(settlement)
+            .expect("settlement account should persist")
+            .balance(),
+        Money::from_cents(owed.cents() * 10),
+        "settlement balances are ledger counterparties, not spendable payroll liquidity"
     );
     validate_invariants(&fixture.state);
 }

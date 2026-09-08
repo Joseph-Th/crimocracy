@@ -1259,18 +1259,36 @@ pub fn acquire_harbor_front(
         .get_business(crimocracy::world::BusinessKind::Hospitality)
         .economics()
         .acquisition_cost();
-    let accounted = scenario
+    let funding_accounts: BTreeSet<_> = scenario
         .state
         .finance()
-        .get_account(scenario.accounted_funds)
-        .expect("accounted-funds account must persist")
-        .balance();
-    if accounted < price {
+        .accounts_for(FinancialOwner::Organization(scenario.player))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.id())
+        .collect();
+    let accounted_cents = funding_accounts
+        .iter()
+        .map(|account| {
+            scenario
+                .state
+                .finance()
+                .get_account(*account)
+                .expect("accounted-funds index must resolve")
+                .balance()
+                .cents()
+                .max(0)
+        })
+        .fold(0_i128, |total, cents| {
+            (total + i128::from(cents)).min(i128::from(price.cents()))
+        });
+    if accounted_cents < i128::from(price.cents()) {
         if metrics.acquisition_rejections == 0 && narrative {
             println!(
                 "[ACQUIRE] The seller wants {} for the harbor club; our accounted books hold only {}. The deal waits for clean money.",
                 format_cents(price.cents()),
-                format_cents(accounted.cents()),
+                format_cents(
+                    i64::try_from(accounted_cents).expect("accounted total is price-bounded")
+                ),
             );
         }
         metrics.acquisition_rejections = metrics.acquisition_rejections.saturating_add(1);
@@ -1289,7 +1307,7 @@ pub fn acquire_harbor_front(
         BusinessAcquisitionDraft {
             organization: scenario.player,
             business: scenario.expansion_front,
-            funding_account: scenario.accounted_funds,
+            funding_accounts,
         },
     )?
     .commit(&mut scenario.state)?;

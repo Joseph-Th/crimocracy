@@ -359,7 +359,7 @@ fn validate_organization_change_release(
 ) -> Result<(), WorldError> {
     if let Some(case) = state
         .legal
-        .prosecution_cases_for_lead(character)
+        .reviewing_prosecution_cases_for_prosecutor(character)
         .find(|case| case.status() == ProsecutionCaseStatus::Reviewing)
     {
         return Err(WorldError::ActiveProsecutionAssignment {

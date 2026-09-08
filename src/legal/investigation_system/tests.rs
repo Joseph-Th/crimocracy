@@ -28,6 +28,57 @@ fn rating(value: u8) -> Rating {
 }
 
 #[test]
+fn investigation_subject_cannot_be_assigned_to_investigate_their_own_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x5E1F_C45E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Internal Affairs".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Investigated Detective", 95);
+    let replacement = insert_test_investigator(&mut state, police, "Independent Detective", 70);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Internal corruption inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detective)]),
+        },
+    )
+    .expect("case should validate")
+    .commit(&mut state)
+    .expect("case should commit");
+
+    assert_eq!(
+        validate_assign_investigator(&state, investigation, detective)
+            .expect_err("a case subject cannot investigate their own case"),
+        InvestigationError::InvestigatorIsCaseSubject {
+            investigation,
+            investigator: detective,
+        }
+    );
+
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("autonomous staffing should skip conflicted candidates");
+    assert_eq!(staffed, vec![(investigation, replacement)]);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(investigation)
+            .expect("case should persist")
+            .lead_investigator(),
+        Some(replacement)
+    );
+    validate_state(&state).expect("self-investigation rejection should preserve valid state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn investigator_assignment_information_id_exhaustion_is_atomic() {
     let registry = build_registry();
     let mut state = AppState::new(0x1D_A5516E);
@@ -81,10 +132,6 @@ fn investigator_assignment_information_id_exhaustion_is_atomic() {
         .get_investigation(investigation)
         .expect("investigation should persist");
     assert_eq!(after.lead_investigator(), before.lead_investigator());
-    assert_eq!(
-        after.assigned_investigators(),
-        before.assigned_investigators()
-    );
     assert_eq!(after.version(), before.version());
     assert_eq!(after.last_activity_at(), before.last_activity_at());
     assert_eq!(
@@ -145,7 +192,6 @@ fn autonomous_staffing_surfaces_allocator_failure_instead_of_erasing_the_case() 
         .get_investigation(investigation)
         .expect("investigation should persist");
     assert_eq!(record.lead_investigator(), None);
-    assert!(record.assigned_investigators().is_empty());
     assert_eq!(
         state
             .intelligence()
@@ -223,10 +269,7 @@ fn investigation_transition_id_exhaustion_leaves_case_unchanged() {
         .expect("investigation should persist");
     assert_eq!(after.status(), before.status());
     assert_eq!(after.version(), before.version());
-    assert_eq!(
-        after.assigned_investigators(),
-        before.assigned_investigators()
-    );
+    assert_eq!(after.lead_investigator(), before.lead_investigator());
 }
 
 fn insert_test_investigator(
@@ -976,16 +1019,15 @@ fn suspending_a_case_releases_its_investigator_and_resume_restafs_from_the_free_
         .commit(&mut state)
         .expect("suspension should commit");
 
-    // Shelving releases institutional attention: the case holds no investigators, so its
-    // former lead is free to transfer while the shelf sits cold.
+    // Shelving releases institutional attention: the case holds no lead, so its former lead is
+    // free to transfer while the shelf sits cold.
     assert_eq!(
         state
             .legal()
             .get_investigation(investigation)
             .expect("suspended case should exist")
-            .assigned_investigators()
-            .len(),
-        0
+            .lead_investigator(),
+        None
     );
     validate_reassign_character(&state, detective, Some(other_police), None)
         .expect("released detective should be free to transfer")
@@ -1165,7 +1207,6 @@ fn investigator_staffing_is_versioned_indexed_and_blocks_foreign_reassignment() 
         .get_investigation(investigation)
         .expect("investigation should exist");
     assert_eq!(record.lead_investigator(), Some(first));
-    assert_eq!(record.assigned_investigators().len(), 1);
     assert_eq!(
         state
             .legal()
@@ -1748,10 +1789,6 @@ fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension()
     assert_eq!(after.status(), InvestigationStatus::Active);
     assert_eq!(after.version(), before.version());
     assert_eq!(after.lead_investigator(), before.lead_investigator());
-    assert_eq!(
-        after.assigned_investigators(),
-        before.assigned_investigators()
-    );
     validate_state(&state).expect("failed cold-case decay must leave state structurally valid");
     validate_invariants(&state);
 }

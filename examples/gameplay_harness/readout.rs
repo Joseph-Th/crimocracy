@@ -897,9 +897,10 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (house fee {}, accounted balance {}), books refused {} over-capacity request(s), vice inquiries drawn {}",
+        "        money: laundered {} gross through the front's books (house fee {}, accounted-payroll spend {}, accounted balance {}), books refused {} over-capacity request(s), vice inquiries drawn {}",
         optional_cents(Some(metrics.laundered_gross_cents)),
         optional_cents(Some(metrics.launder_fee_cents)),
+        optional_cents(Some(metrics.payroll_accounted_spent_cents)),
         optional_cents(metrics.accounted_balance_cents),
         metrics.laundering_capacity_rejections,
         metrics.vice_inquiries_drawn,
@@ -1415,6 +1416,7 @@ pub fn abort_cause_label(cause: OperationAbortCause) -> String {
         OperationAbortCause::Decision(id) => format!("decision request {id}"),
         OperationAbortCause::PoliceArrival(id) => format!("police arrival {id}"),
         OperationAbortCause::DeadlineMissed => "missed deadline".to_owned(),
+        OperationAbortCause::ParticipantDetained(id) => format!("participant detention {id}"),
     }
 }
 

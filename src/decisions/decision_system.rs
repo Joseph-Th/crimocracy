@@ -8,8 +8,9 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::decisions::{
-    DecisionContext, DecisionRecordParts, DecisionRequestDraft, DecisionRequestRecord,
-    DecisionResponse, DecisionStatus, RecruitmentApprovalContext, RecruitmentApprovalRequestDraft,
+    DecisionCancellationReason, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
+    DecisionRequestRecord, DecisionResponse, DecisionStatus, RecruitmentApprovalContext,
+    RecruitmentApprovalRequestDraft, build_cancellation,
     build_recruitment_approval_authority_snapshot, build_recruitment_approval_context,
     build_resolution,
 };
@@ -18,11 +19,11 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crate::legal::PoliceResponseStatus;
-use crate::operations::operation_system::{
-    OperationError, ValidatedOperationAbort, has_operation_deadline_fully_passed,
-    validate_deadline_missed_operation, validate_decision_abort_operation,
+use crate::operations::operation_abort::{
+    ValidatedOperationAbort, validate_deadline_missed_operation, validate_decision_abort_operation,
     validate_police_arrival_abort_if_applicable,
 };
+use crate::operations::operation_system::{OperationError, has_operation_deadline_fully_passed};
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::recruitment::RecruitmentDraft;
 use crate::recruitment::recruitment_system::{
@@ -112,6 +113,14 @@ pub enum DecisionError {
     MissingDecision(DecisionRequestId),
     #[error("decision {0} is no longer pending")]
     DecisionNotPending(DecisionRequestId),
+    #[error(
+        "decision {decision} cannot be cancelled because character {character} is not a participant in operation {operation}"
+    )]
+    InvalidDetentionCancellation {
+        decision: DecisionRequestId,
+        operation: OperationId,
+        character: CharacterId,
+    },
     #[error("organization {resolver} cannot resolve decision {decision} owned by {recipient}")]
     InvalidResolver {
         decision: DecisionRequestId,
@@ -147,6 +156,108 @@ pub enum DecisionError {
     Operation(#[from] OperationError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedOperationDecisionCancellation {
+    decision: DecisionRequestId,
+    operation: OperationId,
+    character: CharacterId,
+    expected_decision_version: u32,
+    cancelled_at: SimTime,
+}
+
+impl ValidatedOperationDecisionCancellation {
+    pub(crate) fn decision(&self) -> DecisionRequestId {
+        self.decision
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), DecisionError> {
+        let decision = state
+            .decisions
+            .get_decision(self.decision)
+            .ok_or(DecisionError::MissingDecision(self.decision))?;
+        if decision.version() != self.expected_decision_version {
+            return Err(DecisionError::StaleDecision {
+                decision: self.decision,
+                expected: self.expected_decision_version,
+                found: decision.version(),
+            });
+        }
+        if decision.status() != DecisionStatus::Pending {
+            return Err(DecisionError::DecisionNotPending(self.decision));
+        }
+        if state.now() != self.cancelled_at {
+            return Err(DecisionError::StaleResolutionTime {
+                expected: self.cancelled_at,
+                found: state.now(),
+            });
+        }
+        let operation = state
+            .operations
+            .get_operation(self.operation)
+            .ok_or(DecisionError::MissingOperation(self.operation))?;
+        if operation.status() != OperationStatus::AwaitingDecision
+            || state.decisions.pending_for_operation(self.operation) != Some(self.decision)
+            || decision.context().operation() != Some(self.operation)
+            || !operation.participants().contains(&self.character)
+        {
+            return Err(DecisionError::InvalidDetentionCancellation {
+                decision: self.decision,
+                operation: self.operation,
+                character: self.character,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        state.decisions.cancel(
+            self.decision,
+            build_cancellation(
+                self.cancelled_at,
+                DecisionCancellationReason::OperationParticipantDetained(self.character),
+            ),
+        );
+    }
+}
+
+pub(crate) fn validate_cancel_operation_decision_for_detention(
+    state: &AppState,
+    operation: OperationId,
+    character: CharacterId,
+) -> Result<Option<ValidatedOperationDecisionCancellation>, DecisionError> {
+    let operation_record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(DecisionError::MissingOperation(operation))?;
+    if operation_record.status() != OperationStatus::AwaitingDecision {
+        return Ok(None);
+    }
+    let decision_id = state
+        .decisions
+        .pending_for_operation(operation)
+        .ok_or(DecisionError::OperationNotAwaitingDecision { operation })?;
+    let decision = state
+        .decisions
+        .get_decision(decision_id)
+        .ok_or(DecisionError::MissingDecision(decision_id))?;
+    if !operation_record.participants().contains(&character)
+        || decision.context().operation() != Some(operation)
+    {
+        return Err(DecisionError::InvalidDetentionCancellation {
+            decision: decision_id,
+            operation,
+            character,
+        });
+    }
+    Ok(Some(ValidatedOperationDecisionCancellation {
+        decision: decision_id,
+        operation,
+        character,
+        expected_decision_version: decision.version(),
+        cancelled_at: state.now(),
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

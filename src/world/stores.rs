@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CharacterStore {
     records: BTreeMap<CharacterId, CharacterRecord>,
+    #[serde(skip)]
     by_organization: BTreeMap<OrganizationId, BTreeSet<CharacterId>>,
+    #[serde(skip)]
     by_supervisor: BTreeMap<CharacterId, BTreeSet<CharacterId>>,
 }
 impl CharacterStore {
@@ -73,11 +75,16 @@ impl CharacterStore {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct BusinessStore {
     records: BTreeMap<BusinessId, BusinessRecord>,
+    #[serde(skip)]
     by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<BusinessId>>,
+    #[serde(skip)]
     by_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
+    #[serde(skip)]
     by_character_owner: BTreeMap<CharacterId, BTreeSet<BusinessId>>,
+    #[serde(skip)]
     by_historical_organization_owner: BTreeMap<OrganizationId, BTreeSet<BusinessId>>,
     ownership_changes: BTreeMap<BusinessOwnershipChangeId, BusinessOwnershipChangeRecord>,
+    #[serde(skip)]
     ownership_change_by_business_version: BTreeMap<(BusinessId, u32), BusinessOwnershipChangeId>,
 }
 impl BusinessStore {
@@ -204,6 +211,70 @@ impl WorldState {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.characters.by_organization.clear();
+        self.characters.by_supervisor.clear();
+        for record in self.characters.records.values() {
+            if let Some(organization) = record.organization() {
+                self.characters
+                    .by_organization
+                    .entry(organization)
+                    .or_default()
+                    .insert(record.id());
+            }
+            if let Some(supervisor) = record.supervisor() {
+                self.characters
+                    .by_supervisor
+                    .entry(supervisor)
+                    .or_default()
+                    .insert(record.id());
+            }
+        }
+
+        self.businesses.by_neighborhood.clear();
+        self.businesses.by_organization_owner.clear();
+        self.businesses.by_character_owner.clear();
+        self.businesses.by_historical_organization_owner.clear();
+        self.businesses.ownership_change_by_business_version.clear();
+        for record in self.businesses.records.values() {
+            self.businesses
+                .by_neighborhood
+                .entry(record.neighborhood())
+                .or_default()
+                .insert(record.id());
+            match record.owner() {
+                BusinessOwner::Independent => {}
+                BusinessOwner::Organization(organization) => {
+                    self.businesses
+                        .by_organization_owner
+                        .entry(organization)
+                        .or_default()
+                        .insert(record.id());
+                }
+                BusinessOwner::Character(character) => {
+                    self.businesses
+                        .by_character_owner
+                        .entry(character)
+                        .or_default()
+                        .insert(record.id());
+                }
+            }
+        }
+        for change in self.businesses.ownership_changes.values() {
+            self.businesses.ownership_change_by_business_version.insert(
+                (change.business(), change.resulting_business_version()),
+                change.id(),
+            );
+            if let BusinessOwner::Organization(organization) = change.new_owner() {
+                self.businesses
+                    .by_historical_organization_owner
+                    .entry(organization)
+                    .or_default()
+                    .insert(change.business());
+            }
+        }
+    }
     pub fn get_organization(&self, id: OrganizationId) -> Option<&OrganizationRecord> {
         self.organizations.get(&id)
     }
@@ -240,7 +311,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|character_id| self.characters.records.get(character_id))
+            .map(|character_id| {
+                self.characters
+                    .records
+                    .get(character_id)
+                    .expect("organization-character index must reference a character")
+            })
     }
     pub fn direct_reports(&self, id: CharacterId) -> impl Iterator<Item = &CharacterRecord> {
         self.characters
@@ -248,7 +324,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|character_id| self.characters.records.get(character_id))
+            .map(|character_id| {
+                self.characters
+                    .records
+                    .get(character_id)
+                    .expect("supervision index must reference a character")
+            })
     }
     pub fn businesses_in_neighborhood(
         &self,
@@ -259,7 +340,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|business_id| self.businesses.records.get(business_id))
+            .map(|business_id| {
+                self.businesses
+                    .records
+                    .get(business_id)
+                    .expect("neighborhood-business index must reference a business")
+            })
     }
     pub fn businesses_ever_owned_by_organization(
         &self,
@@ -270,7 +356,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|business_id| self.businesses.records.get(business_id))
+            .map(|business_id| {
+                self.businesses
+                    .records
+                    .get(business_id)
+                    .expect("historical business-owner index must reference a business")
+            })
     }
     pub fn businesses_owned_by_organization(
         &self,
@@ -281,7 +372,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|business_id| self.businesses.records.get(business_id))
+            .map(|business_id| {
+                self.businesses
+                    .records
+                    .get(business_id)
+                    .expect("organization business-owner index must reference a business")
+            })
     }
     pub fn businesses_owned_by_character(
         &self,
@@ -292,7 +388,12 @@ impl WorldState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|business_id| self.businesses.records.get(business_id))
+            .map(|business_id| {
+                self.businesses
+                    .records
+                    .get(business_id)
+                    .expect("character business-owner index must reference a business")
+            })
     }
     pub fn business_ownership_history(
         &self,
@@ -303,11 +404,16 @@ impl WorldState {
             .records
             .get(&business)
             .map_or(0, BusinessRecord::version);
-        (1..=version).filter_map(move |business_version| {
-            self.businesses
+        (1..=version).map(move |business_version| {
+            let change = self
+                .businesses
                 .ownership_change_by_business_version
                 .get(&(business, business_version))
-                .and_then(|id| self.businesses.ownership_changes.get(id))
+                .expect("business version must have an ownership-change index entry");
+            self.businesses
+                .ownership_changes
+                .get(change)
+                .expect("ownership-change index must reference an ownership record")
         })
     }
     pub fn get_business_ownership_change_for_version(
@@ -318,7 +424,12 @@ impl WorldState {
         self.businesses
             .ownership_change_by_business_version
             .get(&(business, version))
-            .and_then(|id| self.businesses.ownership_changes.get(id))
+            .map(|id| {
+                self.businesses
+                    .ownership_changes
+                    .get(id)
+                    .expect("business ownership-version index must reference a change record")
+            })
     }
     pub fn business_owner_at(&self, business: BusinessId, at: SimTime) -> Option<BusinessOwner> {
         self.business_ownership_history(business)

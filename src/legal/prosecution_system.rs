@@ -23,6 +23,7 @@ use crate::legal::{
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, OrganizationKind};
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -40,16 +41,16 @@ pub enum ProsecutionError {
     MissingProsecutorOffice(OrganizationId),
     #[error("organization {0} is not an active prosecutor office")]
     InvalidProsecutorOffice(OrganizationId),
-    #[error("lead prosecutor {0} does not exist")]
-    MissingLeadProsecutor(CharacterId),
-    #[error("lead prosecutor {prosecutor} is not an active member of office {office}")]
-    InvalidLeadProsecutor {
+    #[error("prosecutor {0} does not exist")]
+    MissingProsecutor(CharacterId),
+    #[error("prosecutor {prosecutor} is not an active member of office {office}")]
+    InvalidProsecutor {
         prosecutor: CharacterId,
         office: OrganizationId,
     },
-    #[error("lead prosecutor {0} is detained")]
-    DetainedLeadProsecutor(CharacterId),
-    #[error("lead prosecutor {0} has no LegalKnowledge capability")]
+    #[error("prosecutor {0} is detained")]
+    DetainedProsecutor(CharacterId),
+    #[error("prosecutor {0} has no LegalKnowledge capability")]
     MissingLegalKnowledge(CharacterId),
     #[error("defendant {0} does not exist")]
     MissingDefendant(CharacterId),
@@ -79,6 +80,8 @@ pub enum ProsecutionError {
     MissingProsecutionCase(ProsecutionCaseId),
     #[error("prosecution case {case} is not open for prosecutorial action")]
     CaseNotOpen { case: ProsecutionCaseId },
+    #[error("prosecution case {case} has no currently assigned prosecutor")]
+    CaseUnstaffed { case: ProsecutionCaseId },
     #[error("evidence {evidence} is already available to prosecution case {case}")]
     EvidenceAlreadyReferred {
         case: ProsecutionCaseId,
@@ -107,7 +110,7 @@ pub enum ProsecutionError {
     #[error(
         "lead prosecutor {prosecutor} changed after referral validation; expected version {expected}, found {found}"
     )]
-    StaleLeadProsecutor {
+    StaleProsecutor {
         prosecutor: CharacterId,
         expected: u32,
         found: u32,
@@ -130,16 +133,224 @@ pub enum ProsecutionError {
     IdExhaustion(#[from] IdExhaustionError),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ProsecutionStaffingError {
+    #[error("prosecution case {0} does not exist")]
+    MissingCase(ProsecutionCaseId),
+    #[error("prosecution case {0} is not under review")]
+    CaseNotReviewing(ProsecutionCaseId),
+    #[error("prosecution case {case} already has prosecutor {prosecutor} assigned")]
+    CaseAlreadyStaffed {
+        case: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    },
+    #[error("character {0} is not an eligible prosecutor for this case")]
+    InvalidProsecutor(CharacterId),
+    #[error("character {0} is detained and cannot staff a prosecution case")]
+    DetainedProsecutor(CharacterId),
+    #[error("prosecution case {case} changed after staffing validation")]
+    StaleCase { case: ProsecutionCaseId },
+    #[error("prosecutor {prosecutor} changed after staffing validation")]
+    StaleProsecutor { prosecutor: CharacterId },
+    #[error("prosecutor {prosecutor}'s reviewing assignments changed after detention preflight")]
+    DetentionAssignmentsChanged { prosecutor: CharacterId },
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedProsecutorDetentionRelease {
+    prosecutor: CharacterId,
+    assignments: Vec<(ProsecutionCaseId, u32)>,
+}
+
+impl ValidatedProsecutorDetentionRelease {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), ProsecutionStaffingError> {
+        let current: Vec<_> = state
+            .legal
+            .reviewing_prosecution_cases_for_prosecutor(self.prosecutor)
+            .filter(|case| case.status() == ProsecutionCaseStatus::Reviewing)
+            .map(|case| (case.id(), case.version()))
+            .collect();
+        if current != self.assignments {
+            return Err(ProsecutionStaffingError::DetentionAssignmentsChanged {
+                prosecutor: self.prosecutor,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        for (case, _) in self.assignments {
+            state
+                .legal
+                .release_prosecution_case_prosecutor_for_detention(case, self.prosecutor);
+        }
+    }
+}
+
+pub(crate) fn validate_release_prosecution_cases_for_detention(
+    state: &AppState,
+    prosecutor: CharacterId,
+) -> Result<ValidatedProsecutorDetentionRelease, ProsecutionStaffingError> {
+    let assignments: Vec<_> = state
+        .legal
+        .reviewing_prosecution_cases_for_prosecutor(prosecutor)
+        .filter(|case| case.status() == ProsecutionCaseStatus::Reviewing)
+        .map(|case| (case.id(), case.version()))
+        .collect();
+    // Keep an empty token too. A prosecutor can acquire a reviewing assignment after arrest
+    // validation without changing their character version; the empty snapshot is what makes
+    // that newly acquired responsibility stale the arrest instead of surviving custody.
+    Ok(ValidatedProsecutorDetentionRelease {
+        prosecutor,
+        assignments,
+    })
+}
+
+#[derive(Debug)]
+pub struct ValidatedProsecutorAssignment {
+    case: ProsecutionCaseId,
+    prosecutor: CharacterId,
+    expected_case_version: u32,
+    expected_prosecutor_version: u32,
+}
+
+impl ValidatedProsecutorAssignment {
+    pub fn commit(self, state: &mut AppState) -> Result<(), ProsecutionStaffingError> {
+        let case = state
+            .legal
+            .get_prosecution_case(self.case)
+            .ok_or(ProsecutionStaffingError::MissingCase(self.case))?;
+        if case.version() != self.expected_case_version
+            || case.status() != ProsecutionCaseStatus::Reviewing
+            || case.assigned_prosecutor().is_some()
+        {
+            return Err(ProsecutionStaffingError::StaleCase { case: self.case });
+        }
+        let prosecutor = state
+            .world
+            .get_character(self.prosecutor)
+            .ok_or(ProsecutionStaffingError::InvalidProsecutor(self.prosecutor))?;
+        if prosecutor.version() != self.expected_prosecutor_version {
+            return Err(ProsecutionStaffingError::StaleProsecutor {
+                prosecutor: self.prosecutor,
+            });
+        }
+        validate_prosecutor_assignment_dependencies(state, self.case, self.prosecutor)?;
+        state
+            .legal
+            .set_prosecution_case_prosecutor(self.case, self.prosecutor);
+        Ok(())
+    }
+}
+
+pub fn validate_assign_prosecutor(
+    state: &AppState,
+    case: ProsecutionCaseId,
+    prosecutor: CharacterId,
+) -> Result<ValidatedProsecutorAssignment, ProsecutionStaffingError> {
+    validate_prosecutor_assignment_dependencies(state, case, prosecutor)?;
+    let case_record = state
+        .legal
+        .get_prosecution_case(case)
+        .expect("validated prosecution case must exist");
+    let prosecutor_record = state
+        .world
+        .get_character(prosecutor)
+        .expect("validated prosecutor must exist");
+    Ok(ValidatedProsecutorAssignment {
+        case,
+        prosecutor,
+        expected_case_version: case_record.version(),
+        expected_prosecutor_version: prosecutor_record.version(),
+    })
+}
+
+fn validate_prosecutor_assignment_dependencies(
+    state: &AppState,
+    case: ProsecutionCaseId,
+    prosecutor: CharacterId,
+) -> Result<(), ProsecutionStaffingError> {
+    let case_record = state
+        .legal
+        .get_prosecution_case(case)
+        .ok_or(ProsecutionStaffingError::MissingCase(case))?;
+    if case_record.status() != ProsecutionCaseStatus::Reviewing {
+        return Err(ProsecutionStaffingError::CaseNotReviewing(case));
+    }
+    if let Some(assigned) = case_record.assigned_prosecutor() {
+        return Err(ProsecutionStaffingError::CaseAlreadyStaffed {
+            case,
+            prosecutor: assigned,
+        });
+    }
+    let record = state
+        .world
+        .get_character(prosecutor)
+        .ok_or(ProsecutionStaffingError::InvalidProsecutor(prosecutor))?;
+    if record.organization() != Some(case_record.prosecutor_office())
+        || record.capability(CapabilityKind::LegalKnowledge).is_none()
+    {
+        return Err(ProsecutionStaffingError::InvalidProsecutor(prosecutor));
+    }
+    if state
+        .legal
+        .active_arrest_for_character(prosecutor)
+        .is_some()
+    {
+        return Err(ProsecutionStaffingError::DetainedProsecutor(prosecutor));
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_autonomous_prosecution_staffing(
+    state: &mut AppState,
+) -> Result<Vec<(ProsecutionCaseId, CharacterId)>, ProsecutionStaffingError> {
+    let cases: Vec<_> = state
+        .legal
+        .reviewing_prosecution_cases_without_prosecutor()
+        .collect();
+    let mut staffed = Vec::new();
+    for case in cases {
+        let office = state
+            .legal
+            .get_prosecution_case(case)
+            .ok_or(ProsecutionStaffingError::MissingCase(case))?
+            .prosecutor_office();
+        let prosecutor = state
+            .world
+            .characters_in_organization(office)
+            .filter(|record| {
+                state
+                    .legal
+                    .active_arrest_for_character(record.id())
+                    .is_none()
+            })
+            .filter_map(|record| {
+                record
+                    .capability(CapabilityKind::LegalKnowledge)
+                    .map(|rating| (record.id(), rating.value()))
+            })
+            .min_by_key(|(prosecutor, capability)| (Reverse(*capability), *prosecutor))
+            .map(|(prosecutor, _)| prosecutor);
+        let Some(prosecutor) = prosecutor else {
+            continue;
+        };
+        validate_assign_prosecutor(state, case, prosecutor)?.commit(state)?;
+        staffed.push((case, prosecutor));
+    }
+    Ok(staffed)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReferralDependencies {
     defendant: CharacterId,
     source_investigation: InvestigationId,
     source_authority: OrganizationId,
     prosecutor_office: OrganizationId,
-    lead_prosecutor: CharacterId,
+    prosecutor: CharacterId,
     arrest_version: u32,
     investigation_version: u32,
-    lead_version: u32,
+    prosecutor_version: u32,
 }
 
 pub struct ValidatedProsecutionCaseOpening {
@@ -200,7 +411,7 @@ impl ValidatedProsecutionCaseOpening {
                     source_investigation: self.dependencies.source_investigation,
                     source_authority: self.dependencies.source_authority,
                     prosecutor_office: self.draft.prosecutor_office,
-                    lead_prosecutor: self.draft.lead_prosecutor,
+                    assigned_prosecutor: Some(self.draft.prosecutor),
                 },
                 referrals: super::ProsecutionCaseReferrals {
                     evidence: case_evidence,
@@ -215,6 +426,7 @@ impl ValidatedProsecutionCaseOpening {
                 resolution_artifacts: super::ProsecutionCaseResolutionArtifacts {
                     resolution_information: None,
                     resolution_report: None,
+                    resolution_prosecutor: None,
                 },
                 version: 1,
             },
@@ -224,6 +436,7 @@ impl ValidatedProsecutionCaseOpening {
                 source_investigation: self.dependencies.source_investigation,
                 source_authority: self.dependencies.source_authority,
                 prosecutor_office: self.draft.prosecutor_office,
+                prosecutor: self.draft.prosecutor,
                 evidence: self.draft.evidence,
                 referred_at: self.referred_at,
                 information,
@@ -247,7 +460,7 @@ pub fn validate_open_prosecution_case(
             source_investigation: dependencies.source_investigation,
             source_authority: dependencies.source_authority,
             prosecutor_office: draft.prosecutor_office,
-            lead_prosecutor: draft.lead_prosecutor,
+            prosecutor: draft.prosecutor,
             evidence: &draft.evidence,
             referred_at,
             initial: true,
@@ -326,24 +539,25 @@ fn validate_opening_dependencies(
             draft.prosecutor_office,
         ));
     }
-    let lead = validate_lead_prosecutor(state, draft.prosecutor_office, draft.lead_prosecutor)?;
+    let prosecutor_record = validate_prosecutor(state, draft.prosecutor_office, draft.prosecutor)?;
     Ok(ReferralDependencies {
         defendant: arrest.character(),
         source_investigation: arrest.investigation(),
         source_authority: arrest.authority(),
         prosecutor_office: draft.prosecutor_office,
-        lead_prosecutor: draft.lead_prosecutor,
+        prosecutor: draft.prosecutor,
         arrest_version: arrest.version(),
         investigation_version: investigation.version(),
-        lead_version: lead.version(),
+        prosecutor_version: prosecutor_record.version(),
     })
 }
 
 pub struct ValidatedProsecutionReferral {
     draft: ProsecutionReferralDraft,
+    prosecutor: CharacterId,
     expected_case_version: u32,
     expected_investigation_version: u32,
-    expected_lead_version: u32,
+    expected_prosecutor_version: u32,
     referred_at: SimTime,
     information: ValidatedInformation,
     report: ValidatedReport,
@@ -383,13 +597,24 @@ impl ValidatedProsecutionReferral {
                 found: investigation.version(),
             });
         }
-        let lead = state.world.get_character(case.lead_prosecutor()).ok_or(
-            ProsecutionError::MissingLeadProsecutor(case.lead_prosecutor()),
-        )?;
-        if lead.version() != self.expected_lead_version {
-            return Err(ProsecutionError::StaleLeadProsecutor {
+        if case.assigned_prosecutor() != Some(self.prosecutor) {
+            return Err(ProsecutionError::StaleProsecutor {
+                prosecutor: self.prosecutor,
+                expected: self.expected_prosecutor_version,
+                found: state
+                    .world
+                    .get_character(self.prosecutor)
+                    .map_or(0, |lead| lead.version()),
+            });
+        }
+        let lead = state
+            .world
+            .get_character(self.prosecutor)
+            .ok_or(ProsecutionError::MissingProsecutor(self.prosecutor))?;
+        if lead.version() != self.expected_prosecutor_version {
+            return Err(ProsecutionError::StaleProsecutor {
                 prosecutor: lead.id(),
-                expected: self.expected_lead_version,
+                expected: self.expected_prosecutor_version,
                 found: lead.version(),
             });
         }
@@ -417,6 +642,7 @@ impl ValidatedProsecutionReferral {
                 source_investigation,
                 source_authority,
                 prosecutor_office,
+                prosecutor: self.prosecutor,
                 evidence: self.draft.evidence,
                 referred_at: self.referred_at,
                 information,
@@ -435,10 +661,11 @@ pub fn validate_supplement_prosecution_case(
         .legal
         .get_investigation(case.source_investigation())
         .expect("validated source investigation must exist");
+    let prosecutor = assigned_prosecutor(case)?;
     let lead = state
         .world
-        .get_character(case.lead_prosecutor())
-        .expect("validated lead prosecutor must exist");
+        .get_character(prosecutor)
+        .expect("validated assigned prosecutor must exist");
     let referred_at = state.now();
     let (information, report) = validate_referral_artifacts(
         state,
@@ -447,7 +674,7 @@ pub fn validate_supplement_prosecution_case(
             source_investigation: case.source_investigation(),
             source_authority: case.source_authority(),
             prosecutor_office: case.prosecutor_office(),
-            lead_prosecutor: case.lead_prosecutor(),
+            prosecutor,
             evidence: &draft.evidence,
             referred_at,
             initial: false,
@@ -455,9 +682,10 @@ pub fn validate_supplement_prosecution_case(
     )?;
     Ok(ValidatedProsecutionReferral {
         draft,
+        prosecutor,
         expected_case_version: case.version(),
         expected_investigation_version: investigation.version(),
-        expected_lead_version: lead.version(),
+        expected_prosecutor_version: lead.version(),
         referred_at,
         information,
         report,
@@ -532,11 +760,17 @@ fn validate_source_case_and_office(
             case.prosecutor_office(),
         ));
     }
-    validate_lead_prosecutor(state, case.prosecutor_office(), case.lead_prosecutor())?;
+    let prosecutor = assigned_prosecutor(case)?;
+    validate_prosecutor(state, case.prosecutor_office(), prosecutor)?;
     Ok(())
 }
 
-fn validate_lead_prosecutor(
+fn assigned_prosecutor(case: &ProsecutionCaseRecord) -> Result<CharacterId, ProsecutionError> {
+    case.assigned_prosecutor()
+        .ok_or(ProsecutionError::CaseUnstaffed { case: case.id() })
+}
+
+fn validate_prosecutor(
     state: &AppState,
     office: OrganizationId,
     prosecutor: CharacterId,
@@ -544,16 +778,16 @@ fn validate_lead_prosecutor(
     let lead = state
         .world
         .get_character(prosecutor)
-        .ok_or(ProsecutionError::MissingLeadProsecutor(prosecutor))?;
+        .ok_or(ProsecutionError::MissingProsecutor(prosecutor))?;
     if lead.organization() != Some(office) {
-        return Err(ProsecutionError::InvalidLeadProsecutor { prosecutor, office });
+        return Err(ProsecutionError::InvalidProsecutor { prosecutor, office });
     }
     if state
         .legal
         .active_arrest_for_character(prosecutor)
         .is_some()
     {
-        return Err(ProsecutionError::DetainedLeadProsecutor(prosecutor));
+        return Err(ProsecutionError::DetainedProsecutor(prosecutor));
     }
     if lead.capability(CapabilityKind::LegalKnowledge).is_none() {
         return Err(ProsecutionError::MissingLegalKnowledge(prosecutor));
@@ -620,13 +854,14 @@ fn validate_opening_versions(
             found: investigation.version(),
         });
     }
-    let lead = state.world.get_character(expected.lead_prosecutor).ok_or(
-        ProsecutionError::MissingLeadProsecutor(expected.lead_prosecutor),
-    )?;
-    if lead.version() != expected.lead_version {
-        return Err(ProsecutionError::StaleLeadProsecutor {
-            prosecutor: expected.lead_prosecutor,
-            expected: expected.lead_version,
+    let lead = state
+        .world
+        .get_character(expected.prosecutor)
+        .ok_or(ProsecutionError::MissingProsecutor(expected.prosecutor))?;
+    if lead.version() != expected.prosecutor_version {
+        return Err(ProsecutionError::StaleProsecutor {
+            prosecutor: expected.prosecutor,
+            expected: expected.prosecutor_version,
             found: lead.version(),
         });
     }
@@ -641,8 +876,9 @@ fn validate_time(state: &AppState, expected: SimTime) -> Result<(), ProsecutionE
 pub struct ValidatedProsecutionCaseResolution {
     case: ProsecutionCaseId,
     resolution: ProsecutionCaseResolution,
+    prosecutor: CharacterId,
     expected_case_version: u32,
-    expected_lead_version: u32,
+    expected_prosecutor_version: u32,
     resolved_at: SimTime,
     information: ValidatedInformation,
     report: ValidatedReport,
@@ -665,13 +901,17 @@ impl ValidatedProsecutionCaseResolution {
                 found: case.version(),
             });
         }
-        let lead = state.world.get_character(case.lead_prosecutor()).ok_or(
-            ProsecutionError::MissingLeadProsecutor(case.lead_prosecutor()),
-        )?;
-        if lead.version() != self.expected_lead_version {
-            return Err(ProsecutionError::StaleLeadProsecutor {
+        if case.assigned_prosecutor() != Some(self.prosecutor) {
+            return Err(ProsecutionError::CaseUnstaffed { case: self.case });
+        }
+        let lead = state
+            .world
+            .get_character(self.prosecutor)
+            .ok_or(ProsecutionError::MissingProsecutor(self.prosecutor))?;
+        if lead.version() != self.expected_prosecutor_version {
+            return Err(ProsecutionError::StaleProsecutor {
                 prosecutor: lead.id(),
-                expected: self.expected_lead_version,
+                expected: self.expected_prosecutor_version,
                 found: lead.version(),
             });
         }
@@ -708,6 +948,7 @@ impl ValidatedProsecutionCaseResolution {
             self.case,
             self.resolution,
             self.resolved_at,
+            self.prosecutor,
             information,
             report,
         );
@@ -740,18 +981,20 @@ fn validate_prosecution_case_resolution(
     resolution: ProsecutionCaseResolution,
 ) -> Result<ValidatedProsecutionCaseResolution, ProsecutionError> {
     let case = validate_resolution_dependencies(state, case_id)?;
+    let prosecutor = assigned_prosecutor(case)?;
     let lead = state
         .world
-        .get_character(case.lead_prosecutor())
-        .expect("validated lead prosecutor must exist");
+        .get_character(prosecutor)
+        .expect("validated assigned prosecutor must exist");
     let resolved_at = state.now();
     let (information, report) =
-        validate_resolution_artifacts(state, case, resolution, resolved_at)?;
+        validate_resolution_artifacts(state, case, prosecutor, resolution, resolved_at)?;
     Ok(ValidatedProsecutionCaseResolution {
         case: case_id,
         resolution,
+        prosecutor,
         expected_case_version: case.version(),
-        expected_lead_version: lead.version(),
+        expected_prosecutor_version: lead.version(),
         resolved_at,
         information,
         report,
@@ -780,7 +1023,8 @@ fn validate_resolution_dependencies(
             case.prosecutor_office(),
         ));
     }
-    validate_lead_prosecutor(state, case.prosecutor_office(), case.lead_prosecutor())?;
+    let prosecutor = assigned_prosecutor(case)?;
+    validate_prosecutor(state, case.prosecutor_office(), prosecutor)?;
     // Resolving the case emits defendant-named artifacts; an inactive defendant cannot be
     // meaningfully reviewed, so resolution must not proceed against one.
     let _ = state
@@ -815,6 +1059,7 @@ pub(crate) fn write_resolution_summary(
 fn validate_resolution_artifacts(
     state: &AppState,
     case: &ProsecutionCaseRecord,
+    prosecutor: CharacterId,
     resolution: ProsecutionCaseResolution,
     resolved_at: SimTime,
 ) -> Result<(ValidatedInformation, ValidatedReport), ProsecutionError> {
@@ -830,7 +1075,7 @@ fn validate_resolution_artifacts(
         .name();
     let lead_name = state
         .world
-        .get_character(case.lead_prosecutor())
+        .get_character(prosecutor)
         .expect("validated lead prosecutor must exist")
         .name();
     let title = match resolution {
@@ -853,7 +1098,7 @@ fn validate_resolution_artifacts(
             holder: KnowledgeHolder::Organization(case.prosecutor_office()),
             source_kind: InformationSourceKind::AfterAction,
             topic: InformationTopic::LegalActivity,
-            source_entity: Some(EntityRef::Character(case.lead_prosecutor())),
+            source_entity: Some(EntityRef::Character(prosecutor)),
             subject: EntityRef::Character(case.defendant()),
             observed_at: resolved_at,
             reliability: Reliability::DirectAccess,
@@ -875,7 +1120,7 @@ fn validate_resolution_artifacts(
                     EntityRef::Character(case.defendant()),
                     EntityRef::Organization(case.source_authority()),
                     EntityRef::Organization(case.prosecutor_office()),
-                    EntityRef::Character(case.lead_prosecutor()),
+                    EntityRef::Character(prosecutor),
                     EntityRef::Investigation(case.source_investigation()),
                 ]),
                 decision: None,
@@ -890,7 +1135,7 @@ struct ReferralArtifactContext<'a> {
     source_investigation: InvestigationId,
     source_authority: OrganizationId,
     prosecutor_office: OrganizationId,
-    lead_prosecutor: CharacterId,
+    prosecutor: CharacterId,
     evidence: &'a BTreeSet<EvidenceId>,
     referred_at: SimTime,
     initial: bool,
@@ -923,7 +1168,7 @@ fn validate_referral_artifacts(
         source_investigation,
         source_authority,
         prosecutor_office,
-        lead_prosecutor,
+        prosecutor,
         evidence,
         referred_at,
         initial,
@@ -982,7 +1227,7 @@ fn validate_referral_artifacts(
                     EntityRef::Character(defendant),
                     EntityRef::Organization(source_authority),
                     EntityRef::Organization(prosecutor_office),
-                    EntityRef::Character(lead_prosecutor),
+                    EntityRef::Character(prosecutor),
                     EntityRef::Investigation(source_investigation),
                 ]),
                 decision: None,

@@ -387,23 +387,29 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
         {
             continue;
         }
-        let Some(enterprise) = state.enterprises.get_enterprise(enterprise_id) else {
-            continue;
-        };
+        let enterprise = state.enterprises.get_enterprise(enterprise_id).ok_or(
+            StateValidationError::InvalidInvestigationActivity {
+                investigation: investigation.id(),
+            },
+        )?;
+        let owner = state.world.get_organization(investigation.owner()).ok_or(
+            StateValidationError::InvalidInvestigationActivity {
+                investigation: investigation.id(),
+            },
+        )?;
         if !investigation
             .notified_organizations()
             .contains(&enterprise.organization())
-            || !state
-                .world
-                .get_organization(investigation.owner())
-                .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+            || owner.kind() != OrganizationKind::LawEnforcement
         {
             continue;
         }
         for evidence_id in investigation.evidence() {
-            let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
-                continue;
-            };
+            let evidence = state.legal.get_evidence(*evidence_id).ok_or(
+                StateValidationError::InvalidInvestigationActivity {
+                    investigation: investigation.id(),
+                },
+            )?;
             if evidence.investigation() == investigation.id()
                 && evidence.custodian() == investigation.owner()
                 && evidence.subject() == EntityRef::Enterprise(enterprise_id)

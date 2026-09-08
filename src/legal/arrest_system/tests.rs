@@ -29,6 +29,160 @@ struct Fixture {
     evidence: EvidenceId,
 }
 
+#[test]
+fn custody_cancels_scheduled_investigation_work_with_arrest_provenance() {
+    use crate::legal::investigation_system::validate_assign_investigator;
+    use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+    use crate::legal::{
+        InvestigationWorkCancellationReason, InvestigationWorkDraft, InvestigationWorkFocus,
+        InvestigationWorkKind, InvestigationWorkStatus,
+    };
+    use crate::world::{CapabilityKind, Rating};
+
+    let mut fixture = fixture();
+    let second_authority = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Internal Affairs Authority".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("second authority should validate");
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Investigated Detective".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(85).expect("investigation capability should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective should validate");
+    let witness_subject = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Separate Case Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("separate case subject should validate");
+    let work_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Detective workload case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(witness_subject)]),
+        },
+    )
+    .expect("work case should validate")
+    .commit(&mut fixture.state)
+    .expect("work case should commit");
+    let work_evidence = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        work_case,
+        witness_subject,
+    );
+    validate_assign_investigator(&fixture.state, work_case, detective)
+        .expect("detective assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+    let work = validate_schedule_investigation_work(
+        &fixture.registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: work_case,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::Evidence(work_evidence),
+        },
+    )
+    .expect("detective work should validate")
+    .commit(&mut fixture.state)
+    .expect("detective work should commit");
+
+    let arrest_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: second_authority,
+            title: "Detective corruption case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detective)]),
+        },
+    )
+    .expect("arrest case should validate")
+    .commit(&mut fixture.state)
+    .expect("arrest case should commit");
+    let arrest_evidence =
+        add_character_evidence(&mut fixture.state, second_authority, arrest_case, detective);
+    let detained_at = fixture.state.now();
+    let arrest = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: detective,
+            investigation: arrest_case,
+            evidence: BTreeSet::from([arrest_evidence]),
+        },
+    )
+    .expect("scheduled detective work should not immunize its owner from custody")
+    .commit(&mut fixture.state)
+    .expect("custody should cancel scheduled work atomically");
+
+    let work_record = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("cancelled work should remain historical");
+    assert_eq!(work_record.status(), InvestigationWorkStatus::Cancelled);
+    assert!(work_record.resolution().is_none());
+    let cancellation = work_record
+        .cancellation()
+        .expect("cancelled work should retain custody provenance");
+    assert_eq!(cancellation.cancelled_at(), detained_at);
+    assert_eq!(
+        cancellation.reason(),
+        InvestigationWorkCancellationReason::InvestigatorDetained(arrest)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .work_for_investigator(detective)
+            .all(|record| record.status() != InvestigationWorkStatus::Scheduled)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(work_case)
+            .expect("active case should persist")
+            .lead_investigator(),
+        None,
+        "custody must release the detective's active lead seat"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_investigations_without_lead()
+            .any(|investigation| investigation == work_case),
+        "detention-preempted case must be available for institutional restaffing"
+    );
+    validate_state(&fixture.state).expect("work-cancellation custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
 fn fixture() -> Fixture {
     let registry = build_registry();
     let mut state = AppState::new(0xA22E_5701);
@@ -437,7 +591,7 @@ fn detention_preserves_formal_supervision_but_blocks_new_supervisory_work() {
 }
 
 #[test]
-fn active_operation_responsibility_blocks_custody() {
+fn custody_preempts_authorized_operation_responsibility() {
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
     use crate::world::world_system::{insert_business, insert_neighborhood};
@@ -508,7 +662,7 @@ fn active_operation_responsibility_blocks_custody() {
     .commit(&mut fixture.state)
     .expect("authorized operation should commit");
 
-    let error = validate_arrest(
+    let arrest = validate_arrest(
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
@@ -516,23 +670,33 @@ fn active_operation_responsibility_blocks_custody() {
             evidence: BTreeSet::from([fixture.evidence]),
         },
     )
-    .expect_err("an operation participant must not enter custody");
-    assert_eq!(
-        error,
-        ArrestError::ActiveOperationResponsibility {
-            character: fixture.suspect,
-            operation,
-        }
-    );
+    .expect("custody should validate despite the internal operation booking")
+    .commit(&mut fixture.state)
+    .expect("custody should preempt the operation atomically");
     assert!(
         fixture
             .state
             .legal()
             .active_arrest_for_character(fixture.suspect)
-            .is_none(),
-        "rejected arrest must leave authoritative state unchanged"
+            .is_some_and(|record| record.id() == arrest),
+        "arrest should become the authoritative live commitment"
     );
-    validate_state(&fixture.state).expect("state after rejected arrest should validate");
+    let operation = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist as history");
+    assert_eq!(
+        operation.status(),
+        crate::operations::OperationStatus::Aborted
+    );
+    assert_eq!(
+        operation.abort_record().map(|abort| abort.cause()),
+        Some(crate::operations::OperationAbortCause::ParticipantDetained(
+            fixture.suspect
+        ))
+    );
+    validate_state(&fixture.state).expect("custody preemption state should validate");
     validate_invariants(&fixture.state);
 }
 

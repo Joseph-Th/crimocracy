@@ -121,17 +121,13 @@ pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValid
             | InvestigationStatus::Suspended
             | InvestigationStatus::Closed => {}
         }
-        if investigation.version() == 0
-            || investigation
-                .lead_investigator()
-                .is_some_and(|lead| !investigation.assigned_investigators().contains(&lead))
-        {
+        if investigation.version() == 0 {
             return Err(StateValidationError::InvalidInvestigationStaffing {
                 investigation: investigation.id(),
             });
         }
-        for investigator in investigation.assigned_investigators() {
-            let character = state.world.get_character(*investigator).ok_or(
+        if let Some(investigator) = investigation.lead_investigator() {
+            let character = state.world.get_character(investigator).ok_or(
                 StateValidationError::InvalidInvestigationStaffing {
                     investigation: investigation.id(),
                 },
@@ -140,7 +136,14 @@ pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValid
                 && (character.organization() != Some(investigation.owner())
                     || character
                         .capability(CapabilityKind::Investigation)
-                        .is_none())
+                        .is_none()
+                    || state
+                        .legal
+                        .active_arrest_for_character(investigator)
+                        .is_some()
+                    || investigation
+                        .subjects()
+                        .contains(&EntityRef::Character(investigator)))
             {
                 return Err(StateValidationError::InvalidInvestigationStaffing {
                     investigation: investigation.id(),
@@ -218,11 +221,10 @@ pub(super) fn validate_investigation_work_records(
             InvestigationWorkStatus::Scheduled => {
                 if work.version() != 1
                     || work.resolution().is_some()
+                    || work.cancellation().is_some()
                     || !scheduled_investigators.insert(work.investigator())
                     || investigation.status() != InvestigationStatus::Active
-                    || !investigation
-                        .assigned_investigators()
-                        .contains(&work.investigator())
+                    || investigation.lead_investigator() != Some(work.investigator())
                     || investigator.organization() != Some(investigation.owner())
                     || investigator
                         .capability(CapabilityKind::Investigation)
@@ -236,6 +238,7 @@ pub(super) fn validate_investigation_work_records(
                     .resolution()
                     .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
                 if work.version() != 2
+                    || work.cancellation().is_some()
                     || resolution.resolved_at() < work.due_at()
                     || resolution.resolved_at() > state.now()
                 {
@@ -316,6 +319,27 @@ pub(super) fn validate_investigation_work_records(
                             });
                         }
                     }
+                }
+            }
+            InvestigationWorkStatus::Cancelled => {
+                let cancellation = work
+                    .cancellation()
+                    .ok_or(StateValidationError::InvalidInvestigationWork { work: work.id() })?;
+                let arrest = match cancellation.reason() {
+                    crate::legal::InvestigationWorkCancellationReason::InvestigatorDetained(
+                        arrest,
+                    ) => state.legal.get_arrest(arrest),
+                };
+                if work.version() != 2
+                    || work.resolution().is_some()
+                    || cancellation.cancelled_at() < work.scheduled_at()
+                    || cancellation.cancelled_at() > state.now()
+                    || arrest.is_none_or(|arrest| {
+                        arrest.character() != work.investigator()
+                            || arrest.arrested_at() != cancellation.cancelled_at()
+                    })
+                {
+                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
                 }
             }
         }

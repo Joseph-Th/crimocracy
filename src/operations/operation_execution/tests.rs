@@ -13,7 +13,9 @@ use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
     DecisionError, validate_request_police_arrival_decision_on_arrival, validate_resolve_decision,
 };
-use crate::decisions::{DecisionContext, DecisionResponse};
+use crate::decisions::{
+    DecisionCancellationReason, DecisionContext, DecisionResponse, DecisionStatus,
+};
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::intelligence::intelligence_system::validate_record_information;
@@ -88,6 +90,110 @@ fn insert_property_disposition_fixture(
     )
     .expect("liquidation settlement account should validate");
     (resale_venue, cash_account, settlement_account)
+}
+
+#[test]
+fn detention_cancels_pending_operation_decision_and_aborts_operation() {
+    let (registry, mut state, police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    run_tick(&registry, &mut state);
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.decision_requests.is_empty() {
+            break;
+        }
+    }
+    let decision_id = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("police-arrival decision should be pending");
+    let leader = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .leader();
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Operation leader detention case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(leader)]),
+        },
+    )
+    .expect("detention investigation should validate")
+    .commit(&mut state)
+    .expect("detention investigation should commit");
+    let evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(leader),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("detention evidence should validate")
+    .commit(&mut state)
+    .expect("detention evidence should commit");
+    let detained_at = state.now();
+    let arrest = crate::legal::arrest_system::validate_arrest(
+        &state,
+        ArrestDraft {
+            character: leader,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("custody should validate while leadership decision is pending")
+    .commit(&mut state)
+    .expect("custody should atomically cancel the decision and abort the operation");
+
+    assert_eq!(
+        state
+            .legal()
+            .active_arrest_for_character(leader)
+            .map(|record| record.id()),
+        Some(arrest)
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("aborted operation should remain historical");
+    assert_eq!(operation_record.status(), OperationStatus::Aborted);
+    let abort = operation_record
+        .abort_record()
+        .expect("detention abort provenance should persist");
+    assert_eq!(abort.phase(), OperationAbortPhase::AwaitingDecision);
+    assert_eq!(
+        abort.cause(),
+        OperationAbortCause::ParticipantDetained(leader)
+    );
+    assert_eq!(abort.aborted_at(), detained_at);
+    let decision = state
+        .decisions()
+        .get_decision(decision_id)
+        .expect("cancelled decision should remain historical");
+    assert_eq!(decision.status(), DecisionStatus::Cancelled);
+    assert!(decision.resolution().is_none());
+    let cancellation = decision
+        .cancellation()
+        .expect("cancelled decision should retain provenance");
+    assert_eq!(cancellation.cancelled_at(), detained_at);
+    assert_eq!(
+        cancellation.reason(),
+        DecisionCancellationReason::OperationParticipantDetained(leader)
+    );
+    assert!(state.decisions().pending_for_operation(operation).is_none());
+    validate_state(&state).expect("detention-preempted decision state should validate");
+    validate_invariants(&state);
 }
 
 /// Compact cash-capable target for operation fixtures. When `owner` is set the business

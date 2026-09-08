@@ -14,12 +14,22 @@ impl LegalState {
     fn has_consistent_prosecution_indexes(&self) -> bool {
         for case in self.prosecution_cases.values() {
             let id = case.id();
-            if !self
-                .indexes
-                .prosecutions
-                .cases_by_lead
-                .get(&case.lead_prosecutor())
-                .is_some_and(|ids| ids.contains(&id))
+            let assignment_indexed = match (case.status(), case.assigned_prosecutor()) {
+                (ProsecutionCaseStatus::Reviewing, Some(prosecutor)) => self
+                    .indexes
+                    .prosecutions
+                    .reviewing_cases_by_prosecutor
+                    .get(&prosecutor)
+                    .is_some_and(|ids| ids.contains(&id)),
+                (ProsecutionCaseStatus::Reviewing, None) => self
+                    .indexes
+                    .prosecutions
+                    .reviewing_without_prosecutor
+                    .contains(&id),
+                (ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed, None) => true,
+                (ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed, Some(_)) => false,
+            };
+            if !assignment_indexed
                 || case.referrals().iter().any(|referral| {
                     !self
                         .indexes
@@ -69,6 +79,24 @@ impl LegalState {
             if !self.prosecution_cases.get(id).is_some_and(|case| {
                 (case.arrest(), case.prosecutor_office()) == *key
                     && case.status() == ProsecutionCaseStatus::Reviewing
+            }) {
+                return false;
+            }
+        }
+        for (prosecutor, ids) in &self.indexes.prosecutions.reviewing_cases_by_prosecutor {
+            if ids.iter().any(|id| {
+                !self.prosecution_cases.get(id).is_some_and(|case| {
+                    case.status() == ProsecutionCaseStatus::Reviewing
+                        && case.assigned_prosecutor() == Some(*prosecutor)
+                })
+            }) {
+                return false;
+            }
+        }
+        for id in &self.indexes.prosecutions.reviewing_without_prosecutor {
+            if !self.prosecution_cases.get(id).is_some_and(|case| {
+                case.status() == ProsecutionCaseStatus::Reviewing
+                    && case.assigned_prosecutor().is_none()
             }) {
                 return false;
             }
@@ -277,12 +305,6 @@ impl LegalState {
                     return false;
                 }
             }
-            if investigation
-                .lead_investigator()
-                .is_some_and(|lead| !investigation.assigned_investigators().contains(&lead))
-            {
-                return false;
-            }
             let should_need_lead = investigation.status() == InvestigationStatus::Active
                 && investigation.lead_investigator().is_none();
             if self
@@ -303,16 +325,15 @@ impl LegalState {
             {
                 return false;
             }
-            for investigator in investigation.assigned_investigators() {
-                if !self
+            if let Some(investigator) = investigation.lead_investigator()
+                && !self
                     .indexes
                     .investigations
                     .investigations_by_investigator
-                    .get(investigator)
+                    .get(&investigator)
                     .is_some_and(|ids| ids.contains(&investigation.id()))
-                {
-                    return false;
-                }
+            {
+                return false;
             }
         }
         for investigation in &self.indexes.investigations.active_without_lead {
@@ -583,12 +604,29 @@ impl LegalState {
             )) == Some(&work.id());
             match work.status() {
                 InvestigationWorkStatus::Scheduled => {
-                    if work.resolution().is_some() || !due_indexed || !focus_indexed {
+                    if work.resolution().is_some()
+                        || work.cancellation().is_some()
+                        || !due_indexed
+                        || !focus_indexed
+                    {
                         return false;
                     }
                 }
                 InvestigationWorkStatus::Completed => {
-                    if work.resolution().is_none() || due_indexed || focus_indexed {
+                    if work.resolution().is_none()
+                        || work.cancellation().is_some()
+                        || due_indexed
+                        || focus_indexed
+                    {
+                        return false;
+                    }
+                }
+                InvestigationWorkStatus::Cancelled => {
+                    if work.resolution().is_some()
+                        || work.cancellation().is_none()
+                        || due_indexed
+                        || focus_indexed
+                    {
                         return false;
                     }
                 }
@@ -638,7 +676,7 @@ impl LegalState {
                 if !self
                     .investigations
                     .get(id)
-                    .is_some_and(|record| record.assigned_investigators().contains(investigator))
+                    .is_some_and(|record| record.lead_investigator() == Some(*investigator))
                 {
                     return false;
                 }

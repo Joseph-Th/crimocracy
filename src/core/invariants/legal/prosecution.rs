@@ -39,23 +39,12 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
             .world
             .get_organization(case.prosecutor_office())
             .ok_or_else(invalid_case)?;
-        let lead = state
-            .world
-            .get_character(case.lead_prosecutor())
-            .ok_or_else(invalid_case)?;
         let defendant = state
             .world
             .get_character(case.defendant())
             .ok_or_else(invalid_case)?;
-        let referral_version = u32::try_from(case.referrals().len()).map_err(|_| invalid_case())?;
-        let expected_version = match case.status() {
-            ProsecutionCaseStatus::Reviewing => referral_version,
-            ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed => {
-                referral_version.checked_add(1).ok_or_else(invalid_case)?
-            }
-        };
         if case.opened_at() > state.now()
-            || case.version() != expected_version
+            || case.version() == 0
             || case.referrals().is_empty()
             || !case.referrals().contains(&case.initial_referral())
             || arrest.character() != case.defendant()
@@ -64,30 +53,42 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
             || investigation.owner() != case.source_authority()
             || source_authority.kind() != OrganizationKind::LawEnforcement
             || office.kind() != OrganizationKind::Prosecutor
-            || lead.capability(CapabilityKind::LegalKnowledge).is_none()
             || case.evidence().is_empty()
             || !arrest.evidence().is_subset(case.evidence())
         {
             return Err(invalid_case());
         }
 
-        // The resolution report's entity set is compared element-wise (both statuses below)
-        // so per-record validation never rebuilds this set per case.
-        let expected_entities_contains = |entities: &BTreeSet<EntityRef>| {
+        let expected_entities_contains = |entities: &BTreeSet<EntityRef>, prosecutor| {
             entities.len() == 5
                 && entities.contains(&EntityRef::Character(case.defendant()))
                 && entities.contains(&EntityRef::Organization(case.source_authority()))
                 && entities.contains(&EntityRef::Organization(case.prosecutor_office()))
-                && entities.contains(&EntityRef::Character(case.lead_prosecutor()))
+                && entities.contains(&EntityRef::Character(prosecutor))
                 && entities.contains(&EntityRef::Investigation(case.source_investigation()))
         };
 
         match case.status() {
             ProsecutionCaseStatus::Reviewing => {
+                let assigned = case.assigned_prosecutor().and_then(|prosecutor| {
+                    state
+                        .world
+                        .get_character(prosecutor)
+                        .map(|record| (prosecutor, record))
+                });
                 if case.resolved_at().is_some()
                     || case.resolution_information().is_some()
                     || case.resolution_report().is_some()
-                    || lead.organization() != Some(case.prosecutor_office())
+                    || case.resolution_prosecutor().is_some()
+                    || assigned.is_some_and(|(prosecutor, lead)| {
+                        lead.organization() != Some(case.prosecutor_office())
+                            || lead.capability(CapabilityKind::LegalKnowledge).is_none()
+                            || state
+                                .legal
+                                .active_arrest_for_character(prosecutor)
+                                .is_some()
+                    })
+                    || (case.assigned_prosecutor().is_some() && assigned.is_none())
                     || state
                         .legal
                         .open_prosecution_case_for(case.arrest(), case.prosecutor_office())
@@ -97,6 +98,18 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                 }
             }
             ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed => {
+                if case.assigned_prosecutor().is_some() {
+                    return Err(invalid_case());
+                }
+                let resolution_prosecutor =
+                    case.resolution_prosecutor().ok_or_else(invalid_case)?;
+                let lead = state
+                    .world
+                    .get_character(resolution_prosecutor)
+                    .ok_or_else(invalid_case)?;
+                if lead.capability(CapabilityKind::LegalKnowledge).is_none() {
+                    return Err(invalid_case());
+                }
                 let resolved_at = case.resolved_at().ok_or_else(invalid_case)?;
                 let information_id = case.resolution_information().ok_or_else(invalid_case)?;
                 let report_id = case.resolution_report().ok_or_else(invalid_case)?;
@@ -144,7 +157,7 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                     || information.source_kind() != InformationSourceKind::AfterAction
                     || information.topic() != InformationTopic::LegalActivity
                     || information.source_entity()
-                        != Some(EntityRef::Character(case.lead_prosecutor()))
+                        != Some(EntityRef::Character(resolution_prosecutor))
                     || information.subject() != EntityRef::Character(case.defendant())
                     || information.observed_at() != resolved_at
                     || information.recorded_at() != resolved_at
@@ -162,7 +175,10 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                     || report.entries()[0].summary != information.summary()
                     || !report.entries()[0].sources.is_empty()
                     || report.entries()[0].decision.is_some()
-                    || !expected_entities_contains(&report.entries()[0].entities)
+                    || !expected_entities_contains(
+                        &report.entries()[0].entities,
+                        resolution_prosecutor,
+                    )
                 {
                     return Err(invalid_case());
                 }
@@ -195,6 +211,10 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                 .reports
                 .get_report(referral.report())
                 .ok_or_else(invalid_referral)?;
+            let prosecutor = state
+                .world
+                .get_character(referral.prosecutor())
+                .ok_or_else(invalid_referral)?;
             let is_initial = referral.id() == case.initial_referral();
             let expected_title = if is_initial {
                 "Prosecution case referral"
@@ -213,6 +233,9 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                 || referral.source_investigation() != case.source_investigation()
                 || referral.source_authority() != case.source_authority()
                 || referral.prosecutor_office() != case.prosecutor_office()
+                || prosecutor
+                    .capability(CapabilityKind::LegalKnowledge)
+                    .is_none()
                 || referral.evidence().is_empty()
                 || referral.referred_at() < case.opened_at()
                 || referral.referred_at() > state.now()
@@ -254,7 +277,7 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                 || report.entries()[0].summary != information.summary()
                 || !report.entries()[0].sources.is_empty()
                 || report.entries()[0].decision.is_some()
-                || !expected_entities_contains(&report.entries()[0].entities)
+                || !expected_entities_contains(&report.entries()[0].entities, referral.prosecutor())
             {
                 return Err(invalid_referral());
             }

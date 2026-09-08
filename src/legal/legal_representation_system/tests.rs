@@ -45,6 +45,131 @@ struct Fixture {
     provider: FinancialAccountId,
 }
 
+#[test]
+fn automatic_legal_support_aggregates_split_organization_liquidity() {
+    let mut fx = fixture();
+    let second_payer = insert_account(
+        &mut fx.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fx.sponsor),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("second sponsor reserve should validate");
+    let parked = insert_account(
+        &mut fx.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fx.sponsor),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("non-spendable parking account should validate");
+    validate_record_transaction(
+        &fx.state,
+        LedgerTransactionDraft {
+            occurred_at: fx.state.now(),
+            memo: "Partition legal reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fx.payer,
+                    amount: Money::from_cents(-45_000),
+                },
+                LedgerPosting {
+                    account: parked,
+                    amount: Money::from_cents(45_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("reserve partition should validate")
+    .commit(&mut fx.state)
+    .expect("reserve partition should commit");
+    validate_record_transaction(
+        &fx.state,
+        LedgerTransactionDraft {
+            occurred_at: fx.state.now(),
+            memo: "Split legal liquidity".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fx.payer,
+                    amount: Money::from_cents(-2_500),
+                },
+                LedgerPosting {
+                    account: second_payer,
+                    amount: Money::from_cents(2_500),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("liquidity split should validate")
+    .commit(&mut fx.state)
+    .expect("liquidity split should commit");
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("first payer should persist")
+            .balance(),
+        Money::from_cents(2_500)
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(second_payer)
+            .expect("second payer should persist")
+            .balance(),
+        Money::from_cents(2_500)
+    );
+
+    set_policy(
+        &fx.registry,
+        &mut fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate");
+    let retained = apply_automatic_legal_support(&mut fx.state)
+        .expect("aggregate sponsor liquidity should fund automatic counsel");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("first payer should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(second_payer)
+            .expect("second payer should persist")
+            .balance(),
+        Money::ZERO
+    );
+    let representation = fx
+        .state
+        .legal()
+        .get_legal_representation(retained[0])
+        .expect("representation should persist");
+    let payment = fx
+        .state
+        .finance()
+        .get_transaction(representation.payment())
+        .expect("retainer payment should persist");
+    assert_eq!(payment.postings().len(), 3);
+    assert!(payment.postings().iter().any(|posting| {
+        posting.account == fx.payer && posting.amount == Money::from_cents(-2_500)
+    }));
+    assert!(payment.postings().iter().any(|posting| {
+        posting.account == second_payer && posting.amount == Money::from_cents(-2_500)
+    }));
+    validate_state(&fx.state).expect("split-liquidity legal support should validate");
+    validate_invariants(&fx.state);
+}
+
 fn tamper_serialized_summary(
     envelope: SaveEnvelope,
     summary: &str,
@@ -319,7 +444,7 @@ fn representation_draft(
         sponsor: fixture.sponsor,
         contact: fixture.contact,
         fee: Money::from_cents(fee_cents),
-        payer_account: fixture.payer,
+        payer_accounts: BTreeSet::from([fixture.payer]),
         provider_account: fixture.provider,
         authorization,
         origin: crate::legal::LegalRepresentationOrigin::DirectRetention,
@@ -752,7 +877,7 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
             sponsor: fixture.sponsor,
             contact: fixture.contact,
             fee: Money::from_cents(5_000),
-            payer_account: fixture.payer,
+            payer_accounts: BTreeSet::from([fixture.payer]),
             provider_account: fixture.provider,
             authorization: None,
             origin: crate::legal::LegalRepresentationOrigin::DirectRetention,
@@ -1069,6 +1194,24 @@ fn delegated_legal_budget_authority_is_persisted_and_enforced() {
         manager: fixture.handler,
         scope: ResponsibilityScope::Function(ResponsibilityFunction::Legal),
     };
+    let second_payer = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.sponsor),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("second sponsor account should validate");
+    let mut mixed_funding = representation_draft(&fixture, 10_000, Some(authority));
+    mixed_funding.payer_accounts.insert(second_payer);
+    assert_eq!(
+        validate_retain_legal_representation(&fixture.state, mixed_funding)
+            .err()
+            .expect("delegated spending must not escape its designated budget account"),
+        LegalRepresentationError::DelegatedFundingAccountMismatch {
+            required: fixture.payer,
+        }
+    );
     let representation = retain(&mut fixture, 10_000, Some(authority));
     let record = fixture
         .state

@@ -68,12 +68,22 @@ impl ReportRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReportState {
     records: BTreeMap<ReportId, ReportRecord>,
+    #[serde(skip)]
     by_recipient: BTreeMap<OrganizationId, BTreeSet<ReportId>>,
 }
 
 impl ReportState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_recipient.clear();
+        for report in self.records.values() {
+            self.by_recipient
+                .entry(report.recipient())
+                .or_default()
+                .insert(report.id());
+        }
     }
     pub fn get_report(&self, id: ReportId) -> Option<&ReportRecord> {
         self.records.get(&id)
@@ -83,7 +93,11 @@ impl ReportState {
             .get(&recipient)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("report recipient index must reference a report")
+            })
     }
     pub fn reports_for_after(
         &self,
@@ -97,7 +111,11 @@ impl ReportState {
             .get(&recipient)
             .into_iter()
             .flat_map(move |ids| ids.range((lower, Unbounded)))
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("report recipient index must reference a report")
+            })
     }
     pub fn latest_for_kind(
         &self,
@@ -107,7 +125,11 @@ impl ReportState {
         self.by_recipient.get(&recipient).and_then(|ids| {
             ids.iter()
                 .rev()
-                .filter_map(|id| self.records.get(id))
+                .map(|id| {
+                    self.records
+                        .get(id)
+                        .expect("report recipient index must reference a report")
+                })
                 .find(|report| report.kind() == kind)
         })
     }
@@ -115,7 +137,11 @@ impl ReportState {
         self.by_recipient
             .get(&recipient)
             .and_then(|ids| ids.last())
-            .and_then(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("report recipient index must reference a report")
+            })
     }
     pub(crate) fn reports(&self) -> impl Iterator<Item = &ReportRecord> {
         self.records.values()

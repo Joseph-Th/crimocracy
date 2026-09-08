@@ -6,9 +6,9 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::operations::{
-    ACTIVE_ASSIGNMENT_STATUSES, OperationAbortPhase, OperationAbortRecord,
-    OperationCashDispositionRecord, OperationObjectiveOutcome, OperationPropertyDispositionRecord,
-    OperationRecord, OperationResolutionRecord, OperationStatus,
+    OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
+    OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
+    OperationResolutionRecord, OperationStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,23 +35,93 @@ pub(crate) fn shift_past_pause(time: SimTime, paused_minutes: u64, what: &str) -
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OperationState {
     records: BTreeMap<OperationId, OperationRecord>,
+    #[serde(skip)]
     by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
-    /// Non-terminal operations per organization. Participant double-booking checks scan
-    /// this instead of the organization's full operation history, which grows forever.
-    active_by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
+    /// Non-terminal operation bookings keyed by participant. This derived availability index
+    /// serves double-booking, custody preemption, and reassignment checks.
+    #[serde(skip)]
+    active_by_participant: BTreeMap<CharacterId, BTreeSet<OperationId>>,
+    #[serde(skip)]
     by_status: BTreeMap<OperationStatus, BTreeSet<OperationId>>,
+    #[serde(skip)]
     by_discovered_information: BTreeMap<InformationId, OperationId>,
+    #[serde(skip)]
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
+    #[serde(skip)]
     in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
     /// Successful property/cash takes per target business as (resolved_at, operation_id).
     /// Feeds recency-depletion economics without scanning the full completed bucket, which
     /// grows for the life of the campaign.
+    #[serde(skip)]
     successful_takes_by_business: BTreeMap<BusinessId, BTreeSet<(SimTime, OperationId)>>,
 }
 
 impl OperationState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_organization.clear();
+        self.active_by_participant.clear();
+        self.by_status.clear();
+        self.by_discovered_information.clear();
+        self.authorized_by_start.clear();
+        self.in_progress_by_resolution_due.clear();
+        self.successful_takes_by_business.clear();
+        for record in self.records.values() {
+            let id = record.id();
+            self.by_organization
+                .entry(record.responsible_organization())
+                .or_default()
+                .insert(id);
+            self.by_status
+                .entry(record.status())
+                .or_default()
+                .insert(id);
+            if !matches!(
+                record.status(),
+                OperationStatus::Completed | OperationStatus::Aborted
+            ) {
+                for participant in record.participants() {
+                    self.active_by_participant
+                        .entry(participant)
+                        .or_default()
+                        .insert(id);
+                }
+            }
+            if record.status() == OperationStatus::Authorized {
+                self.authorized_by_start
+                    .entry(record.scheduled_for())
+                    .or_default()
+                    .insert(id);
+            }
+            if record.status() == OperationStatus::InProgress
+                && let Some(due_at) = record.resolution_due_at()
+            {
+                self.in_progress_by_resolution_due
+                    .entry(due_at)
+                    .or_default()
+                    .insert(id);
+            }
+            if let Some(resolution) = record.resolution() {
+                for information in resolution.discovered_information() {
+                    self.by_discovered_information.insert(*information, id);
+                }
+                if record.status() == OperationStatus::Completed
+                    && matches!(
+                        resolution.objective_outcome(),
+                        OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
+                    )
+                    && let Some(business) = record.objective().taken_business()
+                {
+                    self.successful_takes_by_business
+                        .entry(business)
+                        .or_default()
+                        .insert((resolution.resolved_at(), id));
+                }
+            }
+        }
     }
 
     pub fn get_operation(&self, id: OperationId) -> Option<&OperationRecord> {
@@ -66,45 +136,49 @@ impl OperationState {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|operation_id| self.records.get(operation_id))
+            .map(|operation_id| {
+                self.records
+                    .get(operation_id)
+                    .expect("operation organization index must reference an operation")
+            })
     }
 
-    /// Non-terminal operations of an organization, in id order. This is the scan surface for
-    /// participant availability: terminal operations release their participants and never
-    /// block new bookings.
-    pub(crate) fn active_operations_for_organization(
+    /// Non-terminal operations holding a participant, in operation-id order.
+    pub(crate) fn active_operations_for_participant(
         &self,
-        id: OrganizationId,
+        character: CharacterId,
     ) -> impl Iterator<Item = &OperationRecord> {
-        self.active_by_organization
-            .get(&id)
+        self.active_by_participant
+            .get(&character)
             .into_iter()
             .flatten()
-            .filter_map(|operation_id| self.records.get(operation_id))
+            .map(|operation_id| {
+                self.records
+                    .get(operation_id)
+                    .expect("active participant index must reference an operation")
+            })
+    }
+
+    pub(crate) fn active_operation_bookings(
+        &self,
+        character: CharacterId,
+    ) -> impl Iterator<Item = OperationId> + '_ {
+        self.active_by_participant
+            .get(&character)
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     /// Finds the smallest non-terminal operation holding the character as leader or role
-    /// participant. Served from the status indexes, so reassignment and custody checks cost
-    /// O(live bookings), not O(campaign history).
+    /// participant in O(log participants) lookup time.
     pub(crate) fn find_active_operation_booking(
         &self,
         character: CharacterId,
     ) -> Option<OperationId> {
-        ACTIVE_ASSIGNMENT_STATUSES
-            .iter()
-            .filter_map(|status| self.by_status.get(status))
-            .flatten()
-            .filter_map(|id| {
-                self.records.get(id).and_then(|operation| {
-                    let holds = operation.leader() == character
-                        || operation
-                            .roles()
-                            .values()
-                            .any(|participant| *participant == character);
-                    holds.then_some(*id)
-                })
-            })
-            .min()
+        self.active_by_participant
+            .get(&character)
+            .and_then(|ids| ids.first().copied())
     }
 
     pub fn operation_for_discovered_information(
@@ -113,7 +187,11 @@ impl OperationState {
     ) -> Option<&OperationRecord> {
         self.by_discovered_information
             .get(&information)
-            .and_then(|operation| self.records.get(operation))
+            .map(|operation| {
+                self.records
+                    .get(operation)
+                    .expect("discovered-information index must reference an operation")
+            })
     }
 
     pub fn operations_with_status(
@@ -124,7 +202,11 @@ impl OperationState {
             .get(&status)
             .into_iter()
             .flatten()
-            .filter_map(|operation_id| self.records.get(operation_id))
+            .map(|operation_id| {
+                self.records
+                    .get(operation_id)
+                    .expect("operation status index must reference an operation")
+            })
     }
 
     pub(crate) fn operations(&self) -> impl Iterator<Item = &OperationRecord> {
@@ -174,10 +256,12 @@ impl OperationState {
             .entry(record.responsible_organization())
             .or_default()
             .insert(id);
-        self.active_by_organization
-            .entry(record.responsible_organization())
-            .or_default()
-            .insert(id);
+        for participant in record.participants() {
+            self.active_by_participant
+                .entry(participant)
+                .or_default()
+                .insert(id);
+        }
         self.by_status
             .entry(record.status())
             .or_default()
@@ -498,12 +582,12 @@ impl OperationState {
     }
 
     fn set_status(&mut self, id: OperationId, next: OperationStatus) {
-        let (previous, organization) = {
+        let (previous, participants) = {
             let record = self
                 .records
                 .get(&id)
                 .expect("validated operation disappeared before status commit");
-            (record.status(), record.responsible_organization())
+            (record.status(), record.participants())
         };
         if let Some(ids) = self.by_status.get_mut(&previous) {
             ids.remove(&id);
@@ -511,15 +595,21 @@ impl OperationState {
                 self.by_status.remove(&previous);
             }
         }
-        let active_entry = self.active_by_organization.entry(organization).or_default();
-        if matches!(next, OperationStatus::Completed | OperationStatus::Aborted) {
-            active_entry.remove(&id);
-        } else {
-            // Active-to-active transitions keep their membership; insertion is idempotent.
-            active_entry.insert(id);
-        }
-        if active_entry.is_empty() {
-            self.active_by_organization.remove(&organization);
+        for participant in participants {
+            if matches!(next, OperationStatus::Completed | OperationStatus::Aborted) {
+                if let Some(ids) = self.active_by_participant.get_mut(&participant) {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        self.active_by_participant.remove(&participant);
+                    }
+                }
+            } else {
+                // Active-to-active transitions keep their membership; insertion is idempotent.
+                self.active_by_participant
+                    .entry(participant)
+                    .or_default()
+                    .insert(id);
+            }
         }
         let record = self
             .records
@@ -553,7 +643,7 @@ impl OperationState {
         // totals prove no stale, duplicate, or foreign index membership survives.
         let mut expected_by_organization = 0_usize;
         let mut expected_by_status = 0_usize;
-        let mut expected_active = 0_usize;
+        let mut expected_active_participant_links = 0_usize;
         let mut expected_authorized = 0_usize;
         let mut expected_in_progress = 0_usize;
         let mut expected_takes = 0_usize;
@@ -573,17 +663,19 @@ impl OperationState {
             {
                 return false;
             }
-            let active_indexed = self
-                .active_by_organization
-                .get(&record.responsible_organization())
-                .is_some_and(|ids| ids.contains(&record.id()));
-            if active_indexed
-                != !matches!(
-                    record.status(),
-                    OperationStatus::Completed | OperationStatus::Aborted
-                )
-            {
-                return false;
+            let active = !matches!(
+                record.status(),
+                OperationStatus::Completed | OperationStatus::Aborted
+            );
+            let participants = record.participants();
+            for participant in &participants {
+                let active_indexed = self
+                    .active_by_participant
+                    .get(participant)
+                    .is_some_and(|ids| ids.contains(&record.id()));
+                if active_indexed != active {
+                    return false;
+                }
             }
             let authorized_indexed = self
                 .authorized_by_start
@@ -602,11 +694,8 @@ impl OperationState {
             }
             expected_by_organization += 1;
             expected_by_status += 1;
-            if !matches!(
-                record.status(),
-                OperationStatus::Completed | OperationStatus::Aborted
-            ) {
-                expected_active += 1;
+            if active {
+                expected_active_participant_links += participants.len();
             }
             if record.status() == OperationStatus::Authorized {
                 expected_authorized += 1;
@@ -649,12 +738,9 @@ impl OperationState {
         if indexed_by_status != expected_by_status {
             return false;
         }
-        let indexed_active: usize = self
-            .active_by_organization
-            .values()
-            .map(BTreeSet::len)
-            .sum();
-        if indexed_active != expected_active {
+        let indexed_active_participant_links: usize =
+            self.active_by_participant.values().map(BTreeSet::len).sum();
+        if indexed_active_participant_links != expected_active_participant_links {
             return false;
         }
         if self.by_discovered_information.len() != expected_discovered_links {

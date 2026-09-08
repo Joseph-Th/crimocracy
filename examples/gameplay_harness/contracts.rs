@@ -48,20 +48,26 @@ pub fn validate_run_metrics(
         });
     }
     // The money state contract: whatever the organization routed through its front's books
-    // must reconcile exactly - accounted funds are gross minus the front's authored fee,
-    // minus anything already spent on legitimate acquisitions - and a branch that
-    // liquidated stolen property must have laundered those proceeds rather than leaving
-    // organizational value in exposed street cash.
+    // must reconcile exactly. Accounted funds are laundering gross minus the front's authored
+    // fee, minus legitimate acquisition spend, minus the exact wage debits that payroll's
+    // ledger took from accounted-funds accounts. Payroll is organization-level and can draw
+    // any spendable liquidity, so subtracting the whole wage bill would be just as wrong as
+    // pretending clean money can never fund wages. A branch that liquidated stolen property
+    // must also have laundered those proceeds rather than leaving all organizational value in
+    // exposed street cash.
     if let Some(balance) = metrics.accounted_balance_cents
         && balance
             != metrics.laundered_gross_cents
                 - metrics.launder_fee_cents
                 - metrics.acquisition_spent_cents
+                - metrics.payroll_accounted_spent_cents
     {
         return Err(HarnessContractError::InconsistentLaunderingEvidence {
             strategy,
             gross: metrics.laundered_gross_cents,
             fee: metrics.launder_fee_cents,
+            acquisition: metrics.acquisition_spent_cents,
+            payroll: metrics.payroll_accounted_spent_cents,
             balance: Some(balance),
         });
     }

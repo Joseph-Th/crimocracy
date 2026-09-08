@@ -436,11 +436,14 @@ pub(crate) fn decide_operation_resolution(
     ]);
     history_entities.extend(record.objective().referenced_entities());
     history_entities.extend(record.roles().values().copied().map(EntityRef::Character));
-    if police_response_arrived
-        && let Some(response) = record
+    if police_response_arrived {
+        let response_id = record
             .police_response()
-            .and_then(|id| state.legal.get_police_response(id))
-    {
+            .expect("arrived operation police response must remain linked from the operation");
+        let response = state
+            .legal
+            .get_police_response(response_id)
+            .expect("operation police-response link must reference a persisted response");
         history_entities.insert(EntityRef::Organization(response.authority()));
         history_entities.insert(EntityRef::Neighborhood(response.neighborhood()));
     }
@@ -1223,7 +1226,8 @@ fn resolve_role_capability_average(
                 let value = state
                     .world
                     .get_character(*character)
-                    .and_then(|record| record.capability(capability))
+                    .expect("operation role must reference a persisted participant")
+                    .capability(capability)
                     .map(|rating| u32::from(rating.value()))
                     .unwrap_or(0);
                 (total + value, count + 1)

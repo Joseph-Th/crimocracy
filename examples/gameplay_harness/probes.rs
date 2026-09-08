@@ -598,7 +598,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
             sponsor,
             contact,
             fee: Money::from_cents(5_000),
-            payer_account: payer,
+            payer_accounts: BTreeSet::from([payer]),
             provider_account: provider,
             authorization: None,
             origin: crimocracy::legal::LegalRepresentationOrigin::DirectRetention,
@@ -611,7 +611,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
         ProsecutionCaseDraft {
             arrest,
             prosecutor_office,
-            lead_prosecutor: prosecutor,
+            prosecutor,
             evidence: BTreeSet::from([evidence]),
         },
     )?

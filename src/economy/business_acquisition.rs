@@ -36,6 +36,7 @@ use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
 use crate::world::world_system::WorldError;
 use crate::world::world_system::validate_transfer_business_ownership;
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -61,12 +62,14 @@ pub enum BusinessAcquisitionError {
     )]
     InvalidFundingAccountKind(FinancialAccountId),
     #[error(
-        "accounted funds {balance_cents} cannot cover the {price_cents}-cent acquisition price"
+        "accounted funds {available_cents} cannot cover the {price_cents}-cent acquisition price"
     )]
     InsufficientFunds {
-        balance_cents: i64,
+        available_cents: i64,
         price_cents: i64,
     },
+    #[error("business acquisition must name at least one accounted-funds account")]
+    NoFundingAccounts,
     #[error(transparent)]
     World(#[from] WorldError),
     #[error(transparent)]
@@ -83,8 +86,10 @@ pub enum BusinessAcquisitionError {
 pub struct BusinessAcquisitionDraft {
     pub organization: OrganizationId,
     pub business: BusinessId,
-    /// Must be one of the organization's accounted-funds accounts.
-    pub funding_account: FinancialAccountId,
+    /// Organization-owned accounted-funds accounts permitted to fund the purchase. The ledger
+    /// records the exact deterministic debit allocation, so the acquisition itself stores no
+    /// duplicate payment-source fact.
+    pub funding_accounts: BTreeSet<FinancialAccountId>,
 }
 
 /// What one committed acquisition actually did, quoted from production state rather than
@@ -101,7 +106,7 @@ pub struct AcquiredBusiness {
 pub struct ValidatedBusinessAcquisition {
     /// Authored cycle duration for the economy commit opens; captured at validation time.
     economy_cycle_duration: crate::core::time::SimDuration,
-    funding_account: FinancialAccountId,
+    funding_accounts: BTreeSet<FinancialAccountId>,
     price: Money,
     business: BusinessId,
     business_name: String,
@@ -126,26 +131,7 @@ impl ValidatedBusinessAcquisition {
                 owner: business_record.owner(),
             });
         }
-        let funding = state.finance.get_account(self.funding_account).ok_or(
-            BusinessAcquisitionError::MissingFundingAccount(self.funding_account),
-        )?;
-        if funding.owner() != FinancialOwner::Organization(self.organization) {
-            return Err(BusinessAcquisitionError::FundingAccountOwnerMismatch {
-                account: self.funding_account,
-                organization: self.organization,
-            });
-        }
-        if funding.kind() != AccountKind::AccountedFunds {
-            return Err(BusinessAcquisitionError::InvalidFundingAccountKind(
-                self.funding_account,
-            ));
-        }
-        if funding.balance() < self.price {
-            return Err(BusinessAcquisitionError::InsufficientFunds {
-                balance_cents: funding.balance().cents(),
-                price_cents: self.price.cents(),
-            });
-        }
+        validate_funding_accounts(state, self.organization, &self.funding_accounts, self.price)?;
         // Hosting conflicts (active enterprise venues/supporters) reject through the same
         // canonical read the ownership transfer enforces. Keep the validated token so commit
         // does not create a second validation path later in the composite operation.
@@ -175,7 +161,7 @@ impl ValidatedBusinessAcquisition {
                 state,
                 acquisition_payment_draft(
                     state,
-                    self.funding_account,
+                    &self.funding_accounts,
                     economy.operating_account(),
                     self.price,
                     &self.business_name,
@@ -220,7 +206,7 @@ impl ValidatedBusinessAcquisition {
                 openings,
                 acquisition_payment_draft(
                     state,
-                    self.funding_account,
+                    &self.funding_accounts,
                     operating_account,
                     self.price,
                     &self.business_name,
@@ -293,28 +279,86 @@ impl ValidatedBusinessAcquisition {
 
 fn acquisition_payment_draft(
     state: &AppState,
-    funding_account: FinancialAccountId,
+    funding_accounts: &BTreeSet<FinancialAccountId>,
     operating_account: FinancialAccountId,
     price: Money,
     business_name: &str,
 ) -> LedgerTransactionDraft {
+    let mut postings = Vec::with_capacity(funding_accounts.len() + 1);
+    let mut remaining = price;
+    for account in funding_accounts {
+        if remaining == Money::ZERO {
+            break;
+        }
+        let balance = state
+            .finance
+            .get_account(*account)
+            .expect("validated acquisition funding account must exist")
+            .balance();
+        if balance <= Money::ZERO {
+            continue;
+        }
+        let debit = balance.min(remaining);
+        postings.push(LedgerPosting {
+            account: *account,
+            amount: debit
+                .checked_neg()
+                .expect("positive acquisition debit must negate"),
+        });
+        remaining = remaining
+            .checked_sub(debit)
+            .expect("acquisition debit cannot exceed remaining price");
+    }
+    debug_assert_eq!(remaining, Money::ZERO);
+    postings.push(LedgerPosting {
+        account: operating_account,
+        amount: price,
+    });
     LedgerTransactionDraft {
         occurred_at: state.now(),
         memo: format!("Business acquisition of {business_name}"),
-        postings: vec![
-            LedgerPosting {
-                account: funding_account,
-                amount: price
-                    .checked_neg()
-                    .expect("an authored acquisition price must fit negation"),
-            },
-            LedgerPosting {
-                account: operating_account,
-                amount: price,
-            },
-        ],
+        postings,
         authorization: None,
     }
+}
+
+fn validate_funding_accounts(
+    state: &AppState,
+    organization: OrganizationId,
+    funding_accounts: &BTreeSet<FinancialAccountId>,
+    price: Money,
+) -> Result<(), BusinessAcquisitionError> {
+    if funding_accounts.is_empty() {
+        return Err(BusinessAcquisitionError::NoFundingAccounts);
+    }
+    let mut available_cents = 0_i128;
+    for account in funding_accounts {
+        let funding = state
+            .finance
+            .get_account(*account)
+            .ok_or(BusinessAcquisitionError::MissingFundingAccount(*account))?;
+        if funding.owner() != FinancialOwner::Organization(organization) {
+            return Err(BusinessAcquisitionError::FundingAccountOwnerMismatch {
+                account: *account,
+                organization,
+            });
+        }
+        if funding.kind() != AccountKind::AccountedFunds {
+            return Err(BusinessAcquisitionError::InvalidFundingAccountKind(
+                *account,
+            ));
+        }
+        available_cents = (available_cents + i128::from(funding.balance().cents().max(0)))
+            .min(i128::from(price.cents()));
+    }
+    if available_cents < i128::from(price.cents()) {
+        return Err(BusinessAcquisitionError::InsufficientFunds {
+            available_cents: i64::try_from(available_cents)
+                .expect("available acquisition funding is bounded by price"),
+            price_cents: price.cents(),
+        });
+    }
+    Ok(())
 }
 
 pub fn validate_acquire_business(
@@ -341,26 +385,7 @@ pub fn validate_acquire_business(
         .get_business(business_record.kind())
         .economics()
         .acquisition_cost();
-    let funding = state.finance.get_account(draft.funding_account).ok_or(
-        BusinessAcquisitionError::MissingFundingAccount(draft.funding_account),
-    )?;
-    if funding.owner() != FinancialOwner::Organization(draft.organization) {
-        return Err(BusinessAcquisitionError::FundingAccountOwnerMismatch {
-            account: draft.funding_account,
-            organization: draft.organization,
-        });
-    }
-    if funding.kind() != AccountKind::AccountedFunds {
-        return Err(BusinessAcquisitionError::InvalidFundingAccountKind(
-            draft.funding_account,
-        ));
-    }
-    if funding.balance() < price {
-        return Err(BusinessAcquisitionError::InsufficientFunds {
-            balance_cents: funding.balance().cents(),
-            price_cents: price.cents(),
-        });
-    }
+    validate_funding_accounts(state, draft.organization, &draft.funding_accounts, price)?;
     // Ownership conflicts (active enterprise hosts/supports) reject through the canonical
     // transfer path; unchanged ownership is impossible because an Independent owner never
     // equals an Organization owner. Commit re-runs this read against live state, so the
@@ -379,7 +404,7 @@ pub fn validate_acquire_business(
             .get_business(business_record.kind())
             .economics()
             .cycle(),
-        funding_account: draft.funding_account,
+        funding_accounts: draft.funding_accounts,
         price,
         business: draft.business,
         business_name: business_record.name().to_owned(),
@@ -524,7 +549,7 @@ mod tests {
         BusinessAcquisitionDraft {
             organization: fixture.organization,
             business: fixture.business,
-            funding_account: fixture.accounted,
+            funding_accounts: BTreeSet::from([fixture.accounted]),
         }
     }
 
@@ -602,6 +627,96 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_aggregates_accounted_funds_across_multiple_accounts() {
+        let mut fixture = make_independent_fixture();
+        let price = hospitality_price(&fixture);
+        fund_accounted_from_street(&mut fixture, price.cents());
+        let second_accounted = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(fixture.organization),
+                kind: AccountKind::AccountedFunds,
+            },
+        )
+        .expect("second accounted reserve should validate");
+        let second_share = price.cents() / 2;
+        validate_record_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Split acquisition reserve".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: fixture.accounted,
+                        amount: Money::from_cents(-second_share),
+                    },
+                    LedgerPosting {
+                        account: second_accounted,
+                        amount: Money::from_cents(second_share),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .expect("reserve split should validate")
+        .commit(&mut fixture.state)
+        .expect("reserve split should commit");
+        assert!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.accounted)
+                .expect("first accounted reserve should persist")
+                .balance()
+                < price
+        );
+        assert!(
+            fixture
+                .state
+                .finance()
+                .get_account(second_accounted)
+                .expect("second accounted reserve should persist")
+                .balance()
+                < price
+        );
+
+        let acquired = validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            BusinessAcquisitionDraft {
+                organization: fixture.organization,
+                business: fixture.business,
+                funding_accounts: BTreeSet::from([fixture.accounted, second_accounted]),
+            },
+        )
+        .expect("aggregate accounted funds should cover the acquisition")
+        .commit(&mut fixture.state)
+        .expect("aggregate-funded acquisition should commit");
+
+        assert_eq!(acquired.price, price);
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(fixture.accounted)
+                .expect("first accounted reserve should persist")
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(second_accounted)
+                .expect("second accounted reserve should persist")
+                .balance(),
+            Money::ZERO
+        );
+        validate_state(&fixture.state).expect("aggregate-funded acquisition should validate");
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
     fn acquisition_id_preflight_rejects_without_opening_books_or_consuming_account_ids() {
         let mut fixture = make_independent_fixture();
         let price = hospitality_price(&fixture);
@@ -670,7 +785,7 @@ mod tests {
         assert_eq!(
             error,
             BusinessAcquisitionError::InsufficientFunds {
-                balance_cents: price.cents() - 1,
+                available_cents: price.cents() - 1,
                 price_cents: price.cents(),
             }
         );
@@ -740,7 +855,7 @@ mod tests {
         assert_eq!(
             error,
             BusinessAcquisitionError::InsufficientFunds {
-                balance_cents: 0,
+                available_cents: 0,
                 price_cents: price.cents(),
             }
         );
@@ -802,7 +917,7 @@ mod tests {
             &fixture.registry,
             &fixture.state,
             BusinessAcquisitionDraft {
-                funding_account: fixture.street,
+                funding_accounts: BTreeSet::from([fixture.street]),
                 ..acquisition_draft(&fixture)
             },
         )

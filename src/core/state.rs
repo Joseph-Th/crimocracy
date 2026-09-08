@@ -30,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 67;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 69;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -208,6 +208,29 @@ impl AppState {
 
     pub(crate) fn state_schema_version(&self) -> u16 {
         self.metadata.schema_version
+    }
+
+    /// Reconstructs every non-authoritative lookup/scheduling projection from persisted records.
+    /// Save serialization skips these indexes entirely, so restore must run this before normal
+    /// invariant validation or any indexed read.
+    pub(crate) fn rebuild_derived_indexes_after_restore(&mut self) -> bool {
+        self.world.rebuild_derived_indexes();
+        self.contacts.rebuild_derived_indexes();
+        self.decisions.rebuild_derived_indexes();
+        self.delegation.rebuild_derived_indexes();
+        self.economy.rebuild_derived_indexes();
+        self.enterprises.rebuild_derived_indexes();
+        if !self.finance.rebuild_derived_indexes() {
+            return false;
+        }
+        self.social.rebuild_derived_indexes();
+        self.intelligence.rebuild_derived_indexes();
+        self.operations.rebuild_derived_indexes();
+        self.opportunities.rebuild_derived_indexes();
+        self.recruitment.rebuild_derived_indexes();
+        self.legal.rebuild_derived_indexes();
+        self.reports.rebuild_derived_indexes();
+        true
     }
 
     pub(crate) fn set_player_organization(&mut self, organization: OrganizationId) {

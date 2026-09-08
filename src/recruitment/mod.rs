@@ -288,15 +288,38 @@ impl RecruitmentAttemptRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RecruitmentState {
     records: BTreeMap<RecruitmentAttemptId, RecruitmentAttemptRecord>,
+    #[serde(skip)]
     by_candidate: BTreeMap<CharacterId, BTreeSet<RecruitmentAttemptId>>,
+    #[serde(skip)]
     by_candidate_organization:
         BTreeMap<(CharacterId, OrganizationId), BTreeSet<RecruitmentAttemptId>>,
+    #[serde(skip)]
     by_approval_decision: BTreeMap<DecisionRequestId, RecruitmentAttemptId>,
 }
 
 impl RecruitmentState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_candidate.clear();
+        self.by_candidate_organization.clear();
+        self.by_approval_decision.clear();
+        for record in self.records.values() {
+            let id = record.id();
+            self.by_candidate
+                .entry(record.candidate())
+                .or_default()
+                .insert(id);
+            self.by_candidate_organization
+                .entry((record.candidate(), record.target_organization()))
+                .or_default()
+                .insert(id);
+            if let RecruitmentAuthority::ApprovedDecision { decision, .. } = record.authority() {
+                self.by_approval_decision.insert(decision, id);
+            }
+        }
     }
 
     pub fn get_attempt(&self, id: RecruitmentAttemptId) -> Option<&RecruitmentAttemptRecord> {
@@ -314,7 +337,11 @@ impl RecruitmentState {
             .get(&candidate)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("candidate recruitment index must reference an attempt")
+            })
     }
 
     pub fn latest_attempt_for(
@@ -325,16 +352,22 @@ impl RecruitmentState {
         self.by_candidate_organization
             .get(&(candidate, organization))
             .and_then(|ids| ids.last())
-            .and_then(|id| self.records.get(id))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("candidate-organization recruitment index must reference an attempt")
+            })
     }
 
     pub fn get_attempt_for_approval_decision(
         &self,
         decision: DecisionRequestId,
     ) -> Option<&RecruitmentAttemptRecord> {
-        self.by_approval_decision
-            .get(&decision)
-            .and_then(|id| self.records.get(id))
+        self.by_approval_decision.get(&decision).map(|id| {
+            self.records
+                .get(id)
+                .expect("recruitment approval index must reference an attempt")
+        })
     }
 
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &RecruitmentAttemptRecord> {

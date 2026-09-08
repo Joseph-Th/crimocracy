@@ -193,12 +193,14 @@ pub enum HarnessContractError {
     #[error("no safe operation window was derivable from the surveillance report")]
     NoSafeOperationWindow,
     #[error(
-        "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c minus fee {fee}c does not equal the accounted balance {balance:?}c"
+        "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c minus fee {fee}c minus acquisition spend {acquisition}c minus accounted-funds payroll {payroll}c does not equal the accounted balance {balance:?}c"
     )]
     InconsistentLaunderingEvidence {
         strategy: Strategy,
         gross: i64,
         fee: i64,
+        acquisition: i64,
+        payroll: i64,
         balance: Option<i64>,
     },
 }
@@ -716,6 +718,10 @@ pub struct RunMetrics {
     pub laundering_capacity_rejections: u32,
     /// Final accounted-funds balance, for the clean-money accounting identity contract.
     pub accounted_balance_cents: Option<i64>,
+    /// Payroll debits that actually came from organization-owned accounted funds. Payroll
+    /// can draw any spendable organization liquidity, so this is read from its ledger
+    /// transactions rather than inferred from the total wage bill.
+    pub payroll_accounted_spent_cents: i64,
     /// Payroll evidence across the session: what wages cost and where they went unpaid.
     pub payroll_paid_cents: i64,
     pub payroll_short_cents: i64,

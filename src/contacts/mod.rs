@@ -177,12 +177,48 @@ struct ContactIndexes {
 pub struct ContactState {
     contacts: BTreeMap<ContactId, InstitutionalContactRecord>,
     disclosures: BTreeMap<ContactDisclosureId, ContactDisclosureRecord>,
+    #[serde(skip)]
     indexes: ContactIndexes,
 }
 
 impl ContactState {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.indexes = ContactIndexes::default();
+        for record in self.contacts.values() {
+            let id = record.id();
+            self.indexes
+                .by_sponsor
+                .entry(record.sponsor())
+                .or_default()
+                .insert(id);
+            if record.status() == ContactStatus::Active {
+                self.indexes
+                    .active_by_sponsor_contact
+                    .insert((record.sponsor(), record.contact()), id);
+                self.indexes
+                    .active_by_handler
+                    .entry(record.handler())
+                    .or_default()
+                    .insert(id);
+                self.indexes
+                    .active_by_contact
+                    .entry(record.contact())
+                    .or_default()
+                    .insert(id);
+            }
+        }
+        for record in self.disclosures.values() {
+            self.indexes
+                .disclosure_by_source
+                .insert((record.contact(), record.source_information()), record.id());
+            self.indexes
+                .disclosure_by_information
+                .insert(record.disclosed_information(), record.id());
+        }
     }
 
     pub fn get_contact(&self, id: ContactId) -> Option<&InstitutionalContactRecord> {
@@ -202,7 +238,11 @@ impl ContactState {
             .get(&sponsor)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.contacts.get(id))
+            .map(|id| {
+                self.contacts
+                    .get(id)
+                    .expect("contact sponsor index must reference a contact")
+            })
     }
 
     pub fn disclosure_for_information(
@@ -212,7 +252,11 @@ impl ContactState {
         self.indexes
             .disclosure_by_information
             .get(&information)
-            .and_then(|id| self.disclosures.get(id))
+            .map(|id| {
+                self.disclosures
+                    .get(id)
+                    .expect("contact disclosure index must reference a disclosure")
+            })
     }
 
     pub(crate) fn active_contact_for(
@@ -223,7 +267,11 @@ impl ContactState {
         self.indexes
             .active_by_sponsor_contact
             .get(&(sponsor, contact))
-            .and_then(|id| self.contacts.get(id))
+            .map(|id| {
+                self.contacts
+                    .get(id)
+                    .expect("active sponsor-contact index must reference a contact")
+            })
     }
 
     pub(crate) fn active_contacts_for_handler(
@@ -235,7 +283,11 @@ impl ContactState {
             .get(&handler)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.contacts.get(id))
+            .map(|id| {
+                self.contacts
+                    .get(id)
+                    .expect("active handler index must reference a contact")
+            })
     }
 
     pub(crate) fn active_contacts_for_character(
@@ -247,7 +299,11 @@ impl ContactState {
             .get(&contact)
             .into_iter()
             .flatten()
-            .filter_map(|id| self.contacts.get(id))
+            .map(|id| {
+                self.contacts
+                    .get(id)
+                    .expect("active contact index must reference a contact")
+            })
     }
 
     pub(crate) fn contacts(&self) -> impl Iterator<Item = &InstitutionalContactRecord> {
@@ -340,7 +396,11 @@ impl ContactState {
         self.indexes
             .disclosure_by_source
             .get(&(contact, source))
-            .and_then(|id| self.disclosures.get(id))
+            .map(|id| {
+                self.disclosures
+                    .get(id)
+                    .expect("contact disclosure source index must reference a disclosure")
+            })
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {

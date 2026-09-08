@@ -5,6 +5,7 @@ use crimocracy::core::simulation::TickOutcome;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::decisions::decision_system::validate_resolve_decision;
 use crimocracy::decisions::{DecisionContext, DecisionResponse};
+use crimocracy::finance::{AccountKind, FinancialOwner};
 use crimocracy::intelligence::intelligence_system::validate_information_transfer;
 use crimocracy::intelligence::{InformationTopic, InformationTransferDraft, KnowledgeHolder};
 use std::error::Error;
@@ -27,6 +28,34 @@ pub fn observe_tick(
     {
         metrics.payroll_paid_cents += payroll.paid().cents();
         metrics.payroll_short_cents += payroll.short().cents();
+        if let Some(transaction) = payroll.transaction() {
+            let transaction = scenario
+                .state
+                .finance()
+                .get_transaction(transaction)
+                .expect("payroll outcome transaction must persist");
+            let accounted_debit = transaction
+                .postings()
+                .iter()
+                .filter_map(|posting| {
+                    let account = scenario
+                        .state
+                        .finance()
+                        .get_account(posting.account)
+                        .expect("payroll posting account must persist");
+                    (posting.amount.cents() < 0
+                        && account.owner() == FinancialOwner::Organization(scenario.player)
+                        && account.kind() == AccountKind::AccountedFunds)
+                        .then(|| posting.amount.cents().checked_neg())
+                        .flatten()
+                })
+                .try_fold(0_i64, i64::checked_add)
+                .expect("accounted payroll debit total must fit money range");
+            metrics.payroll_accounted_spent_cents = metrics
+                .payroll_accounted_spent_cents
+                .checked_add(accounted_debit)
+                .expect("session accounted payroll total must fit money range");
+        }
         if narrative && payroll.short().cents() > 0 {
             println!(
                 "[PAYROLL]  {}: the day's wages went unpaid ({} owed). The crew will remember.",

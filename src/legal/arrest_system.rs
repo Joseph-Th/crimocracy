@@ -2,14 +2,32 @@
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, IdExhaustionError, InvestigationId, InvestigationWorkId,
-    OperationId, OrganizationId,
+    ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId, OperationId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::legal::{
-    ArrestDraft, ArrestRecord, ArrestStatus, InvestigationStatus, InvestigationWorkStatus,
+use crate::core::time::SimTime;
+use crate::decisions::decision_system::{
+    DecisionError, ValidatedOperationDecisionCancellation,
+    validate_cancel_operation_decision_for_detention,
 };
-use crate::operations::ACTIVE_ASSIGNMENT_STATUSES;
+use crate::legal::investigation_system::{
+    InvestigationError, ValidatedInvestigatorDetentionRelease,
+    validate_release_investigator_for_detention,
+};
+use crate::legal::investigation_work_execution::{
+    InvestigationWorkError, ValidatedInvestigationWorkCancellation,
+    validate_cancel_investigation_work_for_detention,
+};
+use crate::legal::prosecution_system::{
+    ProsecutionStaffingError, ValidatedProsecutorDetentionRelease,
+    validate_release_prosecution_cases_for_detention,
+};
+use crate::legal::{ArrestDraft, ArrestRecord, ArrestStatus, InvestigationStatus};
+use crate::operations::operation_abort::{
+    ValidatedOperationAbort, validate_participant_detention_abort_operation,
+};
+use crate::operations::operation_system::OperationError;
 use crate::world::OrganizationKind;
 use thiserror::Error;
 
@@ -65,16 +83,6 @@ pub enum ArrestError {
         character: CharacterId,
         arrest: ArrestId,
     },
-    #[error("character {character} is assigned to active operation {operation}")]
-    ActiveOperationResponsibility {
-        character: CharacterId,
-        operation: OperationId,
-    },
-    #[error("character {character} owns scheduled investigation work {work}")]
-    ScheduledInvestigationWork {
-        character: CharacterId,
-        work: InvestigationWorkId,
-    },
     #[error(
         "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
     )]
@@ -91,6 +99,10 @@ pub enum ArrestError {
         expected: u32,
         found: u32,
     },
+    #[error("arrest was validated at {expected:?}, but simulation time is now {found:?}")]
+    StaleArrestTime { expected: SimTime, found: SimTime },
+    #[error("character {character}'s live responsibilities changed after arrest validation")]
+    CustodyResponsibilitiesChanged { character: CharacterId },
     #[error("arrest {0} does not exist")]
     MissingArrest(ArrestId),
     #[error("arrest {0} is not an active detention")]
@@ -104,7 +116,38 @@ pub enum ArrestError {
         found: u32,
     },
     #[error(transparent)]
+    Decision(#[from] DecisionError),
+    #[error(transparent)]
+    Operation(#[from] OperationError),
+    #[error(transparent)]
+    InvestigationWork(#[from] InvestigationWorkError),
+    #[error(transparent)]
+    Investigation(#[from] InvestigationError),
+    #[error(transparent)]
+    ProsecutionStaffing(#[from] ProsecutionStaffingError),
+    #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+}
+
+struct ValidatedCustodyOperationPreemption {
+    abort: ValidatedOperationAbort,
+    decision_cancellation: Option<ValidatedOperationDecisionCancellation>,
+}
+
+impl std::fmt::Debug for ValidatedCustodyOperationPreemption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatedCustodyOperationPreemption")
+            .field("operation", &self.abort.operation())
+            .field(
+                "decision",
+                &self
+                    .decision_cancellation
+                    .as_ref()
+                    .map(ValidatedOperationDecisionCancellation::decision),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -113,10 +156,21 @@ pub struct ValidatedArrest {
     authority: OrganizationId,
     expected_investigation_version: u32,
     expected_character_version: u32,
+    validated_at: SimTime,
+    work_cancellation: Option<ValidatedInvestigationWorkCancellation>,
+    lead_release: Option<ValidatedInvestigatorDetentionRelease>,
+    prosecution_release: ValidatedProsecutorDetentionRelease,
+    operation_preemptions: Vec<ValidatedCustodyOperationPreemption>,
 }
 
 impl ValidatedArrest {
     pub fn commit(self, state: &mut AppState) -> Result<ArrestId, ArrestError> {
+        if state.now() != self.validated_at {
+            return Err(ArrestError::StaleArrestTime {
+                expected: self.validated_at,
+                found: state.now(),
+            });
+        }
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)
@@ -142,7 +196,69 @@ impl ValidatedArrest {
         let authority = validate_arrest_dependencies(state, &self.draft)?;
         debug_assert_eq!(authority, self.authority);
 
-        let id = state.ids.next_arrest()?;
+        let current_work = scheduled_work_for_investigator(state, self.draft.character);
+        let expected_work = self.work_cancellation.as_ref().map(|token| token.work());
+        let current_lead_case = state
+            .legal
+            .active_investigation_for_investigator(self.draft.character)
+            .map(|investigation| investigation.id());
+        let expected_lead_case = self
+            .lead_release
+            .as_ref()
+            .map(ValidatedInvestigatorDetentionRelease::investigation);
+        let current_operations =
+            active_operation_bookings_for_character(state, self.draft.character);
+        let expected_operations: Vec<OperationId> = self
+            .operation_preemptions
+            .iter()
+            .map(|preemption| preemption.abort.operation())
+            .collect();
+        if current_work != expected_work
+            || current_lead_case != expected_lead_case
+            || current_operations != expected_operations
+        {
+            return Err(ArrestError::CustodyResponsibilitiesChanged {
+                character: self.draft.character,
+            });
+        }
+
+        if let Some(work) = &self.work_cancellation {
+            work.ensure_current(state)?;
+        }
+        if let Some(release) = &self.lead_release {
+            release.ensure_current(state)?;
+        }
+        self.prosecution_release.ensure_current(state)?;
+        for preemption in &self.operation_preemptions {
+            if let Some(decision) = &preemption.decision_cancellation {
+                decision.ensure_current(state)?;
+            }
+            preemption.abort.ensure_current(state)?;
+        }
+
+        let mut id_budget = vec![(IdKind::Arrest, 1)];
+        for preemption in &self.operation_preemptions {
+            id_budget.extend(preemption.abort.id_budget());
+        }
+        state.ids.reserve_many(&id_budget)?;
+
+        let id = state
+            .ids
+            .next_arrest()
+            .expect("arrest ID was preflighted before custody mutation");
+        for preemption in self.operation_preemptions {
+            if let Some(decision) = preemption.decision_cancellation {
+                decision.commit_preflighted(state);
+            }
+            preemption.abort.commit_preflighted(state);
+        }
+        if let Some(work) = self.work_cancellation {
+            work.commit_preflighted(state, id);
+        }
+        if let Some(release) = self.lead_release {
+            release.commit_preflighted(state);
+        }
+        self.prosecution_release.commit_preflighted(state);
         state.legal.insert_arrest(ArrestRecord {
             id,
             character: self.draft.character,
@@ -171,11 +287,32 @@ pub fn validate_arrest(
         .world
         .get_character(draft.character)
         .expect("validated arrest character must exist");
+    let work_cancellation =
+        validate_cancel_investigation_work_for_detention(state, draft.character)?;
+    let lead_release = validate_release_investigator_for_detention(state, draft.character)?;
+    let prosecution_release =
+        validate_release_prosecution_cases_for_detention(state, draft.character)?;
+    let mut operation_preemptions = Vec::new();
+    for operation in active_operation_bookings_for_character(state, draft.character) {
+        let decision_cancellation =
+            validate_cancel_operation_decision_for_detention(state, operation, draft.character)?;
+        let abort =
+            validate_participant_detention_abort_operation(state, operation, draft.character)?;
+        operation_preemptions.push(ValidatedCustodyOperationPreemption {
+            abort,
+            decision_cancellation,
+        });
+    }
     Ok(ValidatedArrest {
         draft,
         authority,
         expected_investigation_version: investigation.version(),
         expected_character_version: character.version(),
+        validated_at: state.now(),
+        work_cancellation,
+        lead_release,
+        prosecution_release,
+        operation_preemptions,
     })
 }
 
@@ -260,45 +397,28 @@ fn validate_arrest_dependencies(
         }
     }
 
-    validate_character_can_enter_custody(state, draft.character)?;
     Ok(authority)
 }
 
-/// Participants bound to any non-terminal operation. Served from the status indexes rather
-/// than the full operation history: terminal operations release their participants.
-fn collect_booked_characters(state: &AppState) -> std::collections::BTreeSet<CharacterId> {
-    let mut booked = std::collections::BTreeSet::new();
-    for status in ACTIVE_ASSIGNMENT_STATUSES {
-        for operation in state.operations().operations_with_status(status) {
-            booked.extend(operation.participants().iter().copied());
-        }
-    }
-    booked
-}
-
-fn validate_character_can_enter_custody(
+fn active_operation_bookings_for_character(
     state: &AppState,
     character: CharacterId,
-) -> Result<(), ArrestError> {
-    if let Some(work) = state
+) -> Vec<OperationId> {
+    state
+        .operations
+        .active_operation_bookings(character)
+        .collect()
+}
+
+fn scheduled_work_for_investigator(
+    state: &AppState,
+    character: CharacterId,
+) -> Option<crate::core::id::InvestigationWorkId> {
+    state
         .legal
         .work_for_investigator(character)
-        .find(|work| work.status() == InvestigationWorkStatus::Scheduled)
-    {
-        return Err(ArrestError::ScheduledInvestigationWork {
-            character,
-            work: work.id(),
-        });
-    }
-    // Only non-terminal operations can hold the character; the owner's booking lookup scans
-    // the live status indexes, so this stays O(live bookings), not O(campaign history).
-    if let Some(operation) = state.operations.find_active_operation_booking(character) {
-        return Err(ArrestError::ActiveOperationResponsibility {
-            character,
-            operation,
-        });
-    }
-    Ok(())
+        .find(|work| work.status() == crate::legal::InvestigationWorkStatus::Scheduled)
+        .map(|work| work.id())
 }
 
 #[derive(Debug)]
@@ -359,9 +479,9 @@ const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
 
 /// Runs the police institution's evidence-to-custody conversion across originated
 /// cases: when an identified subject has enough admissible non-weak evidence against them,
-/// the owning authority makes the arrest through the canonical validated path. Subjects who
-/// currently hold any non-terminal operation booking or scheduled detective work are left alone
-/// until that responsibility ends; custody never tears up active work implicitly.
+/// the owning authority makes the arrest through the canonical validated path. Custody preempts
+/// conflicting operation bookings and scheduled detective work through their explicit abort or
+/// cancellation lifecycles, so internal commitments cannot make an arrestable subject immune.
 pub fn apply_autonomous_evidence_arrests(
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
@@ -396,30 +516,9 @@ pub fn apply_autonomous_evidence_arrests(
         return Ok(Vec::new());
     }
 
-    // One pass over the live operation set per tick, not per candidate: every participant
-    // bound to a non-terminal operation is protected from custody conversion. Built lazily
-    // on the first candidate — operations never mutate during this pass (a booked suspect
-    // is skipped before any arrest validation), so deferring the build past candidate
-    // collection cannot change what it observes.
-    let mut booked_characters = Option::<std::collections::BTreeSet<CharacterId>>::None;
     let mut arrests = Vec::new();
     for (investigation_id, character) in candidates {
-        // A detained character may not hold any non-terminal operation booking; skip
-        // suspects whose crew work is still live rather than tearing it up mid-flight.
-        if booked_characters
-            .get_or_insert_with(|| collect_booked_characters(state))
-            .contains(&character)
-        {
-            continue;
-        }
         if state.legal.active_arrest_for_character(character).is_some() {
-            continue;
-        }
-        if state
-            .legal
-            .work_for_investigator(character)
-            .any(|work| work.status() == InvestigationWorkStatus::Scheduled)
-        {
             continue;
         }
 
@@ -468,9 +567,9 @@ pub fn apply_autonomous_evidence_arrests(
             continue;
         }
 
-        // Every modeled temporary blocker was filtered above. The remaining draft is assembled
-        // from current case/evidence state, so validation or allocation failure is exceptional
-        // and must surface rather than being mistaken for "not enough evidence yet".
+        // The draft is assembled from current case/evidence state. Responsibility preemption is
+        // part of the validated custody transaction, so validation or allocation failure is
+        // exceptional and must surface rather than being mistaken for "not enough evidence yet".
         let arrest = validate_arrest(
             state,
             ArrestDraft {

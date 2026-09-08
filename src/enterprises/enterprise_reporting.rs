@@ -108,9 +108,12 @@ pub fn resolve_neighborhood_enterprise_financial_summary(
                 .map(EnterpriseRecord::id),
         );
     }
-    let enterprises = enterprise_ids
-        .into_iter()
-        .filter_map(|id| state.enterprises().get_enterprise(id));
+    let enterprises = enterprise_ids.into_iter().map(|id| {
+        state
+            .enterprises()
+            .get_enterprise(id)
+            .expect("enterprise location indexes must reference persisted enterprises")
+    });
     resolve_summary(state, enterprises, period_start, period_end)
 }
 
