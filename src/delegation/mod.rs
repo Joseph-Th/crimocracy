@@ -349,7 +349,10 @@ impl DelegationState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             match record.status() {
                 MandateStatus::Active => {
                     if self.active_by_manager.get(&record.manager()) != Some(&record.id())

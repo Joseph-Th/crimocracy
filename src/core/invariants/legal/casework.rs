@@ -2,7 +2,7 @@
 //! and the evidence graph they produce.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::EvidenceId;
+use crate::core::id::{CaseWitnessId, EvidenceId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
@@ -12,10 +12,15 @@ use crate::legal::{
     InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkStatus, WitnessCooperation,
 };
 use crate::world::{CapabilityKind, OrganizationKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValidationError> {
     for investigation in state.legal.investigations() {
+        if investigation.title().trim().is_empty() || investigation.subjects().is_empty() {
+            return Err(StateValidationError::InvalidInvestigationDefinition {
+                investigation: investigation.id(),
+            });
+        }
         let owner = state.world.get_organization(investigation.owner()).ok_or(
             StateValidationError::MissingEntity {
                 context: "investigation owner",
@@ -166,6 +171,7 @@ pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValid
 pub(super) fn validate_investigation_work_records(
     state: &AppState,
     derived_evidence_from_work: &mut BTreeSet<EvidenceId>,
+    completed_interviews_by_witness: &mut BTreeMap<CaseWitnessId, u32>,
 ) -> Result<(), StateValidationError> {
     let mut scheduled_investigators = BTreeSet::new();
     for work in state.legal.investigation_work() {
@@ -243,6 +249,19 @@ pub(super) fn validate_investigation_work_records(
                     || resolution.resolved_at() > state.now()
                 {
                     return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
+                }
+                if work.kind() == InvestigationWorkKind::WitnessInterview {
+                    let case_witness = work.focus().witness_id().ok_or(
+                        StateValidationError::InvalidInvestigationWork { work: work.id() },
+                    )?;
+                    let attempts = completed_interviews_by_witness
+                        .entry(case_witness)
+                        .or_insert(0);
+                    *attempts = attempts.checked_add(1).ok_or(
+                        StateValidationError::InvalidCaseWitness {
+                            witness: case_witness,
+                        },
+                    )?;
                 }
                 match resolution.outcome() {
                     InvestigationWorkOutcome::Connected => {
@@ -392,7 +411,10 @@ pub(crate) fn validate_developed_review_evidence(
     Ok(())
 }
 
-pub(super) fn validate_case_witnesses(state: &AppState) -> Result<(), StateValidationError> {
+pub(super) fn validate_case_witnesses(
+    state: &AppState,
+    completed_interviews_by_witness: &BTreeMap<CaseWitnessId, u32>,
+) -> Result<(), StateValidationError> {
     for witness in state.legal.case_witnesses() {
         let investigation = state
             .legal
@@ -400,10 +422,28 @@ pub(super) fn validate_case_witnesses(state: &AppState) -> Result<(), StateValid
             .ok_or(StateValidationError::InvalidCaseWitness {
                 witness: witness.id(),
             })?;
+        let completed_interviews = completed_interviews_by_witness
+            .get(&witness.id())
+            .copied()
+            .unwrap_or(0);
+        let minimum_version = 1_u32
+            .checked_add(completed_interviews)
+            .and_then(|version| {
+                u32::try_from(witness.statements().len())
+                    .ok()
+                    .and_then(|statements| version.checked_add(statements))
+            })
+            .ok_or(StateValidationError::InvalidCaseWitness {
+                witness: witness.id(),
+            })?;
         if state.world.get_character(witness.witness()).is_none()
             || witness.registered_at() < investigation.opened_at()
             || witness.registered_at() > state.now()
-            || witness.version() == 0
+            || u32::from(witness.interview_attempts()) != completed_interviews
+            // Registration starts at version 1. Every completed interview and every persisted
+            // statement advances the witness exactly once; cooperation changes may add further
+            // unhistoried increments, so this is a derivable lower bound rather than equality.
+            || witness.version() < minimum_version
         {
             return Err(StateValidationError::InvalidCaseWitness {
                 witness: witness.id(),

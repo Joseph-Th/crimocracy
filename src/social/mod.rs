@@ -174,7 +174,10 @@ impl SocialState {
         }
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.relationships.values() {
+        for (key, record) in &self.relationships {
+            if key.from != record.from() || key.to != record.to() {
+                return false;
+            }
             if !self
                 .by_target
                 .get(&record.to())

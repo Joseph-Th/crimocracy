@@ -450,7 +450,10 @@ impl DecisionState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if let Some(operation) = record.context().operation()
                 && !self
                     .by_operation

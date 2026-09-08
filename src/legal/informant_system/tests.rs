@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::time::SimDuration;
+use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
@@ -21,6 +21,7 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, CharacterDraft, DriveKind, OrganizationDraft, OrganizationKind, Rating,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -29,6 +30,103 @@ struct Fixture {
     criminal: OrganizationId,
     member: CharacterId,
     investigation: InvestigationId,
+}
+
+#[derive(Clone, Serialize)]
+struct InformantRecordWire {
+    id: InformantId,
+    character: CharacterId,
+    handler: OrganizationId,
+    status: InformantStatus,
+    established_at: SimTime,
+    version: u32,
+}
+
+fn informant_wire(record: &InformantRecord) -> InformantRecordWire {
+    InformantRecordWire {
+        id: record.id(),
+        character: record.character(),
+        handler: record.handler(),
+        status: record.status(),
+        established_at: record.established_at(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_informant(
+    envelope: SaveEnvelope,
+    original: &InformantRecord,
+    replacement: &InformantRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("informant should serialize");
+    let mirror = informant_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("informant mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement informant should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized informant must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout informant corruption must remain decodable")
+}
+
+#[test]
+fn restore_rejects_informant_version_without_a_relationship_mutation() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let record = fixture
+        .state
+        .legal()
+        .get_informant(informant)
+        .expect("informant should persist")
+        .clone();
+    assert_eq!(record.version(), 1);
+    let mut corrupted = informant_wire(&record);
+    corrupted.version = 2;
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_informant(
+            build_save(&registry, &fixture.state)
+                .expect("valid informant should save before version corruption"),
+            &record,
+            &corrupted,
+        ),
+    )
+    .expect_err("informants have no mutation path that can advance version beyond 1");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidInformant {
+                informant: invalid
+            }
+        ) if invalid == informant
+    ));
 }
 
 fn fixture() -> Fixture {

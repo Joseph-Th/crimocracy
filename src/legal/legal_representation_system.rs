@@ -10,11 +10,11 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::{
-    DelegationError, resolve_mandate_authority, resolve_policy_for_manager,
+    DelegationError, PolicySource, resolve_mandate_authority, resolve_policy_for_manager,
 };
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::finance_system::{
-    FinanceError, ValidatedLedgerTransaction, validate_record_transaction,
+    FinanceError, ValidatedLedgerTransaction, resolve_budget_usage, validate_record_transaction,
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
@@ -841,10 +841,11 @@ const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
 
 /// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
 /// organization that runs the Automatic policy gets counsel retained through the canonical
-/// representation path, paid from the organization's first funded cash account through its
-/// first currently usable LegalServices channel. Organizations without those prerequisites see no
-/// action — the policy promises support, and this stage delivers it only when the pieces
-/// exist for the canonical transaction to carry it.
+/// representation path. Organization policy may aggregate sponsor liquidity; a mandate-sourced
+/// override must spend through its Legal-scope budget account and current budget window. Counsel
+/// is selected from the first currently usable LegalServices channel in stable contact order.
+/// Organizations without those prerequisites see no action — the policy promises support, and
+/// this stage delivers it only when the pieces exist for the canonical transaction to carry it.
 pub(crate) fn apply_automatic_legal_support(
     state: &mut AppState,
 ) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
@@ -919,16 +920,43 @@ pub(crate) fn apply_automatic_legal_support(
         // delegated authority, so the organization's standing default takes over. Every other
         // delegation error denotes malformed current governance and must surface rather than be
         // disguised as an ordinary policy fallback.
-        let setting = if let Some(supervisor) = defendant_record.supervisor() {
+        let (setting, authorization) = if let Some(supervisor) = defendant_record.supervisor() {
             match resolve_policy_for_manager(state, supervisor, PolicyKind::AssociateLegalSupport) {
-                Ok(resolved) => Some(resolved.setting),
+                Ok(resolved) => {
+                    let authorization = match resolved.source {
+                        PolicySource::Organization(_) => None,
+                        PolicySource::Mandate(mandate) => {
+                            let legal_scope =
+                                ResponsibilityScope::Function(ResponsibilityFunction::Legal);
+                            let mandate_record = state
+                                .delegation
+                                .get_mandate(mandate)
+                                .expect("resolved mandate policy must reference a live mandate");
+                            // A mandate standing order can decide only inside authority the
+                            // mandate actually grants. Legal retention also spends money, so a
+                            // mandate with no Legal scope or no budget cannot turn an
+                            // organization-level CaseByCase policy into unrestricted spending.
+                            if !mandate_record.scopes().contains(&legal_scope)
+                                || mandate_record.budget().is_none()
+                            {
+                                continue;
+                            }
+                            Some(MandateAuthority {
+                                mandate,
+                                manager: supervisor,
+                                scope: legal_scope,
+                            })
+                        }
+                    };
+                    (Some(resolved.setting), authorization)
+                }
                 Err(DelegationError::DetainedManager { .. }) => {
-                    record.policy(PolicyKind::AssociateLegalSupport)
+                    (record.policy(PolicyKind::AssociateLegalSupport), None)
                 }
                 Err(error) => return Err(error.into()),
             }
         } else {
-            record.policy(PolicyKind::AssociateLegalSupport)
+            (record.policy(PolicyKind::AssociateLegalSupport), None)
         };
         if matches!(
             setting,
@@ -936,22 +964,41 @@ pub(crate) fn apply_automatic_legal_support(
                 crate::world::LegalSupportPolicy::Automatic,
             )),
         ) {
-            candidates.push((arrest.id(), organization));
+            candidates.push((arrest.id(), organization, authorization));
         }
     }
 
     let mut retained = Vec::new();
-    for (arrest_id, sponsor) in candidates {
+    for (arrest_id, sponsor, authorization) in candidates {
         let fee = crate::finance::Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
-        // Organization-level legal support can draw across the sponsor's liquid reserves. The
-        // payment transaction persists the exact deterministic allocation, so no second source
-        // of truth is stored on the representation itself.
-        let payer_accounts: BTreeSet<_> = state
-            .finance
-            .accounts_for(FinancialOwner::Organization(sponsor))
-            .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
-            .map(|account| account.id())
-            .collect();
+        // Organization policy can draw across the sponsor's liquid reserves. A mandate-sourced
+        // policy must instead use exactly its configured budget account and stay inside the
+        // current budget window, matching explicit delegated retention.
+        let payer_accounts: BTreeSet<_> = if let Some(authority) = authorization {
+            let mandate = state
+                .delegation
+                .get_mandate(authority.mandate)
+                .expect("automatic delegated policy must retain its mandate");
+            let budget = mandate
+                .budget()
+                .expect("automatic delegated support candidate requires a mandate budget");
+            let usage = resolve_budget_usage(state, authority.mandate, state.now())?;
+            let funding = state
+                .finance
+                .get_account(budget.funding_account)
+                .expect("validated mandate budget account must persist");
+            if usage.remaining < fee || funding.balance() < fee {
+                continue;
+            }
+            BTreeSet::from([budget.funding_account])
+        } else {
+            state
+                .finance
+                .accounts_for(FinancialOwner::Organization(sponsor))
+                .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
+                .map(|account| account.id())
+                .collect()
+        };
         let available = payer_accounts
             .iter()
             .map(|account| {
@@ -1010,7 +1057,7 @@ pub(crate) fn apply_automatic_legal_support(
                 fee,
                 payer_accounts: payer_accounts.clone(),
                 provider_account: provider_account.id(),
-                authorization: None,
+                authorization,
                 origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
             };
             validated_representation = Some(validate_retain_legal_representation(state, draft)?);

@@ -404,8 +404,11 @@ impl ContactState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.contacts.values() {
+        for (stored_id, record) in &self.contacts {
             let id = record.id();
+            if *stored_id != id {
+                return false;
+            }
             if !self
                 .indexes
                 .by_sponsor
@@ -442,7 +445,10 @@ impl ContactState {
                 ContactStatus::Active | ContactStatus::Terminated => {}
             }
         }
-        for disclosure in self.disclosures.values() {
+        for (stored_id, disclosure) in &self.disclosures {
+            if *stored_id != disclosure.id() {
+                return false;
+            }
             if !self.contacts.contains_key(&disclosure.contact())
                 || self
                     .indexes

@@ -2,8 +2,10 @@
 
 use super::*;
 use crate::build_registry;
+use crate::core::id::CharacterId;
 use crate::core::invariants::validate_invariants;
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::time::SimTime;
 use crate::delegation::delegation_system::{
     DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
 };
@@ -22,7 +24,184 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, BusinessOwner, CharacterDraft, OrganizationDraft, OrganizationKind,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Serialize)]
+struct BudgetUsageRecordWire {
+    mandate: MandateId,
+    mandate_version: u32,
+    manager: CharacterId,
+    scope: ResponsibilityScope,
+    funding_account: FinancialAccountId,
+    period_start: SimTime,
+    period_end: SimTime,
+    amount: Money,
+}
+
+#[derive(Clone, Serialize)]
+struct FinancialAccountRecordWire {
+    id: FinancialAccountId,
+    owner: FinancialOwner,
+    kind: AccountKind,
+    balance: Money,
+    version: u32,
+}
+
+fn account_wire(record: &FinancialAccountRecord) -> FinancialAccountRecordWire {
+    FinancialAccountRecordWire {
+        id: record.id(),
+        owner: record.owner(),
+        kind: record.kind(),
+        balance: record.balance(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_account(
+    envelope: SaveEnvelope,
+    original: &FinancialAccountRecord,
+    replacement: &FinancialAccountRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("financial account should serialize");
+    let mirror = account_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("financial account mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement account should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized account must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout account corruption must remain decodable")
+}
+
+#[derive(Clone, Serialize)]
+struct LedgerTransactionRecordWire {
+    id: LedgerTransactionId,
+    occurred_at: SimTime,
+    memo: String,
+    postings: Vec<LedgerPosting>,
+    budget_usage: Option<BudgetUsageRecordWire>,
+}
+
+#[test]
+fn restore_rejects_financial_account_version_not_derived_from_ledger() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Account-version persistence fixture".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("fixture transaction should validate")
+    .commit(&mut state)
+    .expect("fixture transaction should commit");
+    let account = state
+        .finance()
+        .get_account(funding)
+        .expect("funding account should persist");
+    assert_eq!(account.version(), 2);
+    let mut corrupted = account_wire(account);
+    corrupted.version = 3;
+
+    let registry = build_registry();
+    let error = restore_save(
+        &registry,
+        replace_serialized_account(
+            build_save(&registry, &state)
+                .expect("valid ledger-derived account version should save before corruption"),
+            account,
+            &corrupted,
+        ),
+    )
+    .expect_err("account version without a matching ledger mutation must fail restore");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidFinancialAccount {
+                account: invalid
+            }
+        ) if invalid == funding
+    ));
+}
+
+fn transaction_wire(record: &LedgerTransactionRecord) -> LedgerTransactionRecordWire {
+    LedgerTransactionRecordWire {
+        id: record.id(),
+        occurred_at: record.occurred_at(),
+        memo: record.memo().to_owned(),
+        postings: record.postings().to_vec(),
+        budget_usage: record.budget_usage().map(|usage| BudgetUsageRecordWire {
+            mandate: usage.mandate(),
+            mandate_version: usage.mandate_version(),
+            manager: usage.manager(),
+            scope: usage.scope(),
+            funding_account: usage.funding_account(),
+            period_start: usage.period_start(),
+            period_end: usage.period_end(),
+            amount: usage.amount(),
+        }),
+    }
+}
+
+fn replace_serialized_transaction(
+    envelope: SaveEnvelope,
+    original: &LedgerTransactionRecord,
+    replacement: &LedgerTransactionRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("ledger transaction should serialize");
+    let mirror = transaction_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("ledger transaction mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement transaction should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized transaction must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout transaction corruption must remain decodable")
+}
 
 fn make_test_budget() -> (
     AppState,
@@ -796,6 +975,71 @@ fn save_round_trip_preserves_budget_history_and_remaining_authority() {
     assert_eq!(persisted_usage.manager(), authorization.manager);
     assert_eq!(persisted_usage.scope(), authorization.scope);
     validate_invariants(&restored);
+}
+
+#[test]
+fn restore_rejects_current_budget_usage_with_forged_period_window() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Current-version budget-window persistence fixture".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-1_000),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(1_000),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("budgeted transaction should validate")
+    .commit(&mut state)
+    .expect("budgeted transaction should commit");
+    let record = state
+        .finance()
+        .get_transaction(transaction)
+        .expect("budgeted transaction should persist");
+    let mut corrupted = transaction_wire(record);
+    let usage = corrupted
+        .budget_usage
+        .as_mut()
+        .expect("delegated transaction should carry budget usage");
+    let expected_window = BudgetPeriod::Weekly.window(record.occurred_at());
+    assert_eq!(usage.period_start, expected_window.start());
+    assert_eq!(usage.period_end, expected_window.end());
+    usage.period_end = SimTime::from_minutes(
+        usage
+            .period_end
+            .as_minutes()
+            .checked_add(1)
+            .expect("fixture period end should have room for one minute"),
+    );
+
+    let registry = build_registry();
+    let error = restore_save(
+        &registry,
+        replace_serialized_transaction(
+            build_save(&registry, &state)
+                .expect("valid delegated transaction should save before period corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("current-version budget usage must retain the authored period window");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBudgetUsage {
+                transaction: invalid
+            }
+        ) if invalid == transaction
+    ));
 }
 
 #[test]

@@ -7,7 +7,7 @@ use crate::core::id::{
     OrganizationId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{DecisionError, validate_request_recruitment_approval};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, ResolvedPolicy, ensure_mandate_authority_current,
@@ -259,6 +259,7 @@ struct RecruitmentPlanDependencies {
     recruiter_relationship: RecruitmentRelationshipSnapshot,
     incumbent_relationship: Option<RecruitmentRelationshipSnapshot>,
     pressure_information_snapshot: BTreeSet<InformationId>,
+    pressure_information_max_age: SimDuration,
     expected_latest_attempt: Option<RecruitmentAttemptId>,
 }
 
@@ -564,8 +565,13 @@ pub(crate) fn decide_recruitment_attempt(
         Some(recruiter_relationship.dimensions()),
         Some(recruiter_relationship.version()),
     );
-    let pressure_information_snapshot =
-        candidate_pressure_information_ids(state, draft.candidate, state.now());
+    let pressure_information_max_age = registry.recruitment().perceived_legal_pressure_max_age();
+    let pressure_information_snapshot = candidate_pressure_information_ids(
+        state,
+        draft.candidate,
+        state.now(),
+        pressure_information_max_age,
+    );
     let (pressure_information, perceived_legal_pressure) =
         resolve_perceived_legal_pressure_from_ids(
             registry.recruitment(),
@@ -613,6 +619,7 @@ pub(crate) fn decide_recruitment_attempt(
             recruiter_relationship,
             incumbent_relationship,
             pressure_information_snapshot,
+            pressure_information_max_age,
             expected_latest_attempt: state
                 .recruitment
                 .latest_attempt_for(draft.candidate, draft.target_organization)
@@ -1346,8 +1353,12 @@ fn validate_plan_state_snapshot(
     if let Some(snapshot) = plan.dependencies.incumbent_relationship {
         validate_relationship_snapshot(state, snapshot)?;
     }
-    if candidate_pressure_information_ids(state, plan.draft.candidate, state.now())
-        != plan.dependencies.pressure_information_snapshot
+    if candidate_pressure_information_ids(
+        state,
+        plan.draft.candidate,
+        state.now(),
+        plan.dependencies.pressure_information_max_age,
+    ) != plan.dependencies.pressure_information_snapshot
     {
         return Err(RecruitmentError::StalePressureKnowledge {
             candidate: plan.draft.candidate,

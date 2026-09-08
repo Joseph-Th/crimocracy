@@ -15,6 +15,7 @@ use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -28,6 +29,65 @@ struct Fixture {
     arrest: ArrestId,
     arrest_evidence: EvidenceId,
     supplemental_evidence: EvidenceId,
+}
+
+#[derive(Clone, Serialize)]
+struct ArrestRecordWire {
+    id: ArrestId,
+    character: CharacterId,
+    authority: OrganizationId,
+    investigation: InvestigationId,
+    evidence: BTreeSet<EvidenceId>,
+    arrested_at: SimTime,
+    released_at: Option<SimTime>,
+    status: crate::legal::ArrestStatus,
+    version: u32,
+}
+
+fn arrest_wire(record: &crate::legal::ArrestRecord) -> ArrestRecordWire {
+    ArrestRecordWire {
+        id: record.id(),
+        character: record.character(),
+        authority: record.authority(),
+        investigation: record.investigation(),
+        evidence: record.evidence().clone(),
+        arrested_at: record.arrested_at(),
+        released_at: record.released_at(),
+        status: record.status(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_arrest(
+    envelope: SaveEnvelope,
+    original: &crate::legal::ArrestRecord,
+    replacement: &ArrestRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("arrest should serialize");
+    let mirror = arrest_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("arrest mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement arrest should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized arrest must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout arrest corruption must remain decodable")
 }
 
 fn tamper_serialized_summary(
@@ -61,6 +121,49 @@ fn tamper_serialized_summary(
         "test must corrupt exactly the intended persisted summary copies"
     );
     bincode::deserialize(&bytes).expect("equal-length summary corruption must remain decodable")
+}
+
+#[test]
+fn restore_rejects_prosecution_predating_its_arrest_anchor() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    let opened_at = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("prosecution case should persist")
+        .opened_at();
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::ONE_MINUTE);
+    let arrest = fixture
+        .state
+        .legal()
+        .get_arrest(fixture.arrest)
+        .expect("source arrest should persist")
+        .clone();
+    assert_eq!(arrest.arrested_at(), opened_at);
+    let mut corrupted = arrest_wire(&arrest);
+    corrupted.arrested_at = fixture.state.now();
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_arrest(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid prosecution state should save before chronology corruption"),
+            &arrest,
+            &corrupted,
+        ),
+    )
+    .expect_err("prosecution cannot predate the arrest that anchors its case");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidProsecutionCase {
+                case: invalid
+            }
+        ) if invalid == case
+    ));
 }
 
 fn rating(value: u8) -> Rating {

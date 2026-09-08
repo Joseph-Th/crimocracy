@@ -59,8 +59,8 @@ pub fn ensure_time_current(now: SimTime, expected: SimTime) -> Result<(), (SimTi
 }
 
 /// Length of one campaign day in minutes. Every daily pass (payroll, reputation decay,
-/// executive briefs, delegated enterprise expansion) keys its cadence off this constant so
-/// the passes can never drift onto different boundaries.
+/// autonomous recruitment, executive briefs, delegated enterprise expansion) keys its cadence
+/// off this constant so the passes can never drift onto different boundaries.
 pub const DAY_MINUTES: u64 = 1_440;
 
 /// True exactly once per campaign day. Minute zero is never a boundary: state created at

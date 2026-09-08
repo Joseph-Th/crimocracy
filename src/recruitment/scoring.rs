@@ -6,7 +6,7 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, InformationId};
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::{InformationRecord, InformationTopic, KnowledgeHolder};
 use crate::recruitment::recruitment_system::RecruitmentFactorContext;
 use crate::recruitment::{
@@ -213,7 +213,12 @@ pub(crate) fn resolve_perceived_legal_pressure_at(
     candidate: CharacterId,
     at: SimTime,
 ) -> (Option<InformationId>, u8) {
-    let ids = candidate_pressure_information_ids(state, candidate, at);
+    let ids = candidate_pressure_information_ids(
+        state,
+        candidate,
+        at,
+        definition.perceived_legal_pressure_max_age(),
+    );
     resolve_perceived_legal_pressure_from_ids(definition, state, &ids, at)
 }
 
@@ -269,7 +274,9 @@ pub(crate) fn candidate_pressure_information_ids(
     state: &AppState,
     candidate: CharacterId,
     at: SimTime,
+    max_age: SimDuration,
 ) -> BTreeSet<InformationId> {
+    let max_age = u64::from(max_age.as_minutes());
     state
         .intelligence
         .information_for_holder_by_topic(
@@ -280,6 +287,13 @@ pub(crate) fn candidate_pressure_information_ids(
             information.subject() == EntityRef::Character(candidate)
                 && information.recorded_at() <= at
                 && information.observed_at() <= at
+                // At exactly max age the scoring function returns zero. Keep the staleness
+                // dependency set identical to the records that can still affect the decision,
+                // rather than retaining mechanically irrelevant knowledge forever.
+                && at
+                    .as_minutes()
+                    .saturating_sub(information.observed_at().as_minutes())
+                    < max_age
         })
         .map(InformationRecord::id)
         .collect()

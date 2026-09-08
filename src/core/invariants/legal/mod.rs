@@ -12,7 +12,7 @@ pub(crate) use casework::validate_developed_review_evidence;
 use crate::core::invariants::StateValidationError;
 
 use crate::core::state::AppState;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Full legal-subsystem record validation, ordered like the custody cluster it guards:
 /// institutions, patrols, arrests, representation, prosecution, investigation casework,
@@ -26,10 +26,17 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
     prosecution::validate_prosecution_cases(state)?;
     casework::validate_investigations(state)?;
     // Derived-evidence uniqueness spans detective work and the evidence graph, so the
-    // seen-set is built here and threaded through both passes.
+    // seen-set is built here and threaded through both passes. Completed witness interviews
+    // are counted in the same history scan so their future-affecting attempt counters can be
+    // reconciled without a second traversal.
     let mut derived_evidence_from_work = BTreeSet::new();
-    casework::validate_investigation_work_records(state, &mut derived_evidence_from_work)?;
-    casework::validate_case_witnesses(state)?;
+    let mut completed_interviews_by_witness = BTreeMap::new();
+    casework::validate_investigation_work_records(
+        state,
+        &mut derived_evidence_from_work,
+        &mut completed_interviews_by_witness,
+    )?;
+    casework::validate_case_witnesses(state, &completed_interviews_by_witness)?;
     let named_witness_evidence = casework::validate_witness_statements(state)?;
     custody::validate_informants(state)?;
     let informant_evidence = custody::validate_informant_disclosures(state)?;

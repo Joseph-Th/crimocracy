@@ -85,9 +85,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // available to every same-minute consumer; then operations (start, deadline aborts, police
     // arrivals, resolution), legal institutional work (staffing, detective work, custody,
     // informants, representation, cold decay), economy cycles (businesses, enterprises),
-    // personnel passes (payroll, recruitment), reputation (decay before consequences), delegated
-    // expansion (which consumes the resulting current police-fear posture), and executive
-    // synthesis last so the due brief sees everything above.
+    // then the day-boundary governance cluster: payroll, reputation (decay before current
+    // consequences), recruitment, delegated expansion (which consumes current police fear), and
+    // executive synthesis last so the due brief sees everything above.
     let expired_opportunities = apply_opportunity_expiry(registry, state);
     let (started_operations, arrived_police_responses, decision_requests, resolved_operations) =
         run_operations_phase(registry, state);
@@ -140,22 +140,21 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let business_cycles = run_business_cycle_phase(registry, state);
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
-    // the same day's wages, and before autonomous recruitment so an unpaid crew's resentment is
-    // already in place when a rival pitches them.
+    // the same day's wages. Reputation then settles the day boundary before recruitment: daily
+    // decay removes yesterday's stale impression first, while operation/vice consequences from
+    // this minute land before candidates judge an outfit's underworld competence. Together with
+    // payroll, every authored recruitment input therefore reflects the current minute rather
+    // than a mixture of pre- and post-boundary state.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
+    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
     let recruitment = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     let recruitment_approval_requests = recruitment.approval_requests;
-    // Reputation runs before delegated expansion because expansion consumes police fear. Daily
-    // decay first cools yesterday's posture, then this minute's operation and vice consequences
-    // land; the expansion gate therefore sees the current state rather than one tick of stale
-    // standing.
-    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
-    // Delegated rival expansion still runs after recruitment so a mandate whose crew changed
-    // this minute governs with its current roster, and now also after reputation so a vice hit
-    // this minute can make the organization keep its head down immediately. Selection consumes
+    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
+    // minute governs with its current roster, and after reputation so a vice hit this minute can
+    // make the organization keep its head down immediately. Selection consumes
     // no randomness, so matched branches observe identical rival growth unless their own actions
     // touched rival state.
     let autonomous_enterprises =

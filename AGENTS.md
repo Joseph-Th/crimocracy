@@ -199,7 +199,7 @@ Did you touch persistence, invariants, cross-domain behavior, or verification in
 | Type-check library | `cargo check-fast` | ~0.06s | `src/` compiles |
 | Type-check all | `cargo check-all` | ~0.45s | `src/` + harness surface |
 | One focused test | `cargo test-focused <filter>` | ~0.11s | owning module's `#[cfg(test)]` |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (371 tests) |
+| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (397 tests) |
 | Auto-rerun on save | `.\scripts\watch.cmd [-Filter <p> \| -Harness \| -Check]` | per lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
 | Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one strategy on `[profile.harness]` |
 | Harness smoke, all | `cargo harness` | ~0.5s | all 3 strategies + legal foundation |
@@ -271,8 +271,8 @@ authoritative minute. Phase order is contractual — comments explain “runs af
  12  apply_cold_case_decay                  (only originated cases; window = 10080 min)
  13  run_business_cycle_phase               (gross variance per due economy)
  14  run_enterprise_cycle_phase             (gross variance + vice roll unconditionally)
- 15  apply_daily_payroll  →  apply_due_autonomous_recruitment
-    ──► apply_reputation_phase (decay first, then operation + vice consequences)
+ 15  apply_daily_payroll  →  apply_reputation_phase (decay first, then operation + vice consequences)
+    ──► apply_due_autonomous_recruitment (sees current resentment + decayed/current competence)
     ──► apply_due_autonomous_enterprises (reads the resulting current police-fear posture)
     ──► synthesize_executive_brief (sees everything above, last)
     ──► validate_invariants

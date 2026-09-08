@@ -11,6 +11,7 @@
 use super::operation_execution::OperationResolutionError;
 use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
+use crate::core::time::SimDuration;
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::operations::{
     OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
@@ -18,7 +19,7 @@ use crate::operations::{
 use crate::registry::Registry;
 /// A successful take from the same business inside this window finds only partially replaced
 /// stock, so repeat scores on one target decay instead of yielding an identical haul forever.
-pub(crate) const RECENT_HIT_WINDOW_MINUTES: i64 = 3 * 24 * 60;
+pub(crate) const RECENT_HIT_WINDOW: SimDuration = SimDuration::from_minutes(3 * 24 * 60);
 /// Each recent prior successful take leaves this share of the remaining loot value.
 pub(crate) const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
 
@@ -103,8 +104,8 @@ pub(crate) fn recent_take_hits(
     state.operations.recent_successful_takes(
         business,
         reference_at,
-        RECENT_HIT_WINDOW_MINUTES,
-        Some(operation.id()),
+        RECENT_HIT_WINDOW,
+        operation.id(),
     )
 }
 

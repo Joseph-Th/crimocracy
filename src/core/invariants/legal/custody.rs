@@ -240,6 +240,11 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
             || counsel.capability(CapabilityKind::LegalKnowledge).is_none()
             || representation.fee() <= Money::ZERO
             || representation.retained_at() > state.now()
+            || representation.retained_at() < arrest.arrested_at()
+            || representation.retained_at() < contact.established_at()
+            || contact
+                .terminated_at()
+                .is_some_and(|terminated_at| terminated_at < representation.retained_at())
             || representation.version() == 0
             || provider.owner()
                 != FinancialOwner::Organization(representation.counsel_institution())
@@ -376,7 +381,11 @@ pub(super) fn validate_informants(state: &AppState) -> Result<(), StateValidatio
             handler.kind(),
             OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
         ) || informant.established_at() > state.now()
-            || informant.version() == 0
+            // Informants currently have no mutable lifecycle: establishment creates the sole
+            // Active state at version 1 and disclosures mutate the case, not the relationship.
+            // Pin restore to that exact constructor-reachable shape so forged versions cannot
+            // invalidate disclosure freshness snapshots without a canonical relationship change.
+            || informant.version() != 1
         {
             return Err(StateValidationError::InvalidInformant {
                 informant: informant.id(),

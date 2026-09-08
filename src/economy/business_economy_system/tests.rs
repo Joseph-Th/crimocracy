@@ -33,11 +33,279 @@ struct BusinessEconomyFixture {
 }
 
 #[derive(Clone, Serialize)]
+struct LedgerTransactionRecordWire {
+    id: crate::core::id::LedgerTransactionId,
+    occurred_at: SimTime,
+    memo: String,
+    postings: Vec<crate::finance::LedgerPosting>,
+    budget_usage: Option<crate::finance::BudgetUsageRecord>,
+}
+
+fn ledger_transaction_wire(
+    record: &crate::finance::LedgerTransactionRecord,
+) -> LedgerTransactionRecordWire {
+    LedgerTransactionRecordWire {
+        id: record.id(),
+        occurred_at: record.occurred_at(),
+        memo: record.memo().to_owned(),
+        postings: record.postings().to_vec(),
+        budget_usage: record.budget_usage(),
+    }
+}
+
+fn replace_serialized_transaction(
+    envelope: SaveEnvelope,
+    original: &crate::finance::LedgerTransactionRecord,
+    replacement: &LedgerTransactionRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("ledger transaction should serialize");
+    let mirror = ledger_transaction_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("ledger transaction mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement ledger transaction should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized transaction must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout ledger transaction corruption must remain decodable")
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessEconomyRecordWire {
+    business: BusinessId,
+    operating_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    status: crate::economy::BusinessOperatingStatus,
+    established_at: SimTime,
+    next_cycle_at: Option<SimTime>,
+    last_cycle_at: Option<SimTime>,
+    disrupted_through: Option<SimTime>,
+    loss_streak_anchor: Option<SimTime>,
+    laundered_this_cycle: Money,
+    version: u32,
+}
+
+#[test]
+fn restore_rejects_nonincreasing_business_cycle_time_in_sequential_id_order() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let settle = |fixture: &mut BusinessEconomyFixture| {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        validate_business_cycle_plan(
+            &fixture.state,
+            decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+                .expect("routine cycle should decide"),
+        )
+        .expect("routine cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("routine cycle should commit")
+    };
+    let first_id = settle(&mut fixture);
+    let second_id = settle(&mut fixture);
+    let first = fixture
+        .state
+        .economy()
+        .get_cycle(first_id)
+        .expect("first cycle should persist");
+    let second = fixture
+        .state
+        .economy()
+        .get_cycle(second_id)
+        .expect("second cycle should persist");
+    assert!(first.id() < second.id());
+    assert!(first.occurred_at() < second.occurred_at());
+    assert_eq!(first.attention(), AttentionClass::Routine);
+    assert!(first.information().is_none());
+    let first_transaction_id = first
+        .transaction()
+        .expect("positive routine business cycle should carry a ledger settlement");
+    let first_transaction = fixture
+        .state
+        .finance()
+        .get_transaction(first_transaction_id)
+        .expect("first settlement transaction should persist");
+
+    // Move the older cycle and its ledger artifact forward to exactly the newer cycle's time.
+    // Every local timestamp relationship still agrees. What becomes impossible is the owner's
+    // documented settlement-order invariant: higher sequential cycle IDs must represent later
+    // settlements for the same business.
+    let mut corrupted_cycle = business_cycle_wire(first);
+    corrupted_cycle.context.occurred_at = second.occurred_at();
+    let mut corrupted_transaction = ledger_transaction_wire(first_transaction);
+    corrupted_transaction.occurred_at = second.occurred_at();
+    let envelope = replace_serialized_cycle(
+        build_save(&registry, &fixture.state)
+            .expect("valid two-cycle economy should save before chronology corruption"),
+        first,
+        &corrupted_cycle,
+    );
+    let envelope =
+        replace_serialized_transaction(envelope, first_transaction, &corrupted_transaction);
+    let error = restore_save(&registry, envelope)
+        .expect_err("nonincreasing per-business cycle history must fail restore");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessCycle { cycle }
+        ) if cycle == second_id
+    ));
+}
+
+fn business_economy_wire(
+    record: &crate::economy::BusinessEconomyRecord,
+) -> BusinessEconomyRecordWire {
+    BusinessEconomyRecordWire {
+        business: record.business(),
+        operating_account: record.operating_account(),
+        settlement_account: record.settlement_account(),
+        status: record.status(),
+        established_at: record.established_at(),
+        next_cycle_at: record.next_cycle_at(),
+        last_cycle_at: record.last_cycle_at(),
+        disrupted_through: record.disrupted_through(),
+        loss_streak_anchor: record.loss_streak_anchor(),
+        laundered_this_cycle: record.laundered_this_cycle(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_economy(
+    envelope: SaveEnvelope,
+    original: &crate::economy::BusinessEconomyRecord,
+    replacement: &BusinessEconomyRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("business economy should serialize");
+    let mirror = business_economy_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("business economy mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement business economy should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized economy must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout business economy corruption must remain decodable")
+}
+
+#[derive(Clone, Serialize)]
 struct BusinessCycleContextWire {
     business: BusinessId,
     business_version: u32,
     owner: BusinessOwner,
     occurred_at: SimTime,
+}
+
+#[test]
+fn restore_rejects_future_loss_streak_anchor() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("fixture economy should suspend")
+        .commit(&mut fixture.state)
+        .expect("fixture suspension should commit");
+    validate_resume_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("fixture economy should resume")
+        .commit(&mut fixture.state)
+        .expect("fixture resumption should commit");
+
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("resumed economy should persist");
+    assert_eq!(record.loss_streak_anchor(), Some(fixture.state.now()));
+    let mut corrupted = business_economy_wire(record);
+    corrupted.loss_streak_anchor = Some(fixture.state.now() + SimDuration::ONE_MINUTE);
+    let error = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state)
+                .expect("valid resumed economy should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("a future loss-streak anchor must fail the real restore boundary");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessEconomySchedule {
+                business
+            }
+        ) if business == fixture.business
+    ));
+}
+
+#[test]
+fn restore_rejects_disruption_horizon_beyond_any_possible_current_hit() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("fixture disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("fixture disruption should commit");
+
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("disrupted economy should persist");
+    let legitimate_horizon = fixture.state.now() + registry.business_disruption().duration();
+    assert_eq!(record.disrupted_through(), Some(legitimate_horizon));
+    let mut corrupted = business_economy_wire(record);
+    corrupted.disrupted_through = Some(legitimate_horizon + SimDuration::ONE_MINUTE);
+    let error = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state)
+                .expect("valid disrupted economy should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("an impossible future disruption horizon must fail the real restore boundary");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessEconomySchedule {
+                business
+            }
+        ) if business == fixture.business
+    ));
 }
 
 #[derive(Clone, Serialize)]

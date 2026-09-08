@@ -28,6 +28,7 @@ use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -43,6 +44,108 @@ struct Fixture {
     arrest: ArrestId,
     payer: FinancialAccountId,
     provider: FinancialAccountId,
+}
+
+#[test]
+fn restore_rejects_representation_predating_its_arrest_anchor() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 12_000, None);
+    let retained_at = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("representation should persist")
+        .retained_at();
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::ONE_MINUTE);
+    let arrest = fixture
+        .state
+        .legal()
+        .get_arrest(fixture.arrest)
+        .expect("arrest should persist")
+        .clone();
+    assert_eq!(arrest.arrested_at(), retained_at);
+    let mut corrupted = arrest_wire(&arrest);
+    corrupted.arrested_at = fixture.state.now();
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_arrest(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid represented arrest should save before chronology corruption"),
+            &arrest,
+            &corrupted,
+        ),
+    )
+    .expect_err("representation cannot predate the arrest it was retained to answer");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidLegalRepresentation {
+                representation: invalid
+            }
+        ) if invalid == representation
+    ));
+}
+
+#[derive(Clone, Serialize)]
+struct ArrestRecordWire {
+    id: ArrestId,
+    character: CharacterId,
+    authority: OrganizationId,
+    investigation: crate::core::id::InvestigationId,
+    evidence: BTreeSet<crate::core::id::EvidenceId>,
+    arrested_at: SimTime,
+    released_at: Option<SimTime>,
+    status: crate::legal::ArrestStatus,
+    version: u32,
+}
+
+fn arrest_wire(record: &crate::legal::ArrestRecord) -> ArrestRecordWire {
+    ArrestRecordWire {
+        id: record.id(),
+        character: record.character(),
+        authority: record.authority(),
+        investigation: record.investigation(),
+        evidence: record.evidence().clone(),
+        arrested_at: record.arrested_at(),
+        released_at: record.released_at(),
+        status: record.status(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_arrest(
+    envelope: SaveEnvelope,
+    original: &crate::legal::ArrestRecord,
+    replacement: &ArrestRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("arrest should serialize");
+    let mirror = arrest_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("arrest mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement arrest should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized arrest must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout arrest corruption must remain decodable")
 }
 
 #[test]
@@ -167,6 +270,93 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
         posting.account == second_payer && posting.amount == Money::from_cents(-2_500)
     }));
     validate_state(&fx.state).expect("split-liquidity legal support should validate");
+    validate_invariants(&fx.state);
+}
+
+#[test]
+fn mandate_automatic_legal_support_respects_exhausted_budget_window() {
+    let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
+    let supervisor = fx
+        .supervisor
+        .expect("supervised fixture should carry a boss");
+    let mandate = validate_assign_mandate(
+        &fx.state,
+        MandateDraft {
+            organization: fx.sponsor,
+            manager: supervisor,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(ResponsibilityFunction::Legal)]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::AssociateLegalSupport,
+                PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+            )]),
+            budget: Some(BudgetAuthority {
+                funding_account: fx.payer,
+                limit: Money::from_cents(5_000),
+                period: BudgetPeriod::Weekly,
+            }),
+        },
+    )
+    .expect("budgeted automatic-support mandate should validate")
+    .commit(&mut fx.state)
+    .expect("budgeted automatic-support mandate should commit");
+    let authority = MandateAuthority {
+        mandate,
+        manager: supervisor,
+        scope: ResponsibilityScope::Function(ResponsibilityFunction::Legal),
+    };
+    validate_record_transaction(
+        &fx.state,
+        LedgerTransactionDraft {
+            occurred_at: fx.state.now(),
+            memo: "Consume delegated legal budget before automatic support".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fx.payer,
+                    amount: Money::from_cents(-5_000),
+                },
+                LedgerPosting {
+                    account: fx.provider,
+                    amount: Money::from_cents(5_000),
+                },
+            ],
+            authorization: Some(authority),
+        },
+    )
+    .expect("fixture legal spend should consume the mandate budget")
+    .commit(&mut fx.state)
+    .expect("fixture legal spend should commit");
+    let payer_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer should persist")
+        .balance();
+
+    assert!(
+        apply_automatic_legal_support(&mut fx.state)
+            .expect("an exhausted budget is ordinary unavailability, not a failed legal pass")
+            .is_empty()
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none()
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer should persist")
+            .balance(),
+        payer_before
+    );
+    let usage =
+        crate::finance::finance_system::resolve_budget_usage(&fx.state, mandate, fx.state.now())
+            .expect("exhausted mandate budget should remain resolvable");
+    assert_eq!(usage.used, Money::from_cents(5_000));
+    assert_eq!(usage.remaining, Money::ZERO);
+    validate_state(&fx.state).expect("exhausted-budget legal-support state should remain valid");
     validate_invariants(&fx.state);
 }
 
@@ -681,7 +871,11 @@ fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
                 PolicyKind::AssociateLegalSupport,
                 PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
             )]),
-            budget: None,
+            budget: Some(BudgetAuthority {
+                funding_account: fx.payer,
+                limit: Money::from_cents(5_000),
+                period: BudgetPeriod::Weekly,
+            }),
         },
     )
     .expect("mandate with legal-support standing order should validate")
@@ -704,13 +898,130 @@ fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
         1,
         "the supervised defendant's retention must follow the mandate standing order"
     );
+    let representation = fx
+        .state
+        .legal()
+        .active_representation_for_arrest(fx.arrest)
+        .expect("mandate-driven support should persist");
+    let authority = MandateAuthority {
+        mandate: fx
+            .state
+            .delegation()
+            .active_for_manager(supervisor)
+            .expect("supervisor mandate should remain active")
+            .id(),
+        manager: supervisor,
+        scope: ResponsibilityScope::Function(ResponsibilityFunction::Legal),
+    };
+    assert_eq!(representation.authorization(), Some(authority));
+    let usage = fx
+        .state
+        .finance()
+        .get_transaction(representation.payment())
+        .expect("automatic mandate payment should persist")
+        .budget_usage()
+        .expect("automatic mandate payment must consume delegated budget");
+    assert_eq!(usage.mandate(), authority.mandate);
+    assert_eq!(usage.funding_account(), fx.payer);
+    assert_eq!(usage.amount(), Money::from_cents(5_000));
+    validate_state(&fx.state).expect("mandate-driven support state should remain valid");
+    validate_invariants(&fx.state);
+}
+
+#[test]
+fn mandate_automatic_legal_support_cannot_spend_without_legal_budget_authority() {
+    let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
+    let supervisor = fx
+        .supervisor
+        .expect("supervised fixture should carry a boss");
+    let assign = |fx: &mut Fixture, scopes: BTreeSet<ResponsibilityScope>, budget| {
+        validate_assign_mandate(
+            &fx.state,
+            MandateDraft {
+                organization: fx.sponsor,
+                manager: supervisor,
+                scopes,
+                standing_orders: BTreeMap::from([(
+                    PolicyKind::AssociateLegalSupport,
+                    PolicySetting::AssociateLegalSupport(
+                        crate::world::LegalSupportPolicy::Automatic,
+                    ),
+                )]),
+                budget,
+            },
+        )
+        .expect("automatic-support mandate fixture should validate")
+        .commit(&mut fx.state)
+        .expect("automatic-support mandate fixture should commit")
+    };
+
+    let payer_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer should persist")
+        .balance();
+    let no_budget = assign(
+        &mut fx,
+        BTreeSet::from([ResponsibilityScope::Function(ResponsibilityFunction::Legal)]),
+        None,
+    );
+    assert!(
+        apply_automatic_legal_support(&mut fx.state)
+            .expect("missing delegated budget is an unavailable prerequisite, not state drift")
+            .is_empty()
+    );
     assert!(
         fx.state
             .legal()
             .active_representation_for_arrest(fx.arrest)
-            .is_some()
+            .is_none()
     );
-    validate_state(&fx.state).expect("mandate-driven support state should remain valid");
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer should persist")
+            .balance(),
+        payer_before
+    );
+    crate::delegation::delegation_system::validate_revoke_mandate(&fx.state, no_budget)
+        .expect("unused mandate should be revocable")
+        .commit(&mut fx.state)
+        .expect("unused mandate revocation should commit");
+
+    let payer = fx.payer;
+    assign(
+        &mut fx,
+        BTreeSet::from([ResponsibilityScope::Function(
+            ResponsibilityFunction::Personnel,
+        )]),
+        Some(BudgetAuthority {
+            funding_account: payer,
+            limit: Money::from_cents(50_000),
+            period: BudgetPeriod::Weekly,
+        }),
+    );
+    assert!(
+        apply_automatic_legal_support(&mut fx.state)
+            .expect("non-Legal mandate scope is not legal spending authority")
+            .is_empty()
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none()
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer should persist")
+            .balance(),
+        payer_before
+    );
+    validate_state(&fx.state).expect("rejected delegated automatic support should remain valid");
     validate_invariants(&fx.state);
 }
 

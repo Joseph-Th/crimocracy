@@ -9,7 +9,7 @@ use crate::core::invariants::{
 };
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
-use crate::core::time::SimDuration;
+use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
     DecisionError, validate_request_police_arrival_decision_on_arrival, validate_resolve_decision,
 };
@@ -28,8 +28,9 @@ use crate::legal::patrol_system::{
 use crate::legal::{
     Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
     EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
+    PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus,
 };
-use crate::operations::operation_economics::RECENT_HIT_WINDOW_MINUTES;
+use crate::operations::operation_economics::RECENT_HIT_WINDOW;
 use crate::operations::operation_system::{OperationError, validate_authorize_operation};
 use crate::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, PropertyDispositionError,
@@ -49,7 +50,96 @@ use crate::world::{
     DriveKind, NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
     NeighborhoodProfile, OrganizationDraft, OrganizationKind,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Serialize)]
+struct PoliceResponseRoutingWire {
+    authority: OrganizationId,
+    neighborhood: NeighborhoodId,
+    source_operation: OperationId,
+}
+
+#[derive(Clone, Serialize)]
+struct PoliceResponseTimingWire {
+    dispatched_at: SimTime,
+    arrival_due_at: SimTime,
+    arrived_at: Option<SimTime>,
+}
+
+#[derive(Clone, Serialize)]
+struct PoliceResponseStateWire {
+    alert_score: i16,
+    response_presence: crate::world::Rating,
+    jurisdiction_version: u32,
+    patrol: Option<PoliceResponsePatrolSnapshot>,
+    status: PoliceResponseStatus,
+    version: u32,
+}
+
+#[derive(Clone, Serialize)]
+struct PoliceResponseRecordWire {
+    id: PoliceResponseId,
+    routing: PoliceResponseRoutingWire,
+    timing: PoliceResponseTimingWire,
+    state: PoliceResponseStateWire,
+}
+
+fn police_response_wire(record: &PoliceResponseRecord) -> PoliceResponseRecordWire {
+    PoliceResponseRecordWire {
+        id: record.id(),
+        routing: PoliceResponseRoutingWire {
+            authority: record.authority(),
+            neighborhood: record.neighborhood(),
+            source_operation: record.source_operation(),
+        },
+        timing: PoliceResponseTimingWire {
+            dispatched_at: record.dispatched_at(),
+            arrival_due_at: record.arrival_due_at(),
+            arrived_at: record.arrived_at(),
+        },
+        state: PoliceResponseStateWire {
+            alert_score: record.alert_score(),
+            response_presence: record.response_presence(),
+            jurisdiction_version: record.jurisdiction_version(),
+            patrol: record.patrol(),
+            status: record.status(),
+            version: record.version(),
+        },
+    }
+}
+
+fn replace_serialized_police_response(
+    envelope: SaveEnvelope,
+    original: &PoliceResponseRecord,
+    replacement: &PoliceResponseRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("police response should serialize");
+    let mirror = police_response_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("police response mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement police response should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized police response must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout police response corruption must remain decodable")
+}
 
 fn insert_property_disposition_fixture(
     registry: &Registry,
@@ -2849,6 +2939,62 @@ fn police_response_arrival_is_deterministic_across_save_round_trip() {
 }
 
 #[test]
+fn restore_rejects_arrived_police_response_version_without_a_second_mutation() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture(true);
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("jurisdictional operation should dispatch a response");
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        if outcome.arrived_police_responses.contains(&response_id) {
+            break;
+        }
+        assert!(
+            state
+                .legal()
+                .get_police_response(response_id)
+                .expect("response should persist while dispatched")
+                .status()
+                == PoliceResponseStatus::Dispatched,
+            "response must remain dispatched until its single arrival transition"
+        );
+    }
+    let response = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("arrived response should persist")
+        .clone();
+    assert_eq!(response.status(), PoliceResponseStatus::Arrived);
+    assert_eq!(response.version(), 2);
+    let mut corrupted = police_response_wire(&response);
+    corrupted.state.version = 3;
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_police_response(
+            build_save(&registry, &state)
+                .expect("valid arrived response should save before version corruption"),
+            &response,
+            &corrupted,
+        ),
+    )
+    .expect_err("police responses have no post-arrival mutation that can create version 3");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidPoliceResponse {
+                response: invalid
+            }
+        ) if invalid == response_id
+    ));
+}
+
+#[test]
 fn resolution_plan_snapshots_patrol_versions_and_uses_explicit_schedule_gaps() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture(true);
@@ -3360,10 +3506,7 @@ fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
     assert!(second_plan.narrative.summary.contains("lighter than usual"));
 
     // After the recency window passes the target stocks back up to full value.
-    state.advance_clock(SimDuration::from_minutes(
-        u32::try_from(RECENT_HIT_WINDOW_MINUTES)
-            .expect("recency window must fit simulation minutes"),
-    ));
+    state.advance_clock(RECENT_HIT_WINDOW);
     let third = authorize_follow_up(&registry, &mut state, "Recovered burglary");
     let third_plan = resolve_achieved(&registry, &mut state, third);
     assert_eq!(

@@ -9,6 +9,11 @@ use crate::intelligence::KnowledgeHolder;
 
 pub(super) fn validate_report_holders(state: &AppState) -> Result<(), StateValidationError> {
     for report in state.reports.reports() {
+        if report.title().trim().is_empty() {
+            return Err(StateValidationError::EmptyReportTitle {
+                report: report.id(),
+            });
+        }
         if state.world.get_organization(report.recipient()).is_none() {
             return Err(StateValidationError::MissingEntity {
                 context: "report recipient",
@@ -18,7 +23,13 @@ pub(super) fn validate_report_holders(state: &AppState) -> Result<(), StateValid
         if report.generated_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp { context: "report" });
         }
-        for entry in report.entries() {
+        for (entry_index, entry) in report.entries().iter().enumerate() {
+            if entry.summary.trim().is_empty() {
+                return Err(StateValidationError::EmptyReportEntrySummary {
+                    report: report.id(),
+                    entry: entry_index,
+                });
+            }
             for information in &entry.sources {
                 let information_record = state.intelligence.get_information(*information).ok_or(
                     StateValidationError::MissingReportInformation {
@@ -71,6 +82,12 @@ pub(super) fn validate_history_event_references(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for event in state.history.events() {
+        if event.summary().trim().is_empty() {
+            return Err(StateValidationError::EmptyHistorySummary { event: event.id() });
+        }
+        if event.entities().is_empty() {
+            return Err(StateValidationError::HistoryEventHasNoEntities { event: event.id() });
+        }
         if event.occurred_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
                 context: "history event",

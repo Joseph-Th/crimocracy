@@ -57,13 +57,21 @@ pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidation
 
         match decision.status() {
             DecisionStatus::Pending => {
-                if decision.resolution().is_some() || decision.cancellation().is_some() {
+                if decision.version() != 1
+                    || decision.resolution().is_some()
+                    || decision.cancellation().is_some()
+                {
                     return Err(StateValidationError::InvalidDecisionContext {
                         decision: decision.id(),
                     });
                 }
             }
             DecisionStatus::Resolved => {
+                if decision.version() != 2 {
+                    return Err(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    });
+                }
                 let resolution = decision.resolution().ok_or(
                     StateValidationError::ResolvedDecisionWithoutResolution {
                         decision: decision.id(),
@@ -92,6 +100,11 @@ pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidation
                 }
             }
             DecisionStatus::Cancelled => {
+                if decision.version() != 2 {
+                    return Err(StateValidationError::InvalidDecisionContext {
+                        decision: decision.id(),
+                    });
+                }
                 let cancellation = decision.cancellation().ok_or(
                     StateValidationError::InvalidDecisionContext {
                         decision: decision.id(),
@@ -446,6 +459,11 @@ fn validate_recruitment_approval_decision(
 
 pub(super) fn validate_delegation(state: &AppState) -> Result<(), StateValidationError> {
     for mandate in state.delegation.mandates() {
+        if mandate.version() == 0 {
+            return Err(StateValidationError::InvalidMandateVersion {
+                mandate: mandate.id(),
+            });
+        }
         state.world.get_organization(mandate.organization()).ok_or(
             StateValidationError::MissingEntity {
                 context: "mandate organization",

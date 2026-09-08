@@ -6,11 +6,11 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     ArrestId, BusinessCycleId, BusinessId, CaseWitnessId, CharacterId, ContactDisclosureId,
-    ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, IdCounters, IdKind,
-    InformantDisclosureId, InformantId, InformationId, InvestigationId, InvestigationWorkId,
-    LedgerTransactionId, LegalRepresentationId, MandateId, OperationId, OpportunityId,
-    OrganizationId, PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId,
-    RecruitmentAttemptId, ReportId, WitnessStatementId,
+    ContactId, DecisionRequestId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
+    HistoryEventId, IdCounters, IdKind, InformantDisclosureId, InformantId, InformationId,
+    InvestigationId, InvestigationWorkId, LedgerTransactionId, LegalRepresentationId, MandateId,
+    OperationId, OpportunityId, OrganizationId, PatrolDeploymentId, PoliceResponseId,
+    ProsecutionCaseId, ProsecutionReferralId, RecruitmentAttemptId, ReportId, WitnessStatementId,
 };
 use crate::core::invariants::legal as legal_invariants;
 use crate::core::state::AppState;
@@ -53,6 +53,10 @@ pub enum StateValidationError {
         context: &'static str,
         entity: EntityRef,
     },
+    #[error("persisted entity {entity:?} has an empty name")]
+    EmptyEntityName { entity: EntityRef },
+    #[error("character {character} has invalid persisted version 0")]
+    InvalidCharacterVersion { character: CharacterId },
     #[error("organization {organization:?} stores an out-of-range {audience:?} reputation score")]
     InvalidReputationScore {
         organization: OrganizationId,
@@ -78,6 +82,10 @@ pub enum StateValidationError {
     },
     #[error("supervision hierarchy contains a cycle involving character {character}")]
     SupervisionCycle { character: CharacterId },
+    #[error("relationship {from}->{to} has invalid persisted state")]
+    InvalidRelationship { from: CharacterId, to: CharacterId },
+    #[error("information {information} has an empty summary")]
+    EmptyInformationSummary { information: InformationId },
     #[error("information {information} has invalid observation/recording chronology")]
     InvalidInformationChronology { information: InformationId },
     #[error("information {information} has invalid provenance source {source_information}")]
@@ -147,6 +155,8 @@ pub enum StateValidationError {
     InvalidInvestigationStaffing { investigation: InvestigationId },
     #[error("investigation {investigation} has invalid origin or case-awareness provenance")]
     InvalidInvestigationActivity { investigation: InvestigationId },
+    #[error("investigation {investigation} has invalid persisted definition")]
+    InvalidInvestigationDefinition { investigation: InvestigationId },
     #[error("investigation work {work} has invalid persisted state")]
     InvalidInvestigationWork { work: InvestigationWorkId },
     #[error("evidence {evidence} has invalid derived provenance")]
@@ -215,6 +225,8 @@ pub enum StateValidationError {
     },
     #[error("mandate {mandate} has no responsibility scopes")]
     MandateHasNoScopes { mandate: crate::core::id::MandateId },
+    #[error("mandate {mandate} has invalid persisted version 0")]
+    InvalidMandateVersion { mandate: MandateId },
     #[error("active mandate {mandate} has invalid manager {manager}")]
     ActiveMandateInvalidManager {
         mandate: crate::core::id::MandateId,
@@ -260,14 +272,28 @@ pub enum StateValidationError {
         report: ReportId,
         decision: DecisionRequestId,
     },
+    #[error("report {report} has an empty title")]
+    EmptyReportTitle { report: ReportId },
+    #[error("executive brief {report} has invalid persisted cadence or shape")]
+    InvalidExecutiveBrief { report: ReportId },
+    #[error("report {report} entry {entry} has an empty summary")]
+    EmptyReportEntrySummary { report: ReportId, entry: usize },
+    #[error("history event {event} has an empty summary")]
+    EmptyHistorySummary { event: HistoryEventId },
+    #[error("history event {event} references no entities")]
+    HistoryEventHasNoEntities { event: HistoryEventId },
     #[error("{context} contains a timestamp later than the current simulation time")]
     FutureTimestamp { context: &'static str },
     #[error("financial account balances do not match their ledger postings")]
     FinancialBalanceMismatch,
+    #[error("financial account {account} has an invalid persisted version")]
+    InvalidFinancialAccount { account: FinancialAccountId },
     #[error("ledger transaction {transaction} postings overflow while summing")]
     LedgerArithmeticOverflow {
         transaction: crate::core::id::LedgerTransactionId,
     },
+    #[error("ledger transaction {transaction} has an invalid persisted memo or posting shape")]
+    InvalidLedgerTransaction { transaction: LedgerTransactionId },
     #[error("ledger transaction {transaction} is unbalanced by {net_cents} cents")]
     UnbalancedLedgerTransaction {
         transaction: crate::core::id::LedgerTransactionId,
@@ -283,6 +309,8 @@ pub enum StateValidationError {
     InvalidEnterpriseAccounts { enterprise: EnterpriseId },
     #[error("enterprise {enterprise} has invalid lifecycle scheduling state")]
     InvalidEnterpriseSchedule { enterprise: EnterpriseId },
+    #[error("enterprise {enterprise} has invalid persisted runtime state")]
+    InvalidEnterpriseRuntime { enterprise: EnterpriseId },
     #[error("enterprise cycle {cycle} has invalid economics or ledger linkage")]
     InvalidEnterpriseCycle { cycle: EnterpriseCycleId },
     #[error("enterprise {enterprise} business {business} lacks required function {function:?}")]
@@ -589,6 +617,33 @@ pub fn validate_state_against_registry(
     )?;
     validate_enterprises_against_registry(registry, state)?;
     validate_recruitment_against_registry(registry, state)?;
+    validate_executive_briefs_against_registry(registry, state)?;
+    Ok(())
+}
+
+fn validate_executive_briefs_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let mut generated = BTreeSet::new();
+    for report in state
+        .reports
+        .reports()
+        .filter(|report| report.kind() == crate::reports::ReportKind::ExecutiveBrief)
+    {
+        if report.title() != "Executive brief"
+            || report.entries().is_empty()
+            || !crate::reports::executive_brief::is_executive_brief_due(
+                registry,
+                report.generated_at(),
+            )
+            || !generated.insert((report.recipient(), report.generated_at()))
+        {
+            return Err(StateValidationError::InvalidExecutiveBrief {
+                report: report.id(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -811,6 +866,14 @@ fn validate_investigation_work_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
+    let witness_attempt_limit = registry.legal().witness_interview_attempt_limit();
+    for witness in state.legal.case_witnesses() {
+        if witness.interview_attempts() > witness_attempt_limit {
+            return Err(StateValidationError::InvalidCaseWitness {
+                witness: witness.id(),
+            });
+        }
+    }
     for work in state.legal.investigation_work() {
         let definition = registry.get_investigation_work(work.kind());
         if work.due_at() != work.scheduled_at() + definition.duration() {
@@ -1051,11 +1114,21 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
 /// by raw account id (ids are allocated monotonically), keeping the hottest loop free of
 /// ordered-map traversals without weakening any check.
 fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateValidationError> {
+    if !state.finance.has_consistent_primary_keys() {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "finance",
+        });
+    }
     // Forward membership plus exact-count agreement proves bidirectional index coherence:
     // ids are unique and each account or transaction occupies at most one slot per key, so
     // matching entry totals rule out stale, duplicate, or foreign index entries.
     let mut account_count = 0_usize;
     for account in state.finance.accounts() {
+        if account.version() == 0 {
+            return Err(StateValidationError::InvalidFinancialAccount {
+                account: account.id(),
+            });
+        }
         let owner = account.owner().entity();
         if !is_entity_present(state, owner) {
             return Err(StateValidationError::MissingEntity {
@@ -1087,8 +1160,13 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         .map_or(0, |(_, highest)| highest) as usize;
     let mut account_present = vec![false; highest_account + 1];
     let mut derived_balance_cents = vec![0_i64; highest_account + 1];
+    let mut derived_account_versions = vec![0_u32; highest_account + 1];
     for account in state.finance.accounts() {
-        account_present[account.id().raw() as usize] = true;
+        let raw = account.id().raw() as usize;
+        account_present[raw] = true;
+        // Every account opens at version 1. The ledger pass below advances this once for each
+        // transaction that touched the account, exactly mirroring `apply_transaction`.
+        derived_account_versions[raw] = 1;
     }
 
     let mut expected_mandate_entries = 0_usize;
@@ -1101,13 +1179,26 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         i64,
     > = BTreeMap::new();
     for transaction in state.finance.transactions() {
+        if transaction.memo().trim().is_empty() || transaction.postings().len() < 2 {
+            return Err(StateValidationError::InvalidLedgerTransaction {
+                transaction: transaction.id(),
+            });
+        }
         if transaction.occurred_at() > state.now() {
             return Err(StateValidationError::FutureTimestamp {
                 context: "ledger transaction",
             });
         }
         let mut net_cents = 0_i64;
+        let mut seen_accounts = BTreeSet::new();
         for posting in transaction.postings() {
+            if posting.amount == crate::finance::Money::ZERO
+                || !seen_accounts.insert(posting.account)
+            {
+                return Err(StateValidationError::InvalidLedgerTransaction {
+                    transaction: transaction.id(),
+                });
+            }
             let raw = posting.account.raw() as usize;
             if raw >= account_present.len() || !account_present[raw] {
                 return Err(StateValidationError::MissingEntity {
@@ -1123,6 +1214,11 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
             derived_balance_cents[raw] = derived_balance_cents[raw]
                 .checked_add(posting.amount.cents())
                 .ok_or(StateValidationError::FinancialBalanceMismatch)?;
+            derived_account_versions[raw] = derived_account_versions[raw].checked_add(1).ok_or(
+                StateValidationError::InvalidFinancialAccount {
+                    account: posting.account,
+                },
+            )?;
         }
         if net_cents != 0 {
             return Err(StateValidationError::UnbalancedLedgerTransaction {
@@ -1164,12 +1260,31 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
                     posting.account == usage.funding_account() && posting.amount.cents() == expected
                 })
             });
+            // A usage snapshot from the mandate's current version is fully re-derivable: no
+            // later revision has erased the budget terms that authorized it. Pin its funding
+            // account and exact period window to those current terms so save tampering cannot
+            // move charged spend into a different aggregate key and manufacture fresh budget
+            // capacity. Older versions remain historical snapshots because legitimate mandate
+            // revisions may have changed or removed those terms.
+            let current_budget_matches = if usage.mandate_version() == mandate.version() {
+                mandate.budget().is_some_and(|budget| {
+                    let window = budget.period.window(transaction.occurred_at());
+                    mandate.status() == crate::delegation::MandateStatus::Active
+                        && budget.funding_account == usage.funding_account()
+                        && usage.amount() <= budget.limit
+                        && usage.period_start() == window.start()
+                        && usage.period_end() == window.end()
+                })
+            } else {
+                true
+            };
             if usage.amount().cents() <= 0
                 || mandate.manager() != usage.manager()
                 || usage.mandate_version() == 0
                 || usage.mandate_version() > mandate.version()
                 || (usage.mandate_version() == mandate.version()
                     && !mandate.scopes().contains(&usage.scope()))
+                || !current_budget_matches
                 || usage.period_start() >= usage.period_end()
                 || transaction.occurred_at() < usage.period_start()
                 || transaction.occurred_at() >= usage.period_end()
@@ -1212,6 +1327,13 @@ fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateVali
         .balances_agree_with_derived_cents(&derived_balance_cents)
     {
         return Err(StateValidationError::FinancialBalanceMismatch);
+    }
+    for account in state.finance.accounts() {
+        if derived_account_versions[account.id().raw() as usize] != account.version() {
+            return Err(StateValidationError::InvalidFinancialAccount {
+                account: account.id(),
+            });
+        }
     }
     Ok(())
 }

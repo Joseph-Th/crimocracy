@@ -633,7 +633,10 @@ impl EnterpriseState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if !self
                 .by_organization
                 .get(&record.organization())
@@ -711,7 +714,10 @@ impl EnterpriseState {
                 return false;
             }
         }
-        for cycle in self.cycles.values() {
+        for (stored_id, cycle) in &self.cycles {
+            if *stored_id != cycle.id() {
+                return false;
+            }
             if !self
                 .cycles_by_enterprise
                 .get(&cycle.enterprise())

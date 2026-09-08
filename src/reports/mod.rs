@@ -161,7 +161,10 @@ impl ReportState {
         );
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for report in self.records.values() {
+        for (stored_id, report) in &self.records {
+            if *stored_id != report.id() {
+                return false;
+            }
             if !self
                 .by_recipient
                 .get(&report.recipient())

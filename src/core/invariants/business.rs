@@ -14,10 +14,15 @@ use crate::intelligence::{
 };
 use crate::legal::{Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength};
 use crate::world::{BusinessOwner, OrganizationKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {
+        if economy.version() == 0 {
+            return Err(StateValidationError::InvalidBusinessEconomy {
+                business: economy.business(),
+            });
+        }
         let _ = state.world.get_business(economy.business()).ok_or(
             StateValidationError::InvalidBusinessEconomy {
                 business: economy.business(),
@@ -49,6 +54,9 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
             || economy
                 .last_cycle_at()
                 .is_some_and(|last_cycle| last_cycle > state.now())
+            || economy
+                .loss_streak_anchor()
+                .is_some_and(|anchor| anchor < economy.established_at() || anchor > state.now())
         {
             return Err(StateValidationError::InvalidBusinessEconomySchedule {
                 business: economy.business(),
@@ -97,6 +105,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
         }
     }
 
+    let mut previous_cycle_at = BTreeMap::new();
     let mut used_transactions: BTreeSet<LedgerTransactionId> = state
         .enterprises
         .cycles()
@@ -115,8 +124,10 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
             .world
             .get_business_ownership_change_for_version(cycle.business(), cycle.business_version())
             .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
-        if cycle.occurred_at() < economy.established_at()
+        let prior_cycle_at = previous_cycle_at.insert(cycle.business(), cycle.occurred_at());
+        if cycle.occurred_at() <= economy.established_at()
             || cycle.occurred_at() > state.now()
+            || prior_cycle_at.is_some_and(|prior| cycle.occurred_at() <= prior)
             || cycle.business_version() == 0
             || cycle.business_version() > business.version()
             || ownership.new_owner() != cycle.owner()
@@ -199,6 +210,11 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
 
 pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
     for enterprise in state.enterprises.enterprises() {
+        if enterprise.version() == 0 {
+            return Err(StateValidationError::InvalidEnterpriseRuntime {
+                enterprise: enterprise.id(),
+            });
+        }
         state
             .world
             .get_organization(enterprise.organization())
@@ -300,6 +316,9 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
             || enterprise
                 .last_cycle_at()
                 .is_some_and(|last_cycle| last_cycle > state.now())
+            || enterprise
+                .loss_streak_anchor()
+                .is_some_and(|anchor| anchor < enterprise.established_at() || anchor > state.now())
         {
             return Err(StateValidationError::InvalidEnterpriseSchedule {
                 enterprise: enterprise.id(),
@@ -425,14 +444,17 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
         }
     }
 
+    let mut previous_cycle_at = BTreeMap::new();
     let mut used_transactions = BTreeSet::new();
     for cycle in state.enterprises.cycles() {
         let enterprise = state
             .enterprises
             .get_enterprise(cycle.enterprise())
             .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
-        if cycle.occurred_at() < enterprise.established_at()
+        let prior_cycle_at = previous_cycle_at.insert(cycle.enterprise(), cycle.occurred_at());
+        if cycle.occurred_at() <= enterprise.established_at()
             || cycle.occurred_at() > state.now()
+            || prior_cycle_at.is_some_and(|prior| cycle.occurred_at() <= prior)
             || cycle.gross_revenue().cents() < 0
             || cycle.operating_cost().cents() < 0
             || cycle.gross_revenue().checked_sub(cycle.operating_cost()) != Some(cycle.net_cash())
@@ -551,6 +573,27 @@ pub(super) fn validate_business_economies_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {
+        if let Some(disrupted_through) = economy.disrupted_through() {
+            let duration = u64::from(registry.business_disruption().duration().as_minutes());
+            let min_horizon = economy
+                .established_at()
+                .as_minutes()
+                .checked_add(duration)
+                .ok_or(StateValidationError::InvalidBusinessEconomySchedule {
+                    business: economy.business(),
+                })?;
+            let max_horizon = state.now().as_minutes().checked_add(duration).ok_or(
+                StateValidationError::InvalidBusinessEconomySchedule {
+                    business: economy.business(),
+                },
+            )?;
+            let horizon = disrupted_through.as_minutes();
+            if horizon < min_horizon || horizon > max_horizon {
+                return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                    business: economy.business(),
+                });
+            }
+        }
         let laundered = economy.laundered_this_cycle();
         if laundered == crate::finance::Money::ZERO {
             continue;

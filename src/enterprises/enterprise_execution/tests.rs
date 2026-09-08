@@ -57,6 +57,59 @@ struct EnterpriseFixture {
     settlement: FinancialAccountId,
 }
 
+#[derive(Clone, Serialize)]
+struct LedgerTransactionRecordWire {
+    id: crate::core::id::LedgerTransactionId,
+    occurred_at: SimTime,
+    memo: String,
+    postings: Vec<crate::finance::LedgerPosting>,
+    budget_usage: Option<crate::finance::BudgetUsageRecord>,
+}
+
+fn ledger_transaction_wire(
+    record: &crate::finance::LedgerTransactionRecord,
+) -> LedgerTransactionRecordWire {
+    LedgerTransactionRecordWire {
+        id: record.id(),
+        occurred_at: record.occurred_at(),
+        memo: record.memo().to_owned(),
+        postings: record.postings().to_vec(),
+        budget_usage: record.budget_usage(),
+    }
+}
+
+fn replace_serialized_transaction(
+    envelope: SaveEnvelope,
+    original: &crate::finance::LedgerTransactionRecord,
+    replacement: &LedgerTransactionRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("ledger transaction should serialize");
+    let mirror = ledger_transaction_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("ledger transaction mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement ledger transaction should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized transaction must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout ledger transaction corruption must remain decodable")
+}
+
 fn fund_enterprise_fixture_cash(fixture: &mut EnterpriseFixture, cents: i64) {
     validate_record_transaction(
         &fixture.state,
@@ -79,6 +132,76 @@ fn fund_enterprise_fixture_cash(fixture: &mut EnterpriseFixture, cents: i64) {
     .expect("fixture funding should validate")
     .commit(&mut fixture.state)
     .expect("fixture funding should commit");
+}
+
+#[test]
+fn restore_rejects_nonincreasing_enterprise_cycle_time_in_sequential_id_order() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let settle = |fixture: &mut EnterpriseFixture| {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        validate_enterprise_cycle_plan(
+            &fixture.state,
+            decide_enterprise_cycle(
+                &registry,
+                &fixture.state,
+                enterprise,
+                EnterpriseCycleRandomness::new(0, u16::MAX),
+            )
+            .expect("routine enterprise cycle should decide"),
+        )
+        .expect("routine enterprise cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("routine enterprise cycle should commit")
+    };
+    let first_id = settle(&mut fixture);
+    let second_id = settle(&mut fixture);
+    let first = fixture
+        .state
+        .enterprises()
+        .get_cycle(first_id)
+        .expect("first enterprise cycle should persist");
+    let second = fixture
+        .state
+        .enterprises()
+        .get_cycle(second_id)
+        .expect("second enterprise cycle should persist");
+    assert!(first.id() < second.id());
+    assert!(first.occurred_at() < second.occurred_at());
+    assert_eq!(first.attention(), AttentionClass::Routine);
+    assert!(first.information().is_none());
+    let first_transaction_id = first
+        .transaction()
+        .expect("positive protection cycle should carry a ledger settlement");
+    let first_transaction = fixture
+        .state
+        .finance()
+        .get_transaction(first_transaction_id)
+        .expect("first enterprise settlement transaction should persist");
+
+    let mut corrupted_cycle = enterprise_cycle_wire(first);
+    corrupted_cycle.context.occurred_at = second.occurred_at();
+    let mut corrupted_transaction = ledger_transaction_wire(first_transaction);
+    corrupted_transaction.occurred_at = second.occurred_at();
+    let envelope = replace_serialized_cycle(
+        build_save(&registry, &fixture.state)
+            .expect("valid two-cycle enterprise should save before chronology corruption"),
+        first,
+        &corrupted_cycle,
+    );
+    let envelope =
+        replace_serialized_transaction(envelope, first_transaction, &corrupted_transaction);
+    let error = restore_save(&registry, envelope)
+        .expect_err("nonincreasing per-enterprise cycle history must fail restore");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidEnterpriseCycle { cycle }
+        ) if cycle == second_id
+    ));
 }
 
 #[derive(Clone, Serialize)]

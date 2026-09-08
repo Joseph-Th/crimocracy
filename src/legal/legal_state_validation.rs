@@ -11,6 +11,58 @@ use crate::legal::records::{
 };
 
 impl LegalState {
+    fn has_consistent_primary_keys(&self) -> bool {
+        self.investigations
+            .iter()
+            .all(|(id, record)| *id == record.id())
+            && self
+                .investigation_work
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .case_witnesses
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .witness_statements
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .informants
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .informant_disclosures
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self.evidence.iter().all(|(id, record)| *id == record.id())
+            && self
+                .jurisdictions
+                .iter()
+                .all(|(organization, record)| *organization == record.organization())
+            && self
+                .patrol_deployments
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .police_responses
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self.arrests.iter().all(|(id, record)| *id == record.id())
+            && self
+                .legal_representations
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .prosecution_cases
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self
+                .prosecution_referrals
+                .iter()
+                .all(|(id, record)| *id == record.id())
+    }
+
     fn has_consistent_prosecution_indexes(&self) -> bool {
         for case in self.prosecution_cases.values() {
             let id = case.id();
@@ -268,7 +320,8 @@ impl LegalState {
         true
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        if !self.has_consistent_arrest_indexes()
+        if !self.has_consistent_primary_keys()
+            || !self.has_consistent_arrest_indexes()
             || !self.has_consistent_legal_representation_indexes()
             || !self.has_consistent_prosecution_indexes()
             || !self.has_consistent_police_response_indexes()

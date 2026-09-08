@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::invariants::{
+    StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
+};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::decisions::decision_system::{
@@ -245,6 +247,34 @@ fn synthesis_prioritizes_pending_decisions_filters_routine_and_deduplicates_sour
     );
     validate_state(&fixture.state).expect("executive brief state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn registry_validation_rejects_forged_off_cadence_executive_brief() {
+    let mut fixture = make_test_brief_fixture();
+    let report = fixture
+        .state
+        .ids
+        .next_report()
+        .expect("forged brief fixture should allocate a report id");
+    fixture.state.reports.insert(crate::reports::ReportRecord {
+        id: report,
+        recipient: fixture.organization,
+        kind: ReportKind::ExecutiveBrief,
+        title: "Executive brief".to_owned(),
+        generated_at: fixture.state.now(),
+        entries: vec![entry(
+            AttentionClass::Routine,
+            "No immediate decision or notable exception requires executive attention.",
+        )],
+    });
+
+    validate_state(&fixture.state)
+        .expect("generic structural validation cannot infer the authored brief cadence");
+    assert_eq!(
+        validate_state_against_registry(&fixture.registry, &fixture.state),
+        Err(StateValidationError::InvalidExecutiveBrief { report })
+    );
 }
 
 #[test]

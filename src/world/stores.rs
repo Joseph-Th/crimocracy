@@ -462,6 +462,9 @@ impl WorldState {
     pub(crate) fn organizations(&self) -> impl Iterator<Item = &OrganizationRecord> {
         self.organizations.values()
     }
+    pub(crate) fn neighborhoods(&self) -> impl Iterator<Item = &NeighborhoodRecord> {
+        self.neighborhoods.values()
+    }
     pub(crate) fn characters(&self) -> impl Iterator<Item = &CharacterRecord> {
         self.characters.records.values()
     }
@@ -511,7 +514,15 @@ impl WorldState {
         self.characters.reassign(id, organization, supervisor);
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        self.characters_have_consistent_indexes() && self.businesses_have_consistent_indexes()
+        self.organizations
+            .iter()
+            .all(|(id, record)| *id == record.id())
+            && self
+                .neighborhoods
+                .iter()
+                .all(|(id, record)| *id == record.id())
+            && self.characters_have_consistent_indexes()
+            && self.businesses_have_consistent_indexes()
     }
 
     /// Forward membership plus exact-count agreement proves bidirectional index coherence
@@ -521,7 +532,10 @@ impl WorldState {
     fn characters_have_consistent_indexes(&self) -> bool {
         let mut expected_member_entries = 0_usize;
         let mut expected_supervised_entries = 0_usize;
-        for record in self.characters.records.values() {
+        for (stored_id, record) in &self.characters.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if let Some(organization) = record.organization() {
                 if !self
                     .characters
@@ -573,7 +587,10 @@ impl WorldState {
         // Historical org-ownership pairs seen while replaying each business's ownership
         // chain; compared against the historical-owner index at the end.
         let mut expected_historical_pairs: BTreeSet<(OrganizationId, BusinessId)> = BTreeSet::new();
-        for record in self.businesses.records.values() {
+        for (stored_id, record) in &self.businesses.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if !self
                 .businesses
                 .by_neighborhood
@@ -642,6 +659,14 @@ impl WorldState {
             if previous_owner != Some(record.owner()) {
                 return false;
             }
+        }
+        if self
+            .businesses
+            .ownership_changes
+            .iter()
+            .any(|(id, change)| *id != change.id())
+        {
+            return false;
         }
         if self
             .businesses

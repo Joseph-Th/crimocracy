@@ -4,7 +4,7 @@ use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessId, CharacterId, InformationId, OperationId, OrganizationId, PoliceResponseId,
 };
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
     OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
@@ -489,27 +489,40 @@ impl OperationState {
         self.set_status(id, OperationStatus::Completed);
     }
 
-    /// Successful takes against `business` resolved inside the recency window before `at`,
-    /// excluding `exclude` itself. Served from the depletion index, ordered by resolution time.
+    /// Successful takes against `business` resolved inside the recency window before the
+    /// current operation's `(resolved_at, id)` ordering position. The lower time boundary is
+    /// open: a target is fully restocked exactly when the authored window elapses. Ordering by
+    /// operation ID within one simulation minute mirrors the canonical due-operation pass and
+    /// keeps historical re-derivation stable when several takes resolve at the same `SimTime`.
     pub(crate) fn recent_successful_takes(
         &self,
         business: BusinessId,
         at: SimTime,
-        window_minutes: i64,
-        exclude: Option<OperationId>,
+        window: SimDuration,
+        current_operation: OperationId,
     ) -> u32 {
-        let at_minutes = i64::try_from(at.as_minutes()).unwrap_or(i64::MAX);
-        let lower_bound =
-            SimTime::from_minutes(at_minutes.saturating_sub(window_minutes).max(0) as u64);
+        let at_minutes = at.as_minutes();
+        let window_minutes = u64::from(window.as_minutes());
+        let lower_bound = SimTime::from_minutes(at_minutes.saturating_sub(window_minutes));
+        // Once a complete window exists, excluding `(lower_bound, MAX)` excludes every take at
+        // the exact lower timestamp, not merely operation ID zero (real IDs start at one). Before
+        // then the conceptual lower bound is before campaign time zero, so the range must be
+        // unbounded below or a legitimate minute-zero take would disappear early.
+        let lower_key = (lower_bound, OperationId::from_raw(u32::MAX));
+        let lower_range_bound = if at_minutes >= window_minutes {
+            std::ops::Bound::Excluded(&lower_key)
+        } else {
+            std::ops::Bound::Unbounded
+        };
+        // When re-deriving one operation, excluding its own `(at, id)` key also excludes later
+        // same-minute IDs that had not yet committed when this operation was resolved by the
+        // canonical ascending-ID pass.
+        let upper_key = (at, current_operation);
         self.successful_takes_by_business
             .get(&business)
             .map(|takes| {
                 takes
-                    .range((
-                        std::ops::Bound::Excluded(&(lower_bound, OperationId::from_raw(0))),
-                        std::ops::Bound::Included(&(at, OperationId::from_raw(u32::MAX))),
-                    ))
-                    .filter(|(_, operation_id)| Some(*operation_id) != exclude)
+                    .range((lower_range_bound, std::ops::Bound::Excluded(&upper_key)))
                     .count() as u32
             })
             .unwrap_or(0)
@@ -648,7 +661,10 @@ impl OperationState {
         let mut expected_in_progress = 0_usize;
         let mut expected_takes = 0_usize;
         let mut expected_discovered_links = 0_usize;
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if !self
                 .by_organization
                 .get(&record.responsible_organization())
@@ -767,5 +783,51 @@ impl OperationState {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_take_window_excludes_exact_lower_boundary_and_later_same_minute_ids() {
+        let business = BusinessId::from_raw(7);
+        let at = SimTime::from_minutes(5_000);
+        let window = SimDuration::from_minutes(4_320);
+        let lower = SimTime::from_minutes(680);
+        let current = OperationId::from_raw(20);
+        let mut state = OperationState::new();
+        state.successful_takes_by_business.insert(
+            business,
+            BTreeSet::from([
+                (lower, OperationId::from_raw(1)),
+                (SimTime::from_minutes(681), OperationId::from_raw(2)),
+                (at, OperationId::from_raw(10)),
+                (at, current),
+                (at, OperationId::from_raw(30)),
+            ]),
+        );
+
+        assert_eq!(
+            state.recent_successful_takes(business, at, window, current),
+            2,
+            "only interior-window takes that precede the current operation may deplete it"
+        );
+
+        let early = SimTime::from_minutes(100);
+        let mut early_state = OperationState::new();
+        early_state.successful_takes_by_business.insert(
+            business,
+            BTreeSet::from([
+                (SimTime::from_minutes(0), OperationId::from_raw(1)),
+                (early, OperationId::from_raw(2)),
+            ]),
+        );
+        assert_eq!(
+            early_state.recent_successful_takes(business, early, window, OperationId::from_raw(2),),
+            1,
+            "before a full window has elapsed, campaign-start takes are still recent"
+        );
     }
 }

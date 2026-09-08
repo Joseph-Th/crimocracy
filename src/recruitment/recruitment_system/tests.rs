@@ -310,6 +310,51 @@ fn candidate_discovery_follows_incoming_relationships_not_global_roster() {
 }
 
 #[test]
+fn day_boundary_recruitment_uses_current_decayed_reputation() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    let baseline = fixture.registry.reputation().baseline();
+    crate::reputation::reputation_system::apply_reputation_delta(
+        &fixture.registry,
+        &mut fixture.state,
+        fixture.target,
+        crate::reputation::AudienceKind::Underworld,
+        crate::reputation::ReputationDimension::Competence,
+        3,
+    )
+    .expect("fixture competence reputation should apply");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_439));
+
+    let outcome = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(outcome.recruitment_attempts.len(), 1);
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.recruitment_attempts[0])
+        .expect("day-boundary autonomous attempt should persist");
+    assert_eq!(
+        attempt.factors().organization_competence(),
+        baseline + 2,
+        "daily reputation decay must settle before the same-minute recruitment decision"
+    );
+    assert_eq!(
+        crate::reputation::reputation_system::resolve_score(
+            &fixture.registry,
+            fixture.state.reputation(),
+            fixture.target,
+            crate::reputation::AudienceKind::Underworld,
+            crate::reputation::ReputationDimension::Competence,
+        ),
+        baseline + 2,
+        "the persisted attempt must quote the same current reputation the world now holds"
+    );
+    validate_state(&fixture.state).expect("current-reputation recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     let registry = build_registry();
     let mut fixture = fixture();
@@ -868,6 +913,69 @@ fn protection_offer_uses_only_candidate_known_legal_pressure_and_stales_when_kno
     assert_eq!(record.pressure_information(), Some(information));
     assert_eq!(record.factors().perceived_legal_pressure(), 100);
     validate_state(&fixture.state).expect("pressure-aware recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn expired_pressure_knowledge_neither_scores_nor_stales_a_validated_recruitment() {
+    let mut fixture = fixture();
+    let observed_at = fixture.state.now();
+    let record_expired_pressure = |fixture: &mut Fixture, summary: &str| {
+        validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(fixture.candidate),
+                source_kind: InformationSourceKind::PoliceContact,
+                topic: InformationTopic::PoliceActivity,
+                source_entity: None,
+                subject: EntityRef::Character(fixture.candidate),
+                observed_at,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: summary.to_owned(),
+            },
+        )
+        .expect("expired pressure fixture information should validate")
+        .commit(&mut fixture.state)
+        .expect("expired pressure fixture information should commit")
+    };
+    let first = record_expired_pressure(&mut fixture, "Old police pressure");
+    fixture.state.advance_clock(
+        fixture
+            .registry
+            .recruitment()
+            .perceived_legal_pressure_max_age(),
+    );
+
+    let draft = protection_draft(&fixture);
+    let plan = decide_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("expired knowledge should not block recruitment planning");
+    assert_eq!(plan.context.pressure_information, None);
+    assert_eq!(plan.context.factors.perceived_legal_pressure(), 0);
+    assert!(
+        !plan
+            .dependencies
+            .pressure_information_snapshot
+            .contains(&first),
+        "zero-value expired information must not remain a live decision dependency"
+    );
+    let token = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("recruitment with only expired pressure should validate");
+
+    let second = record_expired_pressure(&mut fixture, "Another old police report");
+    assert_ne!(first, second);
+    token
+        .commit(&mut fixture.state)
+        .expect("newly recorded but already expired knowledge must not stale the decision");
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .attempts_for_candidate(fixture.candidate)
+            .count(),
+        1
+    );
+    validate_state(&fixture.state).expect("expired-pressure recruitment state should validate");
     validate_invariants(&fixture.state);
 }
 

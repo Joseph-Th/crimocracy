@@ -319,6 +319,16 @@ impl FinanceState {
         self.transactions.id_bounds()
     }
 
+    pub(crate) fn has_consistent_primary_keys(&self) -> bool {
+        self.accounts
+            .iter()
+            .all(|(id, account)| *id == account.id())
+            && self
+                .transactions
+                .iter()
+                .all(|(id, transaction)| *id == transaction.id())
+    }
+
     pub(crate) fn transactions(&self) -> impl Iterator<Item = &LedgerTransactionRecord> {
         self.transactions.values()
     }

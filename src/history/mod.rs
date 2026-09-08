@@ -71,9 +71,9 @@ impl HistoryState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        // History is append-only with no derived indexes; consistency is key uniqueness,
-        // which BTreeMap guarantees. Keep the hook so validate_indexes covers every substate.
-        true
+        // History has no secondary indexes, but the authoritative map key is still part of
+        // record identity and must agree with the embedded ID after deserialization.
+        self.records.iter().all(|(id, event)| *id == event.id())
     }
 }
 

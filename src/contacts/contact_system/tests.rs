@@ -16,6 +16,7 @@ use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct ContactFixture {
@@ -27,8 +28,161 @@ struct ContactFixture {
     source: CharacterId,
 }
 
+#[derive(Clone, Serialize)]
+struct ContactPartiesWire {
+    sponsor: OrganizationId,
+    handler: CharacterId,
+    contact: CharacterId,
+    institution: OrganizationId,
+    kind: ContactKind,
+}
+
+#[derive(Clone, Serialize)]
+struct ContactRelationshipBasisWire {
+    handler_to_contact: Option<ContactRelationshipSnapshot>,
+    contact_to_handler: Option<ContactRelationshipSnapshot>,
+}
+
+#[derive(Clone, Serialize)]
+struct ContactLifecycleWire {
+    status: ContactStatus,
+    established_at: SimTime,
+    terminated_at: Option<SimTime>,
+    version: u32,
+}
+
+#[derive(Clone, Serialize)]
+struct InstitutionalContactRecordWire {
+    id: ContactId,
+    parties: ContactPartiesWire,
+    relationship_basis: ContactRelationshipBasisWire,
+    lifecycle: ContactLifecycleWire,
+}
+
+fn contact_wire(record: &InstitutionalContactRecord) -> InstitutionalContactRecordWire {
+    InstitutionalContactRecordWire {
+        id: record.id(),
+        parties: ContactPartiesWire {
+            sponsor: record.sponsor(),
+            handler: record.handler(),
+            contact: record.contact(),
+            institution: record.institution(),
+            kind: record.kind(),
+        },
+        relationship_basis: ContactRelationshipBasisWire {
+            handler_to_contact: record.handler_to_contact(),
+            contact_to_handler: record.contact_to_handler(),
+        },
+        lifecycle: ContactLifecycleWire {
+            status: record.status(),
+            established_at: record.established_at(),
+            terminated_at: record.terminated_at(),
+            version: record.version(),
+        },
+    }
+}
+
+fn replace_serialized_contact(
+    envelope: SaveEnvelope,
+    original: &InstitutionalContactRecord,
+    replacement: &InstitutionalContactRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("contact should serialize");
+    let mirror = contact_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("contact mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement contact should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized contact must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout contact corruption must remain decodable")
+}
+
 fn level(value: u8) -> RelationshipLevel {
     RelationshipLevel::try_new(value).expect("fixture relationship level should validate")
+}
+
+#[test]
+fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
+    let mut active_fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let active = establish(&mut active_fixture);
+    let active_record = active_fixture
+        .state
+        .contacts()
+        .get_contact(active)
+        .expect("active contact should persist")
+        .clone();
+    assert_eq!(active_record.version(), 1);
+    let mut corrupted_active = contact_wire(&active_record);
+    corrupted_active.lifecycle.version = 2;
+    let error = restore_save(
+        &active_fixture.registry,
+        replace_serialized_contact(
+            build_save(&active_fixture.registry, &active_fixture.state)
+                .expect("valid active contact should save before version corruption"),
+            &active_record,
+            &corrupted_active,
+        ),
+    )
+    .expect_err("active contact can only exist at constructor version 1");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidInstitutionalContact {
+                contact: invalid
+            }
+        ) if invalid == active
+    ));
+
+    let mut terminated_fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let terminated = establish(&mut terminated_fixture);
+    validate_terminate_contact(&terminated_fixture.state, terminated)
+        .expect("active contact should terminate")
+        .commit(&mut terminated_fixture.state)
+        .expect("contact termination should commit");
+    let terminated_record = terminated_fixture
+        .state
+        .contacts()
+        .get_contact(terminated)
+        .expect("terminated contact should persist")
+        .clone();
+    assert_eq!(terminated_record.version(), 2);
+    let mut corrupted_terminated = contact_wire(&terminated_record);
+    corrupted_terminated.lifecycle.version = 3;
+    let error = restore_save(
+        &terminated_fixture.registry,
+        replace_serialized_contact(
+            build_save(&terminated_fixture.registry, &terminated_fixture.state)
+                .expect("valid terminated contact should save before version corruption"),
+            &terminated_record,
+            &corrupted_terminated,
+        ),
+    )
+    .expect_err("terminated contact has exactly one lifecycle mutation and must be version 2");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidInstitutionalContact {
+                contact: invalid
+            }
+        ) if invalid == terminated
+    ));
 }
 
 fn relationship(trust: u8, debt: u8) -> RelationshipDimensions {

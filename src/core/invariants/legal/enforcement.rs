@@ -149,7 +149,7 @@ pub(super) fn validate_police_responses(state: &AppState) -> Result<(), StateVal
             PoliceResponseStatus::Arrived => {
                 if response.arrived_at().is_none_or(|arrived_at| {
                     arrived_at < response.arrival_due_at() || arrived_at > state.now()
-                }) || response.version() < 2
+                }) || response.version() != 2
                 {
                     return Err(StateValidationError::InvalidPoliceResponse {
                         response: response.id(),

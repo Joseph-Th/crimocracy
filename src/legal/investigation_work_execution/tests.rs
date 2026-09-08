@@ -275,9 +275,83 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
             .expect("exhausted scheduling pass should resolve")
             .is_empty()
     );
+    let direct_error = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect_err("direct canonical scheduling must enforce the same authored attempt limit");
+    assert_eq!(
+        direct_error,
+        InvestigationWorkError::WitnessInterviewLimitReached {
+            witness: case_witness,
+            attempts: u8::try_from(limit).expect("authored attempt limit must fit u8"),
+            limit: registry.legal().witness_interview_attempt_limit(),
+        }
+    );
     validate_state(&fixture.state).expect("capped interview state should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("capped interview state should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.first,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness registration should commit");
+    crate::legal::witness_system::validate_record_witness_statement(
+        &fixture.state,
+        crate::legal::WitnessStatementDraft {
+            case_witness,
+            subject: EntityRef::Character(fixture.target),
+            origin: None,
+            confidence: rating(80),
+            summary: "The witness already gave a usable account.".to_owned(),
+        },
+    )
+    .expect("statement should validate")
+    .commit(&mut fixture.state)
+    .expect("statement should commit");
+
+    let error = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect_err("a statemented witness must not consume another detective interview");
+    assert_eq!(
+        error,
+        InvestigationWorkError::WitnessAlreadyStatemented {
+            witness: case_witness,
+        }
+    );
+    validate_state(&fixture.state).expect("rejected redundant interview must leave valid state");
     validate_invariants(&fixture.state);
 }
 

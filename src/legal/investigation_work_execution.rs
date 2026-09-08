@@ -43,6 +43,16 @@ pub enum InvestigationWorkError {
     MissingInvestigationCapability(CharacterId),
     #[error("investigation work focus must match the work kind")]
     InvalidFocus,
+    #[error("case witness {witness} already gave a statement and needs no further interview")]
+    WitnessAlreadyStatemented { witness: CaseWitnessId },
+    #[error(
+        "case witness {witness} has exhausted the interview attempt limit ({attempts}/{limit})"
+    )]
+    WitnessInterviewLimitReached {
+        witness: CaseWitnessId,
+        attempts: u8,
+        limit: u8,
+    },
     #[error("evidence {evidence} has already been reviewed as evidence {derived}")]
     EvidenceAlreadyReviewed {
         evidence: EvidenceId,
@@ -254,7 +264,7 @@ pub fn validate_schedule_investigation_work(
     validate_case_and_investigator(state, draft.investigation, draft.investigator)?;
     validate_no_duplicate_work(state, draft)?;
     validate_investigator_capacity(state, draft.investigator)?;
-    let source_evidence = resolve_work_sources(state, draft)?;
+    let source_evidence = resolve_work_sources(registry, state, draft)?;
     let investigation = state
         .legal
         .get_investigation(draft.investigation)
@@ -274,18 +284,20 @@ pub fn validate_schedule_investigation_work(
 }
 
 fn resolve_work_sources(
+    registry: &Registry,
     state: &AppState,
     draft: InvestigationWorkDraft,
 ) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
     match draft.kind {
         InvestigationWorkKind::EvidenceReview => resolve_review_source(state, draft),
-        InvestigationWorkKind::WitnessInterview => resolve_interview_focus(state, draft),
+        InvestigationWorkKind::WitnessInterview => resolve_interview_focus(registry, state, draft),
     }
 }
 
 /// An interview's source is a registered case witness, not an evidence record; its support
 /// comes from the witness's cooperation at resolution time.
 fn resolve_interview_focus(
+    registry: &Registry,
     state: &AppState,
     draft: InvestigationWorkDraft,
 ) -> Result<BTreeSet<EvidenceId>, InvestigationWorkError> {
@@ -299,6 +311,19 @@ fn resolve_interview_focus(
         .ok_or(InvestigationWorkError::InvalidFocus)?;
     if witness.investigation() != draft.investigation {
         return Err(InvestigationWorkError::InvalidFocus);
+    }
+    if !witness.statements().is_empty() {
+        return Err(InvestigationWorkError::WitnessAlreadyStatemented {
+            witness: case_witness,
+        });
+    }
+    let limit = registry.legal().witness_interview_attempt_limit();
+    if witness.interview_attempts() >= limit {
+        return Err(InvestigationWorkError::WitnessInterviewLimitReached {
+            witness: case_witness,
+            attempts: witness.interview_attempts(),
+            limit,
+        });
     }
     Ok(BTreeSet::new())
 }

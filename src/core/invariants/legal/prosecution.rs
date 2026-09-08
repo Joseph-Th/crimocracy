@@ -44,6 +44,7 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
             .get_character(case.defendant())
             .ok_or_else(invalid_case)?;
         if case.opened_at() > state.now()
+            || case.opened_at() < arrest.arrested_at()
             || case.version() == 0
             || case.referrals().is_empty()
             || !case.referrals().contains(&case.initial_referral())

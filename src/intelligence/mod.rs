@@ -273,7 +273,10 @@ impl IntelligenceState {
         let mut expected_holder_topic_entries = 0_usize;
         let mut expected_subject_entries = 0_usize;
         let mut expected_source_entries = 0_usize;
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
+            if *stored_id != record.id() {
+                return false;
+            }
             if !self
                 .by_holder
                 .get(&record.holder())

@@ -67,8 +67,7 @@ impl BusinessEconomyRecord {
     pub fn last_cycle_at(&self) -> Option<SimTime> {
         self.last_cycle_at
     }
-    #[cfg(test)]
-    pub fn disrupted_through(&self) -> Option<SimTime> {
+    pub(crate) fn disrupted_through(&self) -> Option<SimTime> {
         self.disrupted_through
     }
     pub(crate) fn loss_streak_anchor(&self) -> Option<SimTime> {
@@ -419,7 +418,10 @@ impl EconomyState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.businesses.values() {
+        for (stored_business, record) in &self.businesses {
+            if *stored_business != record.business() {
+                return false;
+            }
             if self.by_settlement_account.get(&record.settlement_account())
                 != Some(&record.business())
             {
@@ -453,7 +455,10 @@ impl EconomyState {
                 }
             }
         }
-        for cycle in self.cycles.values() {
+        for (stored_id, cycle) in &self.cycles {
+            if *stored_id != cycle.id() {
+                return false;
+            }
             if !self
                 .cycles_by_business
                 .get(&cycle.business())

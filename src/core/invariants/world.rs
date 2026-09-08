@@ -31,6 +31,11 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
     }
 
     for organization in state.world.organizations() {
+        if organization.name().trim().is_empty() {
+            return Err(StateValidationError::EmptyEntityName {
+                entity: EntityRef::Organization(organization.id()),
+            });
+        }
         for policy in ALL_POLICY_KINDS {
             let setting =
                 organization
@@ -49,10 +54,28 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
         }
     }
 
+    for neighborhood in state.world.neighborhoods() {
+        if neighborhood.name().trim().is_empty() {
+            return Err(StateValidationError::EmptyEntityName {
+                entity: EntityRef::Neighborhood(neighborhood.id()),
+            });
+        }
+    }
+
     // One reused visitation set serves every character's ancestor walk; clearing between
     // characters keeps the cycle detection identical without allocating per record.
     let mut visited = BTreeSet::new();
     for character in state.world.characters() {
+        if character.name().trim().is_empty() {
+            return Err(StateValidationError::EmptyEntityName {
+                entity: EntityRef::Character(character.id()),
+            });
+        }
+        if character.version() == 0 {
+            return Err(StateValidationError::InvalidCharacterVersion {
+                character: character.id(),
+            });
+        }
         if let Some(organization) = character.organization()
             && state.world.get_organization(organization).is_none()
         {
@@ -95,6 +118,11 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
     }
 
     for business in state.world.businesses() {
+        if business.name().trim().is_empty() {
+            return Err(StateValidationError::EmptyEntityName {
+                entity: EntityRef::Business(business.id()),
+            });
+        }
         if state
             .world
             .get_neighborhood(business.neighborhood())
@@ -158,6 +186,12 @@ pub(super) fn validate_social_and_intelligence(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for relationship in state.social.relationships() {
+        if relationship.from() == relationship.to() || relationship.version() == 0 {
+            return Err(StateValidationError::InvalidRelationship {
+                from: relationship.from(),
+                to: relationship.to(),
+            });
+        }
         for (context, entity) in [
             (
                 "relationship source",
@@ -175,6 +209,11 @@ pub(super) fn validate_social_and_intelligence(
     }
 
     for information in state.intelligence.information() {
+        if information.summary().trim().is_empty() {
+            return Err(StateValidationError::EmptyInformationSummary {
+                information: information.id(),
+            });
+        }
         match information.holder() {
             KnowledgeHolder::Character(id) => {
                 if state.world.get_character(id).is_none() {
@@ -332,7 +371,6 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
         if sponsor.kind() != OrganizationKind::Criminal
             || resolve_contact_kind_for_institution_kind(institution.kind()) != Some(contact.kind())
             || contact.handler() == contact.contact()
-            || contact.version() == 0
             || contact.established_at() > state.now()
             || !contact_relationship_basis_is_valid(
                 contact.handler(),
@@ -347,7 +385,8 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
         }
         match contact.status() {
             ContactStatus::Active => {
-                if contact.terminated_at().is_some()
+                if contact.version() != 1
+                    || contact.terminated_at().is_some()
                     || handler.organization() != Some(contact.sponsor())
                     || source.organization() != Some(contact.institution())
                     || state
@@ -366,7 +405,10 @@ pub(super) fn validate_contacts(state: &AppState) -> Result<(), StateValidationE
                         contact: contact.id(),
                     },
                 )?;
-                if terminated_at < contact.established_at() || terminated_at > state.now() {
+                if contact.version() != 2
+                    || terminated_at < contact.established_at()
+                    || terminated_at > state.now()
+                {
                     return Err(StateValidationError::InvalidInstitutionalContact {
                         contact: contact.id(),
                     });

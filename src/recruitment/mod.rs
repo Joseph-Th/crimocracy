@@ -405,8 +405,11 @@ impl RecruitmentState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        for record in self.records.values() {
+        for (stored_id, record) in &self.records {
             let id = record.id();
+            if *stored_id != id {
+                return false;
+            }
             if !self
                 .by_candidate
                 .get(&record.candidate())

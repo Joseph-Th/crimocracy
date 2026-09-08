@@ -253,9 +253,10 @@ pub struct LegalRepresentationDraft {
     pub sponsor: OrganizationId,
     pub contact: ContactId,
     pub fee: Money,
-    /// Sponsor-owned liquid accounts permitted to fund the retainer. Direct and automatic
-    /// retention may aggregate them; delegated retention is constrained to the mandate's one
-    /// budget funding account by the canonical payment validator.
+    /// Sponsor-owned liquid accounts permitted to fund the retainer. Direct and
+    /// organization-policy automatic retention may aggregate them; mandate-sourced automatic
+    /// and explicitly delegated retention are constrained to the mandate's one budget funding
+    /// account by the canonical payment validator.
     pub payer_accounts: BTreeSet<FinancialAccountId>,
     pub provider_account: FinancialAccountId,
     pub authorization: Option<MandateAuthority>,

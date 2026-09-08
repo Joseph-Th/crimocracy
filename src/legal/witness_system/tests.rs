@@ -5,14 +5,16 @@ use crate::build_registry;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{build_save, restore_save};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::time::SimTime;
 use crate::legal::investigation_system::{
     InvestigationTransition, validate_add_evidence, validate_open_investigation,
     validate_transition_investigation,
 };
-use crate::legal::{EvidenceDraft, InvestigationDraft, WitnessStatementDraft};
+use crate::legal::{CaseWitnessRecord, EvidenceDraft, InvestigationDraft, WitnessStatementDraft};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, Rating};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct WitnessFixture {
@@ -22,6 +24,63 @@ struct WitnessFixture {
     investigation: InvestigationId,
     witness: CharacterId,
     subject: CharacterId,
+}
+
+#[derive(Clone, Serialize)]
+struct CaseWitnessRecordWire {
+    id: CaseWitnessId,
+    investigation: InvestigationId,
+    witness: CharacterId,
+    cooperation: WitnessCooperation,
+    registered_at: SimTime,
+    statements: BTreeSet<crate::core::id::WitnessStatementId>,
+    interview_attempts: u8,
+    version: u32,
+}
+
+fn case_witness_wire(record: &CaseWitnessRecord) -> CaseWitnessRecordWire {
+    CaseWitnessRecordWire {
+        id: record.id(),
+        investigation: record.investigation(),
+        witness: record.witness(),
+        cooperation: record.cooperation(),
+        registered_at: record.registered_at(),
+        statements: record.statements().clone(),
+        interview_attempts: record.interview_attempts(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_case_witness(
+    envelope: SaveEnvelope,
+    original: &CaseWitnessRecord,
+    replacement: &CaseWitnessRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("case witness should serialize");
+    let mirror = case_witness_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("case witness mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement case witness should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized case witness must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout case witness corruption must remain decodable")
 }
 
 fn rating(value: u8) -> Rating {
@@ -94,6 +153,56 @@ fn make_fixture() -> WitnessFixture {
         witness,
         subject,
     }
+}
+
+#[test]
+fn restore_rejects_witness_attempt_counter_without_completed_interview_history() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("case witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness registration should commit");
+    let record = fixture
+        .state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("registered witness should persist")
+        .clone();
+    assert_eq!(record.interview_attempts(), 0);
+    assert_eq!(record.version(), 1);
+    let mut corrupted = case_witness_wire(&record);
+    corrupted.interview_attempts = 1;
+    // Make the version superficially plausible as though one mutation occurred. Restore must
+    // still reject because there is no completed WitnessInterview work record backing the
+    // future-affecting attempt counter.
+    corrupted.version = 2;
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_case_witness(
+            build_save(&registry, &fixture.state)
+                .expect("valid case witness should save before attempt corruption"),
+            &record,
+            &corrupted,
+        ),
+    )
+    .expect_err("interview attempts must be derived from completed interview work");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidCaseWitness {
+                witness: invalid
+            }
+        ) if invalid == case_witness
+    ));
 }
 
 #[test]

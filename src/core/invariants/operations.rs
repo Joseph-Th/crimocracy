@@ -88,6 +88,11 @@ pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidatio
     // Reused signature set for surveillance discovery validation across operations.
     let mut actual_signatures = BTreeSet::new();
     for operation in state.operations.operations() {
+        if operation.title().trim().is_empty() || operation.version() == 0 {
+            return Err(StateValidationError::InvalidOperationDefinition {
+                operation: operation.id(),
+            });
+        }
         let leader = state.world.get_character(operation.leader()).ok_or(
             StateValidationError::MissingEntity {
                 context: "operation leader",
