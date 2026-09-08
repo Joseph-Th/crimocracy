@@ -78,6 +78,8 @@ pub enum StateValidationError {
     EmptyInformationSummary { information: InformationId },
     #[error("information {information} has invalid observation/recording chronology")]
     InvalidInformationChronology { information: InformationId },
+    #[error("information {information} has an invalid typed semantic signal")]
+    InvalidInformationSignal { information: InformationId },
     #[error("information {information} has invalid provenance source {source_information}")]
     InvalidInformationProvenance {
         information: InformationId,

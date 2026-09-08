@@ -1204,6 +1204,82 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
     validate_invariants(&fixture.state);
 }
 
+#[test]
+fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("quiet due cycle should resolve");
+
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Pressure Snapshot Police".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Fresh enterprise inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Enterprise(enterprise)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Enterprise(enterprise),
+                origin: Some(EntityRef::Enterprise(enterprise)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Enterprise(enterprise)),
+            notified_organizations: BTreeSet::from([fixture.organization]),
+            witness: None,
+        },
+    )
+    .expect("fresh pressure case should validate")
+    .commit(&mut fixture.state)
+    .expect("fresh pressure case should commit without advancing time");
+
+    let error = match validate_enterprise_cycle_plan(&fixture.state, plan) {
+        Err(error) => error,
+        Ok(_) => panic!("held cycle must stale when legal pressure changes"),
+    };
+    assert!(matches!(
+        error,
+        EnterpriseError::StaleLegalPressureContext {
+            enterprise: stale_enterprise,
+            expected_active_district_cases: 0,
+            found_active_district_cases: 1,
+            expected_active_inquiry: false,
+            found_active_inquiry: true,
+        } if stale_enterprise == enterprise
+    ));
+    assert!(
+        fixture
+            .state
+            .enterprises()
+            .cycles_for(enterprise)
+            .next()
+            .is_none(),
+        "stale plan rejection must not settle a cycle"
+    );
+    validate_state(&fixture.state).expect("rejected stale plan leaves valid state");
+    validate_invariants(&fixture.state);
+}
+
 /// Settles one due cycle for `enterprise` and returns its committed attention class.
 fn settle_cycle_inner(
     registry: &Registry,
@@ -1275,6 +1351,13 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
+    let stale_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("due cycle should plan while the manager is free");
     let arrest = validate_arrest(
         &fixture.state,
         ArrestDraft {
@@ -1286,6 +1369,35 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     .expect("manager arrest should not require revoking formal enterprise authority")
     .commit(&mut fixture.state)
     .expect("manager arrest should commit");
+
+    let stale_error = match validate_enterprise_cycle_plan(&fixture.state, stale_plan) {
+        Err(error) => error,
+        Ok(_) => panic!("arrest must stale a cycle planned while the manager was free"),
+    };
+    assert_eq!(
+        stale_error,
+        EnterpriseError::Delegation(
+            crate::delegation::delegation_system::DelegationError::DetainedManager {
+                manager,
+                arrest,
+            },
+        )
+    );
+    assert_eq!(
+        decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, u16::MAX),
+        )
+        .expect_err("a detained manager cannot settle through the direct enterprise API"),
+        EnterpriseError::Delegation(
+            crate::delegation::delegation_system::DelegationError::DetainedManager {
+                manager,
+                arrest,
+            },
+        )
+    );
 
     assert!(find_due_enterprises(&fixture.state).is_empty());
     let detained_tick = run_tick(&registry, &mut fixture.state);

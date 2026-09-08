@@ -24,8 +24,8 @@ use crimocracy::finance::{
 };
 use crimocracy::intelligence::intelligence_system::validate_record_information;
 use crimocracy::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    CaseActivitySignal, InformationDraft, InformationRecord, InformationSignal,
+    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crimocracy::legal::jurisdiction_system::validate_set_jurisdiction;
 use crimocracy::legal::patrol_system::validate_establish_patrol_deployment;
@@ -927,18 +927,23 @@ pub fn observe_authority_case_sightline(
             if record.topic() != InformationTopic::LegalActivity {
                 return None;
             }
-            observe_authority_case_sightline_summary(record.summary())
+            observe_case_activity_information(record)
         })
 }
 
-/// Parses a player-visible case-activity summary into the sightline read: Some(true) means the
-/// authority is still visibly developing the known case, Some(false) that it appears shelved.
-/// Both counterintelligence channels (precinct surveillance and contact disclosure) phrase
-/// their summaries with the canonical markers from `legal::case_knowledge`, so the acting
-/// policy never needs hidden state.
-pub fn observe_authority_case_sightline_summary(summary: &str) -> Option<bool> {
-    crimocracy::legal::case_knowledge::CaseActivityStatus::parse_summary_marker(summary)
-        .and_then(|status| status.is_hot())
+/// Reads the typed semantic signal carried by player-visible case-activity information. Both
+/// precinct surveillance and contact disclosure preserve this signal through the intelligence
+/// owner, so acting policy never parses prose or reaches into hidden legal state.
+pub fn observe_case_activity_information(record: &InformationRecord) -> Option<bool> {
+    match record.signal() {
+        Some(InformationSignal::CaseActivity(CaseActivitySignal::Active)) => Some(true),
+        Some(InformationSignal::CaseActivity(
+            CaseActivitySignal::Shelved | CaseActivitySignal::Closed,
+        )) => Some(false),
+        Some(InformationSignal::PersonnelPresence { .. }) => None,
+        Some(InformationSignal::PatrolPattern { .. }) => None,
+        None => None,
+    }
 }
 
 /// Fixture-authored contact knowledge was deleted: the lead detective's case knowledge is now

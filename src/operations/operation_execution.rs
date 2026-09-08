@@ -36,8 +36,7 @@ use crate::legal::{
 };
 use crate::operations::operation_economics::{
     CashProceedsPlan, DEPLETED_TAKE_CLAUSE, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE,
-    resolve_cash_proceeds, resolve_property_proceeds, undeposited_cash_clause,
-    unliquidated_property_clause,
+    held_cash_clause, held_property_clause, resolve_cash_proceeds, resolve_property_proceeds,
 };
 use crate::operations::surveillance_integration::{
     SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
@@ -392,9 +391,7 @@ pub(crate) fn decide_operation_resolution(
     let mut depleted_clause_written = false;
     if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
-        summary.push_str(&unliquidated_property_clause(
-            proceeds.estimated_value().cents(),
-        ));
+        summary.push_str(&held_property_clause(proceeds.estimated_value().cents()));
     }
     if property_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
         summary.push(' ');
@@ -403,7 +400,7 @@ pub(crate) fn decide_operation_resolution(
     }
     if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
-        summary.push_str(&undeposited_cash_clause(proceeds.amount().cents()));
+        summary.push_str(&held_cash_clause(proceeds.amount().cents()));
     }
     if cash_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
         summary.push(' ');

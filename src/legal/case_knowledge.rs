@@ -5,86 +5,52 @@
 //! ordinary provenance-bearing information held by the investigator character, so every consumer
 //! — a police-channel institutional contact, a surveillance read of the precinct, a future
 //! informant — reaches it through the canonical intelligence paths instead of case-graph reads.
-//! Summaries carry anchored activity markers ("Case activity: actively developing." and
-//! siblings) so player-facing readers can parse the sightline without hidden state, and the
-//! anchoring keeps free-text case titles from spoofing the parse.
+//! Summaries use consistent activity phrasing for presentation. Authoritative status remains the
+//! typed `InvestigationStatus` on the legal owner; prose is never parsed back into domain state.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::CharacterId;
 use crate::core::id::InvestigationId;
 use crate::core::state::AppState;
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_information_with_signal,
+};
 use crate::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    CaseActivitySignal, InformationDraft, InformationSignal, InformationSourceKind,
+    InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::InvestigationStatus;
 use crate::world::OrganizationKind;
 
-/// The activity signal a case's lead investigator personally holds about their own case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaseActivityStatus {
-    Active,
-    Shelved,
-    Closed,
+/// Shared display prefix for case-activity summaries. This is presentation consistency only;
+/// consumers reason from `InformationSignal::CaseActivity`, never from this prose.
+pub(crate) fn case_activity_summary_prefix(activity: CaseActivitySignal) -> &'static str {
+    match activity {
+        CaseActivitySignal::Active => "Case activity: actively developing.",
+        CaseActivitySignal::Shelved => "Case activity: shelved.",
+        CaseActivitySignal::Closed => "Case activity: has closed.",
+    }
 }
 
-impl CaseActivityStatus {
-    /// Fixed summary prefix carrying the activity signal. The marker is anchored to the very
-    /// start of the summary so free-text case titles embedded later can never impersonate or
-    /// shadow it. Every producer of case-activity summaries — lead-investigator knowledge and
-    /// authority-sightline surveillance alike — must lead with this marker.
-    pub(crate) fn marker(self) -> &'static str {
-        match self {
-            Self::Active => "Case activity: actively developing.",
-            Self::Shelved => "Case activity: shelved.",
-            Self::Closed => "Case activity: has closed.",
-        }
-    }
-
-    fn summary(self, authority_name: &str, case_title: &str) -> String {
-        format!(
-            "{} {}",
-            self.marker(),
-            match self {
-                Self::Active => format!(
-                    "{authority_name} detectives are still working the case \"{case_title}\"."
-                ),
-                Self::Shelved => {
-                    format!("{authority_name} has already shelved the case \"{case_title}\".")
-                }
-                Self::Closed => format!("{authority_name} has closed the case \"{case_title}\"."),
+fn case_activity_summary(
+    activity: CaseActivitySignal,
+    authority_name: &str,
+    case_title: &str,
+) -> String {
+    format!(
+        "{} {}",
+        case_activity_summary_prefix(activity),
+        match activity {
+            CaseActivitySignal::Active =>
+                format!("{authority_name} detectives are still working the case \"{case_title}\"."),
+            CaseActivitySignal::Shelved => {
+                format!("{authority_name} has already shelved the case \"{case_title}\".")
             }
-        )
-    }
-
-    /// Whether the authority still visibly works the matter. `None` for an unknown status so a
-    /// parsed sightline never invents certainty the summary did not carry.
-    pub fn is_hot(self) -> Option<bool> {
-        match self {
-            Self::Active => Some(true),
-            Self::Shelved | Self::Closed => Some(false),
+            CaseActivitySignal::Closed => {
+                format!("{authority_name} has closed the case \"{case_title}\".")
+            }
         }
-    }
-
-    /// Parses a player-visible case-activity summary into its activity marker. Both
-    /// counterintelligence channels (precinct surveillance and contact disclosure) phrase their
-    /// summaries with these exact prefixes so no reader needs hidden state, and the anchored
-    /// prefix keeps arbitrary case-title text from spoofing the parse.
-    pub fn parse_summary_marker(summary: &str) -> Option<Self> {
-        const MARKERS: [(CaseActivityStatus, &str); 3] = [
-            (
-                CaseActivityStatus::Active,
-                "Case activity: actively developing.",
-            ),
-            (CaseActivityStatus::Shelved, "Case activity: shelved."),
-            (CaseActivityStatus::Closed, "Case activity: has closed."),
-        ];
-        MARKERS
-            .into_iter()
-            .find(|(_, marker)| summary.starts_with(marker))
-            .map(|(status, _)| status)
-    }
+    )
 }
 
 /// Builds (but does not commit) the validated refresh of a case lead's personal knowledge of
@@ -96,7 +62,7 @@ impl CaseActivityStatus {
 pub(crate) fn prepare_case_activity_knowledge(
     state: &AppState,
     investigation: InvestigationId,
-    activity: CaseActivityStatus,
+    activity: CaseActivitySignal,
     lead: CharacterId,
 ) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
 {
@@ -124,18 +90,19 @@ pub(crate) fn prepare_case_activity_knowledge(
         observed_at: state.now(),
         reliability: Reliability::DirectAccess,
         specificity: Specificity::Specific,
-        summary: activity.summary(&authority_name, &case_title),
+        summary: case_activity_summary(activity, &authority_name, &case_title),
     };
-    validate_record_information(state, draft).map(Some)
+    validate_record_information_with_signal(state, draft, InformationSignal::CaseActivity(activity))
+        .map(Some)
 }
 
 /// Convenience mapping for callers that hold an `InvestigationStatus` (for example the
 /// lifecycle transition path) and need the matching activity signal.
-pub(crate) fn activity_for_status(status: InvestigationStatus) -> CaseActivityStatus {
+pub(crate) fn activity_for_status(status: InvestigationStatus) -> CaseActivitySignal {
     match status {
-        InvestigationStatus::Active => CaseActivityStatus::Active,
-        InvestigationStatus::Suspended => CaseActivityStatus::Shelved,
-        InvestigationStatus::Closed => CaseActivityStatus::Closed,
+        InvestigationStatus::Active => CaseActivitySignal::Active,
+        InvestigationStatus::Suspended => CaseActivitySignal::Shelved,
+        InvestigationStatus::Closed => CaseActivitySignal::Closed,
     }
 }
 

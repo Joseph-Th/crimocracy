@@ -1,5 +1,6 @@
 //! Release-safe structural validation for the recruitment subsystem.
 
+use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OrganizationId};
 use crate::core::invariants::StateValidationError;
@@ -11,7 +12,9 @@ use crate::intelligence::{
 };
 use crate::recruitment::recruitment_system::{
     RecruitmentFactorContext, recruitment_defection_history_summary,
-    recruitment_join_history_summary, recruitment_outcome_summary,
+    recruitment_join_history_summary, recruitment_member_report_entities,
+    recruitment_member_report_summary, recruitment_member_report_title,
+    recruitment_outcome_summary,
 };
 use crate::recruitment::scoring::{
     resolve_perceived_legal_pressure_at, resolve_recruitment_factors_from_context,
@@ -21,6 +24,7 @@ use crate::recruitment::{
     RecruitmentAttemptRecord, RecruitmentAuthority, RecruitmentOutcome, RecruitmentPolicySource,
 };
 use crate::registry::Registry;
+use crate::reports::ReportKind;
 use crate::world::{ApprovalPolicy, CharacterRecord, OrganizationKind, OrganizationRecord};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +33,7 @@ struct SeenRecruitmentArtifacts {
     previous_attempt_by_pair: BTreeMap<(CharacterId, OrganizationId), crate::core::time::SimTime>,
     history_events: BTreeSet<crate::core::id::HistoryEventId>,
     outcome_information: BTreeSet<crate::core::id::InformationId>,
+    member_reports: BTreeSet<crate::core::id::ReportId>,
 }
 
 struct RecruitmentAttemptRefs<'a> {
@@ -56,6 +61,7 @@ fn validate_recruitment_attempt(
     validate_attempt_authority(state, attempt, refs.recruiter)?;
     validate_pressure_information(state, attempt)?;
     validate_outcome_information(state, attempt, &refs, seen)?;
+    validate_member_report(state, attempt, &refs, seen)?;
     validate_factor_bounds(attempt, refs.candidate)?;
     validate_attempt_chronology(attempt, seen)?;
     validate_outcome_consequence(state, attempt, &refs, seen)
@@ -106,6 +112,66 @@ fn validate_attempt_base(
         if previous.kind() != OrganizationKind::Criminal {
             return Err(invalid_attempt(attempt));
         }
+    }
+    Ok(())
+}
+
+fn validate_member_report(
+    state: &AppState,
+    attempt: &RecruitmentAttemptRecord,
+    refs: &RecruitmentAttemptRefs<'_>,
+    seen: &mut SeenRecruitmentArtifacts,
+) -> Result<(), StateValidationError> {
+    let Some(incumbent_organization) = attempt.previous_organization() else {
+        return if attempt.member_report().is_none() {
+            Ok(())
+        } else {
+            Err(invalid_attempt(attempt))
+        };
+    };
+    let report_id = attempt
+        .member_report()
+        .ok_or_else(|| invalid_attempt(attempt))?;
+    if !seen.member_reports.insert(report_id) {
+        return Err(invalid_attempt(attempt));
+    }
+    let report = state
+        .reports
+        .get_report(report_id)
+        .ok_or_else(|| invalid_attempt(attempt))?;
+    let incumbent = state
+        .world
+        .get_organization(incumbent_organization)
+        .ok_or_else(|| invalid_attempt(attempt))?;
+    let expected_summary = recruitment_member_report_summary(
+        attempt.outcome(),
+        refs.candidate.name(),
+        incumbent.name(),
+        (attempt.outcome() == RecruitmentOutcome::Refused)
+            .then_some((refs.recruiter.name(), refs.target.name())),
+    );
+    let expected_entities = recruitment_member_report_entities(
+        attempt.outcome(),
+        attempt.candidate(),
+        attempt.recruiter(),
+        attempt.target_organization(),
+        incumbent_organization,
+    );
+    let Some(entry) = report.entries().first() else {
+        return Err(invalid_attempt(attempt));
+    };
+    if report.recipient() != incumbent_organization
+        || report.kind() != ReportKind::AfterAction
+        || report.title() != recruitment_member_report_title(attempt.outcome())
+        || report.generated_at() != attempt.occurred_at()
+        || report.entries().len() != 1
+        || entry.attention != AttentionClass::Notable
+        || entry.summary != expected_summary
+        || !entry.sources.is_empty()
+        || entry.entities != expected_entities
+        || entry.decision.is_some()
+    {
+        return Err(invalid_attempt(attempt));
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ use crimocracy::finance::finance_system::{
     LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
 };
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
-use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
+use crimocracy::intelligence::{InformationSignal, InformationTopic, KnowledgeHolder};
 use crimocracy::legal::InvestigationWorkKind;
 use crimocracy::operations::property_disposition::{
     PropertyDispositionDraft, validate_dispose_property,
@@ -33,7 +33,7 @@ use crate::*;
 
 /// The standing police-contact channel, used the way a player uses it: ask the handler what the
 /// contact can tell us, then hear one fresh item through the canonical disclosure path. Returns
-/// the parsed case-activity sightline plus the disclosed summary so callers can quote a changed
+/// the typed case-activity sightline plus the disclosed summary so callers can quote a changed
 /// read even on days they suppress full narration. The acting policy never enumerates hidden
 /// knowledge - `find_pending_disclosure_sources` exposes only what the channel itself offers,
 /// and everything the organization learns arrives as a derived information record.
@@ -85,7 +85,7 @@ pub fn read_police_contact(
         .intelligence()
         .get_information(disclosed)
         .expect("disclosed contact information must persist");
-    let read = observe_authority_case_sightline_summary(record.summary());
+    let read = observe_case_activity_information(record);
     let summary = record.summary().to_owned();
     if narrative {
         println!(
@@ -359,7 +359,7 @@ pub fn play_session_with_fixture_view(
     }
 
     let mut burglary_intelligence = BTreeSet::from([scenario.opportunity_information]);
-    let mut learned_patrol_summary = None;
+    let mut learned_patrol_information = None;
     if strategy == Strategy::Recon {
         if narrative {
             println!(
@@ -390,8 +390,13 @@ pub fn play_session_with_fixture_view(
                     record.summary()
                 );
             }
-            if record.topic() == InformationTopic::PoliceActivity {
-                learned_patrol_summary = Some(record.summary().to_owned());
+            if record.topic() == InformationTopic::PoliceActivity
+                && matches!(
+                    record.signal(),
+                    Some(InformationSignal::PatrolPattern { .. })
+                )
+            {
+                learned_patrol_information = Some(*information);
             }
             // Every discovered record is already organization-held and target-relevant by the
             // surveillance contract. Carry all of it into the next plan so the harness tests
@@ -403,26 +408,35 @@ pub fn play_session_with_fixture_view(
     let scheduled_for = match strategy {
         Strategy::Rush | Strategy::Press => scenario.timeline.initial_burglary_at,
         Strategy::Recon => {
-            let patrol_summary = learned_patrol_summary.as_deref().ok_or(
+            let patrol_information = learned_patrol_information.ok_or(
                 "recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
             )?;
+            let patrol_record = scenario
+                .state
+                .intelligence()
+                .get_information(patrol_information)
+                .expect("selected patrol-pattern information must persist");
+            let patrol_signal = patrol_record
+                .signal()
+                .cloned()
+                .ok_or("selected patrol-pattern information lost its typed semantics")?;
             let duration = scenario
                 .registry
                 .get_operation(OperationKind::Burglary)
                 .execution()
                 .duration();
-            let chosen = choose_safe_start_from_patrol_report(
+            let chosen = choose_safe_start_from_patrol_signal(
                 scenario.state.now(),
-                patrol_summary,
+                &patrol_signal,
                 duration,
                 SimDuration::from_minutes(60),
                 scenario.timeline.initial_opportunity_valid_until,
             )?;
             if narrative {
-                let windows = crate::observe::parse_patrol_windows(patrol_summary);
+                let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
                     "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose minute {} ({}), window stays outside heavy presence.",
-                    patrol_summary,
+                    patrol_record.summary(),
                     windows,
                     duration.as_minutes(),
                     chosen.as_minutes(),
@@ -782,19 +796,27 @@ pub fn play_session_with_fixture_view(
         let case_open_minute = metrics
             .case_open_minute
             .expect("witness-pressure arc requires the surfaced case-open minute");
-        let debrief_patrol_summary = metrics
-            .debrief_patrol_information
-            .iter()
-            .filter_map(|information| {
-                scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .map(|record| record.summary().to_owned())
-            })
-            .next();
-        // Fallback: any organization-held police-activity observation about the district.
-        let police_activity_summary = debrief_patrol_summary.or_else(|| {
+        let debrief_patrol_information =
+            metrics
+                .debrief_patrol_information
+                .iter()
+                .copied()
+                .find(|information| {
+                    scenario
+                        .state
+                        .intelligence()
+                        .get_information(*information)
+                        .is_some_and(|record| {
+                            matches!(
+                                record.signal(),
+                                Some(InformationSignal::PatrolPattern { .. })
+                            )
+                        })
+                });
+        // Fallback: any organization-held police-activity observation that actually carries a
+        // dependable recurring pattern. A debrief saying only "police were active at that hour"
+        // is useful planning information, but it is not enough to manufacture a daily schedule.
+        let police_activity_information = debrief_patrol_information.or_else(|| {
             scenario
                 .state
                 .intelligence()
@@ -802,10 +824,22 @@ pub fn play_session_with_fixture_view(
                     KnowledgeHolder::Organization(scenario.player),
                     InformationTopic::PoliceActivity,
                 )
-                .map(|information| information.summary().to_owned())
-                .next()
+                .find(|information| {
+                    matches!(
+                        information.signal(),
+                        Some(InformationSignal::PatrolPattern { .. })
+                    )
+                })
+                .map(|information| information.id())
         });
-        let pressure_at = if let Some(ref summary) = police_activity_summary {
+        let pressure_at = if let Some(information) = police_activity_information {
+            let patrol_signal = scenario
+                .state
+                .intelligence()
+                .get_information(information)
+                .and_then(|record| record.signal())
+                .cloned()
+                .expect("selected police-activity information must retain patrol semantics");
             let duration = scenario
                 .registry
                 .get_operation(OperationKind::WitnessPressure)
@@ -814,9 +848,9 @@ pub fn play_session_with_fixture_view(
             // Witness interviews typically land 2-3h after intake; fit the word inside the
             // first quiet window after opening but before the authority can interview.
             let latest_start = SimTime::from_minutes(case_open_minute + 180);
-            choose_safe_start_from_patrol_report(
+            choose_safe_start_from_patrol_signal(
                 SimTime::from_minutes(case_open_minute),
-                summary,
+                &patrol_signal,
                 duration,
                 SimDuration::from_minutes(30),
                 latest_start,
@@ -829,7 +863,7 @@ pub fn play_session_with_fixture_view(
             let delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
             SimTime::from_minutes(case_open_minute + delay)
         };
-        if narrative && police_activity_summary.is_some() {
+        if narrative && police_activity_information.is_some() {
             println!(
                 "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
                 format_minute_of_day(pressure_at.as_minutes())
@@ -1510,7 +1544,7 @@ pub fn run_second_act(
                 .any(|information| information.subject() == EntityRef::Operation(recon));
             let mut burglary_intelligence =
                 BTreeSet::from([scenario.alternate_opportunity_information]);
-            let mut learned_patrol_summary = None;
+            let mut learned_patrol_information = None;
             for information in &discovered_information {
                 let record = scenario
                     .state
@@ -1525,8 +1559,13 @@ pub fn run_second_act(
                         record.summary()
                     );
                 }
-                if record.topic() == InformationTopic::PoliceActivity {
-                    learned_patrol_summary = Some(record.summary().to_owned());
+                if record.topic() == InformationTopic::PoliceActivity
+                    && matches!(
+                        record.signal(),
+                        Some(InformationSignal::PatrolPattern { .. })
+                    )
+                {
+                    learned_patrol_information = Some(*information);
                 }
                 burglary_intelligence.insert(*information);
             }
@@ -1576,26 +1615,35 @@ pub fn run_second_act(
                     }
                 }
             }
-            let patrol_summary = learned_patrol_summary.as_deref().ok_or(
+            let patrol_information = learned_patrol_information.ok_or(
                 "second-score recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
             )?;
+            let patrol_record = scenario
+                .state
+                .intelligence()
+                .get_information(patrol_information)
+                .expect("second-score patrol-pattern information must persist");
+            let patrol_signal = patrol_record
+                .signal()
+                .cloned()
+                .ok_or("second-score patrol-pattern information lost its typed semantics")?;
             let duration = scenario
                 .registry
                 .get_operation(OperationKind::Burglary)
                 .execution()
                 .duration();
-            let scheduled_for = choose_safe_start_from_patrol_report(
+            let scheduled_for = choose_safe_start_from_patrol_signal(
                 scenario.state.now(),
-                patrol_summary,
+                &patrol_signal,
                 duration,
                 SimDuration::from_minutes(60),
                 scenario.timeline.second_opportunity_valid_until,
             )?;
             if narrative {
-                let windows = crate::observe::parse_patrol_windows(patrol_summary);
+                let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
                     "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
-                    patrol_summary,
+                    patrol_record.summary(),
                     windows,
                     duration.as_minutes(),
                     scheduled_for.as_minutes(),
@@ -1938,7 +1986,11 @@ pub fn run_defector_trail(
                     .is_some_and(|record| {
                         record.topic() == InformationTopic::Personnel
                             && record.subject() == EntityRef::Organization(rival)
-                            && record.summary().contains(&defector_name)
+                            && matches!(
+                                record.signal(),
+                                Some(InformationSignal::PersonnelPresence { characters })
+                                    if characters.contains(&defector)
+                            )
                     })
             });
         if found {
@@ -2050,7 +2102,6 @@ pub fn run_win_back_attempt(
             "[DECIDE]  {boss_name} makes one {approach:?} pitch to {defector_name}: come home to {player_name}."
         );
     }
-    let attempt_at = scenario.state.now();
     let attempt = validate_recruitment_attempt(
         scenario.registry,
         &scenario.state,
@@ -2114,12 +2165,16 @@ pub fn run_win_back_attempt(
     // organization who tried to recruit them. Audit-only here - the acting policy never reads
     // rival reports - but the narration may explain the mechanism because it follows from the
     // player-visible refusal itself.
-    let leaked = scenario
-        .state
-        .reports()
-        .reports_for(scenario.rival)
-        .any(|report| {
-            report.title() == "Personnel approach" && report.generated_at() == attempt_at
+    let leaked = record
+        .member_report()
+        .and_then(|report| scenario.state.reports().get_report(report))
+        .is_some_and(|report| {
+            report.recipient() == scenario.rival
+                && report.kind() == ReportKind::AfterAction
+                && report.entries().len() == 1
+                && report.entries()[0]
+                    .entities
+                    .contains(&EntityRef::Character(scenario.boss))
         });
     metrics.win_back_refusal_leaked_to_rival = Some(leaked);
     if narrative {

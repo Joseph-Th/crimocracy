@@ -295,6 +295,10 @@ fn validate_active_lifecycle(
         || refs.counsel.organization() != Some(representation.counsel_institution())
         || state
             .legal
+            .active_arrest_for_character(representation.counsel())
+            .is_some()
+        || state
+            .legal
             .active_representation_for_arrest(representation.arrest())
             .is_none_or(|active| active.id() != representation.id())
     {

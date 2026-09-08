@@ -2007,6 +2007,8 @@ fn fresh_complete_intelligence_improves_execution_and_reduces_exposure() {
 #[test]
 fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
     let (registry, mut state, organization, operation) = make_operation_fixture();
+    designate_player_organization(&mut state, organization)
+        .expect("operation organization should be eligible as the player organization");
     for minute in 1..=25_u64 {
         let outcome = run_tick(&registry, &mut state);
         if !outcome.resolved_operations.is_empty() {
@@ -2029,7 +2031,7 @@ fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
         .intelligence()
         .get_information(resolution.after_action_information())
         .expect("completion should persist after-action information");
-    assert!(after_action.summary().contains("remains undeposited"));
+    assert!(after_action.summary().contains("held it for later deposit"));
 
     let cash_account = insert_account(
         &mut state,
@@ -2089,6 +2091,33 @@ fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
       ),
       Err(PropertyDispositionError::AlreadyDeposited(found)) if found == operation
     ));
+    let delta = 1_439_u64
+        .checked_sub(state.now().as_minutes())
+        .expect("cash deposit should occur before the first daily brief");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(delta).expect("daily brief delta should fit SimDuration"),
+    ));
+    let brief = run_tick(&registry, &mut state)
+        .executive_brief
+        .expect("daily brief should include both cash events");
+    let brief = state
+        .reports()
+        .get_report(brief)
+        .expect("cash-event executive brief should persist");
+    let operation_entries: Vec<_> = brief
+        .entries()
+        .iter()
+        .filter(|entry| entry.entities.contains(&EntityRef::Operation(operation)))
+        .collect();
+    assert_eq!(operation_entries.len(), 2);
+    assert!(
+        operation_entries
+            .iter()
+            .any(|entry| entry.summary.contains("held it for later deposit"))
+    );
+    assert!(operation_entries.iter().any(|entry| {
+        entry.summary.starts_with("Cash from ") && entry.summary.contains("was deposited for")
+    }));
     validate_state(&state).expect("cash disposition state should remain valid");
     validate_invariants(&state);
 
@@ -3618,7 +3647,7 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
         achieved_plan
             .narrative
             .summary
-            .contains("remains unliquidated")
+            .contains("was held for later liquidation")
     );
     validate_operation_resolution_plan(&registry, &achieved_state, achieved_plan)
         .expect("achieved property proceeds should validate")
@@ -4026,24 +4055,18 @@ fn property_disposition_reporting_respects_executive_brief_window() {
         .iter()
         .filter(|entry| entry.entities.contains(&EntityRef::Operation(operation)))
         .collect::<Vec<_>>();
-    assert_eq!(operation_entries.len(), 1);
+    assert_eq!(operation_entries.len(), 2);
     assert!(
-        operation_entries[0]
-            .summary
-            .contains("it was later liquidated through Fixture Pawn Exchange for $321.48")
-    );
-    assert!(
-        !same_window_report
-            .entries()
+        operation_entries
             .iter()
-            .any(|entry| entry.summary.starts_with("Property from "))
+            .any(|entry| entry.summary.contains("was held for later liquidation"))
     );
-    assert!(
-        !same_window_report
-            .entries()
-            .iter()
-            .any(|entry| entry.summary.contains("remains unliquidated"))
-    );
+    assert!(operation_entries.iter().any(|entry| {
+        entry.summary.starts_with("Property from ")
+            && entry
+                .summary
+                .contains("liquidated through Fixture Pawn Exchange for $321.48")
+    }));
 
     let delta = 1_439_u64
         .checked_sub(later_window.now().as_minutes())
@@ -4063,7 +4086,7 @@ fn property_disposition_reporting_respects_executive_brief_window() {
         first_report
             .entries()
             .iter()
-            .any(|entry| entry.summary.contains("remains unliquidated"))
+            .any(|entry| entry.summary.contains("was held for later liquidation"))
     );
 
     validate_dispose_property(
@@ -4103,7 +4126,7 @@ fn property_disposition_reporting_respects_executive_brief_window() {
         !second_report
             .entries()
             .iter()
-            .any(|entry| entry.summary.contains("remains unliquidated"))
+            .any(|entry| entry.summary.contains("was held for later liquidation"))
     );
 
     validate_state_against_registry(&registry, &same_window)

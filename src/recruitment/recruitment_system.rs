@@ -147,6 +147,14 @@ pub enum RecruitmentError {
     #[error("candidate {candidate} legal-pressure knowledge changed after recruitment was decided")]
     StalePressureKnowledge { candidate: CharacterId },
     #[error(
+        "target organization {organization} underworld competence changed after recruitment was decided; expected {expected}, found {found}"
+    )]
+    StaleOrganizationCompetence {
+        organization: OrganizationId,
+        expected: u8,
+        found: u8,
+    },
+    #[error(
         "delegated recruitment requires recruiter {recruiter} to be the authority manager {manager}"
     )]
     DelegatedRecruiterMismatch {
@@ -186,6 +194,54 @@ pub enum RecruitmentError {
     Report(#[from] ReportError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+}
+
+pub(crate) const fn recruitment_member_report_title(outcome: RecruitmentOutcome) -> &'static str {
+    match outcome {
+        RecruitmentOutcome::Accepted => "Personnel change",
+        RecruitmentOutcome::Refused => "Personnel approach",
+    }
+}
+
+pub(crate) fn recruitment_member_report_summary(
+    outcome: RecruitmentOutcome,
+    candidate: &str,
+    incumbent_organization: &str,
+    outside_approach: Option<(&str, &str)>,
+) -> String {
+    match outcome {
+        RecruitmentOutcome::Accepted => format!(
+            "{candidate} left {incumbent_organization} and is no longer available for assignments."
+        ),
+        RecruitmentOutcome::Refused => {
+            let (recruiter, target_organization) = outside_approach
+                .expect("refused recruitment member reports always name the outside approach");
+            format!(
+                "{candidate} told {incumbent_organization} leadership that {recruiter} of {target_organization} tried to recruit them. They turned the approach down and remain with {incumbent_organization}."
+            )
+        }
+    }
+}
+
+pub(crate) fn recruitment_member_report_entities(
+    outcome: RecruitmentOutcome,
+    candidate: CharacterId,
+    recruiter: CharacterId,
+    target_organization: OrganizationId,
+    incumbent_organization: OrganizationId,
+) -> BTreeSet<EntityRef> {
+    match outcome {
+        RecruitmentOutcome::Accepted => BTreeSet::from([
+            EntityRef::Character(candidate),
+            EntityRef::Organization(incumbent_organization),
+        ]),
+        RecruitmentOutcome::Refused => BTreeSet::from([
+            EntityRef::Character(candidate),
+            EntityRef::Character(recruiter),
+            EntityRef::Organization(target_organization),
+            EntityRef::Organization(incumbent_organization),
+        ]),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -261,6 +317,10 @@ struct RecruitmentPlanDependencies {
     pressure_information_snapshot: BTreeSet<InformationId>,
     pressure_information_max_age: SimDuration,
     expected_latest_attempt: Option<RecruitmentAttemptId>,
+    /// Authored fallback used when the sparse underworld reputation record is absent. The
+    /// validated token needs this value at commit so it can re-resolve the exact competence
+    /// score that affected willingness without requiring the immutable Registry again.
+    reputation_baseline: u8,
 }
 
 pub fn find_recruitment_candidates(
@@ -666,6 +726,7 @@ pub(crate) fn decide_recruitment_attempt(
                 .recruitment
                 .latest_attempt_for(draft.candidate, draft.target_organization)
                 .map(|attempt| attempt.id()),
+            reputation_baseline: registry.reputation().baseline(),
         },
     })
 }
@@ -1003,19 +1064,23 @@ fn validate_recruitment_member_report(
                 ReportDraft {
                     recipient: previous_organization,
                     kind: ReportKind::AfterAction,
-                    title: "Personnel change".to_owned(),
+                    title: recruitment_member_report_title(plan.context.outcome).to_owned(),
                     entries: vec![ReportEntry {
                         attention: AttentionClass::Notable,
-                        summary: format!(
-                            "{} left {} and is no longer available for assignments.",
+                        summary: recruitment_member_report_summary(
+                            plan.context.outcome,
                             candidate.name(),
-                            previous.name()
+                            previous.name(),
+                            None,
                         ),
                         sources: Vec::new(),
-                        entities: BTreeSet::from([
-                            EntityRef::Character(plan.draft.candidate),
-                            EntityRef::Organization(previous_organization),
-                        ]),
+                        entities: recruitment_member_report_entities(
+                            plan.context.outcome,
+                            plan.draft.candidate,
+                            plan.draft.recruiter,
+                            plan.draft.target_organization,
+                            previous_organization,
+                        ),
                         decision: None,
                     }],
                 },
@@ -1046,24 +1111,23 @@ fn validate_recruitment_member_report(
                 ReportDraft {
                     recipient: current_organization,
                     kind: ReportKind::AfterAction,
-                    title: "Personnel approach".to_owned(),
+                    title: recruitment_member_report_title(plan.context.outcome).to_owned(),
                     entries: vec![ReportEntry {
                         attention: AttentionClass::Notable,
-                        summary: format!(
-                            "{} told {} leadership that {} of {} tried to recruit them. They turned the approach down and remain with {}.",
+                        summary: recruitment_member_report_summary(
+                            plan.context.outcome,
                             candidate.name(),
                             current.name(),
-                            recruiter.name(),
-                            organization.name(),
-                            current.name()
+                            Some((recruiter.name(), organization.name())),
                         ),
                         sources: Vec::new(),
-                        entities: BTreeSet::from([
-                            EntityRef::Character(plan.draft.candidate),
-                            EntityRef::Character(plan.draft.recruiter),
-                            EntityRef::Organization(plan.draft.target_organization),
-                            EntityRef::Organization(current_organization),
-                        ]),
+                        entities: recruitment_member_report_entities(
+                            plan.context.outcome,
+                            plan.draft.candidate,
+                            plan.draft.recruiter,
+                            plan.draft.target_organization,
+                            current_organization,
+                        ),
                         decision: None,
                     }],
                 },
@@ -1153,11 +1217,11 @@ impl ValidatedRecruitmentAttempt {
             .outcome_information
             .commit(state)
             .expect("recruitment information ID was preflighted before mutation");
-        if let Some(report) = self.member_report {
+        let member_report = self.member_report.map(|report| {
             report
                 .commit(state)
-                .expect("recruitment report ID was preflighted before mutation");
-        }
+                .expect("recruitment report ID was preflighted before mutation")
+        });
         let id = state
             .ids
             .next_recruitment_attempt()
@@ -1183,6 +1247,7 @@ impl ValidatedRecruitmentAttempt {
                     resulting_candidate_version,
                     outcome_information,
                     history_event,
+                    member_report,
                 },
             }));
         Ok(id)
@@ -1404,6 +1469,22 @@ fn validate_plan_state_snapshot(
     {
         return Err(RecruitmentError::StalePressureKnowledge {
             candidate: plan.draft.candidate,
+        });
+    }
+    let expected_competence = plan.context.factors.organization_competence();
+    let found_competence = state
+        .reputation()
+        .get_record(
+            plan.draft.target_organization,
+            crate::reputation::AudienceKind::Underworld,
+        )
+        .map(|record| record.score(crate::reputation::ReputationDimension::Competence))
+        .unwrap_or(plan.dependencies.reputation_baseline);
+    if found_competence != expected_competence {
+        return Err(RecruitmentError::StaleOrganizationCompetence {
+            organization: plan.draft.target_organization,
+            expected: expected_competence,
+            found: found_competence,
         });
     }
     let latest = state

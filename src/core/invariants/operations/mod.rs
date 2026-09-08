@@ -12,7 +12,8 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::history::HistoryEventKind;
 use crate::intelligence::{
-    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
 };
 use crate::operations::operation_economics::resolve_property_proceeds;
 use crate::operations::operation_execution::write_legal_activity_summary;
@@ -332,7 +333,7 @@ struct OperationInvariantContext {
     disposition_information: BTreeSet<InformationId>,
     disposition_reports: BTreeSet<crate::core::id::ReportId>,
     text: String,
-    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef)>,
+    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
 }
 
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
@@ -909,7 +910,7 @@ fn validate_operation_discoveries(
     operation: &crate::operations::OperationRecord,
     resolution: &crate::operations::OperationResolutionRecord,
     discovered_information: &mut BTreeSet<InformationId>,
-    actual_signatures: &mut BTreeSet<(InformationTopic, EntityRef)>,
+    actual_signatures: &mut BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
 ) -> Result<(), StateValidationError> {
     actual_signatures.clear();
     match operation.kind() {
@@ -970,7 +971,11 @@ fn validate_operation_discoveries(
             },
         )?;
         if !discovered_information.insert(*information_id)
-            || !actual_signatures.insert((information.topic(), information.subject()))
+            || !actual_signatures.insert((
+                information.topic(),
+                information.subject(),
+                information.signal().cloned(),
+            ))
             || state
                 .operations
                 .operation_for_discovered_information(*information_id)

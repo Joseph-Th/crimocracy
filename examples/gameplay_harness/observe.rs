@@ -1,4 +1,4 @@
-//! Tick observation: metrics capture, narration, and patrol-report sightline parsing.
+//! Tick observation: metrics capture, narration, and typed patrol-sightline interpretation.
 
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::simulation::TickOutcome;
@@ -7,7 +7,9 @@ use crimocracy::decisions::decision_system::validate_resolve_decision;
 use crimocracy::decisions::{DecisionContext, DecisionResponse};
 use crimocracy::finance::{AccountKind, FinancialOwner};
 use crimocracy::intelligence::intelligence_system::validate_information_transfer;
-use crimocracy::intelligence::{InformationTopic, InformationTransferDraft, KnowledgeHolder};
+use crimocracy::intelligence::{
+    InformationSignal, InformationTopic, InformationTransferDraft, KnowledgeHolder,
+};
 use std::error::Error;
 
 use crate::*;
@@ -321,23 +323,20 @@ pub fn observe_tick(
             {
                 // Quote the loyalty report the production path delivered to the player, so the
                 // narrative shows the organization's own information rather than a reconstruction.
-                if let Some(report) =
+                let report =
                     scenario
                         .state
                         .reports()
-                        .reports_for(scenario.player)
-                        .find(|report| {
-                            report.title() == "Personnel approach"
-                                && report.generated_at() == outcome.now
-                        })
-                {
-                    for entry in report.entries() {
-                        println!(
-                            "[POACH WARNING] {}: {}",
-                            stamp(outcome.now.as_minutes()),
-                            entry.summary
-                        );
-                    }
+                        .get_report(attempt.member_report().expect(
+                            "refused poaching against a member must link its loyalty report",
+                        ))
+                        .expect("linked recruitment member report must persist");
+                for entry in report.entries() {
+                    println!(
+                        "[POACH WARNING] {}: {}",
+                        stamp(outcome.now.as_minutes()),
+                        entry.summary
+                    );
                 }
             }
         }
@@ -623,14 +622,14 @@ pub fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
         || outcome.executive_brief.is_some()
 }
 
-pub fn choose_safe_start_from_patrol_report(
+pub fn choose_safe_start_from_patrol_signal(
     now: SimTime,
-    report: &str,
+    signal: &InformationSignal,
     operation_duration: SimDuration,
     uncertainty_buffer: SimDuration,
     latest_start: SimTime,
 ) -> Result<SimTime, HarnessContractError> {
-    let windows = parse_patrol_windows(report);
+    let windows = patrol_intervals_from_signal(signal);
     if windows.is_empty() {
         return Err(HarnessContractError::NoActionablePatrolWindows);
     }
@@ -660,40 +659,19 @@ pub fn choose_safe_start_from_patrol_report(
     Err(HarnessContractError::NoSafeOperationWindow)
 }
 
-pub fn parse_patrol_windows(report: &str) -> Vec<(u64, u64)> {
-    let mut windows = Vec::new();
-    let mut remaining = report;
-    while let Some(index) = remaining.find("roughly ") {
-        remaining = &remaining[index + "roughly ".len()..];
-        let Some(start) = remaining.get(0..5).and_then(parse_clock_minute) else {
-            break;
-        };
-        if remaining.get(5..6) != Some("-") {
-            break;
-        }
-        let Some(end) = remaining.get(6..11).and_then(parse_clock_minute) else {
-            break;
-        };
-        if start < end {
-            windows.push((start, end));
-        } else if start > end {
-            windows.push((start, 1_440));
-            if end > 0 {
-                windows.push((0, end));
-            }
-        } else {
-            windows.push((0, 1_440));
-        }
-        remaining = remaining.get(11..).unwrap_or_default();
-    }
-    windows
-}
-
-pub fn parse_clock_minute(value: &str) -> Option<u64> {
-    let (hour, minute) = value.split_once(':')?;
-    let hour = hour.parse::<u64>().ok()?;
-    let minute = minute.parse::<u64>().ok()?;
-    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+pub fn patrol_intervals_from_signal(signal: &InformationSignal) -> Vec<(u64, u64)> {
+    let InformationSignal::PatrolPattern { intervals } = signal else {
+        return Vec::new();
+    };
+    intervals
+        .iter()
+        .map(|interval| {
+            (
+                u64::from(interval.start_minute()),
+                u64::from(interval.end_minute()),
+            )
+        })
+        .collect()
 }
 
 pub fn intervals_overlap(start_a: u64, end_a: u64, start_b: u64, end_b: u64) -> bool {

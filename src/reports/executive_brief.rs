@@ -186,9 +186,6 @@ fn collect_source_candidates(
         if report.kind() == ReportKind::ExecutiveBrief {
             continue;
         }
-        if disposition_report_is_redundant_in_window(state, report, previous_brief) {
-            continue;
-        }
         if state
             .opportunities()
             .opportunity_for_report(report.id())
@@ -220,101 +217,14 @@ fn collect_source_candidates(
                     continue;
                 }
             }
-            let entry = refresh_operation_financial_state(state, report.id(), entry);
             candidates.push(SourceCandidate {
                 report: report.id(),
                 entry_index,
-                entry,
+                entry: entry.clone(),
             });
         }
     }
     candidates
-}
-
-fn disposition_report_is_redundant_in_window(
-    state: &AppState,
-    report: &crate::reports::ReportRecord,
-    previous_brief: Option<ReportId>,
-) -> bool {
-    // Structural identity only: a Financial-kind report that some operation's disposition
-    // points back to is a property-disposition report. Display titles are not identity.
-    if report.kind() != ReportKind::Financial {
-        return false;
-    }
-    report.entries().iter().any(|entry| {
-        entry.entities.iter().any(|entity| {
-            let EntityRef::Operation(operation_id) = entity else {
-                return false;
-            };
-            let operation = state
-                .operations()
-                .get_operation(*operation_id)
-                .expect("report operation entity must reference a persisted operation");
-            operation
-                .property_disposition()
-                .is_some_and(|disposition| disposition.report() == report.id())
-                && operation.resolution().is_some_and(|resolution| {
-                    previous_brief
-                        .is_none_or(|previous| resolution.after_action_report() > previous)
-                })
-        })
-    })
-}
-
-fn refresh_operation_financial_state(
-    state: &AppState,
-    source_report: ReportId,
-    entry: &ReportEntry,
-) -> ReportEntry {
-    let mut refreshed = entry.clone();
-    for entity in &entry.entities {
-        let EntityRef::Operation(operation_id) = entity else {
-            continue;
-        };
-        let operation = state
-            .operations()
-            .get_operation(*operation_id)
-            .expect("report operation entity must reference a persisted operation");
-        let Some(resolution) = operation.resolution() else {
-            continue;
-        };
-        if resolution.after_action_report() != source_report {
-            continue;
-        }
-        let (Some(proceeds), Some(disposition)) = (
-            resolution.property_proceeds(),
-            operation.property_disposition(),
-        ) else {
-            continue;
-        };
-        let venue = state
-            .world()
-            .get_business(disposition.venue())
-            .expect("property disposition venue must reference a persisted business");
-        // The clause pair is produced by one owner (`operation_economics`), so this refresh
-        // matches on exact text rather than parsing. The `contains` guard is also the drift
-        // alarm: if either clause's wording changes without the other, the unliquidated
-        // clause silently survives into every later brief.
-        let prior = crate::operations::operation_economics::unliquidated_property_clause(
-            proceeds.estimated_value().cents(),
-        );
-        if !refreshed.summary.contains(&prior) {
-            continue;
-        }
-        let current = crate::operations::operation_economics::liquidated_property_clause(
-            proceeds.estimated_value().cents(),
-            venue.name(),
-            disposition.realized_value().cents(),
-        );
-        // Refresh exactly one clause occurrence per operation so two operations sharing an
-        // identical estimated value each get their own clause liquidated instead of the
-        // second silently skipping.
-        if let Some(position) = refreshed.summary.find(&prior) {
-            let end = position + prior.len();
-            refreshed.summary.replace_range(position..end, &current);
-        }
-    }
-    refreshed
 }
 
 fn deduplicate_source_candidates(candidates: Vec<SourceCandidate>) -> Vec<SourceCandidate> {

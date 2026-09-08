@@ -35,6 +35,7 @@ struct Fixture {
     registry: Registry,
     state: AppState,
     sponsor: OrganizationId,
+    police: OrganizationId,
     handler: CharacterId,
     defendant: CharacterId,
     supervisor: Option<CharacterId>,
@@ -612,6 +613,7 @@ fn fixture_with_options(counsel_kind: OrganizationKind, supervised_defendant: bo
         registry,
         state,
         sponsor,
+        police,
         handler,
         defendant,
         supervisor,
@@ -653,6 +655,46 @@ fn retain(
     .expect("legal representation should validate")
     .commit(&mut fixture.state)
     .expect("legal representation should commit")
+}
+
+fn arrest_draft_for_character(
+    fixture: &mut Fixture,
+    character: CharacterId,
+    title: &str,
+) -> ArrestDraft {
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .expect("custody test investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("custody test investigation should commit");
+    let evidence = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("custody test evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("custody test evidence should commit");
+    ArrestDraft {
+        character,
+        investigation,
+        evidence: BTreeSet::from([evidence]),
+    }
 }
 
 #[test]
@@ -1252,7 +1294,7 @@ fn ended_representation_rejects_matching_but_unauthored_persisted_summary() {
     validate_end_legal_representation(
         &fixture.state,
         representation,
-        LegalRepresentationEndReason::CounselWithdrawn,
+        LegalRepresentationEndReason::CounselUnavailable,
     )
     .expect("representation ending should validate")
     .commit(&mut fixture.state)
@@ -1290,6 +1332,94 @@ fn ended_representation_rejects_matching_but_unauthored_persisted_summary() {
         ),
         "expected invalid representation, got {error:?}"
     );
+}
+
+#[test]
+fn arresting_retained_counsel_ends_representation_before_custody() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 8_000, None);
+    let counsel = fixture.counsel;
+    let draft =
+        arrest_draft_for_character(&mut fixture, counsel, "Counsel obstruction investigation");
+
+    let counsel_arrest = validate_arrest(&fixture.state, draft)
+        .expect("counsel custody should validate with representation preemption")
+        .commit(&mut fixture.state)
+        .expect("counsel custody should end representation atomically");
+
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(counsel)
+            .map(|arrest| arrest.id()),
+        Some(counsel_arrest)
+    );
+    let ended = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("ended representation should remain historical");
+    assert_eq!(ended.status(), LegalRepresentationStatus::Ended);
+    assert_eq!(
+        ended.end_reason(),
+        Some(LegalRepresentationEndReason::CounselUnavailable)
+    );
+    assert!(ended.ended_information().is_some());
+    assert!(ended.ended_report().is_some());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none(),
+        "detained counsel cannot remain the active lawyer on another detainee's matter"
+    );
+    validate_state(&fixture.state).expect("counsel-custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn counsel_arrest_token_stales_when_representation_is_retained_after_validation() {
+    let mut fixture = fixture();
+    let counsel = fixture.counsel;
+    let draft = arrest_draft_for_character(
+        &mut fixture,
+        counsel,
+        "Counsel stale-preflight investigation",
+    );
+    let validated = validate_arrest(&fixture.state, draft)
+        .expect("counsel arrest should validate before a matter is retained");
+    let representation = retain(&mut fixture, 8_000, None);
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("new representation must stale the earlier custody preflight");
+    assert_eq!(
+        error,
+        crate::legal::arrest_system::ArrestError::LegalRepresentation(
+            LegalRepresentationError::DetentionRepresentationsChanged { counsel }
+        )
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(counsel)
+            .is_none(),
+        "stale custody token must not partially arrest counsel"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_legal_representation(representation)
+            .expect("newly retained representation should persist")
+            .status(),
+        LegalRepresentationStatus::Active
+    );
+    validate_state(&fixture.state).expect("rejected stale custody state should validate");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

@@ -8,10 +8,13 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_information, validate_record_information_with_signal,
+};
 use crate::intelligence::{
-    InformationDraft, InformationRecord, InformationSourceKind, InformationTopic, KnowledgeHolder,
-    Reliability, Specificity,
+    CaseActivitySignal, InformationDraft, InformationRecord, InformationSignal,
+    InformationSourceKind, InformationTopic, KnowledgeHolder, PatrolIntervalSignal, Reliability,
+    Specificity,
 };
 use crate::legal::{InvestigationStatus, PatrolWindow};
 use crate::operations::{
@@ -47,12 +50,20 @@ impl SurveillanceIntelligencePlan {
         self.observations.len()
     }
 
-    /// The (topic, subject) pairs this plan will persist — the frozen signature set recorded
-    /// on the operation's resolution.
-    pub(crate) fn surveillance_signatures(&self) -> BTreeSet<(InformationTopic, EntityRef)> {
+    /// The topic/subject/semantic triples this plan will persist, frozen on the operation's
+    /// resolution so later world changes cannot rewrite what the surveillance actually learned.
+    pub(crate) fn surveillance_signatures(
+        &self,
+    ) -> BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)> {
         self.observations
             .iter()
-            .map(|observation| (observation.topic, observation.subject))
+            .map(|observation| {
+                (
+                    observation.topic,
+                    observation.subject,
+                    observation.signal.clone(),
+                )
+            })
             .collect()
     }
 
@@ -65,20 +76,12 @@ impl SurveillanceIntelligencePlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LawEnforcementCaseSightline {
-    /// Whether the surveilling organization has been surfaced an active operation-originated case
-    /// owned by the targeted authority. The sightline never reveals evidence, subjects, or internal
-    /// case details; it only distinguishes "the case the organization knows about is still being
-    /// actively worked" from "the authority has shelved it".
-    active_case_against_surveiller: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct SurveillanceObservation {
     topic: InformationTopic,
     subject: EntityRef,
     reliability: Reliability,
     specificity: Specificity,
+    signal: Option<InformationSignal>,
     summary: String,
     /// Compact player-facing phrase naming what this observation covers, quoted by the
     /// operation's after-action clause so the report says what was learned without forcing a
@@ -113,7 +116,7 @@ enum SurveillanceTargetSnapshot {
         active_members: Vec<(CharacterId, String)>,
         // Present for law-enforcement/legal-authority targets so the player's known case can be
         // re-checked through canonical surveillance after standing down.
-        law_enforcement_sightline: Option<LawEnforcementCaseSightline>,
+        law_enforcement_sightline: Option<CaseActivitySignal>,
     },
     Investigation {
         id: InvestigationId,
@@ -239,20 +242,23 @@ pub(crate) fn validate_surveillance_information(
     plan.observations
         .iter()
         .map(|observation| {
-            validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Organization(organization),
-                    source_kind: InformationSourceKind::Surveillance,
-                    topic: observation.topic,
-                    source_entity: Some(EntityRef::Operation(source_operation)),
-                    subject: observation.subject,
-                    observed_at: plan.observed_at,
-                    reliability: observation.reliability,
-                    specificity: observation.specificity,
-                    summary: observation.summary.clone(),
-                },
-            )
+            let draft = InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind: InformationSourceKind::Surveillance,
+                topic: observation.topic,
+                source_entity: Some(EntityRef::Operation(source_operation)),
+                subject: observation.subject,
+                observed_at: plan.observed_at,
+                reliability: observation.reliability,
+                specificity: observation.specificity,
+                summary: observation.summary.clone(),
+            };
+            match &observation.signal {
+                Some(signal) => {
+                    validate_record_information_with_signal(state, draft, signal.clone())
+                }
+                None => validate_record_information(state, draft),
+            }
         })
         .collect()
 }
@@ -324,14 +330,14 @@ pub(crate) fn is_valid_persisted_surveillance_information(
     {
         return false;
     }
-    // One source of truth for the target→(topic, subject) table: the resolution record froze
-    // the signatures this operation produced, so persisted surveillance intelligence is valid
-    // exactly when its signature is in that set. Re-deriving the expectation from current state
-    // would let later changes (for example a case notified to the surveiller after resolution)
-    // silently invalidate honestly-produced intelligence.
-    resolution
-        .surveillance_signatures()
-        .contains(&(information.topic(), information.subject()))
+    // One source of truth for the target→observation table: the resolution froze topic, subject,
+    // and typed semantics. Re-deriving from current state would let later changes silently
+    // invalidate honest intelligence; omitting semantics would let corrupted saves rewrite facts.
+    resolution.surveillance_signatures().contains(&(
+        information.topic(),
+        information.subject(),
+        information.signal().cloned(),
+    ))
 }
 
 fn resolve_target_snapshot(
@@ -404,6 +410,12 @@ fn resolve_target_snapshot(
             let active_members = state
                 .world
                 .characters_in_organization(id)
+                .filter(|character| {
+                    state
+                        .legal
+                        .active_arrest_for_character(character.id())
+                        .is_none()
+                })
                 .map(|character| (character.id(), character.name().to_owned()))
                 .collect();
             let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
@@ -411,22 +423,7 @@ fn resolve_target_snapshot(
                 // originated case to the surveiller; before that there is nothing to re-read,
                 // so surveillance falls back to ordinary personnel observation instead of
                 // fabricating a "shelved" read about a case that never touched this organization.
-                let (any_known, any_active_known) = state.legal.investigations_for_owner(id).fold(
-                    (false, false),
-                    |(known, active), case| {
-                        let is_known = case.notified_organizations().contains(&surveiller);
-                        (
-                            known || is_known,
-                            active || (is_known && case.status() == InvestigationStatus::Active),
-                        )
-                    },
-                );
-                any_known.then_some(LawEnforcementCaseSightline {
-                    // "Still being worked" while any known case is active: that is the
-                    // player-relevant heat signal, and it never reveals evidence, subjects,
-                    // or internal case details.
-                    active_case_against_surveiller: any_active_known,
-                })
+                resolve_known_authority_case_activity(state, id, surveiller)
             } else {
                 None
             };
@@ -562,6 +559,7 @@ fn build_observations(
                 subject: EntityRef::Neighborhood(*id),
                 reliability,
                 specificity,
+                signal: patrol_pattern_signal(patrol, outcome),
                 summary: patrol_summary(name, patrol, outcome, observed_at),
                 finding: format!("police activity around {name}"),
             }]
@@ -579,6 +577,7 @@ fn build_observations(
                 subject: EntityRef::Neighborhood(*neighborhood),
                 reliability,
                 specificity,
+                signal: patrol_pattern_signal(patrol, outcome),
                 summary: patrol_summary(neighborhood_name, patrol, outcome, observed_at),
                 finding: format!("police activity around {neighborhood_name}"),
             }];
@@ -588,6 +587,7 @@ fn build_observations(
                     subject: EntityRef::Business(*id),
                     reliability,
                     specificity,
+                    signal: None,
                     summary: business_access_summary(name, functions),
                     finding: format!("access intelligence at {name}"),
                 });
@@ -604,6 +604,7 @@ fn build_observations(
             subject: EntityRef::Character(*id),
             reliability,
             specificity,
+            signal: None,
             summary: character_summary(name, organization.as_ref(), supervisor.as_ref()),
             finding: format!("the movements of {name}"),
         }],
@@ -613,16 +614,14 @@ fn build_observations(
             active_members,
             law_enforcement_sightline,
         } => match law_enforcement_sightline {
-            Some(sightline) => vec![SurveillanceObservation {
+            Some(activity) => vec![SurveillanceObservation {
                 topic: InformationTopic::LegalActivity,
                 subject: EntityRef::Organization(*id),
                 reliability,
                 specificity,
-                summary: authority_sightline_summary(
-                    name,
-                    sightline.active_case_against_surveiller,
-                    outcome,
-                ),
+                signal: authority_sightline_signal(*activity, outcome)
+                    .map(InformationSignal::CaseActivity),
+                summary: authority_sightline_summary(name, *activity, outcome),
                 finding: format!("case activity at {name}"),
             }],
             None => vec![SurveillanceObservation {
@@ -630,6 +629,7 @@ fn build_observations(
                 subject: EntityRef::Organization(*id),
                 reliability,
                 specificity,
+                signal: organization_personnel_signal(active_members, outcome),
                 summary: organization_summary(name, active_members, outcome),
                 finding: format!("personnel around {name}"),
             }],
@@ -646,6 +646,9 @@ fn build_observations(
             subject: EntityRef::Investigation(*id),
             reliability,
             specificity,
+            signal: Some(InformationSignal::CaseActivity(
+                crate::legal::case_knowledge::activity_for_status(*status),
+            )),
             summary: investigation_summary(title, owner_name, *status, lead.as_ref(), outcome),
             finding: format!("the status of {title}"),
         }],
@@ -663,6 +666,7 @@ fn build_observations(
             subject: EntityRef::Enterprise(*id),
             reliability,
             specificity,
+            signal: None,
             summary: enterprise_summary(organization_name, manager_name, location_name, *status),
             finding: format!("activity at {location_name}"),
         }],
@@ -676,6 +680,7 @@ fn build_observations(
             subject: EntityRef::Operation(*id),
             reliability,
             specificity,
+            signal: None,
             summary: format!(
                 "Observed activity linked to {} appears {}.",
                 organization_name,
@@ -715,18 +720,12 @@ fn patrol_summary(
             police_presence_label(patrol.baseline_presence)
         );
     }
-    let mut windows = Vec::new();
-    for deployment in &patrol.deployments {
-        for window in &deployment.windows {
-            if windows.len() == 4 {
-                break;
-            }
-            windows.push(approximate_patrol_window(*window));
-        }
-        if windows.len() == 4 {
-            break;
-        }
-    }
+    let observed_windows = observed_patrol_windows(patrol);
+    let windows = observed_windows
+        .iter()
+        .copied()
+        .map(approximate_patrol_window)
+        .collect::<Vec<_>>();
     let extra = patrol
         .deployments
         .iter()
@@ -749,6 +748,67 @@ fn patrol_summary(
         format_day_minute(rounded_half_hour(minute)),
         police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
     )
+}
+
+fn patrol_pattern_signal(
+    patrol: &PatrolPatternSnapshot,
+    outcome: OperationObjectiveOutcome,
+) -> Option<InformationSignal> {
+    if outcome != OperationObjectiveOutcome::Achieved || patrol.deployments.is_empty() {
+        return None;
+    }
+    let intervals = observed_patrol_windows(patrol)
+        .into_iter()
+        .flat_map(approximate_patrol_intervals)
+        .collect::<BTreeSet<_>>();
+    (!intervals.is_empty()).then_some(InformationSignal::PatrolPattern { intervals })
+}
+
+fn observed_patrol_windows(patrol: &PatrolPatternSnapshot) -> Vec<PatrolWindow> {
+    patrol
+        .deployments
+        .iter()
+        .flat_map(|deployment| deployment.windows.iter().copied())
+        .take(4)
+        .collect()
+}
+
+fn approximate_patrol_intervals(window: PatrolWindow) -> Vec<PatrolIntervalSignal> {
+    if window.duration_minutes() == 1_440 {
+        return vec![
+            PatrolIntervalSignal::try_new(0, 1_440).expect("all-day patrol interval must be valid"),
+        ];
+    }
+    let start = rounded_half_hour(window.start().value());
+    let end = rounded_half_hour(
+        u16::try_from(
+            (u32::from(window.start().value()) + u32::from(window.duration_minutes())) % 1_440,
+        )
+        .expect("patrol window minute remainder must fit u16"),
+    );
+    match start.cmp(&end) {
+        std::cmp::Ordering::Less => vec![
+            PatrolIntervalSignal::try_new(start, end)
+                .expect("ordered patrol interval must be valid"),
+        ],
+        std::cmp::Ordering::Greater => {
+            let mut intervals = vec![
+                PatrolIntervalSignal::try_new(start, 1_440)
+                    .expect("wrapped patrol tail must be valid"),
+            ];
+            if end > 0 {
+                intervals.push(
+                    PatrolIntervalSignal::try_new(0, end)
+                        .expect("wrapped patrol head must be valid"),
+                );
+            }
+            intervals
+        }
+        std::cmp::Ordering::Equal => vec![
+            PatrolIntervalSignal::try_new(0, 1_440)
+                .expect("ambiguous rounded patrol window is conservatively all-day"),
+        ],
+    }
 }
 
 fn approximate_patrol_window(window: PatrolWindow) -> String {
@@ -835,12 +895,36 @@ fn is_law_enforcement_authority(kind: OrganizationKind) -> bool {
     )
 }
 
+fn resolve_known_authority_case_activity(
+    state: &AppState,
+    authority: OrganizationId,
+    surveiller: OrganizationId,
+) -> Option<CaseActivitySignal> {
+    state
+        .legal
+        .investigations_for_owner(authority)
+        .filter(|case| case.notified_organizations().contains(&surveiller))
+        .map(|case| crate::legal::case_knowledge::activity_for_status(case.status()))
+        .fold(None, |aggregate, activity| {
+            Some(match (aggregate, activity) {
+                (Some(CaseActivitySignal::Active), _) | (_, CaseActivitySignal::Active) => {
+                    CaseActivitySignal::Active
+                }
+                (Some(CaseActivitySignal::Shelved), _) | (_, CaseActivitySignal::Shelved) => {
+                    CaseActivitySignal::Shelved
+                }
+                (None | Some(CaseActivitySignal::Closed), CaseActivitySignal::Closed) => {
+                    CaseActivitySignal::Closed
+                }
+            })
+        })
+}
+
 fn authority_sightline_summary(
     name: &str,
-    active_case_against_surveiller: bool,
+    activity: CaseActivitySignal,
     outcome: OperationObjectiveOutcome,
 ) -> String {
-    use crate::legal::case_knowledge::CaseActivityStatus;
     // The observation reports only visible authority activity tied to a case the surveilling
     // organization already knows exists; it never reveals evidence, subjects, or case internals.
     if outcome == OperationObjectiveOutcome::Partial {
@@ -848,24 +932,30 @@ fn authority_sightline_summary(
             "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
         );
     }
-    // Dependable reads lead with the shared anchored activity marker so player-facing
-    // parsers read the sightline without hidden state and free text cannot spoof the parse.
-    let (status, prose) = if active_case_against_surveiller {
-        (
-            CaseActivityStatus::Active,
-            format!(
-                "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
-            ),
-        )
-    } else {
-        (
-            CaseActivityStatus::Shelved,
-            format!(
-                "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
-            ),
-        )
+    // Dependable reads share the same display prefix as investigator-held case knowledge so
+    // the two player-facing channels describe case activity consistently without parsing prose.
+    let prose = match activity {
+        CaseActivitySignal::Active => format!(
+            "Detectives around {name} appear to be actively developing the case connected to your recent activity. The matter has not gone quiet."
+        ),
+        CaseActivitySignal::Shelved => format!(
+            "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
+        ),
+        CaseActivitySignal::Closed => format!(
+            "No active case machinery connected to your recent activity was observed around {name}; the known matter appears closed."
+        ),
     };
-    format!("{} {prose}", status.marker())
+    format!(
+        "{} {prose}",
+        crate::legal::case_knowledge::case_activity_summary_prefix(activity)
+    )
+}
+
+fn authority_sightline_signal(
+    activity: CaseActivitySignal,
+    outcome: OperationObjectiveOutcome,
+) -> Option<CaseActivitySignal> {
+    (outcome == OperationObjectiveOutcome::Achieved).then_some(activity)
 }
 
 fn organization_summary(
@@ -873,14 +963,8 @@ fn organization_summary(
     active_members: &[(CharacterId, String)],
     outcome: OperationObjectiveOutcome,
 ) -> String {
-    let limit = if outcome == OperationObjectiveOutcome::Achieved {
-        3
-    } else {
-        1
-    };
-    let observed = active_members
+    let observed = observed_organization_members(active_members, outcome)
         .iter()
-        .take(limit)
         .map(|(_, member)| member.as_str())
         .collect::<Vec<_>>();
     if observed.is_empty() {
@@ -891,6 +975,29 @@ fn organization_summary(
             observed.join(", ")
         )
     }
+}
+
+fn organization_personnel_signal(
+    active_members: &[(CharacterId, String)],
+    outcome: OperationObjectiveOutcome,
+) -> Option<InformationSignal> {
+    let characters = observed_organization_members(active_members, outcome)
+        .iter()
+        .map(|(character, _)| *character)
+        .collect::<BTreeSet<_>>();
+    (!characters.is_empty()).then_some(InformationSignal::PersonnelPresence { characters })
+}
+
+fn observed_organization_members(
+    active_members: &[(CharacterId, String)],
+    outcome: OperationObjectiveOutcome,
+) -> &[(CharacterId, String)] {
+    let limit = if outcome == OperationObjectiveOutcome::Achieved {
+        3
+    } else {
+        1
+    };
+    &active_members[..active_members.len().min(limit)]
 }
 
 fn investigation_summary(

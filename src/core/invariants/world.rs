@@ -279,6 +279,21 @@ fn validate_information(
             information: information.id(),
         });
     }
+    if let Some(signal) = information.signal() {
+        if !signal.is_compatible(information.topic(), information.subject()) {
+            return Err(StateValidationError::InvalidInformationSignal {
+                information: information.id(),
+            });
+        }
+        for entity in signal.referenced_entities() {
+            if !is_entity_present(state, entity) {
+                return Err(StateValidationError::MissingEntity {
+                    context: "information signal",
+                    entity,
+                });
+            }
+        }
+    }
     if information.source_kind() == InformationSourceKind::InternalReport {
         validate_internal_report_provenance(state, information)?;
     } else if !information.derived_from().is_empty() {
@@ -398,6 +413,7 @@ fn derived_information_matches_source(
         && information.observed_at() == source.observed_at()
         && information.reliability() == source.reliability()
         && information.specificity() == source.specificity()
+        && information.signal() == source.signal()
         && information.summary() == source.summary()
 }
 

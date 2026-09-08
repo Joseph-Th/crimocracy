@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, CharacterId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
-    IdExhaustionError, IdKind, NeighborhoodId, OrganizationId,
+    BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind,
+    NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -109,14 +109,6 @@ pub enum EnterpriseError {
         expected: u32,
         found: u32,
     },
-    #[error(
-        "enterprise manager {character} changed after validation; expected version {expected}, found {found}"
-    )]
-    StaleManager {
-        character: CharacterId,
-        expected: u32,
-        found: u32,
-    },
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
     #[error("financial account {account} is not owned by organization {organization}")]
@@ -172,6 +164,14 @@ pub enum EnterpriseError {
         "enterprise cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleCycleTime { expected: SimTime, found: SimTime },
+    #[error("enterprise {enterprise} legal-pressure context changed after cycle planning")]
+    StaleLegalPressureContext {
+        enterprise: EnterpriseId,
+        expected_active_district_cases: u32,
+        found_active_district_cases: u32,
+        expected_active_inquiry: bool,
+        found_active_inquiry: bool,
+    },
     #[error(
         "enterprise {enterprise} vice intake routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
     )]
@@ -423,9 +423,14 @@ struct EnterpriseCycleSnapshot {
     suspends_after_settlement: bool,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     host_business_version: Option<(BusinessId, u32)>,
-    /// Manager capability feeds gross revenue, so a manager mutation between decide and
-    /// commit would otherwise settle economics computed from a stale rating.
-    manager_version: (CharacterId, u32),
+    /// Active district casework feeds both street-heat cost and vice probability. Pin the
+    /// count so a held plan cannot settle economics from a legal-pressure picture that no
+    /// longer exists.
+    active_district_cases: u32,
+    /// An existing dedicated inquiry suppresses another vice inquiry. This is a separate
+    /// dependency from district case count because a case can open or close without changing
+    /// the total district pressure count.
+    had_active_enterprise_inquiry: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -572,7 +577,6 @@ pub fn decide_enterprise_cycle(
         .get_character(record.manager())
         .expect("resolved enterprise authority manager must exist");
     let manager_management = manager.capability(CapabilityKind::Management);
-    let manager_version = (record.manager(), manager.version());
     let economics = definition.economics();
     let gross_before_variance =
         resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
@@ -598,8 +602,9 @@ pub fn decide_enterprise_cycle(
     )
     .saturating_mul(active_district_cases)
     .min(10_000);
+    let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
     let vice_roll_hits = active_district_cases > 0
-        && !has_active_enterprise_inquiry(state, enterprise)
+        && !had_active_enterprise_inquiry
         && u32::from(randomness.vice_attention_roll()) < vice_chance_basis_points;
     let vice_authority =
         vice_roll_hits.then(|| resolve_case_intake_authority_snapshot(state, district));
@@ -668,7 +673,8 @@ pub fn decide_enterprise_cycle(
             suspends_after_settlement,
             supporting_business_versions,
             host_business_version,
-            manager_version,
+            active_district_cases,
+            had_active_enterprise_inquiry,
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,
@@ -772,21 +778,23 @@ pub struct ValidatedEnterpriseCycle {
     incident: Option<crate::legal::investigation_system::ValidatedIncidentIntake>,
 }
 
-/// Re-runs the decide-time manager checks that depend on mutable delegation-owned state.
-fn ensure_manager_authority_current(
+fn validate_legal_pressure_context(
     state: &AppState,
+    record: &crate::enterprises::EnterpriseRecord,
     snapshot: &EnterpriseCycleSnapshot,
 ) -> Result<(), EnterpriseError> {
-    let (manager, expected_version) = snapshot.manager_version;
-    let record = state
-        .world
-        .get_character(manager)
-        .expect("current mandate authority implies the manager exists");
-    if record.version() != expected_version {
-        return Err(EnterpriseError::StaleManager {
-            character: manager,
-            expected: expected_version,
-            found: record.version(),
+    let district = resolve_location_neighborhood(state, record.location())?;
+    let active_district_cases = count_district_originated_cases(state, district);
+    let active_inquiry = has_active_enterprise_inquiry(state, record.id());
+    if active_district_cases != snapshot.active_district_cases
+        || active_inquiry != snapshot.had_active_enterprise_inquiry
+    {
+        return Err(EnterpriseError::StaleLegalPressureContext {
+            enterprise: record.id(),
+            expected_active_district_cases: snapshot.active_district_cases,
+            found_active_district_cases: active_district_cases,
+            expected_active_inquiry: snapshot.had_active_enterprise_inquiry,
+            found_active_inquiry: active_inquiry,
         });
     }
     Ok(())
@@ -890,7 +898,7 @@ impl ValidatedEnterpriseCycle {
             });
         }
         ensure_mandate_authority_current(state, self.plan.snapshot.authority)?;
-        ensure_manager_authority_current(state, &self.plan.snapshot)?;
+        validate_legal_pressure_context(state, record, &self.plan.snapshot)?;
         validate_supporting_business_versions(
             state,
             &self.plan.snapshot.supporting_business_versions,
@@ -1030,7 +1038,7 @@ pub fn validate_enterprise_cycle_plan(
         });
     }
     ensure_mandate_authority_current(state, plan.snapshot.authority)?;
-    ensure_manager_authority_current(state, &plan.snapshot)?;
+    validate_legal_pressure_context(state, record, &plan.snapshot)?;
     validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;
     if let Some((business_id, expected)) = plan.snapshot.host_business_version {
         let business = state

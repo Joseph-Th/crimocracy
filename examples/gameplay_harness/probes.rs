@@ -12,7 +12,7 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
+use crimocracy::intelligence::{InformationSignal, InformationTopic, KnowledgeHolder};
 use crimocracy::legal::investigation_system::validate_incident_intake;
 use crimocracy::legal::jurisdiction_system::resolve_case_intake_authority;
 use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
@@ -82,20 +82,24 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         .resolution()
         .expect("completed probe surveillance must have a resolution");
     let mut intelligence = BTreeSet::from([opportunity_information]);
-    let mut learned_patrol_summary = None;
+    let mut learned_patrol_signal = None;
     for information in resolution.discovered_information() {
         let record = scenario
             .state
             .intelligence()
             .get_information(*information)
             .expect("surveillance information must persist");
-        if record.topic() == InformationTopic::PoliceActivity {
-            learned_patrol_summary = Some(record.summary().to_owned());
+        if record.topic() == InformationTopic::PoliceActivity
+            && matches!(
+                record.signal(),
+                Some(InformationSignal::PatrolPattern { .. })
+            )
+        {
+            learned_patrol_signal = record.signal().cloned();
         }
         intelligence.insert(*information);
     }
-    let patrol_summary = learned_patrol_summary
-        .as_deref()
+    let patrol_signal = learned_patrol_signal
         .ok_or("repeat-take probe surveillance produced no patrol-pattern observation")?;
     let duration = registry
         .get_operation(OperationKind::Burglary)
@@ -105,15 +109,15 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
     fn run_take(
         scenario: &mut Scenario,
         metrics: &mut RunMetrics,
-        patrol_summary: &str,
+        patrol_signal: &InformationSignal,
         duration: SimDuration,
         target: BusinessId,
         intelligence: &BTreeSet<InformationId>,
         title: &'static str,
     ) -> Result<i64, Box<dyn Error>> {
-        let scheduled_for = choose_safe_start_from_patrol_report(
+        let scheduled_for = choose_safe_start_from_patrol_signal(
             scenario.state.now(),
-            patrol_summary,
+            patrol_signal,
             duration,
             SimDuration::from_minutes(60),
             SimTime::from_minutes(scenario.state.now().as_minutes() + 2_880),
@@ -152,7 +156,7 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
     let first_take = run_take(
         &mut scenario,
         &mut metrics,
-        patrol_summary,
+        &patrol_signal,
         duration,
         target,
         &intelligence,
@@ -161,7 +165,7 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
     let second_take = run_take(
         &mut scenario,
         &mut metrics,
-        patrol_summary,
+        &patrol_signal,
         duration,
         target,
         &intelligence,
@@ -191,7 +195,7 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
     let third_take = run_take(
         &mut scenario,
         &mut metrics,
-        patrol_summary,
+        &patrol_signal,
         duration,
         target,
         &intelligence,

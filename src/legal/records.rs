@@ -104,7 +104,7 @@ pub enum LegalRepresentationEndReason {
     MatterConcluded,
     Replaced,
     SponsorWithdrawn,
-    CounselWithdrawn,
+    CounselUnavailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

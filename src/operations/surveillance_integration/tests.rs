@@ -7,16 +7,18 @@ use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
+use crate::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
+use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
-    apply_cold_case_decay, validate_add_evidence, validate_incident_intake,
-    validate_open_investigation,
+    InvestigationTransition, apply_cold_case_decay, validate_add_evidence,
+    validate_incident_intake, validate_open_investigation, validate_transition_investigation,
 };
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
 use crate::legal::patrol_system::validate_establish_patrol_deployment;
 use crate::legal::{
-    Admissibility, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft, JurisdictionDraft,
-    PatrolDeploymentDraft, PatrolWindow,
+    Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
+    EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
+    JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
 };
 use crate::operations::operation_execution::{
     OperationResolutionError, OperationResolutionRandomness, decide_operation_resolution,
@@ -227,6 +229,52 @@ fn resolve_with_zero_variance(fixture: &mut Fixture, operation: OperationId) {
         .expect("validated surveillance should commit");
 }
 
+fn detain_character_for_surveillance_test(
+    fixture: &mut Fixture,
+    character: CharacterId,
+    title: &str,
+) {
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .expect("custody investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("custody investigation should commit");
+    let evidence = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("custody evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("custody evidence should commit");
+    validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("evidence-backed detention should validate")
+    .commit(&mut fixture.state)
+    .expect("evidence-backed detention should commit");
+}
+
 #[test]
 fn achieved_business_surveillance_creates_actionable_patrol_and_access_intelligence() {
     let mut fixture = fixture(100, true);
@@ -288,6 +336,16 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
     assert_eq!(
         police.subject(),
         EntityRef::Neighborhood(fixture.neighborhood)
+    );
+    assert_eq!(
+        police.signal(),
+        Some(&InformationSignal::PatrolPattern {
+            intervals: BTreeSet::from([
+                PatrolIntervalSignal::try_new(120, 240).expect("fixture interval must validate"),
+                PatrolIntervalSignal::try_new(1_320, 1_440)
+                    .expect("fixture interval must validate"),
+            ]),
+        })
     );
     assert!(police.summary().contains("recurring pattern"));
     assert!(police.summary().contains("roughly 02:00-04:00"));
@@ -364,6 +422,70 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
     assert!(covered >= 2);
     assert!(covered < relevant);
     validate_state(&fixture.state).expect("surveillance-backed planning state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn organization_surveillance_resolution_stales_when_visible_member_is_detained_after_planning() {
+    let mut fixture = fixture(100, false);
+    let rival = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Custody Snapshot Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival should validate");
+    let member = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Visible Before Custody".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("rival member should validate");
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    let start = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(start.started_operations, vec![operation]);
+    fixture.state.advance_clock(SimDuration::from_minutes(120));
+    let plan = decide_operation_resolution(
+        &fixture.registry,
+        &fixture.state,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("surveillance plan should capture the currently visible member");
+
+    detain_character_for_surveillance_test(
+        &mut fixture,
+        member,
+        "Custody snapshot staleness inquiry",
+    );
+    let error = validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan)
+        .err()
+        .expect("detention must stale the organization personnel snapshot");
+    assert_eq!(
+        error,
+        OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
+            EntityRef::Organization(rival)
+        ))
+    );
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("stale surveillance should remain in progress")
+            .status(),
+        OperationStatus::InProgress
+    );
+    validate_state(&fixture.state).expect("stale detention rejection should preserve valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -580,6 +702,10 @@ fn investigation_surveillance_reports_visible_case_activity_without_evidence_gra
         .expect("legal-activity observation should persist");
     assert_eq!(information.topic(), InformationTopic::LegalActivity);
     assert_eq!(
+        information.signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    );
+    assert_eq!(
         information.subject(),
         EntityRef::Investigation(investigation)
     );
@@ -650,6 +776,10 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
         .expect("case-heat observation should persist");
     assert_eq!(hot_observation.topic(), InformationTopic::LegalActivity);
     assert_eq!(hot_observation.subject(), EntityRef::Organization(police));
+    assert_eq!(
+        hot_observation.signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    );
     assert!(
         hot_observation
             .summary()
@@ -696,6 +826,12 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
                 .unwrap(),
         )
         .expect("shelved observation should persist");
+    assert_eq!(
+        cold_observation.signal(),
+        Some(&InformationSignal::CaseActivity(
+            CaseActivitySignal::Shelved
+        ))
+    );
     assert!(cold_observation.summary().contains("shelved"));
     assert!(
         !cold_observation
@@ -704,6 +840,76 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
     );
     validate_state(&fixture.state).expect("shelved recheck state should validate");
     validate_invariants(&fixture.state);
+
+    validate_transition_investigation(&fixture.state, case, InvestigationTransition::Close)
+        .expect("shelved known case should be closable")
+        .commit(&mut fixture.state)
+        .expect("known case closure should commit");
+    let closed_surveillance = authorize_surveillance(&mut fixture, EntityRef::Organization(police));
+    resolve_with_zero_variance(&mut fixture, closed_surveillance);
+    let closed_resolution = fixture
+        .state
+        .operations()
+        .get_operation(closed_surveillance)
+        .and_then(|record| record.resolution())
+        .expect("closed-case recheck should resolve");
+    let closed_observation = fixture
+        .state
+        .intelligence()
+        .get_information(
+            *closed_resolution
+                .discovered_information()
+                .iter()
+                .next()
+                .expect("closed-case recheck should discover one observation"),
+        )
+        .expect("closed-case observation should persist");
+    assert_eq!(
+        closed_observation.signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Closed))
+    );
+    assert!(closed_observation.summary().contains("closed"));
+    validate_state(&fixture.state).expect("closed-case recheck state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn partial_authority_sightline_carries_no_definitive_case_activity_signal() {
+    assert_eq!(
+        authority_sightline_signal(
+            CaseActivitySignal::Active,
+            OperationObjectiveOutcome::Partial
+        ),
+        None
+    );
+    assert_eq!(
+        authority_sightline_signal(
+            CaseActivitySignal::Shelved,
+            OperationObjectiveOutcome::Partial
+        ),
+        None
+    );
+    assert_eq!(
+        authority_sightline_signal(
+            CaseActivitySignal::Active,
+            OperationObjectiveOutcome::Achieved
+        ),
+        Some(CaseActivitySignal::Active)
+    );
+    assert_eq!(
+        authority_sightline_signal(
+            CaseActivitySignal::Shelved,
+            OperationObjectiveOutcome::Achieved
+        ),
+        Some(CaseActivitySignal::Shelved)
+    );
+    assert_eq!(
+        authority_sightline_signal(
+            CaseActivitySignal::Closed,
+            OperationObjectiveOutcome::Achieved
+        ),
+        Some(CaseActivitySignal::Closed)
+    );
 }
 
 #[test]
@@ -792,6 +998,19 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
         .expect("personnel observation should persist");
     assert_eq!(observation.topic(), InformationTopic::Personnel);
     assert_eq!(observation.subject(), EntityRef::Organization(police));
+    assert_eq!(observation.signal(), None);
+    assert!(
+        observation
+            .summary()
+            .contains("did not identify a recurring active affiliate")
+    );
+    assert!(resolution.surveillance_signatures().contains(&(
+        observation.topic(),
+        observation.subject(),
+        observation.signal().cloned(),
+    )));
+    let observation_id = observation.id();
+    let observation_signal = observation.signal().cloned();
     validate_state(&fixture.state)
         .expect("no-sightline police-org surveillance state should validate");
     validate_invariants(&fixture.state);
@@ -825,4 +1044,106 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
     validate_state(&fixture.state)
         .expect("notification after surveillance must not invalidate persisted signatures");
     validate_invariants(&fixture.state);
+
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("typed personnel surveillance should save after later notification");
+    let bytes = bincode::serialize(&envelope).expect("typed personnel save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("typed personnel save should deserialize");
+    let restored = restore_save(&fixture.registry, decoded)
+        .expect("typed personnel surveillance should restore with frozen semantics");
+    let restored_observation = restored
+        .intelligence()
+        .get_information(observation_id)
+        .expect("restored personnel observation should persist");
+    assert_eq!(restored_observation.signal(), observation_signal.as_ref());
+    validate_invariants(&restored);
+}
+
+#[test]
+fn organization_surveillance_carries_visible_member_ids_and_excludes_detainees() {
+    let mut fixture = fixture(100, false);
+    let rival = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Typed Personnel Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let member_names = ["Ada Pike", "Bram Vale", "Cleo North", "Dane Moss"];
+    let members = member_names.map(|name| {
+        insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: Some(rival),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("rival member should validate")
+    });
+
+    let detained = members[1];
+    detain_character_for_surveillance_test(
+        &mut fixture,
+        detained,
+        "Typed personnel custody inquiry",
+    );
+
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    resolve_with_zero_variance(&mut fixture, operation);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("organization surveillance should resolve");
+    assert_eq!(resolution.discovered_information().len(), 1);
+    let observation = fixture
+        .state
+        .intelligence()
+        .get_information(*resolution.discovered_information().iter().next().unwrap())
+        .expect("typed personnel observation should persist");
+    assert_eq!(observation.topic(), InformationTopic::Personnel);
+    assert_eq!(observation.subject(), EntityRef::Organization(rival));
+    let expected = BTreeSet::from([members[0], members[2], members[3]]);
+    assert_eq!(
+        observation.signal(),
+        Some(&InformationSignal::PersonnelPresence {
+            characters: expected.clone(),
+        })
+    );
+    assert!(observation.summary().contains(member_names[0]));
+    assert!(!observation.summary().contains(member_names[1]));
+    assert!(observation.summary().contains(member_names[2]));
+    assert!(observation.summary().contains(member_names[3]));
+    assert!(resolution.surveillance_signatures().contains(&(
+        observation.topic(),
+        observation.subject(),
+        observation.signal().cloned(),
+    )));
+    let observation_id = observation.id();
+    let observation_signal = observation.signal().cloned();
+    validate_state(&fixture.state).expect("typed personnel surveillance state should validate");
+    validate_invariants(&fixture.state);
+
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("typed personnel surveillance should save");
+    let bytes = bincode::serialize(&envelope).expect("typed personnel save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("typed personnel save should deserialize");
+    let restored = restore_save(&fixture.registry, decoded)
+        .expect("typed personnel surveillance should restore with frozen semantics");
+    let restored_observation = restored
+        .intelligence()
+        .get_information(observation_id)
+        .expect("restored typed personnel observation should persist");
+    assert_eq!(restored_observation.signal(), observation_signal.as_ref());
+    validate_invariants(&restored);
 }

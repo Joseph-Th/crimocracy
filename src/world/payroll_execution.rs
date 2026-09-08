@@ -242,7 +242,7 @@ fn apply_organization_payroll(
         let underpaid: Vec<_> = allocations
             .iter()
             .filter(|(_, _, amount)| *amount < per_member)
-            .map(|(member, supervisor, _)| (*member, *supervisor))
+            .copied()
             .collect();
         Some(validate_shortfall_consequences(
             registry,
@@ -250,6 +250,7 @@ fn apply_organization_payroll(
             organization,
             &outcome,
             &underpaid,
+            per_member,
         )?)
     } else {
         None
@@ -378,22 +379,26 @@ impl ValidatedPayrollShortfallConsequences {
     }
 }
 
-/// Pre-validates every shortfall consequence before payroll money moves. Underpaid work breeds
-/// resentment toward each member's supervisor, and the player organization receives a persisted
-/// notable report so the cause is discoverable.
+/// Pre-validates every shortfall consequence before payroll money moves. Resentment scales with
+/// the uncovered share of each member's wage: a token rounding shortfall is noticeable but must
+/// not cause the same relationship damage as receiving nothing. The player organization receives
+/// a persisted notable report so the cause is discoverable.
 fn validate_shortfall_consequences(
     registry: &Registry,
     state: &AppState,
     organization: OrganizationId,
     outcome: &PayrollOutcome,
-    members: &[(CharacterId, Option<CharacterId>)],
+    members: &[(CharacterId, Option<CharacterId>, Money)],
+    per_member: Money,
 ) -> Result<ValidatedPayrollShortfallConsequences, PayrollError> {
-    let increment = registry.upkeep().shortfall_resentment();
+    let maximum_increment = registry.upkeep().shortfall_resentment();
     let mut relationships = Vec::new();
-    for (member, supervisor) in members {
+    for (member, supervisor, paid) in members {
         let Some(supervisor) = supervisor else {
             continue;
         };
+        let increment =
+            resolve_shortfall_resentment_increment(maximum_increment, per_member, *paid);
         let mut dimensions = state
             .social()
             .get_relationship(*member, *supervisor)
@@ -423,15 +428,36 @@ fn validate_shortfall_consequences(
     })
 }
 
+/// Scales the authored full-nonpayment resentment by the fraction of one wage left unpaid,
+/// rounding any positive shortfall up to one point. The result is bounded by the authored
+/// maximum and uses wide arithmetic so ordinary money values cannot overflow the ratio.
+fn resolve_shortfall_resentment_increment(maximum: u8, owed: Money, paid: Money) -> u8 {
+    debug_assert!(owed > Money::ZERO);
+    debug_assert!(paid >= Money::ZERO && paid < owed);
+    if maximum == 0 {
+        return 0;
+    }
+    let owed_cents = i128::from(owed.cents());
+    let short_cents = i128::from(
+        owed.checked_sub(paid)
+            .expect("underpaid payroll allocation cannot exceed its wage")
+            .cents(),
+    );
+    let scaled = (i128::from(maximum) * short_cents + owed_cents - 1) / owed_cents;
+    u8::try_from(scaled)
+        .expect("scaled resentment is bounded by the authored u8 maximum")
+        .min(maximum)
+}
+
 fn validate_payroll_shortfall_report(
     state: &AppState,
     organization: OrganizationId,
     outcome: &PayrollOutcome,
-    members: &[(CharacterId, Option<CharacterId>)],
+    members: &[(CharacterId, Option<CharacterId>, Money)],
 ) -> Result<ValidatedReport, ReportError> {
     let mut entities = members
         .iter()
-        .map(|(member, _)| EntityRef::Character(*member))
+        .map(|(member, _, _)| EntityRef::Character(*member))
         .collect::<std::collections::BTreeSet<_>>();
     entities.insert(EntityRef::Organization(organization));
     validate_record_report(

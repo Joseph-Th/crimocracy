@@ -54,6 +54,93 @@ pub enum InformationTopic {
     OperationalOutcome,
 }
 
+/// Typed semantic facts carried by player-visible information. These are deliberately sparse:
+/// only facts that production consumers must reason about belong here. Display summaries remain
+/// presentation and are never parsed back into state.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum InformationSignal {
+    CaseActivity(CaseActivitySignal),
+    PersonnelPresence {
+        characters: BTreeSet<CharacterId>,
+    },
+    PatrolPattern {
+        intervals: BTreeSet<PatrolIntervalSignal>,
+    },
+}
+
+impl InformationSignal {
+    pub(crate) fn is_compatible(&self, topic: InformationTopic, subject: EntityRef) -> bool {
+        match self {
+            Self::CaseActivity(_) => {
+                matches!(topic, InformationTopic::LegalActivity)
+                    && matches!(
+                        subject,
+                        EntityRef::Organization(_) | EntityRef::Investigation(_)
+                    )
+            }
+            Self::PersonnelPresence { characters } => {
+                !characters.is_empty()
+                    && matches!(topic, InformationTopic::Personnel)
+                    && matches!(subject, EntityRef::Organization(_))
+            }
+            Self::PatrolPattern { intervals } => {
+                !intervals.is_empty()
+                    && intervals.iter().all(|interval| interval.is_valid())
+                    && matches!(topic, InformationTopic::PoliceActivity)
+                    && matches!(subject, EntityRef::Neighborhood(_))
+            }
+        }
+    }
+
+    pub(crate) fn referenced_entities(&self) -> Vec<EntityRef> {
+        match self {
+            Self::CaseActivity(_) => Vec::new(),
+            Self::PersonnelPresence { characters } => characters
+                .iter()
+                .copied()
+                .map(EntityRef::Character)
+                .collect(),
+            Self::PatrolPattern { .. } => Vec::new(),
+        }
+    }
+}
+
+/// One non-wrapping interval from an approximate recurring patrol pattern disclosed by an
+/// information record. End minute 1440 represents midnight at the end of the day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PatrolIntervalSignal {
+    start_minute: u16,
+    end_minute: u16,
+}
+
+impl PatrolIntervalSignal {
+    pub fn try_new(start_minute: u16, end_minute: u16) -> Option<Self> {
+        (start_minute < end_minute && start_minute < 1_440 && end_minute <= 1_440).then_some(Self {
+            start_minute,
+            end_minute,
+        })
+    }
+
+    pub fn start_minute(self) -> u16 {
+        self.start_minute
+    }
+
+    pub fn end_minute(self) -> u16 {
+        self.end_minute
+    }
+
+    const fn is_valid(self) -> bool {
+        self.start_minute < self.end_minute && self.start_minute < 1_440 && self.end_minute <= 1_440
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CaseActivitySignal {
+    Active,
+    Shelved,
+    Closed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reliability {
     Unknown,
@@ -94,6 +181,7 @@ pub(super) struct InformationChronology {
 pub(super) struct InformationAssessment {
     reliability: Reliability,
     specificity: Specificity,
+    signal: Option<InformationSignal>,
     derived_from: BTreeSet<InformationId>,
     summary: String,
 }
@@ -137,6 +225,9 @@ impl InformationRecord {
     }
     pub fn specificity(&self) -> Specificity {
         self.assessment.specificity
+    }
+    pub fn signal(&self) -> Option<&InformationSignal> {
+        self.assessment.signal.as_ref()
     }
     pub fn derived_from(&self) -> &BTreeSet<InformationId> {
         &self.assessment.derived_from

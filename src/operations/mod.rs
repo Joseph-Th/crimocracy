@@ -19,7 +19,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
-use crate::intelligence::InformationTopic;
+use crate::intelligence::{InformationSignal, InformationTopic};
 use crate::world::Rating;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -602,10 +602,10 @@ pub struct OperationResolutionRecord {
     property_proceeds: Option<OperationPropertyProceedsRecord>,
     cash_proceeds: Option<OperationCashProceedsRecord>,
     discovered_information: BTreeSet<InformationId>,
-    /// Topic/subject pairs actually produced by a surveillance resolution. Persisted because
-    /// the sightline conditions behind them (for example, whether any case had been notified to
-    /// the surveiller by the observed minute) are not re-derivable after later state changes.
-    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef)>,
+    /// Topic/subject/semantic triples actually produced by a surveillance resolution. Persisted
+    /// because sightline conditions and the exact typed facts observed at that minute are not
+    /// re-derivable after later state changes.
+    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
     legal_activity_information: Option<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
@@ -645,7 +645,9 @@ impl OperationResolutionRecord {
         &self.discovered_information
     }
 
-    pub fn surveillance_signatures(&self) -> &BTreeSet<(InformationTopic, EntityRef)> {
+    pub fn surveillance_signatures(
+        &self,
+    ) -> &BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)> {
         &self.surveillance_signatures
     }
 

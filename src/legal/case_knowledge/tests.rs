@@ -1,5 +1,5 @@
 //! Focused tests for investigator-held case-activity knowledge: emission on staffing and
-//! cold-case shelving, sightline parsing, and canonical contact-channel disclosure.
+//! cold-case shelving, typed semantics, and canonical contact-channel disclosure.
 
 use super::*;
 use crate::build_registry;
@@ -10,8 +10,9 @@ use crate::contacts::contact_system::{
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OrganizationId};
 use crate::core::invariants::validate_invariants;
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
-use crate::intelligence::InformationTopic;
+use crate::intelligence::{CaseActivitySignal, InformationSignal, InformationTopic};
 use crate::legal::investigation_system::{
     apply_autonomous_investigator_staffing, apply_cold_case_decay, validate_incident_intake,
 };
@@ -232,10 +233,11 @@ fn staffing_records_lead_held_active_case_knowledge() {
         "staffing records exactly one activity knowledge record"
     );
     let summary = held[0].summary();
-    let status = CaseActivityStatus::parse_summary_marker(summary)
-        .expect("knowledge summary carries a parseable marker");
-    assert_eq!(status, CaseActivityStatus::Active);
-    assert_eq!(status.is_hot(), Some(true));
+    assert_eq!(
+        held[0].signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    );
+    assert!(summary.starts_with(case_activity_summary_prefix(CaseActivitySignal::Active)));
     assert!(summary.contains("Knowledge Precinct"));
     validate_invariants(&fixture.state);
 }
@@ -267,16 +269,13 @@ fn cold_shelving_refreshes_the_leads_knowledge_to_shelved() {
     let shelved = held
         .iter()
         .find(|record| {
-            CaseActivityStatus::parse_summary_marker(record.summary())
-                == Some(CaseActivityStatus::Shelved)
+            record.signal()
+                == Some(&InformationSignal::CaseActivity(
+                    CaseActivitySignal::Shelved,
+                ))
         })
         .expect("shelving refreshes the lead's knowledge");
-    assert_eq!(
-        CaseActivityStatus::parse_summary_marker(shelved.summary())
-            .expect("parsed shelved marker")
-            .is_hot(),
-        Some(false)
-    );
+    assert!(shelved.summary().contains("has already shelved the case"));
     validate_invariants(&fixture.state);
 }
 
@@ -329,8 +328,8 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
         .expect("disclosed information persists");
     assert_eq!(record.holder(), KnowledgeHolder::Organization(sponsor));
     assert_eq!(
-        CaseActivityStatus::parse_summary_marker(record.summary()),
-        Some(CaseActivityStatus::Active)
+        record.signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
     );
 
     // The same development cannot be sold twice; nothing new is pending yet.
@@ -360,9 +359,29 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
         .get_information(disclosed)
         .expect("disclosed information persists");
     assert_eq!(
-        CaseActivityStatus::parse_summary_marker(record.summary()),
-        Some(CaseActivityStatus::Shelved)
+        record.signal(),
+        Some(&InformationSignal::CaseActivity(
+            CaseActivitySignal::Shelved
+        ))
     );
     assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
     validate_invariants(&fixture.state);
+
+    let envelope =
+        build_save(&registry, &fixture.state).expect("typed case-activity disclosure should save");
+    let bytes = bincode::serialize(&envelope).expect("typed disclosure save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("typed disclosure save should deserialize");
+    let restored = restore_save(&registry, decoded).expect("typed disclosure save should restore");
+    assert_eq!(
+        restored
+            .intelligence()
+            .get_information(disclosed)
+            .expect("restored disclosure information should persist")
+            .signal(),
+        Some(&InformationSignal::CaseActivity(
+            CaseActivitySignal::Shelved
+        ))
+    );
+    validate_invariants(&restored);
 }

@@ -595,7 +595,7 @@ impl ValidatedInvestigatorAssignment {
         let knowledge = crate::legal::case_knowledge::prepare_case_activity_knowledge(
             state,
             self.investigation,
-            crate::legal::case_knowledge::CaseActivityStatus::Active,
+            crate::intelligence::CaseActivitySignal::Active,
             self.investigator,
         )?;
         if knowledge.is_some() {

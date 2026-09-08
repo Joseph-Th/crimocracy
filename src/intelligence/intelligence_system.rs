@@ -4,8 +4,8 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{CharacterId, IdExhaustionError, InformationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::intelligence::{
-    InformationDraft, InformationRecord, InformationSourceKind, InformationTransferDraft,
-    KnowledgeHolder,
+    InformationDraft, InformationRecord, InformationSignal, InformationSourceKind,
+    InformationTopic, InformationTransferDraft, KnowledgeHolder,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -24,6 +24,14 @@ pub enum IntelligenceError {
     MissingEntity(EntityRef),
     #[error("observation time cannot be later than the current simulation time")]
     ObservationInFuture,
+    #[error(
+        "information signal {signal:?} is incompatible with topic {topic:?} and subject {subject:?}"
+    )]
+    InvalidSignal {
+        signal: InformationSignal,
+        topic: InformationTopic,
+        subject: EntityRef,
+    },
     #[error("internal-report information must be created through the transfer system")]
     InternalReportRequiresTransfer,
     #[error("internal-report information must retain provenance and a source entity")]
@@ -105,14 +113,19 @@ pub(crate) fn validate_contact_information_derivation(
         summary: source_record.summary().to_owned(),
     };
     validate_information_draft(state, &draft)?;
+    if let Some(signal) = source_record.signal() {
+        validate_information_signal(state, &draft, signal)?;
+    }
     Ok(ValidatedInformation {
         draft,
+        signal: source_record.signal().cloned(),
         derived_from: BTreeSet::from([source]),
     })
 }
 
 pub struct ValidatedInformation {
     draft: InformationDraft,
+    signal: Option<InformationSignal>,
     derived_from: BTreeSet<InformationId>,
 }
 
@@ -149,6 +162,7 @@ impl ValidatedInformation {
             assessment: super::InformationAssessment {
                 reliability,
                 specificity,
+                signal: self.signal,
                 derived_from: self.derived_from,
                 summary,
             },
@@ -167,6 +181,24 @@ pub fn validate_record_information(
     validate_information_draft(state, &draft)?;
     Ok(ValidatedInformation {
         draft,
+        signal: None,
+        derived_from: BTreeSet::new(),
+    })
+}
+
+pub(crate) fn validate_record_information_with_signal(
+    state: &AppState,
+    draft: InformationDraft,
+    signal: InformationSignal,
+) -> Result<ValidatedInformation, IntelligenceError> {
+    if draft.source_kind == InformationSourceKind::InternalReport {
+        return Err(IntelligenceError::InternalReportRequiresTransfer);
+    }
+    validate_information_draft(state, &draft)?;
+    validate_information_signal(state, &draft, &signal)?;
+    Ok(ValidatedInformation {
+        draft,
+        signal: Some(signal),
         derived_from: BTreeSet::new(),
     })
 }
@@ -204,6 +236,26 @@ fn validate_information_draft(
     Ok(())
 }
 
+fn validate_information_signal(
+    state: &AppState,
+    draft: &InformationDraft,
+    signal: &InformationSignal,
+) -> Result<(), IntelligenceError> {
+    if !signal.is_compatible(draft.topic, draft.subject) {
+        return Err(IntelligenceError::InvalidSignal {
+            signal: signal.clone(),
+            topic: draft.topic,
+            subject: draft.subject,
+        });
+    }
+    for entity in signal.referenced_entities() {
+        if !is_entity_present(state, entity) {
+            return Err(IntelligenceError::MissingEntity(entity));
+        }
+    }
+    Ok(())
+}
+
 fn validate_internal_transfer_information(
     state: &AppState,
     draft: InformationDraft,
@@ -220,8 +272,12 @@ fn validate_internal_transfer_information(
     if draft.source_entity != Some(source_record.holder().entity()) {
         return Err(IntelligenceError::InternalReportSourceMismatch);
     }
+    if let Some(signal) = source_record.signal() {
+        validate_information_signal(state, &draft, signal)?;
+    }
     Ok(ValidatedInformation {
         draft,
+        signal: source_record.signal().cloned(),
         derived_from: BTreeSet::from([source]),
     })
 }

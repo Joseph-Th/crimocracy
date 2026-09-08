@@ -1,4 +1,5 @@
-//! Retained legal counsel transactions backed by real contacts, capabilities, and ledger payments.
+//! Retained legal counsel transactions backed by real contacts, capabilities, and ledger payments,
+//! including canonical representation closure when counsel becomes unavailable through custody.
 
 use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::attention::AttentionClass;
@@ -135,6 +136,8 @@ pub enum LegalRepresentationError {
         expected: u32,
         found: u32,
     },
+    #[error("counsel {counsel}'s active representations changed after detention preflight")]
+    DetentionRepresentationsChanged { counsel: CharacterId },
     #[error(
         "contact {contact} changed after legal representation validation; expected version {expected}, found {found}"
     )]
@@ -698,6 +701,12 @@ impl ValidatedLegalRepresentationEnd {
         state
             .ids
             .reserve_many(&[(IdKind::Information, 1), (IdKind::Report, 1)])?;
+        self.ensure_current(state)?;
+        self.commit_preflighted(state);
+        Ok(())
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), LegalRepresentationError> {
         validate_time(state, self.ended_at)?;
         let record = state
             .legal
@@ -717,6 +726,10 @@ impl ValidatedLegalRepresentationEnd {
                 self.representation,
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
         let information = self
             .information
             .commit(state)
@@ -732,8 +745,105 @@ impl ValidatedLegalRepresentationEnd {
             information,
             report,
         );
+    }
+}
+
+/// Legal-representation side of custody preemption. The wrapper exists even when a counsel has
+/// no active matters so an arrest token also stales if representation is retained after arrest
+/// validation but before commit.
+pub(crate) struct ValidatedCounselDetentionEnds {
+    counsel: CharacterId,
+    representations: Vec<ValidatedLegalRepresentationEnd>,
+}
+
+impl std::fmt::Debug for ValidatedCounselDetentionEnds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatedCounselDetentionEnds")
+            .field("counsel", &self.counsel)
+            .field(
+                "representations",
+                &self
+                    .representations
+                    .iter()
+                    .map(|validated| validated.representation)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl ValidatedCounselDetentionEnds {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), LegalRepresentationError> {
+        let current = active_representation_ids_for_counsel(state, self.counsel);
+        let expected: Vec<_> = self
+            .representations
+            .iter()
+            .map(|validated| validated.representation)
+            .collect();
+        if current != expected {
+            return Err(LegalRepresentationError::DetentionRepresentationsChanged {
+                counsel: self.counsel,
+            });
+        }
+        for representation in &self.representations {
+            representation.ensure_current(state)?;
+        }
         Ok(())
     }
+
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        let count = u32::try_from(self.representations.len())
+            .expect("active representation count must fit u32");
+        if count == 0 {
+            Vec::new()
+        } else {
+            vec![(IdKind::Information, count), (IdKind::Report, count)]
+        }
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        for representation in self.representations {
+            representation.commit_preflighted(state);
+        }
+    }
+}
+
+pub(crate) fn validate_end_representations_for_counsel_detention(
+    state: &AppState,
+    counsel: CharacterId,
+) -> Result<ValidatedCounselDetentionEnds, LegalRepresentationError> {
+    let representations = active_representation_ids_for_counsel(state, counsel)
+        .into_iter()
+        .map(|representation| {
+            validate_end_legal_representation(
+                state,
+                representation,
+                LegalRepresentationEndReason::CounselUnavailable,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ValidatedCounselDetentionEnds {
+        counsel,
+        representations,
+    })
+}
+
+fn active_representation_ids_for_counsel(
+    state: &AppState,
+    counsel: CharacterId,
+) -> Vec<LegalRepresentationId> {
+    state
+        .contacts()
+        .active_contacts_for_character(counsel)
+        .flat_map(|contact| {
+            state
+                .legal()
+                .active_representations_for_contact(contact.id())
+        })
+        .filter(|representation| representation.counsel() == counsel)
+        .map(LegalRepresentationRecord::id)
+        .collect()
 }
 
 pub fn validate_end_legal_representation(
@@ -830,7 +940,7 @@ fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str {
         LegalRepresentationEndReason::MatterConcluded => "matter concluded",
         LegalRepresentationEndReason::Replaced => "counsel replaced",
         LegalRepresentationEndReason::SponsorWithdrawn => "sponsor withdrew support",
-        LegalRepresentationEndReason::CounselWithdrawn => "counsel withdrew",
+        LegalRepresentationEndReason::CounselUnavailable => "counsel became unavailable",
     }
 }
 

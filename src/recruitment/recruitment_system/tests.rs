@@ -18,6 +18,8 @@ use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScop
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
 use crate::reports::ReportKind;
+use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
+use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
@@ -347,6 +349,60 @@ fn candidate_discovery_follows_incoming_relationships_not_global_roster() {
     )
     .expect("candidate discovery should validate");
     assert_eq!(candidates, vec![fixture.candidate]);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn validated_recruitment_stales_when_target_competence_changes_before_commit() {
+    let mut fixture = fixture();
+    let draft = protection_draft(&fixture);
+    let expected = resolve_score(
+        &fixture.registry,
+        fixture.state.reputation(),
+        fixture.target,
+        AudienceKind::Underworld,
+        ReputationDimension::Competence,
+    );
+    let validated = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("fresh recruitment should validate");
+
+    let found = apply_reputation_delta(
+        &fixture.registry,
+        &mut fixture.state,
+        fixture.target,
+        AudienceKind::Underworld,
+        ReputationDimension::Competence,
+        1,
+    )
+    .expect("canonical reputation change should commit");
+    assert_ne!(found, expected);
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("recruitment must not commit a willingness result from stale competence");
+    assert_eq!(
+        error,
+        RecruitmentError::StaleOrganizationCompetence {
+            organization: fixture.target,
+            expected,
+            found,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source),
+        "stale recruitment rejection must not move the candidate"
+    );
+    assert!(
+        fixture.state.recruitment().attempts().next().is_none(),
+        "stale recruitment rejection must not record an attempt"
+    );
+    validate_state(&fixture.state).expect("reputation movement plus rejected attempt stays valid");
     validate_invariants(&fixture.state);
 }
 
@@ -1135,27 +1191,30 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         .expect("recruiter should persist")
         .name();
     assert!(!history.summary().contains(recruiter_name));
-    let departure_reports: Vec<_> = fixture
+    let departure_report = fixture
         .state
         .reports()
-        .reports_for(fixture.source)
-        .filter(|report| report.kind() == ReportKind::AfterAction)
-        .filter(|report| report.title() == "Personnel change")
-        .collect();
-    assert_eq!(departure_reports.len(), 1);
-    assert_eq!(departure_reports[0].entries().len(), 1);
+        .get_report(
+            record
+                .member_report()
+                .expect("accepted defection should link its departure report"),
+        )
+        .expect("linked departure report should persist");
+    assert_eq!(departure_report.recipient(), fixture.source);
+    assert_eq!(departure_report.kind(), ReportKind::AfterAction);
+    assert_eq!(departure_report.entries().len(), 1);
     assert!(
-        departure_reports[0].entries()[0]
+        departure_report.entries()[0]
             .summary
             .contains("Frightened Associate left North Crew")
     );
     assert!(
-        departure_reports[0].entries()[0]
+        departure_report.entries()[0]
             .entities
             .contains(&EntityRef::Character(fixture.candidate))
     );
     assert!(
-        !departure_reports[0].entries()[0]
+        !departure_report.entries()[0]
             .entities
             .contains(&EntityRef::Organization(fixture.target))
     );
@@ -1534,22 +1593,31 @@ fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&fixture)
     };
-    validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+    let attempt = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
         .expect("refusal should validate")
         .commit(&mut fixture.state)
         .expect("refusal should persist without moving candidate");
     // A loyal member reports the outside pitch to their own leadership, so the organization
     // learns both that it happened and who made it — without any membership change.
-    let approach_reports: Vec<_> = fixture
+    let record = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .expect("refused recruitment attempt should persist");
+    let approach_report = fixture
         .state
         .reports()
-        .reports_for(fixture.source)
-        .filter(|report| report.title() == "Personnel approach")
-        .collect();
-    assert_eq!(approach_reports.len(), 1);
-    assert_eq!(approach_reports[0].entries().len(), 1);
+        .get_report(
+            record
+                .member_report()
+                .expect("refused poaching should link its loyalty report"),
+        )
+        .expect("linked loyalty report should persist");
+    assert_eq!(approach_report.recipient(), fixture.source);
+    assert_eq!(approach_report.kind(), ReportKind::AfterAction);
+    assert_eq!(approach_report.entries().len(), 1);
     assert_eq!(
-        approach_reports[0].entries()[0].attention,
+        approach_report.entries()[0].attention,
         AttentionClass::Notable
     );
     let recruiter_name = fixture
@@ -1566,17 +1634,70 @@ fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
         .expect("target organization should persist")
         .name()
         .to_owned();
-    let summary = &approach_reports[0].entries()[0].summary;
+    let summary = &approach_report.entries()[0].summary;
     assert!(summary.contains("turned the approach down"));
     assert!(summary.contains(&recruiter_name));
     assert!(summary.contains(&target_name));
-    let entities = &approach_reports[0].entries()[0].entities;
+    let entities = &approach_report.entries()[0].entities;
     assert!(entities.contains(&EntityRef::Character(fixture.candidate)));
     assert!(entities.contains(&EntityRef::Character(fixture.recruiter)));
     assert!(entities.contains(&EntityRef::Organization(fixture.target)));
     assert!(entities.contains(&EntityRef::Organization(fixture.source)));
     validate_state(&fixture.state).expect("refused-approach state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn linked_recruitment_member_report_rejects_persisted_summary_rewrite() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state);
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state);
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    let attempt = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("refusal should validate")
+        .commit(&mut fixture.state)
+        .expect("refusal should commit");
+    let report = fixture
+        .state
+        .recruitment()
+        .get_attempt(attempt)
+        .and_then(|record| record.member_report())
+        .and_then(|report| fixture.state.reports().get_report(report))
+        .expect("refused recruitment must persist its linked member report");
+    let summary = report.entries()[0].summary.clone();
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("linked recruitment report should save before corruption");
+    let corrupted = tamper_serialized_summary(envelope, &summary, 1);
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("rewritten linked recruitment report must fail the load boundary");
+    assert!(
+        matches!(
+            error,
+            LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidRecruitmentAttempt {
+                    attempt: invalid,
+                }
+            ) if invalid == attempt
+        ),
+        "expected invalid recruitment attempt, got {error:?}"
+    );
 }
 
 #[test]

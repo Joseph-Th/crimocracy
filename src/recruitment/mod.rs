@@ -6,7 +6,7 @@ pub mod scoring;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     CharacterId, DecisionRequestId, HistoryEventId, InformationId, MandateId, OrganizationId,
-    RecruitmentAttemptId,
+    RecruitmentAttemptId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::delegation::ResponsibilityScope;
@@ -202,6 +202,9 @@ struct RecruitmentResolution {
     resulting_candidate_version: u32,
     outcome_information: InformationId,
     history_event: Option<HistoryEventId>,
+    /// Player-facing report delivered to the candidate's incumbent organization. Present only
+    /// when the candidate belonged to another organization when the attempt resolved.
+    member_report: Option<ReportId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -282,6 +285,10 @@ impl RecruitmentAttemptRecord {
 
     pub fn history_event(&self) -> Option<HistoryEventId> {
         self.resolution.history_event
+    }
+
+    pub fn member_report(&self) -> Option<ReportId> {
+        self.resolution.member_report
     }
 }
 
@@ -503,6 +510,7 @@ pub(crate) struct RecruitmentRecordResolutionParts {
     pub resulting_candidate_version: u32,
     pub outcome_information: InformationId,
     pub history_event: Option<HistoryEventId>,
+    pub member_report: Option<ReportId>,
 }
 
 pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> RecruitmentAttemptRecord {
@@ -528,6 +536,7 @@ pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> Recruit
         resulting_candidate_version,
         outcome_information,
         history_event,
+        member_report,
     } = resolution;
     RecruitmentAttemptRecord {
         identity: RecruitmentIdentity {
@@ -553,6 +562,7 @@ pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> Recruit
             resulting_candidate_version,
             outcome_information,
             history_event,
+            member_report,
         },
     }
 }

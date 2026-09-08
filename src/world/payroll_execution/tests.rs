@@ -372,7 +372,45 @@ fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
             .dimensions()
             .resentment
             .value(),
-        registry.upkeep().shortfall_resentment()
+        1,
+        "a one-cent rounding shortfall should cause only minimal resentment"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn half_paid_wage_causes_half_of_full_shortfall_resentment() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let per_member = registry.upkeep().per_member_daily();
+    // Two active members split one wage evenly, leaving each exactly half paid. The boss has
+    // no supervisor, while the subordinate's relationship consequence should reflect the
+    // severity of their own shortage rather than treating all underpayment as nonpayment.
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        per_member.cents(),
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("half-funded payroll should settle proportionally");
+
+    let resentment = fixture
+        .state
+        .social()
+        .get_relationship(fixture.member, fixture.boss)
+        .expect("half-paid subordinate should resent their supervisor")
+        .dimensions()
+        .resentment
+        .value();
+    assert_eq!(
+        resentment,
+        registry.upkeep().shortfall_resentment().div_ceil(2),
+        "relationship damage should scale with the uncovered half of the wage"
     );
     validate_invariants(&fixture.state);
 }

@@ -1,4 +1,5 @@
-//! Evidence-backed arrest and custody lifecycle transactions.
+//! Evidence-backed arrest and custody lifecycle transactions, including atomic preemption of
+//! operation, investigation, prosecution, and retained-counsel responsibilities.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
@@ -18,6 +19,10 @@ use crate::legal::investigation_system::{
 use crate::legal::investigation_work_execution::{
     InvestigationWorkError, ValidatedInvestigationWorkCancellation,
     validate_cancel_investigation_work_for_detention,
+};
+use crate::legal::legal_representation_system::{
+    LegalRepresentationError, ValidatedCounselDetentionEnds,
+    validate_end_representations_for_counsel_detention,
 };
 use crate::legal::prosecution_system::{
     ProsecutionStaffingError, ValidatedProsecutorDetentionRelease,
@@ -126,6 +131,8 @@ pub enum ArrestError {
     #[error(transparent)]
     ProsecutionStaffing(#[from] ProsecutionStaffingError),
     #[error(transparent)]
+    LegalRepresentation(#[from] LegalRepresentationError),
+    #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
 
@@ -160,6 +167,7 @@ pub struct ValidatedArrest {
     work_cancellation: Option<ValidatedInvestigationWorkCancellation>,
     lead_release: Option<ValidatedInvestigatorDetentionRelease>,
     prosecution_release: ValidatedProsecutorDetentionRelease,
+    counsel_representation_ends: ValidatedCounselDetentionEnds,
     operation_preemptions: Vec<ValidatedCustodyOperationPreemption>,
 }
 
@@ -229,6 +237,7 @@ impl ValidatedArrest {
             release.ensure_current(state)?;
         }
         self.prosecution_release.ensure_current(state)?;
+        self.counsel_representation_ends.ensure_current(state)?;
         for preemption in &self.operation_preemptions {
             if let Some(decision) = &preemption.decision_cancellation {
                 decision.ensure_current(state)?;
@@ -240,6 +249,7 @@ impl ValidatedArrest {
         for preemption in &self.operation_preemptions {
             id_budget.extend(preemption.abort.id_budget());
         }
+        id_budget.extend(self.counsel_representation_ends.id_budget());
         state.ids.reserve_many(&id_budget)?;
 
         let id = state
@@ -259,6 +269,7 @@ impl ValidatedArrest {
             release.commit_preflighted(state);
         }
         self.prosecution_release.commit_preflighted(state);
+        self.counsel_representation_ends.commit_preflighted(state);
         state.legal.insert_arrest(ArrestRecord {
             id,
             character: self.draft.character,
@@ -292,6 +303,8 @@ pub fn validate_arrest(
     let lead_release = validate_release_investigator_for_detention(state, draft.character)?;
     let prosecution_release =
         validate_release_prosecution_cases_for_detention(state, draft.character)?;
+    let counsel_representation_ends =
+        validate_end_representations_for_counsel_detention(state, draft.character)?;
     let mut operation_preemptions = Vec::new();
     for operation in active_operation_bookings_for_character(state, draft.character) {
         let decision_cancellation =
@@ -312,6 +325,7 @@ pub fn validate_arrest(
         work_cancellation,
         lead_release,
         prosecution_release,
+        counsel_representation_ends,
         operation_preemptions,
     })
 }

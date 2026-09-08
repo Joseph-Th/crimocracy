@@ -5,6 +5,7 @@ use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::intelligence::{CaseActivitySignal, Reliability, Specificity};
 use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
@@ -43,6 +44,82 @@ fn make_transfer_fixture() -> (
     )
     .expect("character fixture should validate");
     (registry, state, organization, character)
+}
+
+#[test]
+fn typed_signal_rejects_incompatible_topic_without_mutation() {
+    let (_registry, state, organization, character) = make_transfer_fixture();
+    let error = match validate_record_information_with_signal(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(character),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(organization),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Specific,
+            summary: "This personnel observation must not masquerade as case activity.".to_owned(),
+        },
+        InformationSignal::CaseActivity(CaseActivitySignal::Active),
+    ) {
+        Ok(_) => panic!("case-activity semantics require legal-activity information"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        IntelligenceError::InvalidSignal {
+            signal: InformationSignal::CaseActivity(CaseActivitySignal::Active),
+            topic: InformationTopic::Personnel,
+            subject: EntityRef::Organization(organization),
+        }
+    );
+    assert_eq!(state.intelligence().information().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
+fn typed_signal_survives_internal_transfer_with_lineage() {
+    let (_registry, mut state, organization, character) = make_transfer_fixture();
+    let signal = InformationSignal::CaseActivity(CaseActivitySignal::Active);
+    let source = validate_record_information_with_signal(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(character),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: Some(EntityRef::Organization(organization)),
+            subject: EntityRef::Organization(organization),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Specific,
+            summary: "The member directly observed that the known case remains active.".to_owned(),
+        },
+        signal.clone(),
+    )
+    .expect("compatible typed information should validate")
+    .commit(&mut state)
+    .expect("typed source information should commit");
+
+    let transferred = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Organization(organization),
+        },
+    )
+    .expect("typed internal transfer should validate")
+    .commit(&mut state)
+    .expect("typed internal transfer should commit");
+    let record = state
+        .intelligence()
+        .get_information(transferred)
+        .expect("transferred typed information should persist");
+    assert_eq!(record.signal(), Some(&signal));
+    assert_eq!(record.derived_from(), &BTreeSet::from([source]));
+    validate_state(&state).expect("typed transfer state should validate");
+    validate_invariants(&state);
 }
 
 fn record_character_information(

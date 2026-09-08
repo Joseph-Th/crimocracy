@@ -359,13 +359,26 @@ mod tests {
     use super::{
         DEFAULT_SEED, FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode,
         HarnessOptions, NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline,
-        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_report, parse_options,
-        parse_patrol_windows, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
-        validate_branch_financial_isolation, validate_press_witness_counterplay,
-        validate_second_act_evidence,
+        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, parse_options,
+        patrol_intervals_from_signal, run_opportunity_portfolio_probe, run_smoke,
+        run_vice_attention_probe, validate_branch_financial_isolation,
+        validate_press_witness_counterplay, validate_second_act_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
+    use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
     use crimocracy::operations::OperationObjectiveOutcome;
+
+    fn patrol_signal(intervals: &[(u16, u16)]) -> InformationSignal {
+        InformationSignal::PatrolPattern {
+            intervals: intervals
+                .iter()
+                .map(|(start, end)| {
+                    PatrolIntervalSignal::try_new(*start, *end)
+                        .expect("harness patrol fixture interval must validate")
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn parses_explicit_smoke_mode_and_hex_seed() {
@@ -503,20 +516,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_wrapped_patrol_windows_without_empty_intervals() {
+    fn reads_normalized_windows_from_typed_patrol_signal() {
+        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
         assert_eq!(
-            parse_patrol_windows(
-                "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy)."
-            ),
+            patrol_intervals_from_signal(&signal),
             vec![(120, 240), (1_320, 1_440)]
         );
     }
 
     #[test]
-    fn chooses_a_buffered_window_from_player_visible_patrol_text() {
-        let chosen = choose_safe_start_from_patrol_report(
+    fn chooses_a_buffered_window_from_player_visible_patrol_signal() {
+        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
+        let chosen = choose_safe_start_from_patrol_signal(
             SimTime::from_minutes(1),
-            "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy).",
+            &signal,
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
             SimTime::from_minutes(720),
@@ -527,10 +540,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_patrol_text_without_actionable_windows() {
-        let error = choose_safe_start_from_patrol_report(
+    fn rejects_information_without_actionable_patrol_semantics() {
+        let signal = InformationSignal::CaseActivity(CaseActivitySignal::Active);
+        let error = choose_safe_start_from_patrol_signal(
             SimTime::ZERO,
-            "Patrol activity was observed, but no recurring window was established.",
+            &signal,
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
             SimTime::from_minutes(720),
@@ -545,9 +559,10 @@ mod tests {
 
     #[test]
     fn refuses_a_patrol_safe_start_after_opportunity_expiry() {
-        let error = choose_safe_start_from_patrol_report(
+        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
+        let error = choose_safe_start_from_patrol_signal(
             SimTime::from_minutes(1),
-            "roughly 02:00-04:00 (concentrated); roughly 22:00-00:00 (heavy).",
+            &signal,
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
             SimTime::from_minutes(200),
