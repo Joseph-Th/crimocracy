@@ -79,6 +79,133 @@ fn investigation_subject_cannot_be_assigned_to_investigate_their_own_case() {
 }
 
 #[test]
+fn incident_intake_cannot_promote_a_character_with_only_questionable_evidence() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xBAD1_EAD5);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Lead Quality Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Lead Quality Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let suspect = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Unreliable Suspect".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(60))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("suspect fixture should validate");
+    let operation = crate::operations::operation_system::validate_authorize_operation(
+        &registry,
+        &state,
+        crate::operations::OperationDraft {
+            title: "Questionable observation origin".to_owned(),
+            kind: crate::operations::OperationKind::Surveillance,
+            responsible_organization: criminal,
+            leader: suspect,
+            objective: crate::operations::OperationObjective::GatherInformation {
+                target: EntityRef::Organization(criminal),
+            },
+            approach: crate::operations::OperationApproach::Covert,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, suspect)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut state)
+    .expect("origin operation should commit");
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Unsubstantiated identification".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Operation(operation),
+                EntityRef::Character(suspect),
+            ]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Character(suspect),
+                origin: Some(EntityRef::Operation(operation)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(operation)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: None,
+        },
+    ) {
+        Ok(_) => {
+            panic!("questionable evidence must not be upgraded into a named suspect by intake")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        InvestigationError::UnsubstantiatedIncidentCharacterSubject { character: suspect }
+    );
+
+    let unrelated_subject_error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Unrelated subject injection".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Operation(operation),
+                EntityRef::Organization(criminal),
+            ]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(operation),
+                origin: Some(EntityRef::Operation(operation)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(operation)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: None,
+        },
+    ) {
+        Ok(_) => panic!("incident intake must not accept unrelated unbacked subjects"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        unrelated_subject_error,
+        InvestigationError::UnsubstantiatedIncidentSubject {
+            subject: EntityRef::Organization(criminal),
+        }
+    );
+    assert!(state.legal().investigations().next().is_none());
+    validate_invariants(&state);
+}
+
+#[test]
 fn investigator_assignment_information_id_exhaustion_is_atomic() {
     let registry = build_registry();
     let mut state = AppState::new(0x1D_A5516E);
@@ -1577,9 +1704,43 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
     .commit(&mut state)
     .expect("institution-authored case should commit");
 
-    // A short cold window shelves only the operation-originated case without an identified
-    // suspect; an operation-originated case that named a concrete character is a real lead and
-    // stays active.
+    let questionable_lead = validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Unreliable identification inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Character(leader),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::KnownAssociation,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: None,
+        },
+    )
+    .expect("questionable lead intake should validate")
+    .commit(&mut state)
+    .expect("questionable lead intake should commit")
+    .investigation;
+    assert!(
+        !state
+            .legal()
+            .get_investigation(questionable_lead)
+            .expect("questionable-lead case should persist")
+            .subjects()
+            .contains(&EntityRef::Character(leader)),
+        "questionable evidence must not promote a person into permanent identified-subject status"
+    );
+
+    // A short cold window shelves originated files without an actionable identified suspect.
+    // A merely questionable identification still cools; a case backed by strong reliable
+    // evidence against a concrete character remains active.
     let identified = validate_incident_intake(
         &state,
         IncidentIntakeDraft {
@@ -1632,7 +1793,7 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
     assert_eq!(
         suspended,
         ColdCaseDecayOutcome {
-            suspended: vec![case],
+            suspended: vec![case, questionable_lead],
             closed: Vec::new()
         }
     );
@@ -2008,6 +2169,33 @@ fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
         "weak evidence must not promote a character to case subject"
     );
 
+    let questionable_tip = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("questionable corroboration should validate")
+    .commit(&mut state)
+    .expect("questionable corroboration should commit");
+    assert!(
+        !state
+            .legal()
+            .get_investigation(investigation)
+            .expect("investigation should exist")
+            .subjects()
+            .contains(&EntityRef::Character(suspect)),
+        "corroborating strength cannot promote a subject while reliability remains questionable"
+    );
+
     let corroboration = validate_add_evidence(
         &state,
         EvidenceDraft {
@@ -2034,6 +2222,7 @@ fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
             .contains(&EntityRef::Character(suspect))
     );
     assert_ne!(weak_tip, corroboration);
+    assert_ne!(questionable_tip, corroboration);
 
     validate_state(&state).expect("subject promotion state should validate");
     validate_invariants(&state);

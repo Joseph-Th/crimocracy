@@ -10,24 +10,24 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 Which change did you make?
   │
   ├─ Syntax / type error?
-  │   Fastest: cargo check-fast              (~0.06s warm / 6s after edit)
-  │            .\scripts\verify.cmd -Check   (~0.7s warm, includes fmt)
+  │   Fastest: cargo check-fast
+  │            .\scripts\verify.cmd -Check   (includes fmt)
   │
   ├─ One library behavior (single module, single system)
-  │   Focused: cargo test-focused <filter>         (~0.11s warm / 6-12s after edit)
-  │   Complete: .\scripts\verify.cmd -Fast         (~0.7s warm)
+  │   Focused: cargo test-focused <filter>
+  │   Complete: .\scripts\verify.cmd -Fast
   │
   ├─ Library implementation (no harness surface touched)
   │   Focused: cargo check-fast  or  cargo test-focused <filter>
   │   Complete: .\scripts\verify.cmd -Fast
   │
   ├─ Harness surface (examples/gameplay_harness/*.rs)
-  │   Focused: cargo harness-rush  (~0.15s warm, incremental cache)
+  │   Focused: cargo harness-rush
   │   Complete: .\scripts\verify.cmd -Fast -Harness
   │
   └─ Persistence, invariants, cross-domain, or verification infra
       Focused: owning module's focused test or load/continuation diagnosis
-      Complete: .\scripts\verify.cmd               (~2-3s warm / 15-20s after edit)
+      Complete: .\scripts\verify.cmd
 ```
 
 | Change | Focused feedback | Completion lane |
@@ -75,39 +75,29 @@ replacement for focused behavioral tests.
 
 ### Fast lanes — inner loop
 
-| Need | Command | Warm (no change) | After touching one file | What it proves |
-|---|---|---|---|---|
-| Type-check lib | `cargo check-fast` | ~0.06s | ~6s | `src/` compiles |
-| Type-check all | `cargo check-all` | ~0.45s | ~6s | lib + harness compile |
-| Type-check harness | `cargo check-harness` | ~0.4s | ~3s | example adapter compiles |
-| Lib tests (no soak) | `cargo test-fast` | ~0.11s | ~12s | 397 lib tests, `--skip soak` |
-| One test / module | `cargo test-focused <filter>` | ~0.11s | ~6-12s | owning module's `#[cfg(test)]` |
-| One domain | `cargo test-legal` / `test-finance` / `test-world` … | ~0.11s | ~6-12s | sugar over `test-focused <domain>` |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, `-Check`) | per-run | per-run | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
-| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | ~10-15s | one branch on `[profile.harness]` |
-| Full-mode batch | `cargo harness-full --samples 8` | ~5s | ~15s | all strategies, matched seeds, artifacts |
-| Check lane | `.\scripts\verify.cmd -Check` | ~0.7s | ~7s | fmt + type-check |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | ~13s | iteration gate |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~0.7s | ~10s | smoke contract only |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | ~0.5s | ~6-12s | focused + fmt |
-| Soak only | `cargo soak` | ~1s | ~13s | mixed-state invariant stress |
+| Need | Command | What it proves |
+|---|---|---|
+| Type-check lib | `cargo check-fast` | `src/` compiles |
+| Type-check all | `cargo check-all` | lib + harness compile |
+| Type-check harness | `cargo check-harness` | example adapter compiles |
+| Lib tests (no soak) | `cargo test-fast` | all library tests except soak-class tests |
+| One test / module | `cargo test-focused <filter>` | owning module's `#[cfg(test)]` |
+| One domain | `cargo test-legal` / `test-finance` / `test-world` … | sugar over `test-focused <domain>` |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, `-Check`) | reruns the selected local lane |
+| Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | one strategy branch |
+| Full-mode batch | `cargo harness-full --samples 8` | all strategies, matched seeds, artifacts |
+| Check lane | `.\scripts\verify.cmd -Check` | fmt + type-check |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | iteration gate |
+| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | smoke contract only |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | focused tests + fmt |
+| Soak only | `cargo soak` | mixed-state invariant stress |
 
 `cargo check-fast` is the absolute fastest; `cargo test-focused` is the inner loop
 for behavior; `.\scripts\verify.cmd -Fast` is the iteration gate. The full gate
 is reserved for persistence/invariant/cross-domain work.
 
-**Why some lanes are slower after edits:** after touching one lib file, `cargo check`
-recompiles that file's crate (~6s). Tests additionally link the test binary
-(~12s). These are rustc costs, not script overhead. Warm runs with no changes
-are near-instant because cargo's cache is reused. See `Cargo.toml` for the
-profile tuning and measured alternatives that lost.
-
-**Harness rebuild cost model (measured, see `Cargo.toml`):**
-
-- All `harness*` aliases run on `[profile.harness]` (`target\harness\`): dev semantics at `opt-level 1`, never disturbing library caches in `target\debug\`.
-- Example-only edits recompile in ~2-3s. A library edit pays one optimized lib rebuild: ~10-20s warm (incremental cache) vs ~75s cold.
-- Dependencies compile at `opt-level 3` in every dev-derived profile and rebuild only on lockfile changes.
-- The scripts pin `CARGO_INCREMENTAL=0` per stage, so an inherited value cannot override the profiles. Dev stages force `0`; harness stages clear it so `[profile.harness] incremental=true` governs.
+Build-profile tuning and measured compile-cost observations live with Cargo configuration.
+This document owns behavioral proof selection, not machine-specific timing claims.
 
 ### Broad completion gate — when cheap lanes are not enough
 
@@ -144,11 +134,11 @@ Gate flags: `-Check` (type-check only) | `-Fast` (skip soak/harness-full/clippy)
 
 ### Modes
 
-| Mode | Command | Evidence | Cost (warm) |
-|---|---|---|---|
-| `smoke` (default) | `cargo harness` | Canonical strategies + legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence | ~0.5s |
-| focused smoke | `cargo harness-rush` / `-press` / `-recon` | One strategy branch only | ~0.15s |
-| `full` | `cargo harness-full --samples 8` | Narrative strategy arcs, probes, matched-seed batches, scenario sensitivity, artifacts | ~5s |
+| Mode | Command | Evidence |
+|---|---|---|
+| `smoke` (default) | `cargo harness` | Canonical strategies + legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence |
+| focused smoke | `cargo harness-rush` / `-press` / `-recon` | One strategy branch only |
+| `full` | `cargo harness-full --samples 8` | Narrative strategy arcs, probes, matched-seed batches, scenario sensitivity, artifacts |
 
 Commands: `cargo harness` runs smoke by default; `cargo harness-full --samples 8` runs explicit comparison; append `--artifact-dir target/my-run` to relocate artifacts. `cargo harness -- --mode smoke --strategy press` selects one branch.
 

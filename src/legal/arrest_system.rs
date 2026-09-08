@@ -382,13 +382,13 @@ fn validate_arrest_dependencies(
                 character: draft.character,
             });
         }
-        if evidence.admissibility() == crate::legal::Admissibility::Inadmissible {
-            return Err(ArrestError::InadmissibleEvidence {
-                evidence: *evidence_id,
-                admissibility: evidence.admissibility(),
-            });
-        }
-        if evidence.strength() == crate::legal::EvidenceStrength::Weak {
+        if !evidence_qualifies_for_custody(evidence) {
+            if evidence.admissibility() == crate::legal::Admissibility::Inadmissible {
+                return Err(ArrestError::InadmissibleEvidence {
+                    evidence: *evidence_id,
+                    admissibility: evidence.admissibility(),
+                });
+            }
             return Err(ArrestError::InsufficientEvidence {
                 evidence: *evidence_id,
                 strength: evidence.strength(),
@@ -398,6 +398,27 @@ fn validate_arrest_dependencies(
     }
 
     Ok(authority)
+}
+
+/// Custody is a stronger consequence than adding a subject to a case graph. Weak material or a
+/// source the institution itself still considers Questionable can remain useful investigative
+/// input, but neither can justify detention. Unknown or disputed admissibility remains usable at
+/// the arrest stage unless the material is already known to be inadmissible; admissibility is a
+/// separate legal axis and newly gathered testimony routinely starts as Unknown.
+fn has_minimum_custody_quality(
+    strength: crate::legal::EvidenceStrength,
+    reliability: crate::legal::EvidenceReliability,
+) -> bool {
+    strength != crate::legal::EvidenceStrength::Weak
+        && reliability != crate::legal::EvidenceReliability::Questionable
+}
+
+/// Single semantic predicate for evidence that may support custody. Runtime arrest validation,
+/// autonomous arrest selection, and persistence invariants all consume this owner so a save can
+/// never restore an arrest that the canonical transaction would reject.
+pub(crate) fn evidence_qualifies_for_custody(evidence: &crate::legal::EvidenceRecord) -> bool {
+    evidence.admissibility() != crate::legal::Admissibility::Inadmissible
+        && has_minimum_custody_quality(evidence.strength(), evidence.reliability())
 }
 
 fn active_operation_bookings_for_character(
@@ -472,24 +493,33 @@ pub fn validate_release_arrest(
 
 /// Evidence bar for the autonomous conversion step: at least two qualifying items, at
 /// least one of them Strong or Direct. Qualifying evidence targets the subject directly,
-/// is held by the case's own authority, and is neither inadmissible nor weak. This is a
+/// is held by the case's own authority, is not known inadmissible, and meets the same minimum
+/// strength/reliability floor as the canonical arrest path. This is a
 /// deliberately conservative institutional gate — it consumes case evidence that already
 /// exists; it never generates new leads.
 const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
 
-/// Runs the police institution's evidence-to-custody conversion across originated
-/// cases: when an identified subject has enough admissible non-weak evidence against them,
+/// Runs the police institution's evidence-to-custody conversion across active cases: when an
+/// identified subject has enough usable independent evidence against them,
 /// the owning authority makes the arrest through the canonical validated path. Custody preempts
 /// conflicting operation bookings and scheduled detective work through their explicit abort or
 /// cancellation lifecycles, so internal commitments cannot make an arrestable subject immune.
 pub fn apply_autonomous_evidence_arrests(
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
-    // Single scan over active operation-originated cases; subject pairs append directly so
+    // Single scan over active cases. Case provenance controls lifecycle and information flow,
+    // not whether equally strong evidence can produce custody; subject pairs append directly so
     // a tick with no candidates allocates nothing beyond the one candidate buffer.
     let mut candidates: Vec<(InvestigationId, CharacterId)> = Vec::new();
     for investigation in state.legal().active_investigations() {
-        if !matches!(investigation.origin(), Some(EntityRef::Operation(_))) {
+        // Legal authorities can own investigative files, but only law-enforcement institutions
+        // have custody authority. Skip non-police case owners here instead of turning a valid
+        // legal-authority case with strong evidence into a tick-failing InvalidAuthority error.
+        if !state
+            .world()
+            .get_organization(investigation.owner())
+            .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+        {
             continue;
         }
         let investigation_id = investigation.id();
@@ -544,8 +574,7 @@ pub fn apply_autonomous_evidence_arrests(
                 .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
             if evidence.subject() != EntityRef::Character(character)
                 || evidence.custodian() != owner
-                || evidence.strength() == crate::legal::EvidenceStrength::Weak
-                || evidence.admissibility() == crate::legal::Admissibility::Inadmissible
+                || !evidence_qualifies_for_custody(evidence)
             {
                 continue;
             }

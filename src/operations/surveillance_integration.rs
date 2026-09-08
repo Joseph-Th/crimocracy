@@ -953,6 +953,7 @@ fn enterprise_status_label(status: EnterpriseStatus) -> &'static str {
     match status {
         EnterpriseStatus::Active => "active",
         EnterpriseStatus::Suspended => "inactive or suspended",
+        EnterpriseStatus::Retired => "closed and retired",
     }
 }
 

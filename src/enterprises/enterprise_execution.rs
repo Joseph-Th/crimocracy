@@ -137,6 +137,8 @@ pub enum EnterpriseError {
     EnterpriseNotActive(EnterpriseId),
     #[error("enterprise {0} is not suspended")]
     EnterpriseNotSuspended(EnterpriseId),
+    #[error("enterprise {0} is retired and cannot return to operation")]
+    EnterpriseRetired(EnterpriseId),
     #[error(transparent)]
     Investigation(#[from] crate::legal::investigation_system::InvestigationError),
     #[error("enterprise {enterprise} is not due for a cycle until {due_at:?}")]
@@ -221,11 +223,7 @@ impl ValidatedEnterpriseEstablishment {
         // One racket of a kind per spot is re-checked at commit: a second token validated
         // before an identical establishment committed (or held across one) must reject here
         // rather than double-book the location.
-        if state
-            .enterprises()
-            .enterprises_at(self.draft.location)
-            .any(|record| record.kind() == self.draft.kind)
-        {
+        if enterprise_location_is_occupied(state, self.draft.kind, self.draft.location) {
             return Err(EnterpriseError::DuplicateEnterpriseAtLocation {
                 kind: self.draft.kind,
                 location: self.draft.location,
@@ -343,14 +341,9 @@ fn validate_establish_enterprise_with_optional_openings(
         draft.location,
         &draft.supporting_businesses,
     )?;
-    // One racket of a kind per spot — including suspended ones. A suspended racket stays
-    // on its location's books until manually resumed, so a fresh identical racket would
-    // resurrect losses the chronic-loss threshold already shut down.
-    if state
-        .enterprises()
-        .enterprises_at(draft.location)
-        .any(|record| record.kind() == draft.kind)
-    {
+    // Active and suspended rackets reserve their spot. A terminally retired record remains
+    // historical truth but no longer blocks a genuinely new racket from being established.
+    if enterprise_location_is_occupied(state, draft.kind, draft.location) {
         return Err(EnterpriseError::DuplicateEnterpriseAtLocation {
             kind: draft.kind,
             location: draft.location,
@@ -400,6 +393,17 @@ fn validate_establish_enterprise_with_optional_openings(
         host_business_version,
         account_openings,
     })
+}
+
+fn enterprise_location_is_occupied(
+    state: &AppState,
+    kind: EnterpriseKind,
+    location: EnterpriseLocation,
+) -> bool {
+    state
+        .enterprises()
+        .enterprises_at(location)
+        .any(|record| record.kind() == kind && record.status() != EnterpriseStatus::Retired)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1166,6 +1170,7 @@ pub fn validate_enterprise_cycle_plan(
 enum EnterpriseStatusChange {
     Suspend,
     Resume,
+    Retire,
 }
 
 pub struct ValidatedEnterpriseStatusChange {
@@ -1234,6 +1239,7 @@ impl ValidatedEnterpriseStatusChange {
         let next_status = match self.change {
             EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
             EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
+            EnterpriseStatusChange::Retire => EnterpriseStatus::Retired,
         };
         let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
         // Resuming restarts the chronic-loss grace window at the actual resume instant.
@@ -1261,6 +1267,7 @@ pub fn validate_suspend_enterprise(
         return Err(match record.status() {
             EnterpriseStatus::Active => unreachable!(),
             EnterpriseStatus::Suspended => EnterpriseError::EnterpriseNotActive(enterprise),
+            EnterpriseStatus::Retired => EnterpriseError::EnterpriseRetired(enterprise),
         });
     }
     Ok(ValidatedEnterpriseStatusChange {
@@ -1288,6 +1295,7 @@ pub fn validate_resume_enterprise(
             return Err(EnterpriseError::EnterpriseNotSuspended(enterprise));
         }
         EnterpriseStatus::Suspended => {}
+        EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
     }
     let authority = resolve_mandate_authority(state, record.authority())?;
     validate_enterprise_environment(
@@ -1333,6 +1341,36 @@ pub fn validate_resume_enterprise(
         authority: Some(authority),
         supporting_business_versions,
         host_business_version,
+    })
+}
+
+/// Permanently abandons a suspended racket while preserving its historical record and cycles.
+/// Retirement is intentionally a separate step from suspension: callers must first release the
+/// active schedule/mandate dependency, then explicitly decide that the old operation will never
+/// be resumed. A retired record no longer reserves its kind/location slot.
+pub fn validate_retire_enterprise(
+    state: &AppState,
+    enterprise: EnterpriseId,
+) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
+    let record = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
+    match record.status() {
+        EnterpriseStatus::Active => {
+            return Err(EnterpriseError::EnterpriseNotSuspended(enterprise));
+        }
+        EnterpriseStatus::Suspended => {}
+        EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
+    }
+    Ok(ValidatedEnterpriseStatusChange {
+        enterprise,
+        expected_version: record.version(),
+        change: EnterpriseStatusChange::Retire,
+        cycle_duration: None,
+        authority: None,
+        supporting_business_versions: BTreeMap::new(),
+        host_business_version: None,
     })
 }
 

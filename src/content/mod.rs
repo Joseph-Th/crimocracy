@@ -55,7 +55,7 @@ pub fn build_registry() -> Registry {
     builder
         .register_legal(LegalConfigSpec {
             // Seven campaign days (one week) of institutional inactivity before an
-            // operation-originated case is deterministically shelved.
+            // origin-linked street case is deterministically shelved.
             cold_case_window: SimDuration::from_minutes(10_080),
             // Three statementless interviews and investigators stop retrying a witness:
             // enough for a reluctant witness to open up, few enough that a hostile one

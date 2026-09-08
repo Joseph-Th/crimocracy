@@ -9,7 +9,9 @@ use crate::core::state::AppState;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::legal::prosecution_system::{prosecution_referral_summary, write_resolution_summary};
+use crate::legal::prosecution_system::{
+    evidence_concerns_defendant, prosecution_referral_summary, write_resolution_summary,
+};
 use crate::legal::{ArrestStatus, ProsecutionCaseResolution, ProsecutionCaseStatus};
 use crate::reports::ReportKind;
 use crate::world::{CapabilityKind, OrganizationKind};
@@ -251,6 +253,7 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
                         .is_none_or(|evidence| {
                             evidence.investigation() != case.source_investigation()
                                 || evidence.custodian() != case.source_authority()
+                                || !evidence_concerns_defendant(evidence, case.defendant())
                                 || evidence.discovered_at() > referral.referred_at()
                         })
                         || !referred_evidence.insert(*evidence_id)

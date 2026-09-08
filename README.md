@@ -2,105 +2,44 @@
 
 Deterministic Rust simulation foundation for a systemic crime-organization strategy game. The player acts through people, information, plans, policies, relationships, delegated authority, enterprises, and institutions.
 
-## Agent cockpit — 60s quick start
+## Start here
 
-You are the agent driving this system. The cockpit is [`AGENTS.md`](AGENTS.md) — it
-compresses every authority into one scannable path. This page orients you; that
-page routes you to the cheapest correct proof for any change.
+Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rules and routing; [`STATUS.md`](STATUS.md) owns implemented scope and exclusions; [`ARCHITECTURE.md`](ARCHITECTURE.md) owns state ownership, mutation, determinism, persistence, invariants, and tick order; [`TESTING.md`](TESTING.md) owns verification and harness evidence; [`GAME_DESIGN.md`](GAME_DESIGN.md) owns product intent.
 
-```text
-Registry (immutable, build_registry)  ─┐
-AppState  (domain state + 5 RNG streams + clocks) ─┤─► run_tick (1 min, ordered phases)
-Harness   (smoke/full, player-visible only)        ─┘
-```
+`content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-```powershell
-cargo check-fast          # 0.06s warm — does it compile? (6s after touching a file)
-cargo test-focused social # 0.11s warm — did one behavior change?
-.\scripts\verify.cmd -Check # 0.7s warm — type-check + fmt (fastest gate)
-.\scripts\verify.cmd -Fast  # 0.7s warm — iteration gate (fmt + lib --skip soak)
-.\scripts\verify.cmd        # 2-3s warm — broad gate (only for persistence/invariant/cross-domain)
-cargo harness-rush         # 0.15s warm — does one strategy still narrate correctly?
-cargo harness-full --samples 8  # 5s — full calibration + artifacts in target/harness-runs/
-```
-
-- Mutate only through the owning system's `validate_* → commit` or `decide_* → apply_*`.
-  Never construct a `*Record{}` literal — `AGENTS.md:§3` lists every canonical entry point.
-- `run_tick` (`src/core/simulation.rs`) is the only authoritative minute. Speed is
-  an adapter concern — call it more often, don't change its semantics.
-- The tower is `core → registry/content → world/social/intelligence/history/reports → finance/delegation/reputation/… → operations/legal/enterprises/economy`. See `AGENTS.md:§2` for the diagram.
+Consequential mutation goes through the owning system's `validate_* → commit` or `decide_* → validate_* → commit` path. Tests, examples, adapters, and tools use those same production paths. Do not construct authoritative `*Record` values or patch owner-private state as a shortcut.
 
 ## Reading order
 
-| Need | Read | Time |
-|---|---|---|
-| Agent routing and shortest proof | [`AGENTS.md`](AGENTS.md) (cockpit) | 2 min |
-| What exists and what is excluded | [`STATUS.md`](STATUS.md) | 1 min |
-| State ownership, mutation, determinism, persistence | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 5 min |
-| How behavior is proved | [`TESTING.md`](TESTING.md) | 3 min |
-| Player experience and product intent | [`GAME_DESIGN.md`](GAME_DESIGN.md) | as needed |
+| Need | Read |
+|---|---|
+| Agent routing and execution rules | [`AGENTS.md`](AGENTS.md) |
+| What exists and what is excluded | [`STATUS.md`](STATUS.md) |
+| State ownership, mutation, determinism, persistence | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| How behavior is proved | [`TESTING.md`](TESTING.md) |
+| Player experience and product intent | [`GAME_DESIGN.md`](GAME_DESIGN.md) |
 
 The owning `src/` module and its focused tests are the authority for executable
 behavior. Design intent does not prove implementation and status does not define
 intent. If authorities conflict, repair the owning document and implementation.
 
-## Architecture shape — the tower
+## Local commands
 
-```
-Layer 4  operations · legal · enterprises · economy     (orchestrating, cross-owner transactions)
-Layer 3  finance · delegation · reputation · decisions · contacts · opportunities · recruitment
-Layer 2  world · social · intelligence · history · reports   (leaf, no cross-domain writes)
-Layer 1  registry ◄── content::build_registry           (immutable after build)
-Layer 0  core::{id,time,entity,attention,state,simulation,persistence,invariants}
-```
-
-- `Registry` — immutable authored definitions and validated lookup tables.
-- `AppState` — serializable mutable campaign state, typed IDs, clocks, and 5 independent `ChaCha8Rng` streams.
-- Domain systems — validate requests, commit mutations, and maintain owned indexes and records.
-
-Canonical execution boundary is [`core::simulation::run_tick`](src/core/simulation.rs). It advances one simulated minute and resolves due work in the deterministic order documented in `ARCHITECTURE.md`. Adapters, the harness, tests, and reports observe or request through the same production systems.
-
-Full ownership map, phase diagram, RNG streams, and persistence envelope are in [`ARCHITECTURE.md`](ARCHITECTURE.md); the quick-ref table of `validate_*`/`decide_*` entry points is in [`AGENTS.md:§3`](AGENTS.md#3-canonical-operations--quick-reference).
-
-## Local verification — cheapest lane that proves the change
-
-Fast iteration uses the cheapest lane that proves the change. Routine completion uses the smallest scripted lane selected by the changed surface; the full gate is reserved for contracts that require its broader harness/Clippy coverage or for an explicit broad checkpoint. Lane ownership is in [`TESTING.md`](TESTING.md); the gate is owned by [`scripts/verify.ps1`](scripts/verify.ps1) and wrapped by [`scripts/verify.cmd`](scripts/verify.cmd).
-
-```
-Did you touch persistence, invariants, cross-domain, or verify infra?
-  YES → .\scripts\verify.cmd                (broad gate, 2-3s warm)
-  NO  → Did you touch harness?
-          YES → .\scripts\verify.cmd -Fast -Harness  (0.7s warm)
-          NO  → cargo check-fast  (0.06s warm)  or  cargo test-focused <filter>  (0.11s warm)
-                └─ complete with  .\scripts\verify.cmd -Fast  (0.7s warm)
+```powershell
+cargo check-fast
+cargo test-focused <filter>
+.\scripts\verify.cmd -Check
+.\scripts\verify.cmd -Fast
+.\scripts\verify.cmd -Fast -Harness
+.\scripts\verify.cmd
+cargo harness
+cargo harness-rush
+cargo harness-press
+cargo harness-recon
+cargo harness-full --samples 8
 ```
 
-| Need | Command | Warm (no change) | After one file edit |
-|---|---|---|---|
-| Type-check lib | `cargo check-fast` | ~0.06s | ~6s |
-| Type-check all | `cargo check-all` | ~0.45s | ~6s |
-| One focused test | `cargo test-focused <filter>` | ~0.11s | ~6-12s |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | ~12s |
-| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <pattern> \| -Harness \| -Check]` | per lane | per lane + rebuild |
-| Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | ~10-15s |
-| Check lane (fmt + check) | `.\scripts\verify.cmd -Check` | ~0.7s | ~7s |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | ~13s |
-| Broad local gate | `.\scripts\verify.cmd` | ~2-3s | ~15-20s |
+[`TESTING.md`](TESTING.md) owns which lane completes each class of change and what each harness mode proves. [`scripts/verify.ps1`](scripts/verify.ps1) owns the verification gate; [`scripts/verify.cmd`](scripts/verify.cmd) is its wrapper. Verification is local and does not depend on hosted CI.
 
-The broad gate runs `cargo fmt --check`, lib+integration tests, the exact ignored harness smoke contract selected fail-closed, one full-mode harness run (`--samples 1` on `[profile.harness]`, covering the narrative arcs, probes, and cross-branch contracts smoke skips), and strict Clippy for `lib` + `gameplay_harness`. Do not run it after a passing fast lane merely for reassurance. Verification is local; hosted runners are not authorities. When optimized compilation can change behavior, also run `cargo test-release`.
-
-Full lane table, decision tree, and harness mode matrix are in [`TESTING.md`](TESTING.md); the cockpit summary is in [`AGENTS.md:§5`](AGENTS.md#5-verification-lanes--which-command-when).
-
-## Gameplay harness — bounded evaluation surface
-
-Bounded deterministic evaluation surface, not a human-play test. All harness commands execute on `[profile.harness]` (dev semantics, `opt-level = 1`), so warm runs are ~10x faster than dev-profile execution and never disturb library iteration caches. Acting policy uses only player-visible information and surfaced decisions; `[DEV AUDIT]` is diagnostic only.
-
-```text
-cargo harness                                        # smoke: 3 strategies + legal foundation
-cargo harness -- --mode smoke --strategy press        # focused smoke: one branch
-cargo harness-rush / -press / -recon                 # aliases for focused smoke
-cargo harness-full --samples 8                        # full: rotation + probes + batches
-cargo harness-full -- --samples 8 --artifact-dir target/my-run
-```
-
-Smoke covers canonical strategies (1 campaign day); full mode compares all strategies on matched seeds, rotates across `NARRATIVE_SEED_ROTATION=3` fixture variations (Clockwork/Crowded/Quiet), runs 4 probes + sensitivity batches, and writes per-run `target/harness-runs/*.json` artifacts that preserve seeds and raw metrics. See [`TESTING.md`](TESTING.md) for modes and evidence rules; the cockpit cheat sheet is in [`AGENTS.md:§8`](AGENTS.md#8-harness--bounded-evaluation-surface-not-a-playtest).
+Build-profile tuning and measured performance notes live with Cargo configuration rather than in the current contract documents.

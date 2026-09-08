@@ -946,8 +946,8 @@ pub struct InvestigationRecord {
     pub(super) subjects: BTreeSet<EntityRef>,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) opened_at: SimTime,
-    /// The entity whose exposure or notoriety opened this case (an operation today, and any
-    /// future origin the intake vocabulary grows). Only originated cases are eligible for
+    /// The entity whose exposure or notoriety opened this case (currently an operation or an
+    /// enterprise). Only originated cases are eligible for
     /// deterministic cold-case decay; institution-authored cases keep their own lifecycle
     /// until an explicit transition.
     pub(super) origin: Option<EntityRef>,

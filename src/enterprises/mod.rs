@@ -49,6 +49,7 @@ pub enum EnterpriseLocation {
 pub enum EnterpriseStatus {
     Active,
     Suspended,
+    Retired,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

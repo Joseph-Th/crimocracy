@@ -1,7 +1,5 @@
 //! Custody-cluster validation: detentions, legal representation, and confidential sources.
 
-//! Release-safe structural validation for the legal subsystems plus persisted reports and history.
-
 use crate::contacts::ContactStatus;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -13,7 +11,10 @@ use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::legal::informant_system::{informant_reliability, informant_strength};
+use crate::legal::arrest_system::evidence_qualifies_for_custody;
+use crate::legal::informant_system::{
+    informant_reliability, informant_strength, information_is_relevant_to_investigation,
+};
 use crate::legal::legal_representation_system::{
     ended_representation_summary, retained_representation_summary,
 };
@@ -60,6 +61,7 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                             || evidence.custodian() != arrest.authority()
                             || evidence.subject() != EntityRef::Character(arrest.character())
                             || evidence.discovered_at() > arrest.arrested_at()
+                            || !evidence_qualifies_for_custody(evidence)
                     })
             })
         {
@@ -432,6 +434,7 @@ pub(super) fn validate_informant_disclosures(
         )?;
         if investigation.owner() != informant.handler()
             || information.holder() != KnowledgeHolder::Character(informant.character())
+            || !information_is_relevant_to_investigation(information, investigation)
             || information.recorded_at() > disclosure.disclosed_at()
             || disclosure.disclosed_at() < informant.established_at()
             || disclosure.disclosed_at() < investigation.opened_at()

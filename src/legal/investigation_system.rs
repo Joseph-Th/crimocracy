@@ -88,6 +88,12 @@ pub enum InvestigationError {
     #[error("incident intake must contain at least one evidence record")]
     NoIncidentEvidence,
     #[error(
+        "incident intake names character {character} as a case subject without actionable evidence"
+    )]
+    UnsubstantiatedIncidentCharacterSubject { character: CharacterId },
+    #[error("incident intake names {subject:?} as a case subject without matching evidence")]
+    UnsubstantiatedIncidentSubject { subject: EntityRef },
+    #[error(
         "incident intake resumable shelf changed after validation; expected {expected:?}, found {found:?}"
     )]
     StaleIncidentShelf {
@@ -228,6 +234,28 @@ pub fn validate_open_investigation(
 ) -> Result<ValidatedInvestigation, InvestigationError> {
     validate_investigation_draft(state, &draft)?;
     Ok(ValidatedInvestigation { draft })
+}
+
+/// Evidence quality sufficient to turn a referenced entity into an actionable case subject.
+/// This is intentionally below the autonomous-arrest corroboration bar, but material the
+/// institution itself still considers Questionable is only a lead to develop, not enough to
+/// keep a person permanently tracked as an identified suspect.
+pub(crate) fn evidence_assessment_is_actionable_case_lead(
+    strength: crate::legal::EvidenceStrength,
+    reliability: crate::legal::EvidenceReliability,
+    admissibility: crate::legal::Admissibility,
+) -> bool {
+    strength != crate::legal::EvidenceStrength::Weak
+        && reliability != crate::legal::EvidenceReliability::Questionable
+        && admissibility != crate::legal::Admissibility::Inadmissible
+}
+
+pub(crate) fn evidence_is_actionable_case_lead(evidence: &crate::legal::EvidenceRecord) -> bool {
+    evidence_assessment_is_actionable_case_lead(
+        evidence.strength(),
+        evidence.reliability(),
+        evidence.admissibility(),
+    )
 }
 
 fn validate_investigation_draft(
@@ -399,7 +427,7 @@ fn validate_investigation_transition_dependencies(
     Ok(())
 }
 
-/// Deterministically shelves operation-originated investigations whose owning authority has been
+/// Deterministically shelves origin-linked investigations whose owning authority has been
 /// institutionally inactive for the authored cold window.
 ///
 /// Cold cases are suspended through the canonical lifecycle transition, which revalidates every
@@ -452,7 +480,7 @@ pub(crate) fn apply_cold_case_decay(
         {
             continue;
         }
-        // An operation-originated case whose every identified subject is in custody is fully
+        // An originated case whose every identified subject is in custody is fully
         // worked: the institutional trail ends, so the case closes rather than sitting active
         // forever. Closing is allowed while arrests hold (cleared by arrest); cases with
         // subjects still at large keep their investigator attention.
@@ -471,6 +499,16 @@ pub(crate) fn apply_cold_case_decay(
                 | EntityRef::DecisionRequest(_)
                 | EntityRef::Mandate(_)
                 | EntityRef::Enterprise(_) => None,
+            })
+            .filter(|character| {
+                record.evidence().iter().any(|evidence_id| {
+                    let evidence = state
+                        .legal
+                        .get_evidence(*evidence_id)
+                        .expect("investigation evidence index must reference persisted evidence");
+                    evidence.subject() == EntityRef::Character(*character)
+                        && evidence_is_actionable_case_lead(evidence)
+                })
             })
             .collect();
         if !identified_subjects.is_empty()
@@ -1078,6 +1116,53 @@ fn validate_incident_intake_dependencies(
         }
         if evidence.discovered_at > state.now() {
             return Err(InvestigationError::DiscoveryInFuture);
+        }
+    }
+    // Every incident subject must belong to the incident itself or have evidence in this intake.
+    // Without this boundary a caller could attach an unrelated business, organization, or
+    // neighborhood and silently alter shelf matching and district pressure. Concrete characters
+    // carry the stronger actionable-evidence threshold because identifying a suspect also keeps
+    // an originated case from cooling automatically.
+    for subject in &draft.subjects {
+        if draft.origin == Some(*subject) {
+            continue;
+        }
+        let matching_evidence = draft
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.subject == *subject);
+        match subject {
+            EntityRef::Character(character) => {
+                if !matching_evidence.into_iter().any(|evidence| {
+                    evidence_assessment_is_actionable_case_lead(
+                        evidence.strength,
+                        evidence.reliability,
+                        evidence.admissibility,
+                    )
+                }) {
+                    return Err(
+                        InvestigationError::UnsubstantiatedIncidentCharacterSubject {
+                            character: *character,
+                        },
+                    );
+                }
+            }
+            EntityRef::Organization(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Business(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => {
+                if matching_evidence.into_iter().next().is_none() {
+                    return Err(InvestigationError::UnsubstantiatedIncidentSubject {
+                        subject: *subject,
+                    });
+                }
+            }
         }
     }
     Ok(())

@@ -45,7 +45,7 @@ pub struct LegalConfigDefinition {
 }
 
 impl LegalConfigDefinition {
-    /// How long an operation-originated investigation remains institutionally active after its
+    /// How long an origin-linked investigation remains institutionally active after its
     /// last evidence/work activity before the owning authority deterministically shelves it.
     pub fn cold_case_window(self) -> SimDuration {
         self.cold_case_window

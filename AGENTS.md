@@ -2,16 +2,15 @@
 
 **BCA policy:** advisory
 
-This is the single cockpit for any agent driving this system. It compresses every
-authority into one scannable path so you can orient, locate the canonical mutation,
-and verify with the least expenditure of resources. Ownership contracts are in
+This is the execution card for agents changing this system. It keeps high-risk
+guardrails local and routes detailed contracts to their single owners. Ownership is in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); scope is in [`STATUS.md`](STATUS.md);
 evidence rules are in [`TESTING.md`](TESTING.md); intent is in
 [`GAME_DESIGN.md`](GAME_DESIGN.md); commands are in [`README.md`](README.md).
 
 ---
 
-## 1. At a glance — 30 seconds
+## 1. At a glance
 
 ```text
 Registry (immutable, build_registry)  ─┐
@@ -25,9 +24,9 @@ Harness   (evaluation surface, smoke/full, player-visible only) ─┘
   Speed is an adapter concern — call it more often, don't change its semantics.
 - **Determinism** = `Registry + AppState + ordered inputs + state-owned RNG`. No wall
   clock, no hash iteration, no ambient entropy.
-- **Cheapest proof:** `cargo check-fast` (0.06s warm) → `cargo test-focused <filter>` (0.11s warm)
-  → `.\scripts\verify.cmd -Fast` (0.7s warm) → `.\scripts\verify.cmd` (2-3s warm) only for
-  persistence/invariant/cross-domain work.
+- **Verification:** use the narrowest focused check while editing and the completion lane
+  selected by [`TESTING.md`](TESTING.md). Cross-domain, persistence, invariant, or
+  verification-infrastructure work requires the broad local gate.
 
 ---
 
@@ -54,45 +53,9 @@ Layer 0 — Foundations (everyone depends on these)
   core::{id, time, entity, attention, state, simulation, persistence, invariants}
 ```
 
-**Dependency DAG (no cycles):**
-
-```text
-core/id,time,attention,entity ──► every domain
-world ──► social, intelligence, delegation(policy), economy, enterprises, operations(rating)
-finance ──► delegation, enterprises, economy, operations, world/contacts via ledger
-delegation ──► recruitment, enterprises (MandateAuthority)
-intelligence ──► operations, contacts, recruitment, legal, reports
-social ──► recruitment
-legal ──► operations(police_response, investigation) ◄──► enterprises(vice inquiries)
-registry/content ──► everything reads it; nothing writes it after build_registry
-AppState (state.rs) owns all domain state; simulation.rs orchestrates all
-```
-
-**File inventory:** `src/lib.rs` is the authoritative top-level module inventory — start there.
-
-### AppState ownership cockpit
-
-| # | Field `state.*` | Owns | Canonical mutation | File |
-|---|---|---|---|---|
-| 1 | `world` | orgs, characters, neighborhoods, businesses, designation, payroll | `world_system`, `payroll_execution`, `territory_influence` (read-only) | `src/world/` |
-| 2 | `social` | directional relationships | `relationship_system` | `src/social/` |
-| 3 | `intelligence` | provenance-bearing information | `intelligence_system` | `src/intelligence/` |
-| 4 | `reports` | player-facing reports & briefs | `report_system` | `src/reports/` |
-| 5 | `history` | entity-linked campaign events | `history_system` | `src/history/` |
-| 6 | `finance` | accounts, balanced ledger, laundering | `finance_system` (`validate_launder_funds`) | `src/finance/` |
-| 7 | `operations` | plans, execution, property/cash/property disposition | `operation_system`, `operation_execution`, `operation_economics` | `src/operations/` |
-| 8 | `opportunities` | provenance-backed opportunities | `opportunity_system` | `src/opportunities/` |
-| 9 | `decisions` | typed decision requests | `decision_system` | `src/decisions/` |
-| 10 | `delegation` | mandates & responsibility scopes | `delegation_system` | `src/delegation/` |
-| 11 | `economy` | business economies, sabotage, suspension | `business_economy_system`, `business_acquisition` | `src/economy/` |
-| 12 | `enterprises` | rackets, cycles, vice-attention, expansion | `enterprise_execution`, `autonomous_expansion` | `src/enterprises/` |
-| 13 | `legal` | jurisdictions, patrols, investigations, evidence, arrests, custody, representation, prosecution, witnesses, informants | `jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, … via `legal_state` | `src/legal/` |
-| 14 | `contacts` | institutional contacts & disclosures | `contact_system` | `src/contacts/` |
-| 15 | `recruitment` | recruitment, cooldowns, approvals, scoring | `recruitment_system`, `scoring` | `src/recruitment/` |
-| 16 | `reputation` | per-audience standing (Fear/Reliability/Competence/Treachery) | `reputation_system::apply_reputation_delta` (single score path) | `src/reputation/` |
-
-Persistence envelope: `src/core/persistence.rs` (`SaveEnvelope { format_version:1, content_revision, state }`);
-ID allocator: `src/core/id.rs` (`IdCounters`, `reserve` before multi-record commits).
+The authoritative dependency DAG, `AppState` ownership map, persistence model, and
+source map live in [`ARCHITECTURE.md`](ARCHITECTURE.md). `src/lib.rs` is the
+authoritative top-level module inventory.
 
 ---
 
@@ -113,18 +76,8 @@ and arithmetic **before** any mutation. Commit rechecks freshness (`SimTime` sta
 via `ensure_time_current`) and preserves indexes atomically. Rejected operations leave
 authoritative state unchanged.
 
-**Where to find them:**
-
-| Domain | Validate entry point | Commit via | Typed error |
-|---|---|---|---|
-| world | `world_system::validate_insert_*` `validate_designate_player_organization` | `Validated*::commit` | `WorldError` |
-| finance | `finance_system::validate_record_transaction` `validate_launder_funds` `validate_insert_account` | `commit` | `FinanceError` |
-| operations | `operation_system::validate_authorize_operation` `operation_execution::validate_operation_resolution_plan` `property_disposition::validate_dispose_property` | `commit` | `OperationError` |
-| economy | `business_acquisition::validate_acquire_business` `business_economy_system::validate_*` | `commit` | `BusinessError` |
-| legal | `investigation_system::validate_open_investigation` `arrest_system::validate_arrest` `legal_representation_system::validate_retain_legal_representation` | `commit` | `LegalError` |
-| contacts | `contact_system::validate_establish_contact` `validate_contact_disclosure` | `commit` | `ContactError` |
-| delegation | `delegation_system::validate_assign_mandate` `validate_revise_mandate` | `commit` | `DelegationError` |
-| recruitment | `recruitment_system::validate_recruitment_attempt` | `commit` | `RecruitmentError` |
+Find the owner in the [`ARCHITECTURE.md`](ARCHITECTURE.md) source map, then read that
+module's `//!` header and focused tests. Do not maintain a second entry-point inventory here.
 
 ### Pattern B — Decide then apply (read-only derivation)
 
@@ -135,11 +88,6 @@ apply_*(&mut state, plan)                        // single-owner, preserves inva
 
 Decision reads broader state than it mutates. Randomness is explicitly supplied
 (`&mut ChaCha8Rng`) and drawn via `core::simulation::draw_index`.
-
-**Examples:** `decide_operation_resolution` → `validate_operation_resolution_plan → commit`;
-`decide_business_cycle` → `validate_business_cycle_plan → commit`;
-`decide_enterprise_cycle` → `validate_enterprise_cycle_plan → commit`;
-`decide_executive_brief` → `validate_executive_brief_plan → commit`.
 
 ### Single-owner direct mutation
 
@@ -170,7 +118,8 @@ No bypasses. If you are constructing a `*Record` literal, stop — use the owner
 6. **Preserve persistence.** Every future-affecting value must survive `build_save` →
    `restore_save` (`src/core/persistence.rs`). Add `#[derive(Serialize,Deserialize)]`
    and a round-trip test if you add state.
-7. **Prove it with the narrowest lane** (see §6), then run the broader completion lane.
+7. **Prove it with the narrowest lane** in [`TESTING.md`](TESTING.md), then run the
+   completion lane required for the changed surface.
    Update the single authority document whose contract you changed.
 
 If any step is not discoverable, repair the owning documentation as part of the change.
@@ -179,107 +128,40 @@ If any step is not discoverable, repair the owning documentation as part of the 
 
 ## 5. Verification lanes — which command when
 
-### Decision tree
+[`TESTING.md`](TESTING.md) owns the decision tree, exact gate stages, harness modes, and
+which lane completes each change class. Use focused checks while editing when they
+shorten feedback. The broad local gate is required for persistence, invariant,
+cross-domain, or verification-infrastructure changes.
 
-```text
-Did you touch persistence, invariants, cross-domain behavior, or verification infra?
-  ├─ YES → broad gate:  .\scripts\verify.cmd              (2-3s warm)
-  └─ NO ─┬─ Did you touch harness surface (examples/gameplay_harness)?
-          │   ├─ YES → fast harness lane: .\scripts\verify.cmd -Fast -Harness  (0.7s warm)
-          │   └─ NO ─┬─ Single behavior? → cargo test-focused <filter>          (0.11s warm)
-          │           └─ Library work?   → .\scripts\verify.cmd -Fast           (0.7s warm)
-          │                              cargo test-fast                         (0.11s warm)
-          │                              cargo check-fast                        (0.06s warm)
-```
-
-**Never rerun the broad gate after a passing fast lane “for reassurance”.**
-
-| Need | Command | Warm (no change) | What it proves |
-|---|---|---|---|
-| Type-check library | `cargo check-fast` | ~0.06s | `src/` compiles |
-| Type-check all | `cargo check-all` | ~0.45s | `src/` + harness surface |
-| One focused test | `cargo test-focused <filter>` | ~0.11s | owning module's `#[cfg(test)]` |
-| Fast lib tests (no soak) | `cargo test-fast` | ~0.11s | all lib, `--skip soak` (397 tests) |
-| Auto-rerun on save | `.\scripts\watch.cmd [-Filter <p> \| -Harness \| -Check]` | per lane | polls 120ms, debounce 300ms, watches `*.rs,*.toml,*.md` |
-| Harness smoke, one branch | `cargo harness-rush` / `-press` / `-recon` | ~0.15s | one strategy on `[profile.harness]` |
-| Harness smoke, all | `cargo harness` | ~0.5s | all 3 strategies + legal foundation |
-| Full comparison batch | `cargo harness-full --samples 8` | ~5s | all strategies, matched seeds, artifacts in `target/harness-runs/` |
-| Check lane (fmt + check) | `.\scripts\verify.cmd -Check` | ~0.7s | type-check only, fastest gate |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | ~0.7s | iteration gate |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | ~0.7s | smoke contract only |
-| Broad local gate | `.\scripts\verify.cmd` | ~2-3s | **fmt → lib+integration → harness units → smoke (fail-closed) → full n=1 → clippy** |
-
-**Watch your lanes:** `tests/documentation_contracts.rs` guards alias names, doc links,
-and `STATUS.md ↔ CURRENT_STATE_SCHEMA_VERSION / CURRENT_CONTENT_REVISION`
-agreement — they run in stage 2/3.
+`tests/documentation_contracts.rs` mechanically checks the live documentation routes,
+Cargo aliases, and persistence-version publication rules.
 
 ---
 
 ## 6. Determinism · persistence · invariants — checklist
 
-Before handoff, every change that touches state must satisfy all three:
+Before handoff, every state-affecting change must preserve all three:
 
-- [ ] **Determinism.** No `HashMap`/`HashSet` iteration, no `SystemTime`, no filesystem
-  iteration, no thread scheduling as input. Ordered collections or explicit stable
-  sort + tie-breakers. All result-affecting randomness from the 5 state-owned
-  `ChaCha8Rng` streams (`src/core/state.rs`, `src/core/simulation.rs`).
+- **Determinism:** ordered collections or stable sorting with tie-breakers; no ambient wall
+  clock, filesystem order, thread scheduling, hash iteration, or external entropy as input;
+  result-affecting randomness comes only from serialized `AppState` RNG streams.
+- **Persistence:** every future-affecting authoritative value survives save/restore; derived
+  indexes remain projections rebuilt from authoritative records; current-version-only loading
+  rejects incompatible state rather than defaulting or migrating it silently.
+- **Invariants:** owner indexes, typed references, lifecycle relationships, ID high-water marks,
+  timestamps, and registry-derived values remain re-derivable and valid.
 
-  | Stream | Used for | Draw helper |
-  |---|---|---|
-  | `operation_rng` | operation execution & exposure variance | `draw_signed_variance(limit)` |
-  | `investigation_rng` | investigation-work variance | `draw_signed_variance(limit)` |
-  | `business_rng` | business cycle gross variance | `draw_basis_point_variance(limit)` |
-  | `enterprise_rng` | enterprise gross variance + vice-attention roll (both unconditionally per cycle) | `draw_basis_point_variance` + `draw_index(bound=10000)` |
-  | `recruitment_rng` | recruitment scoring variance | `draw_index` |
-
-- [ ] **Persistence.** Every future-affecting authoritative value is serialized. Save/load path:
-  `build_save(registry, state)` validates `validate_state` + `validate_state_against_registry`
-  before cloning into `SaveEnvelope`; derived indexes are `serde(skip)` projections and are
-  absent from save bytes. `restore_save` validates format, schema
-  (`CURRENT_STATE_SCHEMA_VERSION`), and content revision, then rebuilds every derived index
-  from authoritative records before validating indexes, high-water marks, and registry-derived
-  values (`src/core/persistence.rs`). Adding a field? Persist it only if it is authoritative or
-  future-affecting; add a round-trip/rebuild test for new state or indexes.
-
-- [ ] **Invariants.** `validate_state(state)` checks ID allocators (no 0, next > max),
-  index consistency (every domain `has_consistent_indexes()`), existence of typed
-  references, lifecycle agreement, and future timestamps. `validate_state_against_registry`
-  re-derives authored-content-dependent values (margins, exposure, proceeds, schedules).
-  `run_tick` calls `validate_invariants` at `src/core/simulation.rs` after every
-  authoritative minute. The soak (`cargo soak` / `--skip soak`) exercises mixed state
-  under full invariant validation.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) owns the detailed RNG, persistence, and invariant
+contracts. [`TESTING.md`](TESTING.md) owns the proof lanes.
 
 ---
 
 ## 7. Runtime flow — the authoritative tick
 
 `core::simulation::run_tick` (`src/core/simulation.rs`) is the **only**
-authoritative minute. Phase order is contractual — comments explain “runs after X so…”.
-
-```text
- 1  apply_opportunity_expiry               (durable lifecycle report before consumers)
- 2  run_operations_phase                   (start → deadline aborts → police arrivals → resolution)
- 3  apply_autonomous_investigator_staffing
- 4  apply_initial_evidence_reviews             (first reviewable evidence on active staffed cases)
- 5  apply_witness_interview_scheduling
- 6  run_investigation_work_phase           (resolve due work with pre-drawn variance)
- 7  apply_autonomous_evidence_arrests      (threshold: 2 independent evidence items; custody preempts live responsibilities)
- 8  apply_autonomous_prosecution_staffing  (refill review seats released by custody)
- 9  apply_detainee_informant_recruitment   (single decision at now-1440)
- 10  apply_informant_disclosures
- 11  apply_automatic_legal_support           (policy → retention via canonical path)
- 12  apply_cold_case_decay                  (only originated cases; window = 10080 min)
- 13  run_business_cycle_phase               (gross variance per due economy)
- 14  run_enterprise_cycle_phase             (gross variance + vice roll unconditionally)
- 15  apply_daily_payroll  →  apply_reputation_phase (decay first, then operation + vice consequences)
-    ──► apply_due_autonomous_recruitment (sees current resentment + decayed/current competence)
-    ──► apply_due_autonomous_enterprises (reads the resulting current police-fear posture)
-    ──► synthesize_executive_brief (sees everything above, last)
-    ──► validate_invariants
-```
-
-New autonomous work must slot explicitly here with a rationale comment matching the
-existing ones at `src/core/simulation.rs`.
+authoritative minute. Phase order is contractual. [`ARCHITECTURE.md`](ARCHITECTURE.md)
+owns the phase diagram; `src/core/simulation.rs` owns executable order and rationale
+comments. New autonomous work must slot explicitly there with an ordering rationale.
 
 ---
 
@@ -287,22 +169,9 @@ existing ones at `src/core/simulation.rs`.
 
 `examples/gameplay_harness/` exercises **production paths** through player-visible
 information only. `[DEV AUDIT]` is diagnostic, never fed to decisions.
-
-| Mode | Command | What it proves |
-|---|---|---|
-| `smoke` (default) | `cargo harness` | 3 strategies (`Rush/Press/Recon`) + legal foundation on one seed; 1 campaign day |
-| focused smoke | `cargo harness-rush` / `-press` / `-recon` | single strategy branch |
-| `full` (calibration) | `cargo harness-full --samples 8` | narrative rotation (`NARRATIVE_SEED_ROTATION=3`, covers Clockwork/Crowded/Quiet), 4 probes, batch sensitivity, artifacts |
-
-Full mode artifacts: `target/harness-runs/*.json` per run + `summary-<seed>.json`.
-Matched-seed branches share fixture, timeline, and seed — use `RunMetrics` and
-`validate_branch_financial_isolation` (enterprise heat never lets a cased branch
-out-earn an unheated one over the shared window). Timing anchors derive from
-`content::build_registry()` (operation durations, recruitment cadence, cold window,
-longest operation duration as terminal-wait slack), not constants.
-
-**Do not** infer safe operation windows from vague patrol text — use
-`choose_safe_start_from_patrol_report` with actionable windows only.
+[`TESTING.md`](TESTING.md) owns harness modes, evidence contracts, artifacts, and
+matched-seed comparison rules. Do not infer safe operation windows from vague patrol
+text; acting policy must use only actionable player-visible information.
 
 ---
 
@@ -318,39 +187,24 @@ longest operation duration as terminal-wait slack), not constants.
 | 6 | Consuming RNG conditionally (e.g. vice roll only when vice inquiry) | Branches needing matched determinism diverge | Draw unconditionally per cycle (see `src/core/simulation.rs`) |
 | 7 | Writing ledger `balance` directly | Balance is a materialized view; ledger `postings` are the truth | `finance_system::validate_record_transaction` derives balances; audit re-derives via dense `Vec<i64>` at `src/core/invariants/mod.rs` |
 | 8 | Using display text as identity | Fragile foreign keys, collisions | Typed IDs (`CharacterId`, `BusinessId`) + `EntityRef` where project controls vocabulary |
-| 9 | Silently defaulting a missing future-affecting value on load | Old save loads but loses continuation fidelity | `CURRENT_STATE_SCHEMA_VERSION` / `CURRENT_CONTENT_REVISION` mismatch is `LoadError`; compat is current-version only (`STATUS.md:61`) |
-| 10 | `cargo test` without `--locked` or with inherited `CARGO_INCREMENTAL=1` | Defeats `[profile.dev] incremental=false` (measured +30-180s) or `[profile.harness] incremental=true` (revert to 75s) | Use aliases or `verify.ps1` — it pins `CARGO_INCREMENTAL=0` for dev stages and clears it for harness stages |
+| 9 | Silently defaulting a missing future-affecting value on load | Old save loads but loses continuation fidelity | Incompatible schema/content is rejected; [`STATUS.md`](STATUS.md) owns the current compatibility policy |
+| 10 | Bypassing repository Cargo aliases or verification scripts | Can silently change lockfile, profile, or incremental-build assumptions | Use the aliases in `.cargo/config.toml` or the scripted gate in [`TESTING.md`](TESTING.md) |
 
 ---
 
 ## 10. Accretion guide — adding without fragmenting
 
-**New domain** (`src/<newdomain>/`):
+For a new domain, first place it in the dependency tower and ownership map in
+[`ARCHITECTURE.md`](ARCHITECTURE.md), then follow the nearest existing owner pattern for
+private state, canonical mutation, indexes, invariants, persistence, and any required
+state-owned randomness. Autonomous behavior must be inserted explicitly into `run_tick`.
 
-1. Define `NewDomainState` with `records: BTreeMap<NewId, NewRecord>` + derived
-   `BTreeMap<Key, BTreeSet<Id>>` indexes. Own the `IdKind::NewKind` counter.
-2. Create `newdomain_system.rs` with `validate_* → Validated*::commit` following
-   `finance_system` as a template. Keep `has_consistent_indexes()` exhaustive.
-3. Register the substate in `AppState` (`src/core/state.rs`), wire it into
-   `validate_state` (`src/core/invariants/mod.rs`), and allocate an RNG stream
-   if result-affecting randomness is needed.
-4. Slot any autonomous work into `run_tick`'s phase order with a rationale comment.
-5. Add focused tests under `#[cfg(test)]` named after behavior (not “CRUD smoke”).
-   Add a `soak`-substring stress test only if it exercises mixed state.
-6. Update `ARCHITECTURE.md` source map and this guide's §2/§3 tables.
+For a new authored kind, update the closed vocabulary, authored registry definition,
+all exhaustive matches, and registry-dependent invariant re-derivation. Do not add inert
+fields or variants without a consuming system.
 
-**New authored kind** (e.g. `OperationKind::Arson`):
-
-1. Add the variant to `operations/mod.rs` / `registry` vocabulary.
-2. Author its economics in `content::build_registry()` (`src/content/mod.rs`).
-3. Ensure `validate_state_against_registry` re-derives every authored-dependent value.
-4. Verify `MATCH` is exhaustive — the project forbids wildcards on owned enums (`clippy::wildcard_enum_match_arm = deny`).
-
-**New test:**
-
-- Exercise the canonical operation, assert the typed `Error` variant + fields, and
-  for rejections assert authoritative state is unchanged. Use explicit seeds and
-  stable ordering — never hunt for a passing seed.
+For a new test, exercise the canonical operation, assert typed failures and unchanged
+state on rejection, use explicit seeds/stable ordering, and follow [`TESTING.md`](TESTING.md).
 
 ---
 

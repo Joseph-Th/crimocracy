@@ -76,6 +76,11 @@ pub enum ProsecutionError {
         evidence: EvidenceId,
         authority: OrganizationId,
     },
+    #[error("evidence {evidence} does not concern prosecution defendant {defendant}")]
+    EvidenceDefendantMismatch {
+        evidence: EvidenceId,
+        defendant: CharacterId,
+    },
     #[error("prosecution case {0} does not exist")]
     MissingProsecutionCase(ProsecutionCaseId),
     #[error("prosecution case {case} is not open for prosecutorial action")]
@@ -506,6 +511,7 @@ fn validate_opening_dependencies(
         state,
         arrest.investigation(),
         arrest.authority(),
+        arrest.character(),
         &draft.evidence,
     )?;
     for evidence in arrest.evidence() {
@@ -710,6 +716,7 @@ fn validate_supplement_dependencies<'a>(
         state,
         case.source_investigation(),
         case.source_authority(),
+        case.defendant(),
         &draft.evidence,
     )?;
     for evidence in &draft.evidence {
@@ -799,6 +806,7 @@ fn validate_evidence_set(
     state: &AppState,
     investigation: InvestigationId,
     source_authority: OrganizationId,
+    defendant: CharacterId,
     evidence_ids: &BTreeSet<EvidenceId>,
 ) -> Result<(), ProsecutionError> {
     if evidence_ids.is_empty() {
@@ -821,8 +829,24 @@ fn validate_evidence_set(
                 authority: source_authority,
             });
         }
+        if !evidence_concerns_defendant(evidence, defendant) {
+            return Err(ProsecutionError::EvidenceDefendantMismatch {
+                evidence: *evidence_id,
+                defendant,
+            });
+        }
     }
     Ok(())
+}
+
+/// Prosecution referrals are defendant-specific transfers, not bulk exports of an entire police
+/// file. Keep the relevance predicate here so canonical opening/supplement validation and restore
+/// invariants use one exact semantic boundary.
+pub(crate) fn evidence_concerns_defendant(
+    evidence: &crate::legal::EvidenceRecord,
+    defendant: CharacterId,
+) -> bool {
+    evidence.subject() == EntityRef::Character(defendant)
 }
 
 fn validate_opening_versions(

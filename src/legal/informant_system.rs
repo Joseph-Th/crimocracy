@@ -3,7 +3,7 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     CharacterId, IdExhaustionError, IdKind, InformantDisclosureId, InformantId, InformationId,
-    InvestigationId, OperationId, OrganizationId,
+    InvestigationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
@@ -63,6 +63,14 @@ pub enum InformantError {
     InformationNotHeldByInformant {
         information: InformationId,
         character: CharacterId,
+    },
+    #[error(
+        "information {information} about {subject:?} is unrelated to investigation {investigation}"
+    )]
+    InformationCaseMismatch {
+        information: InformationId,
+        subject: EntityRef,
+        investigation: InvestigationId,
     },
     #[error(
         "information {information} already has disclosure {disclosure} in investigation {investigation}"
@@ -348,6 +356,13 @@ fn validate_disclosure_dependencies(
             character: informant.character(),
         });
     }
+    if !information_is_relevant_to_investigation(information, investigation) {
+        return Err(InformantError::InformationCaseMismatch {
+            information: draft.source_information,
+            subject: information.subject(),
+            investigation: draft.investigation,
+        });
+    }
     if let Some(existing) = state
         .legal
         .informant_disclosure_for_case_information(draft.investigation, draft.source_information)
@@ -359,6 +374,19 @@ fn validate_disclosure_dependencies(
         });
     }
     Ok(())
+}
+
+/// A confidential source may contribute only facts that actually belong in the target case.
+/// Origin-linked cases accept information about their originating event or enterprise; every
+/// case also accepts information about an entity it already tracks as a subject. Keeping this
+/// predicate shared by validation, automation, and restore prevents unrelated personal knowledge
+/// from being converted into case evidence merely because the same institution owns both facts.
+pub(crate) fn information_is_relevant_to_investigation(
+    information: &crate::intelligence::InformationRecord,
+    investigation: &crate::legal::InvestigationRecord,
+) -> bool {
+    investigation.origin() == Some(information.subject())
+        || investigation.subjects().contains(&information.subject())
 }
 
 pub(crate) const fn informant_strength(specificity: Specificity) -> EvidenceStrength {
@@ -480,10 +508,10 @@ pub(crate) fn apply_detainee_informant_recruitment(
     Ok(recruited)
 }
 
-/// Active informants disclose what they personally know into their handler's active cases:
-/// each piece of personally-held information whose subject matches a case's origin operation
-/// is disclosed at most once (the disclosure index rejects duplicates). This is what makes an
-/// informant more than a flag: their knowledge becomes InformantStatement evidence.
+/// Active informants disclose personally held information relevant to their handler's active
+/// cases. Relevance uses the same subject/origin predicate as the canonical disclosure validator,
+/// so institution-authored cases and enterprise-origin vice inquiries are not arbitrarily excluded.
+/// Each case-information pair is disclosed at most once by the disclosure index.
 pub(crate) fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
@@ -493,19 +521,22 @@ pub(crate) fn apply_informant_disclosures(
     if !state.legal.has_active_informants() {
         return Ok(Vec::new());
     }
-    // Active cases owned by each handler, keyed by their origin operation. Built once per
-    // pass in investigation-id order so the smallest matching case id wins deterministically.
-    let mut cases_by_handler_origin: BTreeMap<
+    // Active cases owned by each handler, keyed by entities that make information relevant to
+    // the case. Built in investigation-id order so overlapping cases pick the smallest case id
+    // deterministically for one disclosure pass rather than multiplying one fact automatically.
+    let mut cases_by_handler_subject: BTreeMap<
         OrganizationId,
-        BTreeMap<OperationId, InvestigationId>,
+        BTreeMap<EntityRef, InvestigationId>,
     > = BTreeMap::new();
     for investigation in state.legal.active_investigations() {
-        if let Some(EntityRef::Operation(origin)) = investigation.origin() {
-            cases_by_handler_origin
-                .entry(investigation.owner())
-                .or_default()
-                .entry(origin)
-                .or_insert(investigation.id());
+        let cases = cases_by_handler_subject
+            .entry(investigation.owner())
+            .or_default();
+        if let Some(origin) = investigation.origin() {
+            cases.entry(origin).or_insert(investigation.id());
+        }
+        for subject in investigation.subjects() {
+            cases.entry(*subject).or_insert(investigation.id());
         }
     }
 
@@ -520,12 +551,9 @@ pub(crate) fn apply_informant_disclosures(
                 .intelligence
                 .information_for_holder(KnowledgeHolder::Character(character))
             {
-                let EntityRef::Operation(operation) = information.subject() else {
-                    continue;
-                };
-                if let Some(&investigation) = cases_by_handler_origin
+                if let Some(&investigation) = cases_by_handler_subject
                     .get(&handler)
-                    .and_then(|cases| cases.get(&operation))
+                    .and_then(|cases| cases.get(&information.subject()))
                 {
                     // Skip knowledge already traded into this case; the disclosure index is
                     // the authority on what has been disclosed.

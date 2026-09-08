@@ -324,6 +324,97 @@ fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
 }
 
 #[test]
+fn disclosure_rejects_personal_information_unrelated_to_the_case() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let unrelated = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Unrelated Outfit".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("unrelated organization should validate");
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let information = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.member),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(unrelated),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The source knows unrelated personnel facts.".to_owned(),
+        },
+    )
+    .expect("unrelated personal information should validate")
+    .commit(&mut fixture.state)
+    .expect("unrelated personal information should commit");
+
+    assert_eq!(
+        validate_record_informant_disclosure(
+            &fixture.state,
+            InformantDisclosureDraft {
+                informant,
+                investigation: fixture.investigation,
+                source_information: information,
+            },
+        )
+        .expect_err("handler ownership must not turn unrelated knowledge into case evidence"),
+        InformantError::InformationCaseMismatch {
+            information,
+            subject: EntityRef::Organization(unrelated),
+            investigation: fixture.investigation,
+        }
+    );
+    assert_eq!(fixture.state.legal().informant_disclosures().count(), 0);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins() {
+    let mut fixture = fixture();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let information = record_personal_information(&mut fixture);
+
+    let disclosures = apply_informant_disclosures(&mut fixture.state)
+        .expect("relevant personal knowledge should flow into an active handler case");
+    assert_eq!(disclosures.len(), 1);
+    let disclosure = fixture
+        .state
+        .legal()
+        .get_informant_disclosure(disclosures[0])
+        .expect("autonomous disclosure should persist");
+    assert_eq!(disclosure.informant(), informant);
+    assert_eq!(disclosure.investigation(), fixture.investigation);
+    assert_eq!(disclosure.source_information(), information);
+    validate_state(&fixture.state).expect("subject-matched disclosure state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn generic_evidence_path_cannot_forge_informant_statement() {
     let fixture = fixture();
     let error = match validate_add_evidence(

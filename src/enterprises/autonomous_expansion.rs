@@ -13,10 +13,10 @@ use crate::enterprises::enterprise_execution::{
     validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
-    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
+    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
 };
 use crate::finance::finance_system::{FinanceError, validate_open_accounts};
-use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::AutonomyLevel;
 use crate::world::territory_influence::resolve_neighborhood_influence;
@@ -31,6 +31,10 @@ pub(crate) enum AutonomousExpansionError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Enterprise(#[from] EnterpriseError),
+    #[error("active enterprise {enterprise} has no valid current working-capital runway")]
+    InvalidCommittedRunway { enterprise: EnterpriseId },
+    #[error("working-capital reservations overflowed for account {account}")]
+    WorkingCapitalOverflow { account: FinancialAccountId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +56,7 @@ struct AutonomousExpansionPlan {
 /// rival-governed state.
 ///
 /// Rival organizations without governed territory (no mandate, a Tight/Guided manager, or no
-/// usable cash and settlement accounts) simply do not expand.
+/// usable uncommitted cash and settlement accounts) simply do not expand.
 pub(crate) fn apply_due_autonomous_enterprises(
     registry: &Registry,
     state: &mut AppState,
@@ -61,6 +65,12 @@ pub(crate) fn apply_due_autonomous_enterprises(
         return Ok(Vec::new());
     }
     let player_organization = state.player_organization();
+    // Working capital is a capacity constraint, not a balance-presence check. Existing active
+    // rackets already rely on their cash accounts for one current operating cycle, and each new
+    // establishment in this pass makes another claim on that same pool. Keep those commitments
+    // as a read-only planning projection so delegated managers cannot multiply-count one dollar
+    // of liquidity across several rackets without inventing a second authoritative ledger.
+    let mut working_capital_reservations = resolve_committed_working_capital(registry, state)?;
     // Active mandates iterate in mandate-id order, so every eligible authority is evaluated
     // in a single stable sequence; the active-mandate index keeps revoked history out of
     // this daily scan.
@@ -97,9 +107,11 @@ pub(crate) fn apply_due_autonomous_enterprises(
         {
             continue;
         }
-        let Some(available_working_capital) =
-            resolve_max_autonomous_working_capital(state, organization)
-        else {
+        let Some(available_working_capital) = resolve_max_autonomous_working_capital(
+            state,
+            organization,
+            &working_capital_reservations,
+        ) else {
             continue;
         };
         let Some(plan) = decide_autonomous_expansion(
@@ -120,9 +132,15 @@ pub(crate) fn apply_due_autonomous_enterprises(
             state,
             organization,
             plan.required_working_capital,
+            &working_capital_reservations,
         ) else {
             continue;
         };
+        reserve_working_capital(
+            &mut working_capital_reservations,
+            cash_account,
+            plan.required_working_capital,
+        )?;
         let draft = |settlement_account| EnterpriseDraft {
             kind: plan.kind,
             organization,
@@ -454,7 +472,8 @@ fn resolve_support_network(
 fn resolve_max_autonomous_working_capital(
     state: &AppState,
     organization: OrganizationId,
-) -> Option<crate::finance::Money> {
+    reservations: &BTreeMap<FinancialAccountId, Money>,
+) -> Option<Money> {
     state
         .finance()
         .accounts_for(FinancialOwner::Organization(organization))
@@ -464,8 +483,62 @@ fn resolve_max_autonomous_working_capital(
                 AccountKind::StreetCash | AccountKind::ConcealedCash
             )
         })
-        .map(|account| account.balance())
+        .map(|account| available_working_capital(account, reservations))
         .max()
+}
+
+fn resolve_committed_working_capital(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<BTreeMap<FinancialAccountId, Money>, AutonomousExpansionError> {
+    let mut reservations = BTreeMap::new();
+    for enterprise in state.enterprises().enterprises() {
+        if enterprise.status() != EnterpriseStatus::Active {
+            continue;
+        }
+        let required = resolve_current_enterprise_operating_cost(
+            registry,
+            state,
+            enterprise.kind(),
+            enterprise.location(),
+            enterprise.supporting_businesses().len(),
+        )
+        .ok_or(AutonomousExpansionError::InvalidCommittedRunway {
+            enterprise: enterprise.id(),
+        })?;
+        reserve_working_capital(&mut reservations, enterprise.cash_account(), required)?;
+    }
+    Ok(reservations)
+}
+
+fn reserve_working_capital(
+    reservations: &mut BTreeMap<FinancialAccountId, Money>,
+    account: FinancialAccountId,
+    amount: Money,
+) -> Result<(), AutonomousExpansionError> {
+    let current = reservations.get(&account).copied().unwrap_or(Money::ZERO);
+    let reserved = current
+        .checked_add(amount)
+        .ok_or(AutonomousExpansionError::WorkingCapitalOverflow { account })?;
+    reservations.insert(account, reserved);
+    Ok(())
+}
+
+fn available_working_capital(
+    account: &crate::finance::FinancialAccountRecord,
+    reservations: &BTreeMap<FinancialAccountId, Money>,
+) -> Money {
+    let reserved = reservations
+        .get(&account.id())
+        .copied()
+        .unwrap_or(Money::ZERO);
+    if account.balance() <= reserved {
+        return Money::ZERO;
+    }
+    account
+        .balance()
+        .checked_sub(reserved)
+        .expect("positive balance above a nonnegative reservation must subtract safely")
 }
 
 /// Resolves the rival's operating accounts read-only: first org-owned street-or-concealed
@@ -477,7 +550,8 @@ fn resolve_max_autonomous_working_capital(
 fn resolve_existing_autonomous_accounts(
     state: &AppState,
     organization: OrganizationId,
-    minimum_working_capital: crate::finance::Money,
+    minimum_working_capital: Money,
+    reservations: &BTreeMap<FinancialAccountId, Money>,
 ) -> Option<(FinancialAccountId, Option<FinancialAccountId>)> {
     let owner = FinancialOwner::Organization(organization);
     let mut cash = None;
@@ -489,7 +563,9 @@ fn resolve_existing_autonomous_accounts(
         // ledger. Account existence alone is not funding.
         match account.kind() {
             AccountKind::StreetCash | AccountKind::ConcealedCash
-                if cash.is_none() && account.balance() >= minimum_working_capital =>
+                if cash.is_none()
+                    && available_working_capital(account, reservations)
+                        >= minimum_working_capital =>
             {
                 cash = Some(id);
             }

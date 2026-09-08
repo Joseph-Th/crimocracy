@@ -32,6 +32,92 @@ struct Fixture {
 }
 
 #[derive(Clone, Serialize)]
+struct EvidenceIdentityWire {
+    id: EvidenceId,
+    investigation: InvestigationId,
+    custodian: OrganizationId,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceConnectionWire {
+    subject: EntityRef,
+    origin: Option<EntityRef>,
+    source: Option<EntityRef>,
+    derived_from: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct EvidenceAssessmentWire {
+    kind: EvidenceKind,
+    strength: EvidenceStrength,
+    reliability: EvidenceReliability,
+    admissibility: Admissibility,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceRecordWire {
+    identity: EvidenceIdentityWire,
+    connection: EvidenceConnectionWire,
+    assessment: EvidenceAssessmentWire,
+    discovered_at: SimTime,
+}
+
+fn evidence_wire(record: &crate::legal::EvidenceRecord) -> EvidenceRecordWire {
+    EvidenceRecordWire {
+        identity: EvidenceIdentityWire {
+            id: record.id(),
+            investigation: record.investigation(),
+            custodian: record.custodian(),
+        },
+        connection: EvidenceConnectionWire {
+            subject: record.subject(),
+            origin: record.origin(),
+            source: record.source(),
+            derived_from: record.derived_from().clone(),
+        },
+        assessment: EvidenceAssessmentWire {
+            kind: record.kind(),
+            strength: record.strength(),
+            reliability: record.reliability(),
+            admissibility: record.admissibility(),
+        },
+        discovered_at: record.discovered_at(),
+    }
+}
+
+fn replace_serialized_evidence(
+    envelope: SaveEnvelope,
+    original: &crate::legal::EvidenceRecord,
+    replacement: &EvidenceRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("evidence record should serialize");
+    let mirror = evidence_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("evidence mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement evidence should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized evidence must appear exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout evidence corruption must remain decodable")
+}
+
+#[derive(Clone, Serialize)]
 struct ArrestRecordWire {
     id: ArrestId,
     character: CharacterId,
@@ -42,6 +128,103 @@ struct ArrestRecordWire {
     released_at: Option<SimTime>,
     status: crate::legal::ArrestStatus,
     version: u32,
+}
+
+#[test]
+fn prosecution_referrals_reject_evidence_about_another_person_in_the_same_police_case() {
+    let mut fixture = fixture();
+    let unrelated = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.lead,
+        EvidenceKind::Surveillance,
+    );
+    let opening_error = match validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest: fixture.arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: fixture.lead,
+            evidence: BTreeSet::from([fixture.arrest_evidence, unrelated]),
+        },
+    ) {
+        Ok(_) => panic!("initial referral must not import unrelated evidence from the police file"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        opening_error,
+        ProsecutionError::EvidenceDefendantMismatch {
+            evidence: unrelated,
+            defendant: fixture.defendant,
+        }
+    );
+
+    let case = open_case(&mut fixture);
+    let supplement_error = match validate_supplement_prosecution_case(
+        &fixture.state,
+        ProsecutionReferralDraft {
+            prosecution_case: case,
+            evidence: BTreeSet::from([unrelated]),
+        },
+    ) {
+        Ok(_) => panic!("supplement must remain defendant-specific"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        supplement_error,
+        ProsecutionError::EvidenceDefendantMismatch {
+            evidence: unrelated,
+            defendant: fixture.defendant,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("case should remain unchanged")
+            .evidence(),
+        &BTreeSet::from([fixture.arrest_evidence])
+    );
+    validate_state(&fixture.state).expect("rejected unrelated referrals leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_referred_evidence_that_no_longer_concerns_the_defendant() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    validate_supplement_prosecution_case(
+        &fixture.state,
+        ProsecutionReferralDraft {
+            prosecution_case: case,
+            evidence: BTreeSet::from([fixture.supplemental_evidence]),
+        },
+    )
+    .expect("valid defendant-specific supplement should validate")
+    .commit(&mut fixture.state)
+    .expect("valid defendant-specific supplement should commit");
+
+    let original = fixture
+        .state
+        .legal()
+        .get_evidence(fixture.supplemental_evidence)
+        .expect("supplemental evidence should persist");
+    let mut corrupted = evidence_wire(original);
+    corrupted.connection.subject = EntityRef::Character(fixture.lead);
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid prosecution state should save before corruption");
+    let corrupted = replace_serialized_evidence(envelope, original, &corrupted);
+
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("restore must reject a referral whose evidence was retargeted off defendant");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidProsecutionReferral { .. }
+        )
+    ));
 }
 
 fn arrest_wire(record: &crate::legal::ArrestRecord) -> ArrestRecordWire {

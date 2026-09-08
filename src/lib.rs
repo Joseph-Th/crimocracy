@@ -1,6 +1,6 @@
 //! Core simulation library for Crimocracy — the agent's module map.
 //!
-//! Tower of abstractions (see `AGENTS.md:§2` and `ARCHITECTURE.md` for the full diagram):
+//! Tower of abstractions (see `ARCHITECTURE.md` for the authoritative diagram and source map):
 //! ```text
 //! Layer 4  operations · legal · enterprises · economy
 //! Layer 3  finance · delegation · reputation · decisions · contacts · opportunities · recruitment
@@ -8,7 +8,7 @@
 //! Layer 1  registry ◄── content::build_registry
 //! Layer 0  core::{id,time,entity,attention,state,simulation,persistence,invariants}
 //! ```
-//! Start at `core::state::AppState` (16 domain substates) and the ordered
+//! Start at `core::state::AppState` and the ordered
 //! `core::simulation::run_tick` pipeline.
 //! Every `src/*/mod.rs` //! header names its canonical mutation path — treat it as contract.
 

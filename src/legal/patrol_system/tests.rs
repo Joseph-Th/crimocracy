@@ -57,6 +57,35 @@ fn make_fixture() -> (crate::Registry, AppState, OrganizationId, NeighborhoodId)
     (registry, state, police, neighborhood)
 }
 
+#[test]
+fn interval_presence_stays_exact_across_the_full_clock_range() {
+    let (_registry, mut state, police, neighborhood) = make_fixture();
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, MINUTES_PER_DAY, 80)],
+        },
+    )
+    .expect("full-day patrol deployment should validate")
+    .commit(&mut state)
+    .expect("full-day patrol deployment should commit");
+
+    let snapshot = resolve_patrol_presence_interval_snapshot(
+        &state,
+        neighborhood,
+        SimTime::from_minutes(0),
+        SimTime::from_minutes(u64::MAX),
+    );
+    assert_eq!(
+        snapshot.presence().map(Rating::value),
+        Some(80),
+        "interval averaging must not distort presence when u64 accumulation would overflow"
+    );
+    validate_invariants(&state);
+}
+
 fn window(start: u16, duration: u16, presence: u8) -> PatrolWindow {
     PatrolWindow::try_new(
         DayMinute::try_new(start).expect("fixture minute should validate"),

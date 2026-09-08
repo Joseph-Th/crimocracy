@@ -16,15 +16,16 @@ use crate::core::id::{
     ProsecutionCaseId, ProsecutionReferralId, ReportId, WitnessStatementId,
 };
 use crate::core::time::SimTime;
+use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::records::{
-    Admissibility, ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, EvidenceStrength,
-    InformantDisclosureRecord, InformantRecord, InformantStatus, InvestigationRecord,
-    InvestigationStatus, InvestigationWorkCancellation, InvestigationWorkFocus,
-    InvestigationWorkKind, InvestigationWorkRecord, InvestigationWorkResolution,
-    InvestigationWorkStatus, JurisdictionRecord, LegalIndexes, LegalRepresentationEndReason,
-    LegalRepresentationOrigin, LegalRepresentationRecord, LegalRepresentationStatus,
-    PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord,
-    PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
+    ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord,
+    InformantRecord, InformantStatus, InvestigationRecord, InvestigationStatus,
+    InvestigationWorkCancellation, InvestigationWorkFocus, InvestigationWorkKind,
+    InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkStatus,
+    JurisdictionRecord, LegalIndexes, LegalRepresentationEndReason, LegalRepresentationOrigin,
+    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentRecord,
+    PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord, PoliceResponseStatus,
+    ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
     ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -1104,12 +1105,10 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before evidence commit");
-        // A subject enters the case graph through evidence whose assessment is actionable:
-        // not weak, and not inadmissible. Unusable material stays in the case graph without
-        // promoting anyone — character, organization, or venue — to tracked-subject status.
-        let promotes_subject = record.strength() != EvidenceStrength::Weak
-            && record.admissibility() != Admissibility::Inadmissible;
-        if promotes_subject {
+        // Unusable or still-questionable material stays in the evidence graph without promoting
+        // anyone to tracked-subject status. The investigation system owns the semantic threshold
+        // because cold-case eligibility consumes the same definition of an actionable lead.
+        if evidence_is_actionable_case_lead(&record) {
             investigation.subjects.insert(record.subject());
             self.indexes
                 .investigations

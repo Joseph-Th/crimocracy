@@ -408,22 +408,25 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
         };
     }
 
-    let duration = end.as_minutes().saturating_sub(start.as_minutes());
+    let duration = end
+        .as_minutes()
+        .checked_sub(start.as_minutes())
+        .expect("ordered patrol interval must have a positive duration");
     let day_minutes = u64::from(MINUTES_PER_DAY);
-    let daily_total: u64 = daily_presence.iter().map(|value| u64::from(*value)).sum();
+    // Presence is bounded by 100 for every simulated minute, so a u128 accumulator can represent
+    // the exact sum across the entire u64 clock range. Saturating u64 arithmetic would silently
+    // flatten sufficiently long intervals and produce a materially wrong average.
+    let daily_total: u128 = daily_presence.iter().map(|value| u128::from(*value)).sum();
     let full_days = duration / day_minutes;
     let remainder = duration % day_minutes;
-    let mut total_presence = daily_total.saturating_mul(full_days);
+    let mut total_presence = daily_total * u128::from(full_days);
     let start_minute = start.as_minutes() % day_minutes;
     for offset in 0..remainder {
         let minute = usize::try_from((start_minute + offset) % day_minutes)
             .expect("minute-of-day remainder must fit usize");
-        total_presence = total_presence.saturating_add(u64::from(daily_presence[minute]));
+        total_presence += u128::from(daily_presence[minute]);
     }
-    let average = total_presence
-        .saturating_add(duration / 2)
-        .checked_div(duration)
-        .expect("positive patrol interval duration must divide");
+    let average = (total_presence + u128::from(duration / 2)) / u128::from(duration);
     let average = u8::try_from(average).expect("average patrol presence must fit u8");
     PatrolPresenceSnapshot {
         deployment_versions,

@@ -578,7 +578,7 @@ impl ExecutiveBriefDefinition {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct LegalConfigSpec {
-    /// How long an operation-originated investigation remains institutionally active after
+    /// How long an origin-linked investigation remains institutionally active after
     /// its last evidence/work activity before deterministic shelving.
     pub cold_case_window: SimDuration,
     /// How many completed interviews a case witness may sit through without producing a

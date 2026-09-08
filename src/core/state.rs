@@ -1,8 +1,8 @@
 //! Serializable application state; subsystem state is owned here and mutated through systems.
 //!
-//! `AppState` is the aggregate root: 16 domain substates, 5 deterministic RNG streams, and runtime metadata.
+//! `AppState` is the aggregate root for domain state, deterministic RNG streams, and runtime metadata.
 //! Find the owning field below, then the canonical `validate_* → commit` in that
-//! owner's `*_system.rs` (see `AGENTS.md:§3` quick-ref and `ARCHITECTURE.md` source map).
+//! owner's `*_system.rs` (see the `ARCHITECTURE.md` source map).
 //! All `//!` headers name the owner; `core::simulation::run_tick` orchestrates the ordered domain passes.
 
 // Current schema — bump on any AppState layout change; `STATUS.md` must stay in sync.
@@ -30,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 69;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 70;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {

@@ -113,8 +113,8 @@ fn open_operation_case(state: &mut AppState) -> InvestigationId {
     let registry = build_registry();
     let police = police_of(state);
     let criminal = criminal_of(state);
-    // Cold-case decay only shelves operation-originated cases, so the fixture opens the case
-    // through the same operation-originated intake path production exposure uses.
+    // Cold-case decay only shelves origin-linked cases, so this fixture deliberately opens one
+    // through the operation-originated intake path production exposure uses.
     let leader = crate::world::world_system::insert_character(
         state,
         CharacterDraft {

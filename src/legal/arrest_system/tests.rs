@@ -18,6 +18,7 @@ use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -27,6 +28,301 @@ struct Fixture {
     suspect: CharacterId,
     investigation: InvestigationId,
     evidence: EvidenceId,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceIdentityWire {
+    id: EvidenceId,
+    investigation: InvestigationId,
+    custodian: OrganizationId,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceConnectionWire {
+    subject: EntityRef,
+    origin: Option<EntityRef>,
+    source: Option<EntityRef>,
+    derived_from: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct EvidenceAssessmentWire {
+    kind: EvidenceKind,
+    strength: EvidenceStrength,
+    reliability: EvidenceReliability,
+    admissibility: Admissibility,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceRecordWire {
+    identity: EvidenceIdentityWire,
+    connection: EvidenceConnectionWire,
+    assessment: EvidenceAssessmentWire,
+    discovered_at: SimTime,
+}
+
+fn evidence_wire(record: &crate::legal::EvidenceRecord) -> EvidenceRecordWire {
+    EvidenceRecordWire {
+        identity: EvidenceIdentityWire {
+            id: record.id(),
+            investigation: record.investigation(),
+            custodian: record.custodian(),
+        },
+        connection: EvidenceConnectionWire {
+            subject: record.subject(),
+            origin: record.origin(),
+            source: record.source(),
+            derived_from: record.derived_from().clone(),
+        },
+        assessment: EvidenceAssessmentWire {
+            kind: record.kind(),
+            strength: record.strength(),
+            reliability: record.reliability(),
+            admissibility: record.admissibility(),
+        },
+        discovered_at: record.discovered_at(),
+    }
+}
+
+fn replace_serialized_evidence(
+    envelope: SaveEnvelope,
+    original: &crate::legal::EvidenceRecord,
+    replacement: &EvidenceRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("evidence record should serialize");
+    let mirror = evidence_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("evidence mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement evidence should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized evidence must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout evidence corruption must remain decodable")
+}
+
+#[test]
+fn restore_rejects_arrest_backed_by_nonqualifying_evidence() {
+    let mut fixture = fixture();
+    let arrest = arrest_fixture(&mut fixture);
+    let original = fixture
+        .state
+        .legal()
+        .get_evidence(fixture.evidence)
+        .expect("arrest evidence should persist");
+    let mut corrupted = evidence_wire(original);
+    corrupted.assessment.reliability = EvidenceReliability::Questionable;
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid custody state should save before corruption");
+    let corrupted = replace_serialized_evidence(envelope, original, &corrupted);
+
+    let error = restore_save(&fixture.registry, corrupted)
+        .expect_err("restore must reject custody supported by evidence canonical arrest rejects");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid }
+        ) if invalid == arrest
+    ));
+}
+
+#[test]
+fn arrest_rejects_questionable_evidence_even_when_strong() {
+    let mut fixture = fixture();
+    let questionable = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("questionable material can remain part of an active investigation")
+    .commit(&mut fixture.state)
+    .expect("questionable material should persist as investigative evidence");
+
+    let error = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([questionable]),
+        },
+    )
+    .expect_err("questionable evidence must not justify custody merely because it is strong");
+    assert_eq!(
+        error,
+        ArrestError::InsufficientEvidence {
+            evidence: questionable,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Questionable,
+        }
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_arrest_excludes_questionable_material_from_corroboration() {
+    let mut fixture = fixture();
+    let questionable = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("questionable surveillance should remain valid investigative material")
+    .commit(&mut fixture.state)
+    .expect("questionable surveillance should persist");
+
+    assert!(
+        apply_autonomous_evidence_arrests(&mut fixture.state)
+            .expect("questionable evidence should be ignored rather than failing the pass")
+            .is_empty(),
+        "one reliable item plus one questionable item does not satisfy corroboration"
+    );
+
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+        .expect("two independently usable items should resolve to custody");
+    assert_eq!(arrests.len(), 1);
+    let arrest = fixture
+        .state
+        .legal()
+        .get_arrest(arrests[0])
+        .expect("autonomous arrest should persist");
+    assert_eq!(
+        arrest.evidence(),
+        &BTreeSet::from([fixture.evidence, corroborating]),
+        "questionable material stays in the case graph but is not cited as custody support"
+    );
+    assert!(!arrest.evidence().contains(&questionable));
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_arrest_is_evidence_driven_not_case_origin_driven() {
+    let mut fixture = fixture();
+    let second = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+
+    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+        .expect("qualifying institution-authored evidence should resolve to custody");
+    assert_eq!(arrests.len(), 1);
+    let record = fixture
+        .state
+        .legal()
+        .get_arrest(arrests[0])
+        .expect("autonomous arrest should persist");
+    assert_eq!(record.character(), fixture.suspect);
+    assert_eq!(record.investigation(), fixture.investigation);
+    assert_eq!(
+        record.evidence(),
+        &BTreeSet::from([fixture.evidence, second])
+    );
+    validate_state(&fixture.state).expect("evidence-driven custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_arrest_leaves_legal_authority_cases_outside_police_custody() {
+    let mut fixture = fixture();
+    let legal_authority = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Municipal Investigative Authority".to_owned(),
+            kind: OrganizationKind::LegalAuthority,
+        },
+    )
+    .expect("legal authority should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: legal_authority,
+            title: "Administrative corruption file".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.suspect)]),
+        },
+    )
+    .expect("legal-authority investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("legal-authority investigation should commit");
+    for kind in [EvidenceKind::Document, EvidenceKind::FinancialRecord] {
+        validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation,
+                custodian: legal_authority,
+                subject: EntityRef::Character(fixture.suspect),
+                origin: None,
+                kind,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("legal-authority evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("legal-authority evidence should commit");
+    }
+
+    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+        .expect("non-police investigative evidence must not break the autonomous custody pass");
+    assert!(arrests.is_empty());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("legal-authority case should leave valid state");
+    validate_invariants(&fixture.state);
 }
 
 #[test]
