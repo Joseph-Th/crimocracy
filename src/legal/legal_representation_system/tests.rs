@@ -896,6 +896,63 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
 }
 
 #[test]
+fn automatic_legal_support_prefers_stronger_later_counsel() {
+    let mut fx = fixture();
+    set_policy(
+        &fx.registry,
+        &mut fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate");
+
+    let stronger_counsel = insert_character(
+        &mut fx.state,
+        CharacterDraft {
+            name: "Margaret Shaw".to_owned(),
+            organization: Some(fx.firm),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(96))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("stronger counsel should validate");
+    validate_set_relationship(&fx.state, fx.handler, stronger_counsel, relationship())
+        .expect("stronger counsel relationship should validate")
+        .commit(&mut fx.state);
+    let stronger_contact = validate_establish_contact(
+        &fx.state,
+        InstitutionalContactDraft {
+            sponsor: fx.sponsor,
+            handler: fx.handler,
+            contact: stronger_counsel,
+        },
+    )
+    .expect("stronger legal contact should validate")
+    .commit(&mut fx.state)
+    .expect("stronger legal contact should commit");
+    assert!(
+        stronger_contact > fx.contact,
+        "fixture must make the stronger lawyer the newer contact"
+    );
+
+    let retained = apply_automatic_legal_support(&mut fx.state)
+        .expect("automatic support should select among viable lawyers");
+    assert_eq!(retained.len(), 1);
+    let representation = fx
+        .state
+        .legal()
+        .get_legal_representation(retained[0])
+        .expect("automatic representation should persist");
+    assert_eq!(representation.contact(), stronger_contact);
+    assert_eq!(representation.counsel(), stronger_counsel);
+    validate_state(&fx.state).expect("competence-ranked automatic support should remain valid");
+    validate_invariants(&fx.state);
+}
+
+#[test]
 fn mandate_standing_order_governs_automatic_legal_support_for_the_supervised() {
     let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
     let supervisor = fx

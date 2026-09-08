@@ -32,6 +32,7 @@ use crate::legal::{
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, OrganizationKind};
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -965,7 +966,8 @@ struct ResolvedAutomaticLegalSupport {
 /// organization that runs the Automatic policy gets counsel retained through the canonical
 /// representation path. Organization policy may aggregate sponsor liquidity; a mandate-sourced
 /// override must spend through its Legal-scope budget account and current budget window. Counsel
-/// is selected from the first currently usable LegalServices channel in stable contact order.
+/// is selected from the strongest currently usable LegalServices channel by LegalKnowledge,
+/// with stable contact/account IDs only as exact-skill tie-breakers.
 /// Organizations without those prerequisites see no action — the policy promises support, and
 /// this stage delivers it only when the pieces exist for the canonical transaction to carry it.
 pub(crate) fn apply_automatic_legal_support(
@@ -998,7 +1000,7 @@ pub(crate) fn apply_automatic_legal_support(
             continue;
         };
         let Some(validated_representation) =
-            validate_first_usable_automatic_counsel(state, candidate, fee, &payer_accounts)?
+            validate_best_usable_automatic_counsel(state, candidate, fee, &payer_accounts)?
         else {
             continue;
         };
@@ -1199,17 +1201,17 @@ fn resolve_automatic_support_payer_accounts(
     Ok(Some(payer_accounts))
 }
 
-fn validate_first_usable_automatic_counsel(
+fn validate_best_usable_automatic_counsel(
     state: &AppState,
     candidate: AutomaticLegalSupportCandidate,
     fee: Money,
     payer_accounts: &BTreeSet<FinancialAccountId>,
 ) -> Result<Option<ValidatedLegalRepresentation>, LegalRepresentationError> {
-    // Legal contacts are broader than retained counsel: prosecutors and legal authorities
-    // also expose Legal channels. Walk contacts in stable ID order until a live LegalServices
-    // lawyer with an operating account can actually carry this representation. A detained
-    // endpoint or non-lawyer is an ordinary temporary/institutional mismatch, not a reason to
-    // let an older unusable contact block a later viable one.
+    // Legal contacts are broader than retained counsel: prosecutors and legal authorities also
+    // expose Legal channels. Rank every currently viable LegalServices lawyer by actual legal
+    // competence rather than contact creation order. Contact/account IDs are deterministic
+    // tie-breakers only, so adding a stronger later relationship can improve automatic defense.
+    let mut best: Option<(Reverse<u8>, ContactId, FinancialAccountId)> = None;
     for contact in state.contacts.contacts_for_sponsor(candidate.sponsor) {
         if contact.status() != ContactStatus::Active
             || contact.kind() != ContactKind::Legal
@@ -1227,9 +1229,9 @@ fn validate_first_usable_automatic_counsel(
             .world
             .get_character(contact.contact())
             .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
-        if counsel.capability(CapabilityKind::LegalKnowledge).is_none() {
+        let Some(legal_knowledge) = counsel.capability(CapabilityKind::LegalKnowledge) else {
             continue;
-        }
+        };
         let Some(provider_account) = state
             .finance
             .accounts_for(FinancialOwner::Organization(contact.institution()))
@@ -1237,22 +1239,32 @@ fn validate_first_usable_automatic_counsel(
         else {
             continue;
         };
-        return validate_retain_legal_representation(
-            state,
-            LegalRepresentationDraft {
-                arrest: candidate.arrest,
-                sponsor: candidate.sponsor,
-                contact: contact.id(),
-                fee,
-                payer_accounts: payer_accounts.clone(),
-                provider_account: provider_account.id(),
-                authorization: candidate.authorization,
-                origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
-            },
-        )
-        .map(Some);
+        let ranked = (
+            Reverse(legal_knowledge.value()),
+            contact.id(),
+            provider_account.id(),
+        );
+        if best.is_none_or(|current| ranked < current) {
+            best = Some(ranked);
+        }
     }
-    Ok(None)
+    let Some((_, contact, provider_account)) = best else {
+        return Ok(None);
+    };
+    validate_retain_legal_representation(
+        state,
+        LegalRepresentationDraft {
+            arrest: candidate.arrest,
+            sponsor: candidate.sponsor,
+            contact,
+            fee,
+            payer_accounts: payer_accounts.clone(),
+            provider_account,
+            authorization: candidate.authorization,
+            origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
+        },
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

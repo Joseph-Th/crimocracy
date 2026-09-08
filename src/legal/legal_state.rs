@@ -6,7 +6,6 @@
 //! through read-only getters, and sibling `legal_state_validation.rs` owns the
 //! `has_consistent_*` projection checks over the same private fields.
 
-#[cfg(test)]
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
@@ -984,6 +983,44 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate investigation ID inserted"
         );
+    }
+
+    /// Adds incident-declared subject matter to an existing investigation while preserving the
+    /// subject index. Incident intake uses this when a suspended originated shelf is resumed:
+    /// opening a new file and continuing an old one must not disagree about what the same
+    /// validated incident is about merely because some fresh evidence is still weak.
+    pub(crate) fn extend_investigation_subjects(
+        &mut self,
+        investigation_id: InvestigationId,
+        subjects: BTreeSet<EntityRef>,
+    ) {
+        let mut added = Vec::new();
+        {
+            let investigation = self
+                .investigations
+                .get_mut(&investigation_id)
+                .expect("validated investigation disappeared before subject merge");
+            for subject in subjects {
+                if investigation.subjects.insert(subject) {
+                    added.push(subject);
+                }
+            }
+            if added.is_empty() {
+                return;
+            }
+            investigation.version = investigation
+                .version
+                .checked_add(1)
+                .expect("investigation version counter exhausted");
+        }
+        for subject in added {
+            self.indexes
+                .investigations
+                .investigations_by_subject
+                .entry(subject)
+                .or_default()
+                .insert(investigation_id);
+        }
     }
 
     /// Advances a case's last-activity instant and re-synchronizes the cold-decay index in one

@@ -940,6 +940,11 @@ impl ValidatedIncidentIntake {
                 // personal knowledge through the shared transition path.
                 validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?
                     .commit(state)?;
+                // A fresh case stores every validated incident subject at opening time. Preserve
+                // the same semantic boundary on continuation instead of making weak-but-valid
+                // non-character subject matter disappear merely because this incident found a
+                // resumable shelf.
+                state.legal.extend_investigation_subjects(shelf, subjects);
                 shelf
             }
             None => {
@@ -1036,10 +1041,11 @@ pub fn validate_incident_intake(
 }
 
 /// Finds the owner's suspended originated shelf sharing subject matter with the draft, so a
-/// later incident continues the existing case file instead of opening a parallel one while
-/// the old shelf sits cold holding nothing. The lowest case id wins deterministically when
-/// several shelves match. Institution-authored cases (no origination link) keep their explicit
-/// lifecycle and are never auto-resumed.
+/// later incident continues the most relevant existing file instead of opening a parallel one.
+/// Exact origin continuity outranks subject overlap, broader overlap outranks narrower overlap,
+/// and more recently active casework outranks an older shelf. Investigation ID is only the final
+/// deterministic tie-breaker. Institution-authored cases (no origination link) keep their
+/// explicit lifecycle and are never auto-resumed.
 fn find_resumable_shelf(
     state: &AppState,
     draft: &IncidentIntakeDraft,
@@ -1049,14 +1055,19 @@ fn find_resumable_shelf(
         .investigations_for_owner(draft.owner)
         .filter(|record| record.status() == InvestigationStatus::Suspended)
         .filter(|record| record.origin().is_some())
-        .filter(|record| {
-            record
-                .subjects()
-                .iter()
-                .any(|subject| draft.subjects.contains(subject))
+        .filter_map(|record| {
+            let overlap = record.subjects().intersection(&draft.subjects).count();
+            (overlap > 0).then_some((record, overlap))
         })
-        .map(|record| (record.id(), record.version()))
-        .min()
+        .max_by_key(|(record, overlap)| {
+            (
+                record.origin() == draft.origin,
+                *overlap,
+                record.last_activity_at(),
+                Reverse(record.id()),
+            )
+        })
+        .map(|(record, _)| (record.id(), record.version()))
 }
 
 fn validate_incident_intake_dependencies(

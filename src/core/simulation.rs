@@ -39,7 +39,7 @@ use crate::operations::operation_system::{
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
 use crate::opportunities::opportunity_system::apply_opportunity_expiry;
-use crate::recruitment::recruitment_system::apply_due_autonomous_recruitment;
+use crate::recruitment::autonomous_recruitment::apply_due_autonomous_recruitment;
 use crate::registry::Registry;
 use crate::reports::executive_brief::{
     decide_executive_brief, is_executive_brief_due, validate_executive_brief_plan,

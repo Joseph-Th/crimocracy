@@ -62,7 +62,7 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 ## Program model
 
 - **Registry** — immutable authored definitions and validated lookup tables.
-- **AppState** — serializable mutable campaign state. Typed IDs, clocks, and 5 state-owned RNG streams.
+- **AppState** — serializable mutable campaign state. Typed IDs, clocks, and 4 state-owned RNG streams.
 - **Records** — typed identity, lifecycle, references, and version state.
 - **Systems** — validate requests, derive decisions, commit authoritative mutation, preserve invariants.
 - **Indexes and projections** — derived views maintained from authoritative records. Never independent truth.
@@ -79,7 +79,7 @@ After that, every minute advances through one contractual pipeline:
 
 ```text
  1  content::build_registry          validated immutable registry (content::CURRENT_CONTENT_REVISION)
- 2  AppState::new(seed)              serializable state, 5 ChaCha8Rng streams, SimTime::ZERO
+ 2  AppState::new(seed)              serializable state, 4 ChaCha8Rng streams, SimTime::ZERO
  3  validate_* / decide_*            domain system validates or derives read-only plan
  4  Validated*::commit / apply_*      owning system commits atomically, preserves indexes
  5  core::simulation::run_tick        one simulated minute in stable contractual order
@@ -150,7 +150,7 @@ are validated by `src/core/invariants/`. The top-level tick is
 | `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension; acquisition of independently owned businesses at the authored kind price paid by aggregating organization-owned accounted-funds accounts, with exact source debits owned by the ledger and purchase consideration credited to the acquired business's non-liquid seller-settlement counterparty rather than its operating cash | `business_economy_system` (establishment/settlement/disruption/suspension), `business_acquisition` (canonical purchase composing ownership transfer, first economy establishment, and payment), `business_reporting` (read-only) | `src/economy/business_acquisition.rs` |
 | `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold; autonomous custody is evidence-driven across active LawEnforcement-owned investigations, requires independent non-weak/non-questionable evidence not known inadmissible, is one-shot per case/person pair, and leaves non-police LegalAuthority files investigative only; custody has an authored maximum because charging/bail/trial are outside the current foundation; prosecution referrals accept only source-authority evidence whose subject is the case defendant; direct and organization-policy automatic defense retention can aggregate sponsor liquid accounts, while mandate-sourced automatic and explicitly delegated retention use the mandate's Legal scope and budget account | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, `legal_representation_system`, `prosecution_system`, …) via `legal_state`; arrest composes validated responsibility preemption; investigation and prosecution staffing remain current assignments while historical action actors stay on durable artifacts; retainer payment allocation and delegated budget usage are historical ledger truth, not duplicated representation state | `src/legal/legal_state.rs` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) | `src/contacts/contact_system.rs` |
-| `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` (channels and autonomous pass); `scoring` owns the deterministic factor/margin arithmetic shared by decide paths and invariant re-derivation | `src/recruitment/recruitment_system.rs`, `src/recruitment/scoring.rs` |
+| `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` owns canonical recruitment transactions; `autonomous_recruitment` owns the deterministic daily delegated policy pass; `scoring` owns factor/margin arithmetic shared by decide paths and invariant re-derivation | `src/recruitment/recruitment_system.rs`, `src/recruitment/autonomous_recruitment.rs`, `src/recruitment/scoring.rs` |
 | `reputation/` | Contextual per-audience organizational standing with baseline decay; fed by operation consequences and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface atomically with Standing reports | `reputation_system` (`apply_reputation_delta` is the single score mutation path; consequence composition and decay are tick passes) | `src/reputation/reputation_system.rs` |
 
 Adapters, the harness at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
@@ -220,7 +220,7 @@ ordered explicit inputs, state-owned RNG, and any explicitly modeled external sn
 - Parallelism may change throughput, not authoritative semantics.
 - Top-level scheduling order is visible in one orchestration surface (`run_tick`).
 
-**RNG streams — 5 independent ChaCha8, never cross-contaminate (`src/core/state.rs`):**
+**RNG streams — 4 independent ChaCha8, never cross-contaminate (`src/core/state.rs`):**
 
 | Stream | Field | Used for | Draw helper (`src/core/simulation.rs`) |
 |---|---|---|---|
@@ -228,7 +228,6 @@ ordered explicit inputs, state-owned RNG, and any explicitly modeled external sn
 | `investigation_rng` | `simulation.investigation_rng` | investigation-work variance | `draw_signed_variance(limit)` |
 | `business_rng` | `simulation.business_rng` | business cycle gross variance (basis points) | `draw_basis_point_variance(limit)` → `i16` |
 | `enterprise_rng` | `simulation.enterprise_rng` | enterprise gross variance + vice-attention roll (both **unconditionally** per cycle) | `draw_basis_point_variance` + `draw_index(10_000)` |
-| `recruitment_rng` | `simulation.recruitment_rng` | recruitment scoring variance | `draw_index` (rejection sampling) |
 
 `draw_index` at `src/core/simulation.rs` uses rejection sampling (`u64::MAX - (u64::MAX % bound)`) — no modulo bias.
 Time-indexed `find_due_*` schedulers use `BTreeMap<SimTime, BTreeSet<Id>>` and preserve its natural `(due time, ID)` order. IDs break ties only among work due at the same instant, so deterministic catch-up never lets creation order outrank chronology.

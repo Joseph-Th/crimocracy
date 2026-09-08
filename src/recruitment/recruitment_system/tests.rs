@@ -17,6 +17,9 @@ use crate::delegation::delegation_system::{validate_assign_mandate, validate_rev
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
+use crate::recruitment::autonomous_recruitment::{
+    AutonomousRecruitmentError, apply_due_autonomous_recruitment,
+};
 use crate::reports::ReportKind;
 use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
 use crate::reputation::{AudienceKind, ReputationDimension};
@@ -27,7 +30,7 @@ use crate::world::world_system::{
 };
 use crate::world::{
     ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
-    PolicyKind, PolicySetting, Rating,
+    PolicyKind, PolicySetting, Rating, TraitKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -500,7 +503,7 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
 }
 
 #[test]
-fn failed_delegated_autonomous_recruitment_does_not_consume_selection_rng() {
+fn failed_delegated_autonomous_recruitment_is_atomic() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
@@ -511,8 +514,6 @@ fn failed_delegated_autonomous_recruitment_does_not_consume_selection_rng() {
         .state
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::RecruitmentAttempt, u32::MAX);
-    let mut untouched = fixture.state.clone();
-
     let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
         .expect_err("attempt allocator exhaustion must reject autonomous recruitment");
     assert!(matches!(
@@ -535,15 +536,6 @@ fn failed_delegated_autonomous_recruitment_does_not_consume_selection_rng() {
         Some(fixture.source)
     );
 
-    let after_failure =
-        crate::core::simulation::draw_index(fixture.state.recruitment_rng_mut(), 100)
-            .expect("comparison draw should succeed");
-    let untouched_draw = crate::core::simulation::draw_index(untouched.recruitment_rng_mut(), 100)
-        .expect("control draw should succeed");
-    assert_eq!(
-        after_failure, untouched_draw,
-        "a rejected autonomous attempt must not advance the recruitment RNG"
-    );
     validate_state(&fixture.state).expect("rejected autonomous recruitment must leave valid state");
     validate_invariants(&fixture.state);
 }
@@ -576,6 +568,49 @@ fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
             .count(),
         0
     );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let stronger_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Trusted Delegated Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second delegated candidate should validate");
+    validate_set_relationship(
+        &fixture.state,
+        stronger_candidate,
+        fixture.recruiter,
+        relationship(95, 95, 0, 80, 15, 0, 50),
+    )
+    .expect("strong delegated candidate relationship should validate")
+    .commit(&mut fixture.state);
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("relationship-ranked delegated recruitment should validate");
+    assert_eq!(outcome.attempts.len(), 1);
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("delegated attempt should persist");
+    assert_eq!(attempt.candidate(), stronger_candidate);
     validate_invariants(&fixture.state);
 }
 

@@ -22,7 +22,7 @@ use crate::operations::{
     OperationIdentity, OperationKind, OperationObjective, OperationObjectiveKind, OperationRecord,
     OperationRuntime, OperationStatus, RoleKind,
 };
-use crate::registry::Registry;
+use crate::registry::{OperationDefinition, Registry};
 use crate::reports::report_system::ReportError;
 use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
@@ -430,6 +430,56 @@ pub fn validate_authorize_operation<'registry>(
     if !definition.supported_approaches().contains(&draft.approach) {
         return Err(OperationError::UnsupportedApproach);
     }
+    let participants = validate_authorization_participants(
+        state,
+        definition,
+        &draft,
+        &mut expected_participant_versions,
+    )?;
+    if let Some((character, operation)) = find_busy_participant(
+        registry,
+        state,
+        &participants,
+        draft.kind,
+        draft.scheduled_for,
+        &draft.constraints,
+    ) {
+        return Err(OperationError::ParticipantBusy {
+            character,
+            operation,
+        });
+    }
+    validate_authorization_intelligence(state, definition, &draft)?;
+    for entity in draft.objective.referenced_entities() {
+        if !is_entity_present(state, entity) {
+            return Err(OperationError::MissingEntity(entity));
+        }
+    }
+    validate_deadline_execution_window(
+        definition.execution(),
+        state.now(),
+        draft.scheduled_for,
+        &draft.constraints,
+    )?;
+    validate_authorization_constraints(state, &draft)?;
+    validate_authorization_contingencies(definition, &draft)?;
+
+    Ok(ValidatedOperation {
+        draft,
+        expected_participant_versions,
+        registry,
+    })
+}
+
+/// Validates the operation's required seats and participant availability while collecting the
+/// version pins consumed by the authorization token. Keeping this as one concern prevents the
+/// public authorization path from interleaving roster validation with plan semantics.
+fn validate_authorization_participants(
+    state: &AppState,
+    definition: &OperationDefinition,
+    draft: &OperationDraft,
+    expected_participant_versions: &mut BTreeMap<CharacterId, u32>,
+) -> Result<BTreeSet<CharacterId>, OperationError> {
     for role in definition.required_roles() {
         if !draft.roles.contains_key(role) {
             return Err(OperationError::MissingRequiredRole(*role));
@@ -468,19 +518,14 @@ pub fn validate_authorize_operation<'registry>(
     }
     let mut participants = BTreeSet::from([draft.leader]);
     participants.extend(role_participants.keys().copied());
-    if let Some((character, operation)) = find_busy_participant(
-        registry,
-        state,
-        &participants,
-        draft.kind,
-        draft.scheduled_for,
-        &draft.constraints,
-    ) {
-        return Err(OperationError::ParticipantBusy {
-            character,
-            operation,
-        });
-    }
+    Ok(participants)
+}
+
+fn validate_authorization_intelligence(
+    state: &AppState,
+    definition: &OperationDefinition,
+    draft: &OperationDraft,
+) -> Result<(), OperationError> {
     for information in &draft.intelligence {
         let record = state
             .intelligence
@@ -501,23 +546,19 @@ pub fn validate_authorize_operation<'registry>(
             return Err(OperationError::IrrelevantInformation(*information));
         }
     }
-    for entity in draft.objective.referenced_entities() {
-        if !is_entity_present(state, entity) {
-            return Err(OperationError::MissingEntity(entity));
-        }
-    }
-    validate_deadline_execution_window(
-        definition.execution(),
-        state.now(),
-        draft.scheduled_for,
-        &draft.constraints,
-    )?;
+    Ok(())
+}
+
+fn validate_authorization_constraints(
+    state: &AppState,
+    draft: &OperationDraft,
+) -> Result<(), OperationError> {
     for constraint in &draft.constraints {
         match constraint {
             crate::operations::OperationConstraint::CompleteBefore(_) => {}
             crate::operations::OperationConstraint::RequireIntelligenceTopic(topic) => {
                 // Reconnaissance prerequisite: organization-held intelligence of exactly this
-                // topic, already validated for objective relevance below, must back the plan.
+                // topic, already validated for objective relevance, must back the plan.
                 let covered = draft.intelligence.iter().any(|information| {
                     state
                         .intelligence
@@ -530,6 +571,13 @@ pub fn validate_authorize_operation<'registry>(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_authorization_contingencies(
+    definition: &OperationDefinition,
+    draft: &OperationDraft,
+) -> Result<(), OperationError> {
     for contingency in &draft.contingencies {
         match contingency {
             crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
@@ -543,12 +591,7 @@ pub fn validate_authorize_operation<'registry>(
             | crate::operations::OperationContingency::RequestDecisionOnPoliceArrival => {}
         }
     }
-
-    Ok(ValidatedOperation {
-        draft,
-        expected_participant_versions,
-        registry,
-    })
+    Ok(())
 }
 
 /// A completion deadline must leave at least one executable minute after the earliest legal

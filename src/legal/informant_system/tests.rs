@@ -740,7 +740,7 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
 }
 
 #[test]
-fn informant_id_exhaustion_rejects_before_consuming_recruitment_rng() {
+fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
     let registry = build_registry();
     let mut fixture = fixture();
     let detainee = insert_character(

@@ -1,5 +1,7 @@
-//! Relational recruitment records and indexes; `recruitment_system` owns candidate discovery, decisions, and membership changes.
+//! Relational recruitment records and indexes; `recruitment_system` owns canonical recruitment
+//! transactions and `autonomous_recruitment` owns the daily delegated decision pass.
 
+pub(crate) mod autonomous_recruitment;
 pub mod recruitment_system;
 pub mod scoring;
 

@@ -12,7 +12,7 @@ use crate::core::id::{
     CharacterId, FinancialAccountId, IdExhaustionError, IdKind, LedgerTransactionId, OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::finance::finance_system::{
     FinanceError, ValidatedFinancialAccountOpenings, validate_open_accounts,
     validate_record_transaction, validate_record_transaction_with_openings,
@@ -171,7 +171,12 @@ fn apply_organization_payroll(
     let paid = Money::from_cents(
         i64::try_from(available_cents).expect("available payroll is bounded by money owed"),
     );
-    let allocations = allocate_member_payments(&members, per_member, paid);
+    let allocations = allocate_member_payments(
+        &members,
+        per_member,
+        paid,
+        payroll_remainder_offset(state.now(), members.len()),
+    );
     let transaction = if paid > Money::ZERO {
         let mut postings: Vec<LedgerPosting> = Vec::new();
         let mut remaining = paid;
@@ -278,6 +283,7 @@ fn allocate_member_payments(
     members: &[(CharacterId, Option<CharacterId>)],
     per_member: Money,
     paid: Money,
+    remainder_offset: usize,
 ) -> Vec<(CharacterId, Option<CharacterId>, Money)> {
     let count = i64::try_from(members.len()).expect("payroll member count must fit i64");
     let base = paid.cents() / count;
@@ -286,13 +292,32 @@ fn allocate_member_payments(
         .iter()
         .enumerate()
         .map(|(index, (member, supervisor))| {
+            // A stable CharacterId order makes allocation deterministic, but always giving the
+            // low IDs the remainder cents turns creation order into a permanent wage advantage.
+            // Rotate the remainder window once per payroll day so repeated tiny shortfalls are
+            // shared fairly without adding mutable scheduling state.
+            let relative = (index + members.len() - remainder_offset) % members.len();
             let extra = i64::from(
-                i64::try_from(index).expect("payroll member index must fit i64") < remainder,
+                i64::try_from(relative).expect("payroll member index must fit i64") < remainder,
             );
             let amount = Money::from_cents(base + extra).min(per_member);
             (*member, *supervisor, amount)
         })
         .collect()
+}
+
+/// First member eligible for a remainder cent on this payroll day. Day one begins at the
+/// lowest stable member ID; later days advance one slot, so no persistent CharacterId ordering
+/// advantage survives repeated sub-cent-per-member shortfalls.
+fn payroll_remainder_offset(now: SimTime, member_count: usize) -> usize {
+    debug_assert!(member_count > 0);
+    debug_assert!(is_payroll_due(now));
+    let payroll_day = now.as_minutes() / DAY_MINUTES;
+    let zero_based_day = payroll_day.saturating_sub(1);
+    let member_count = u64::try_from(member_count)
+        .expect("payroll member count must fit the simulation clock width");
+    usize::try_from(zero_based_day % member_count)
+        .expect("payroll remainder offset is bounded by the in-memory member count")
 }
 
 /// Resolves existing personal pockets and plans every missing pocket read-only. The returned

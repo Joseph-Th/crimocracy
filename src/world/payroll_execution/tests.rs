@@ -315,7 +315,7 @@ fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
 }
 
 #[test]
-fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
+fn one_cent_shortfall_rotates_rounding_priority_across_payroll_days() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
     let per_member = registry.upkeep().per_member_daily();
@@ -343,7 +343,7 @@ fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
         .finance()
         .accounts_for(FinancialOwner::Character(fixture.boss))
         .find(|account| account.kind() == AccountKind::StreetCash)
-        .expect("boss receives the deterministic remainder cent");
+        .expect("boss receives a wage account");
     let member_pocket = fixture
         .state
         .finance()
@@ -374,6 +374,57 @@ fn one_cent_short_only_shorts_one_member_in_stable_member_order() {
             .value(),
         1,
         "a one-cent rounding shortfall should cause only minimal resentment"
+    );
+
+    // Fund the same one-cent-short payroll on day two. The extra cent rotates to the soldier,
+    // so the boss takes this day's one-cent shortfall instead of CharacterId order making the
+    // subordinate the permanent rounding loser.
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        owed.cents() - 1,
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("second one-cent-short payroll should settle");
+
+    let expected_two_day_total = Money::from_cents(
+        per_member
+            .cents()
+            .checked_mul(2)
+            .and_then(|cents| cents.checked_sub(1))
+            .expect("two-day wage total should fit"),
+    );
+    let boss_balance = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.boss))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("boss wage account persists")
+        .balance();
+    let member_balance = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.member))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("member wage account persists")
+        .balance();
+    assert_eq!(boss_balance, expected_two_day_total);
+    assert_eq!(member_balance, expected_two_day_total);
+    assert_eq!(
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.member, fixture.boss)
+            .expect("day-one rounding shortfall remains represented")
+            .dimensions()
+            .resentment
+            .value(),
+        1,
+        "the subordinate must not gain another resentment point when day-two rounding favors them"
     );
     validate_invariants(&fixture.state);
 }

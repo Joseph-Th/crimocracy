@@ -14,7 +14,7 @@ evidence rules are in [`TESTING.md`](TESTING.md); intent is in
 
 ```text
 Registry (immutable, build_registry)  ─┐
-AppState  (mutable domain state + 5 RNG streams + clocks) ─┤─► run_tick (1 min, deterministic ordered phases)
+AppState  (mutable domain state + 4 RNG streams + clocks) ─┤─► run_tick (1 min, deterministic ordered phases)
 Harness   (evaluation surface, smoke/full, player-visible only) ─┘
 ```
 
@@ -112,9 +112,9 @@ No bypasses. If you are constructing a `*Record` literal, stop — use the owner
    maintain every derived index (`BTreeMap` + `BTreeSet`) and bump `version` where
    present. Handle the project's enums exhaustively.
 5. **Preserve determinism.** Use `BTreeMap`/`BTreeSet` or explicit stable sorting
-   with tie-breakers. Draw randomness only from `state.operation_rng_mut()` /
-   `investigation_rng_mut()` / `business_rng_mut()` / `enterprise_rng_mut()` /
-   `recruitment_rng_mut()` via `draw_index`.
+   with tie-breakers. When authored behavior is stochastic, draw only from
+   `state.operation_rng_mut()` / `investigation_rng_mut()` / `business_rng_mut()` /
+   `enterprise_rng_mut()` via `draw_index`. Do not add randomness merely to break ties.
 6. **Preserve persistence.** Every future-affecting value must survive `build_save` →
    `restore_save` (`src/core/persistence.rs`). Add `#[derive(Serialize,Deserialize)]`
    and a round-trip test if you add state.
