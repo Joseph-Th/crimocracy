@@ -23,7 +23,7 @@ use crate::finance::finance_system::{insert_account, validate_record_transaction
 use crate::finance::{
     FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
-use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
+use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_incident_intake, validate_open_investigation,
 };
@@ -1269,19 +1269,21 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
             .next_cycle_at(),
         Some(SimTime::from_minutes(1_440))
     );
-    fixture
-        .state
-        .advance_clock(SimDuration::from_minutes(2_880));
+    // Stay one minute short of the authored custody maximum: the overdue cycle must remain
+    // paused while its manager is still actually detained.
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().maximum_detention().as_minutes() - 3,
+    ));
     let still_detained_tick = run_tick(&registry, &mut fixture.state);
     assert!(still_detained_tick.enterprise_cycles.is_empty());
+    assert!(still_detained_tick.custody_releases.is_empty());
     validate_state(&fixture.state).expect("paused enterprise detention state should validate");
     validate_invariants(&fixture.state);
 
-    validate_release_arrest(&fixture.state, arrest)
-        .expect("manager detention should release")
-        .commit(&mut fixture.state)
-        .expect("manager release should commit");
+    // The next canonical minute reaches the custody cap. Release runs before economy settlement,
+    // so the manager becomes available and the single overdue enterprise cycle settles immediately.
     let released_tick = run_tick(&registry, &mut fixture.state);
+    assert_eq!(released_tick.custody_releases, vec![arrest]);
     assert_eq!(released_tick.enterprise_cycles.len(), 1);
     assert_eq!(
         fixture

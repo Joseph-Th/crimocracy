@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 38;
+pub const CURRENT_CONTENT_REVISION: u32 = 39;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -63,6 +63,10 @@ pub fn build_registry() -> Registry {
             witness_interview_attempt_limit: 3,
             // One custody day before a detainee faces their informant-recruitment decision.
             informant_decision_delay: SimDuration::from_minutes(1_440),
+            // Two custody days is long enough for the one-day informant decision and legal
+            // support response to matter, but custody cannot become de facto permanent while
+            // charging, bail, and trial remain outside the modeled foundation.
+            maximum_detention: SimDuration::from_minutes(2_880),
         })
         .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);

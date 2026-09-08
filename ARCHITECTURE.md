@@ -111,11 +111,12 @@ determinism and harness contracts.
 12  apply_autonomous_prosecution_staffing   refill prosecution seats released by custody
 13  apply_detainee_informant_recruitment    single decision after the authored detention delay
 14  apply_informant_disclosures             holder-knowledge → handler cases
-15  apply_automatic_legal_support           policy → representation via canonical path
-16  apply_cold_case_decay                   originated cases only, authored inactivity window, no RNG
-17  run_business_cycle_phase                per due business (RNG: business stream)
-18  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
-19  apply_daily_payroll  →  apply_reputation_phase
+15  apply_due_custody_releases              authored pre-charge custody cap; informant decision already had its window
+16  apply_automatic_legal_support           policy → representation; concluded automatic retainers end same minute as release
+17  apply_cold_case_decay                   originated cases only, authored inactivity window, no RNG
+18  run_business_cycle_phase                per due business (RNG: business stream)
+19  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
+20  apply_daily_payroll  →  apply_reputation_phase
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_autonomous_enterprises  reads current police-fear posture
     ──► synthesize_executive_brief        sees every report/decision made this minute, last
@@ -147,7 +148,7 @@ are validated by `src/core/invariants/`. The top-level tick is
 | `delegation/` | Organization-owned mandates and responsibility indexes | `delegation_system` | `src/delegation/delegation_system.rs` |
 | `enterprises/` | Routine criminal enterprises and cycle history; Active → Suspended → Active/Retired lifecycle, with Retired terminal history releasing the kind/location slot; per-cycle vice-attention rolls convert sustained district casework into an originated inquiry on the racket through canonical incident intake; delegated daily expansion for non-player organizations through canonical establishment, using only working capital not already reserved for active or earlier same-pass rackets | `enterprise_execution` (lifecycle/settlement), `autonomous_expansion` (daily delegated expansion), `enterprise_reporting` (read-only) | `src/enterprises/enterprise_execution.rs` |
 | `economy/` | Legitimate business economies, cycle history, sabotage disruption horizons, chronic-loss suspension; acquisition of independently owned businesses at the authored kind price paid by aggregating organization-owned accounted-funds accounts, with exact source debits owned by the ledger | `business_economy_system` (establishment/settlement/disruption/suspension), `business_acquisition` (canonical purchase composing ownership transfer, first economy establishment, and payment), `business_reporting` (read-only) | `src/economy/business_acquisition.rs` |
-| `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold; autonomous custody is evidence-driven across active LawEnforcement-owned investigations, requires independent non-weak/non-questionable evidence not known inadmissible, and leaves non-police LegalAuthority files investigative only; prosecution referrals accept only source-authority evidence whose subject is the case defendant; direct and organization-policy automatic defense retention can aggregate sponsor liquid accounts, while mandate-sourced automatic and explicitly delegated retention use the mandate's Legal scope and budget account | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, `legal_representation_system`, `prosecution_system`, …) via `legal_state`; arrest composes validated responsibility preemption; investigation and prosecution staffing remain current assignments while historical action actors stay on durable artifacts; retainer payment allocation and delegated budget usage are historical ledger truth, not duplicated representation state | `src/legal/legal_state.rs` |
+| `legal/` | Jurisdictions, patrols, timed police response, investigations/evidence/arrests/custody/representation/prosecution/witnesses/informants; case origination is a typed entity link (operation exposure or enterprise vice attention) and only originated cases decay cold; autonomous custody is evidence-driven across active LawEnforcement-owned investigations, requires independent non-weak/non-questionable evidence not known inadmissible, is one-shot per case/person pair, and leaves non-police LegalAuthority files investigative only; custody has an authored maximum because charging/bail/trial are outside the current foundation; prosecution referrals accept only source-authority evidence whose subject is the case defendant; direct and organization-policy automatic defense retention can aggregate sponsor liquid accounts, while mandate-sourced automatic and explicitly delegated retention use the mandate's Legal scope and budget account | Named modules (`jurisdiction_system`, `patrol_system`, `investigation_system`, `arrest_system`, `legal_representation_system`, `prosecution_system`, …) via `legal_state`; arrest composes validated responsibility preemption; investigation and prosecution staffing remain current assignments while historical action actors stay on durable artifacts; retainer payment allocation and delegated budget usage are historical ledger truth, not duplicated representation state | `src/legal/legal_state.rs` |
 | `contacts/` | Institutional contacts and provenance-preserving disclosures | `contact_system` (establishment, termination, disclosure; `find_pending_disclosure_sources` read-only offer surface) | `src/contacts/contact_system.rs` |
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes | `recruitment_system` (channels and autonomous pass); `scoring` owns the deterministic factor/margin arithmetic shared by decide paths and invariant re-derivation | `src/recruitment/recruitment_system.rs`, `src/recruitment/scoring.rs` |
 | `reputation/` | Contextual per-audience organizational standing with baseline decay; fed by operation consequences and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface atomically with Standing reports | `reputation_system` (`apply_reputation_delta` is the single score mutation path; consequence composition and decay are tick passes) | `src/reputation/reputation_system.rs` |
@@ -254,7 +255,7 @@ restore_save(registry, envelope) ─► format check → schema check → conten
 - Core systems do not perform implicit filesystem IO (`src/core/persistence.rs` returns data; adapters do IO).
 
 ID high-water marks: `validate_id_allocators` checks `next > max_persisted` per `IdKind`.
-Finance re-derivation: `src/core/invariants/mod.rs` walks the ledger once,
+Finance re-derivation: `src/core/invariants/finance.rs` walks the ledger once,
 dense `Vec<i64>` keyed by `raw()` — balances must agree with derived cents.
 
 ## Runtime invariants
@@ -275,7 +276,7 @@ dense `Vec<i64>` keyed by `raw()` — balances must agree with derived cents.
 
 Maintain `validate_invariants(state)` for structural checks. The soak exercises mixed state under invariant validation; [`TESTING.md`](TESTING.md) owns how it is run.
 
-The ledger enforces balance and overflow, not solvency: a validated settlement may drive an operating account negative, recording an obligation rather than rejecting the cycle. Domain owners decide suspension or closure consequences; the ledger itself never silently clamps balances. See `src/finance/mod.rs` (`Money(i64 cents)`) and `src/core/invariants/mod.rs` (single-pass re-derivation).
+The ledger enforces balance and overflow, not solvency: a validated settlement may drive an operating account negative, recording an obligation rather than rejecting the cycle. Domain owners decide suspension or closure consequences; the ledger itself never silently clamps balances. See `src/finance/mod.rs` (`Money(i64 cents)`) and `src/core/invariants/finance.rs` (single-pass re-derivation).
 
 ## API and representation
 

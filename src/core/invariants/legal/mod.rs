@@ -6,6 +6,7 @@ mod custody;
 mod enforcement;
 mod prosecution;
 mod references;
+mod representation;
 
 pub(crate) use casework::validate_developed_review_evidence;
 
@@ -22,7 +23,7 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
     enforcement::validate_police_responses(state)?;
     enforcement::validate_patrol_deployments(state)?;
     custody::validate_arrests(state)?;
-    custody::validate_legal_representations(state)?;
+    representation::validate_legal_representations(state)?;
     prosecution::validate_prosecution_cases(state)?;
     casework::validate_investigations(state)?;
     // Derived-evidence uniqueness spans detective work and the evidence graph, so the

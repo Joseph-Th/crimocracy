@@ -586,6 +586,10 @@ pub struct LegalConfigSpec {
     pub witness_interview_attempt_limit: u8,
     /// How long after detention a detainee faces their single informant-recruitment decision.
     pub informant_decision_delay: SimDuration,
+    /// Maximum continuous detention before the modeled pre-charge custody window ends.
+    /// Charging, bail, and trial are outside the current simulation scope, so custody itself
+    /// must have a bounded lifecycle rather than silently becoming permanent confinement.
+    pub maximum_detention: SimDuration,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct UpkeepConfigSpec {

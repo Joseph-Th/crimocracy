@@ -491,6 +491,28 @@ pub fn validate_release_arrest(
     })
 }
 
+/// Releases detainees whose modeled custody window has elapsed. The current legal foundation
+/// intentionally stops before charging, bail, and trial, so an arrest cannot imply permanent
+/// confinement merely because no higher legal layer exists to advance it. The authored window
+/// is long enough for the detainee informant decision to occur first.
+pub(crate) fn apply_due_custody_releases(
+    state: &mut AppState,
+    maximum_detention: crate::core::time::SimDuration,
+) -> Result<Vec<ArrestId>, ArrestError> {
+    let due: Vec<ArrestId> = state
+        .legal
+        .detained_arrests()
+        .filter(|arrest| state.now() >= arrest.arrested_at() + maximum_detention)
+        .map(|arrest| arrest.id())
+        .collect();
+    for arrest in &due {
+        // IDs came from the authoritative detained index in this same pass. A rejection here
+        // is therefore broken current state, not an ordinary race to ignore.
+        validate_release_arrest(state, *arrest)?.commit(state)?;
+    }
+    Ok(due)
+}
+
 /// Evidence bar for the autonomous conversion step: at least two qualifying items, at
 /// least one of them Strong or Direct. Qualifying evidence targets the subject directly,
 /// is held by the case's own authority, is not known inadmissible, and meets the same minimum
@@ -549,6 +571,18 @@ pub fn apply_autonomous_evidence_arrests(
     let mut arrests = Vec::new();
     for (investigation_id, character) in candidates {
         if state.legal.active_arrest_for_character(character).is_some() {
+            continue;
+        }
+        // Autonomous custody is a conservative one-time conversion for one case/person pair.
+        // Once that detention has ended, unchanged case evidence must not manufacture an
+        // arrest-release-arrest loop every authored custody window. A later deliberate re-arrest
+        // remains available through `validate_arrest`; a distinct investigation can also make
+        // its own autonomous custody decision.
+        if state
+            .legal
+            .arrests_for_investigation(investigation_id)
+            .any(|arrest| arrest.character() == character)
+        {
             continue;
         }
 

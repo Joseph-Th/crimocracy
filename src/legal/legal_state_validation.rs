@@ -319,15 +319,157 @@ impl LegalState {
         }
         true
     }
-    pub(crate) fn has_consistent_indexes(&self) -> bool {
-        if !self.has_consistent_primary_keys()
-            || !self.has_consistent_arrest_indexes()
-            || !self.has_consistent_legal_representation_indexes()
-            || !self.has_consistent_prosecution_indexes()
-            || !self.has_consistent_police_response_indexes()
-        {
-            return false;
+
+    fn has_consistent_informant_indexes(&self) -> bool {
+        for informant in self.informants.values() {
+            let id = informant.id();
+            if informant.status() != InformantStatus::Active {
+                return false;
+            }
+            let active_index = self
+                .indexes
+                .informants
+                .active_by_character_handler
+                .get(&(informant.character(), informant.handler()));
+            if active_index != Some(&id) || !self.indexes.informants.active.contains(&id) {
+                return false;
+            }
         }
+        for id in &self.indexes.informants.active {
+            if !self
+                .informants
+                .get(id)
+                .is_some_and(|record| record.status() == InformantStatus::Active)
+            {
+                return false;
+            }
+        }
+        for (key, id) in &self.indexes.informants.active_by_character_handler {
+            if !self.informants.get(id).is_some_and(|record| {
+                record.status() == InformantStatus::Active
+                    && (record.character(), record.handler()) == *key
+            }) {
+                return false;
+            }
+        }
+        for disclosure in self.informant_disclosures.values() {
+            if !self.informants.contains_key(&disclosure.informant())
+                || !self.evidence.contains_key(&disclosure.evidence())
+                || self
+                    .indexes
+                    .informants
+                    .disclosure_by_case_information
+                    .get(&(disclosure.investigation(), disclosure.source_information()))
+                    != Some(&disclosure.id())
+            {
+                return false;
+            }
+        }
+        for (key, disclosure) in &self.indexes.informants.disclosure_by_case_information {
+            if !self
+                .informant_disclosures
+                .get(disclosure)
+                .is_some_and(|record| (record.investigation(), record.source_information()) == *key)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn has_consistent_witness_indexes(&self) -> bool {
+        for witness in self.case_witnesses.values() {
+            if self
+                .indexes
+                .witnesses
+                .case_witness_by_case_character
+                .get(&(witness.investigation(), witness.witness()))
+                != Some(&witness.id())
+                || !self
+                    .indexes
+                    .witnesses
+                    .case_witnesses_by_investigation
+                    .get(&witness.investigation())
+                    .is_some_and(|ids| ids.contains(&witness.id()))
+                || !self
+                    .indexes
+                    .witnesses
+                    .case_witnesses_by_character
+                    .get(&witness.witness())
+                    .is_some_and(|ids| ids.contains(&witness.id()))
+            {
+                return false;
+            }
+            for statement in witness.statements() {
+                if !self
+                    .witness_statements
+                    .get(statement)
+                    .is_some_and(|record| record.case_witness() == witness.id())
+                {
+                    return false;
+                }
+            }
+        }
+        for (key, id) in &self.indexes.witnesses.case_witness_by_case_character {
+            if !self
+                .case_witnesses
+                .get(id)
+                .is_some_and(|record| (record.investigation(), record.witness()) == *key)
+            {
+                return false;
+            }
+        }
+        for (investigation, ids) in &self.indexes.witnesses.case_witnesses_by_investigation {
+            for id in ids {
+                if !self
+                    .case_witnesses
+                    .get(id)
+                    .is_some_and(|record| record.investigation() == *investigation)
+                {
+                    return false;
+                }
+            }
+        }
+        for (character, ids) in &self.indexes.witnesses.case_witnesses_by_character {
+            for id in ids {
+                if !self
+                    .case_witnesses
+                    .get(id)
+                    .is_some_and(|record| record.witness() == *character)
+                {
+                    return false;
+                }
+            }
+        }
+        for statement in self.witness_statements.values() {
+            if !self
+                .case_witnesses
+                .get(&statement.case_witness())
+                .is_some_and(|witness| witness.statements().contains(&statement.id()))
+                || self
+                    .indexes
+                    .witnesses
+                    .witness_statement_by_evidence
+                    .get(&statement.evidence())
+                    != Some(&statement.id())
+                || !self.evidence.contains_key(&statement.evidence())
+            {
+                return false;
+            }
+        }
+        for (evidence, statement) in &self.indexes.witnesses.witness_statement_by_evidence {
+            if !self
+                .witness_statements
+                .get(statement)
+                .is_some_and(|record| record.evidence() == *evidence)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn has_consistent_investigation_indexes(&self) -> bool {
         for investigation in self.investigations.values() {
             if !self
                 .indexes
@@ -434,147 +576,6 @@ impl LegalState {
                 return false;
             }
         }
-        for informant in self.informants.values() {
-            let id = informant.id();
-            if informant.status() != InformantStatus::Active {
-                return false;
-            }
-            let active_index = self
-                .indexes
-                .informants
-                .active_by_character_handler
-                .get(&(informant.character(), informant.handler()));
-            if active_index != Some(&id) || !self.indexes.informants.active.contains(&id) {
-                return false;
-            }
-        }
-        for id in &self.indexes.informants.active {
-            if !self
-                .informants
-                .get(id)
-                .is_some_and(|record| record.status() == InformantStatus::Active)
-            {
-                return false;
-            }
-        }
-        for (key, id) in &self.indexes.informants.active_by_character_handler {
-            if !self.informants.get(id).is_some_and(|record| {
-                record.status() == InformantStatus::Active
-                    && (record.character(), record.handler()) == *key
-            }) {
-                return false;
-            }
-        }
-        for disclosure in self.informant_disclosures.values() {
-            if !self.informants.contains_key(&disclosure.informant())
-                || !self.evidence.contains_key(&disclosure.evidence())
-                || self
-                    .indexes
-                    .informants
-                    .disclosure_by_case_information
-                    .get(&(disclosure.investigation(), disclosure.source_information()))
-                    != Some(&disclosure.id())
-            {
-                return false;
-            }
-        }
-        for (key, disclosure) in &self.indexes.informants.disclosure_by_case_information {
-            if !self
-                .informant_disclosures
-                .get(disclosure)
-                .is_some_and(|record| (record.investigation(), record.source_information()) == *key)
-            {
-                return false;
-            }
-        }
-        for witness in self.case_witnesses.values() {
-            if self
-                .indexes
-                .witnesses
-                .case_witness_by_case_character
-                .get(&(witness.investigation(), witness.witness()))
-                != Some(&witness.id())
-                || !self
-                    .indexes
-                    .witnesses
-                    .case_witnesses_by_investigation
-                    .get(&witness.investigation())
-                    .is_some_and(|ids| ids.contains(&witness.id()))
-                || !self
-                    .indexes
-                    .witnesses
-                    .case_witnesses_by_character
-                    .get(&witness.witness())
-                    .is_some_and(|ids| ids.contains(&witness.id()))
-            {
-                return false;
-            }
-            for statement in witness.statements() {
-                if !self
-                    .witness_statements
-                    .get(statement)
-                    .is_some_and(|record| record.case_witness() == witness.id())
-                {
-                    return false;
-                }
-            }
-        }
-        for (key, id) in &self.indexes.witnesses.case_witness_by_case_character {
-            if !self
-                .case_witnesses
-                .get(id)
-                .is_some_and(|record| (record.investigation(), record.witness()) == *key)
-            {
-                return false;
-            }
-        }
-        for (investigation, ids) in &self.indexes.witnesses.case_witnesses_by_investigation {
-            for id in ids {
-                if !self
-                    .case_witnesses
-                    .get(id)
-                    .is_some_and(|record| record.investigation() == *investigation)
-                {
-                    return false;
-                }
-            }
-        }
-        for (character, ids) in &self.indexes.witnesses.case_witnesses_by_character {
-            for id in ids {
-                if !self
-                    .case_witnesses
-                    .get(id)
-                    .is_some_and(|record| record.witness() == *character)
-                {
-                    return false;
-                }
-            }
-        }
-        for statement in self.witness_statements.values() {
-            if !self
-                .case_witnesses
-                .get(&statement.case_witness())
-                .is_some_and(|witness| witness.statements().contains(&statement.id()))
-                || self
-                    .indexes
-                    .witnesses
-                    .witness_statement_by_evidence
-                    .get(&statement.evidence())
-                    != Some(&statement.id())
-                || !self.evidence.contains_key(&statement.evidence())
-            {
-                return false;
-            }
-        }
-        for (evidence, statement) in &self.indexes.witnesses.witness_statement_by_evidence {
-            if !self
-                .witness_statements
-                .get(statement)
-                .is_some_and(|record| record.evidence() == *evidence)
-            {
-                return false;
-            }
-        }
         for (owner, ids) in &self.indexes.investigations.by_owner {
             for id in ids {
                 if !self
@@ -597,6 +598,21 @@ impl LegalState {
                 }
             }
         }
+        for (investigator, ids) in &self.indexes.investigations.investigations_by_investigator {
+            for id in ids {
+                if !self
+                    .investigations
+                    .get(id)
+                    .is_some_and(|record| record.lead_investigator() == Some(*investigator))
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn has_consistent_evidence_indexes(&self) -> bool {
         for evidence in self.evidence.values() {
             if !self
                 .investigations
@@ -628,6 +644,10 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    fn has_consistent_investigation_work_indexes(&self) -> bool {
         for work in self.investigation_work.values() {
             if !self
                 .indexes
@@ -724,17 +744,10 @@ impl LegalState {
                 return false;
             }
         }
-        for (investigator, ids) in &self.indexes.investigations.investigations_by_investigator {
-            for id in ids {
-                if !self
-                    .investigations
-                    .get(id)
-                    .is_some_and(|record| record.lead_investigator() == Some(*investigator))
-                {
-                    return false;
-                }
-            }
-        }
+        true
+    }
+
+    fn has_consistent_jurisdiction_indexes(&self) -> bool {
         for jurisdiction in self.jurisdictions.values() {
             for neighborhood in jurisdiction.neighborhoods() {
                 if !self
@@ -763,6 +776,10 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    fn has_consistent_patrol_indexes(&self) -> bool {
         for deployment in self.patrol_deployments.values() {
             let id = deployment.id();
             let active_pair = self
@@ -811,5 +828,20 @@ impl LegalState {
             }
         }
         true
+    }
+
+    pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.has_consistent_primary_keys()
+            && self.has_consistent_investigation_indexes()
+            && self.has_consistent_investigation_work_indexes()
+            && self.has_consistent_evidence_indexes()
+            && self.has_consistent_witness_indexes()
+            && self.has_consistent_informant_indexes()
+            && self.has_consistent_arrest_indexes()
+            && self.has_consistent_legal_representation_indexes()
+            && self.has_consistent_prosecution_indexes()
+            && self.has_consistent_jurisdiction_indexes()
+            && self.has_consistent_patrol_indexes()
+            && self.has_consistent_police_response_indexes()
     }
 }

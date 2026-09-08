@@ -1,7 +1,5 @@
 //! Runtime invariant enforcement and release-safe structural state validation.
 
-use std::collections::BTreeMap;
-
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
@@ -17,17 +15,9 @@ use crate::core::state::AppState;
 #[cfg(debug_assertions)]
 use crate::core::state::CURRENT_STATE_SCHEMA_VERSION;
 use crate::decisions::DecisionResponse;
-use crate::enterprises::EnterpriseLocation;
 use crate::legal::investigation_work_execution::validate_historical_work_factors;
-use crate::legal::{InvestigationWorkKind, InvestigationWorkOutcome};
-use crate::operations::operation_economics::resolve_property_proceeds;
-use crate::operations::operation_execution::{
-    has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
-    resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
-};
-use crate::operations::police_response_integration::resolve_police_arrival_delay;
-use crate::operations::property_disposition::resolve_property_liquidation_value;
-use crate::operations::{OperationContingency, OperationStatus};
+use crate::legal::{InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkRecord};
+use crate::operations::OperationStatus;
 use crate::opportunities::OpportunityResolution;
 use crate::registry::Registry;
 use crate::world::{BusinessFunction, PolicyKind};
@@ -343,14 +333,17 @@ pub enum StateValidationError {
 
 mod business;
 mod decisions;
+mod enterprise;
+mod finance;
 mod legal;
 mod operations;
 mod opportunities;
 mod recruitment;
 mod world;
 
-use self::business::{validate_business_economies, validate_enterprises};
+use self::business::validate_business_economies;
 use self::decisions::{validate_decisions, validate_delegation};
+use self::enterprise::{validate_enterprises, validate_enterprises_against_registry};
 use self::legal::validate_legal_subsystems;
 use self::operations::validate_operations;
 use self::opportunities::validate_opportunities;
@@ -608,7 +601,7 @@ pub fn validate_state_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
-    validate_operations_against_registry(registry, state)?;
+    operations::validate_operations_against_registry(registry, state)?;
     validate_opportunities_against_registry(registry, state)?;
     validate_investigation_work_against_registry(registry, state)?;
     validate_business_cycles_against_registry(registry, state)?;
@@ -644,175 +637,6 @@ fn validate_executive_briefs_against_registry(
             });
         }
     }
-    Ok(())
-}
-
-fn validate_operations_against_registry(
-    registry: &Registry,
-    state: &AppState,
-) -> Result<(), StateValidationError> {
-    for operation in state.operations.operations() {
-        let definition = registry.get_operation(operation.kind());
-        let execution = definition.execution();
-        let has_police_entry_contingency = operation
-            .contingencies()
-            .contains(&OperationContingency::AbortOnPoliceArrivalBeforeEntry);
-        let police_response_matches_authorship =
-            operation.police_response().is_none_or(|response| {
-                state
-                    .legal
-                    .get_police_response(response)
-                    .is_some_and(|response| {
-                        let delay = resolve_police_arrival_delay(
-                            execution,
-                            response.response_presence().value(),
-                        );
-                        response.alert_score() >= execution.police_dispatch_threshold()
-                            && response.arrival_due_at()
-                                == response.dispatched_at()
-                                    + crate::core::time::SimDuration::from_minutes(delay)
-                    })
-            });
-        if !definition
-            .supported_approaches()
-            .contains(&operation.approach())
-            || definition
-                .required_roles()
-                .iter()
-                .any(|role| !operation.roles().contains_key(role))
-            || operation
-                .roles()
-                .keys()
-                .any(|role| execution.capability_for_role(*role).is_none())
-            || operation.intelligence().iter().any(|information| {
-                state
-                    .intelligence
-                    .get_information(*information)
-                    .is_none_or(|record| {
-                        !execution
-                            .relevant_intelligence_topics()
-                            .contains(&record.topic())
-                    })
-            })
-            || (has_police_entry_contingency && execution.operation_entry_offset().is_none())
-            || (execution.operation_entry_offset().is_none() && operation.entry_at().is_some())
-            || (operation.started_at().is_some()
-                && execution.operation_entry_offset().is_some()
-                && operation.entry_at().is_none())
-            || !police_response_matches_authorship
-        {
-            return Err(StateValidationError::InvalidOperationDefinition {
-                operation: operation.id(),
-            });
-        }
-        if let Some(resolution) = operation.resolution() {
-            let factors = resolution.factors();
-            let expected_margin = resolve_execution_margin(execution, factors);
-            let expected_outcome = resolve_objective_outcome(execution, expected_margin);
-            let (
-                expected_intelligence_quality,
-                expected_intelligence_adjustment,
-                expected_intelligence_topics_covered,
-                expected_intelligence_topics_relevant,
-            ) = resolve_intelligence_factors(registry, state, operation.id());
-            let expected_police_response_arrived =
-                has_police_response_arrived_by(state, operation, resolution.resolved_at());
-            let expected_property_proceeds = resolve_property_proceeds(
-                registry,
-                state,
-                operation,
-                resolution.objective_outcome(),
-            )
-            .map_err(|_| StateValidationError::InvalidOperationDefinition {
-                operation: operation.id(),
-            })?;
-            if factors.variance().unsigned_abs() > execution.variance_limit()
-                || factors.time_pressure()
-                    > crate::operations::operation_execution::MAX_TIME_PRESSURE
-                || factors.approach_adjustment()
-                    != execution
-                        .approach_difficulty_adjustment(operation.approach())
-                        .expect("validated operation approach must have an execution adjustment")
-                || factors.intelligence_quality() != expected_intelligence_quality
-                || factors.intelligence_adjustment() != expected_intelligence_adjustment
-                || factors.intelligence_topics_covered() != expected_intelligence_topics_covered
-                || factors.intelligence_topics_relevant() != expected_intelligence_topics_relevant
-                || factors.intelligence_topics_covered() > factors.intelligence_topics_relevant()
-                || factors.police_response_arrived() != expected_police_response_arrived
-                || resolution.execution_margin() != expected_margin
-                || resolution.objective_outcome() != expected_outcome
-                || resolution.property_proceeds() != expected_property_proceeds.proceeds
-            {
-                return Err(StateValidationError::InvalidOperationDefinition {
-                    operation: operation.id(),
-                });
-            }
-            if let Some(disposition) = operation.property_disposition() {
-                let proceeds = resolution.property_proceeds().ok_or(
-                    StateValidationError::InvalidOperationPropertyDisposition {
-                        operation: operation.id(),
-                    },
-                )?;
-                let expected_realized = resolve_property_liquidation_value(
-                    registry,
-                    state,
-                    operation.kind(),
-                    proceeds.estimated_value(),
-                    operation.id(),
-                    disposition.venue(),
-                )
-                .map_err(|_| {
-                    StateValidationError::InvalidOperationPropertyDisposition {
-                        operation: operation.id(),
-                    }
-                })?;
-                if disposition.realized_value() != expected_realized {
-                    return Err(StateValidationError::InvalidOperationPropertyDisposition {
-                        operation: operation.id(),
-                    });
-                }
-            }
-
-            let exposure = resolution.exposure();
-            let exposure_factors = exposure.factors();
-            let expected_intelligence_mitigation =
-                u16::from(factors.intelligence_quality().value())
-                    .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
-                    / 100;
-            let expected_exposure_score = resolve_exposure_score(execution, exposure_factors);
-            let expected_exposure_level =
-                resolve_exposure_level(execution, expected_exposure_score);
-            if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
-                || exposure_factors.approach_adjustment()
-                    != execution
-                        .exposure_approach_adjustment(operation.approach())
-                        .expect("validated operation approach must have an exposure adjustment")
-                || exposure_factors.intelligence_mitigation()
-                    != u8::try_from(expected_intelligence_mitigation)
-                        .expect("bounded exposure intelligence mitigation must fit u8")
-                || exposure_factors.police_response_arrived() != expected_police_response_arrived
-                || exposure.score() != expected_exposure_score
-                || exposure.level() != expected_exposure_level
-            {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-            if let Some(evidence_id) = exposure.evidence().iter().next() {
-                let evidence = state.legal.get_evidence(*evidence_id).ok_or(
-                    StateValidationError::InvalidOperationExposure {
-                        operation: operation.id(),
-                    },
-                )?;
-                if evidence.kind() != execution.exposure_evidence_kind() {
-                    return Err(StateValidationError::InvalidOperationExposure {
-                        operation: operation.id(),
-                    });
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -866,6 +690,25 @@ fn validate_investigation_work_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
+    validate_witness_attempts_against_registry(registry, state)?;
+    let mut derived_evidence = BTreeSet::new();
+    for work in state.legal.investigation_work() {
+        derived_evidence.clear();
+        validate_investigation_work_record_against_registry(
+            registry,
+            state,
+            work,
+            &mut derived_evidence,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_witness_attempts_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
     let witness_attempt_limit = registry.legal().witness_interview_attempt_limit();
     for witness in state.legal.case_witnesses() {
         if witness.interview_attempts() > witness_attempt_limit {
@@ -874,55 +717,59 @@ fn validate_investigation_work_against_registry(
             });
         }
     }
-    for work in state.legal.investigation_work() {
-        let definition = registry.get_investigation_work(work.kind());
-        if work.due_at() != work.scheduled_at() + definition.duration() {
-            return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-        }
-        let Some(resolution) = work.resolution() else {
-            continue;
-        };
-        let factors = resolution.factors();
-        let expected_margin = validate_historical_work_factors(definition, state, work, factors)
-            .map_err(|_| StateValidationError::InvalidInvestigationWork { work: work.id() })?;
-        if factors.variance().unsigned_abs() > definition.variance_limit()
-            || resolution.margin() != expected_margin
-        {
-            return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-        }
-        match resolution.outcome() {
-            InvestigationWorkOutcome::Connected => {
-                // Only a witness interview resolves as Connected; its frozen arithmetic was
-                // validated above and its testimony provenance is checked in `invariants::legal`.
-                if work.kind() != InvestigationWorkKind::WitnessInterview
-                    || expected_margin < definition.connected_margin()
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
+    Ok(())
+}
+
+fn validate_investigation_work_record_against_registry(
+    registry: &Registry,
+    state: &AppState,
+    work: &InvestigationWorkRecord,
+    derived_evidence: &mut BTreeSet<crate::core::id::EvidenceId>,
+) -> Result<(), StateValidationError> {
+    let definition = registry.get_investigation_work(work.kind());
+    if work.due_at() != work.scheduled_at() + definition.duration() {
+        return Err(invalid_investigation_work(work));
+    }
+    let Some(resolution) = work.resolution() else {
+        return Ok(());
+    };
+    let factors = resolution.factors();
+    let expected_margin = validate_historical_work_factors(definition, state, work, factors)
+        .map_err(|_| invalid_investigation_work(work))?;
+    if factors.variance().unsigned_abs() > definition.variance_limit()
+        || resolution.margin() != expected_margin
+    {
+        return Err(invalid_investigation_work(work));
+    }
+    match resolution.outcome() {
+        InvestigationWorkOutcome::Connected => {
+            if work.kind() != InvestigationWorkKind::WitnessInterview
+                || expected_margin < definition.connected_margin()
+            {
+                return Err(invalid_investigation_work(work));
             }
-            InvestigationWorkOutcome::Developed => {
-                if work.kind() != InvestigationWorkKind::EvidenceReview
-                    || expected_margin < definition.connected_margin()
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
-                legal_invariants::validate_developed_review_evidence(
-                    state,
-                    work,
-                    &mut BTreeSet::new(),
-                )?;
+        }
+        InvestigationWorkOutcome::Developed => {
+            if work.kind() != InvestigationWorkKind::EvidenceReview
+                || expected_margin < definition.connected_margin()
+            {
+                return Err(invalid_investigation_work(work));
             }
-            InvestigationWorkOutcome::Inconclusive => {
-                if expected_margin >= definition.connected_margin()
-                    || resolution.derived_evidence().is_some()
-                {
-                    return Err(StateValidationError::InvalidInvestigationWork { work: work.id() });
-                }
+            legal_invariants::validate_developed_review_evidence(state, work, derived_evidence)?;
+        }
+        InvestigationWorkOutcome::Inconclusive => {
+            if expected_margin >= definition.connected_margin()
+                || resolution.derived_evidence().is_some()
+            {
+                return Err(invalid_investigation_work(work));
             }
         }
     }
-
     Ok(())
+}
+
+fn invalid_investigation_work(work: &InvestigationWorkRecord) -> StateValidationError {
+    StateValidationError::InvalidInvestigationWork { work: work.id() }
 }
 
 fn validate_business_cycles_against_registry(
@@ -970,113 +817,6 @@ fn validate_business_cycles_against_registry(
     Ok(())
 }
 
-fn validate_enterprises_against_registry(
-    registry: &Registry,
-    state: &AppState,
-) -> Result<(), StateValidationError> {
-    for enterprise in state.enterprises.enterprises() {
-        let definition = registry.get_enterprise(enterprise.kind());
-        let mut network_functions = BTreeSet::new();
-        if let EnterpriseLocation::Business(business_id) = enterprise.location() {
-            let business = state.world.get_business(business_id).ok_or(
-                StateValidationError::InvalidEnterpriseLocation {
-                    enterprise: enterprise.id(),
-                },
-            )?;
-            for function in definition.required_business_functions() {
-                if !business.has_function(*function) {
-                    return Err(StateValidationError::EnterpriseBusinessRequirementMissing {
-                        enterprise: enterprise.id(),
-                        business: business_id,
-                        function: *function,
-                    });
-                }
-            }
-            network_functions.extend(business.functions().iter().copied());
-        } else if !definition.required_business_functions().is_empty() {
-            return Err(StateValidationError::InvalidEnterpriseLocation {
-                enterprise: enterprise.id(),
-            });
-        }
-        for business_id in enterprise.supporting_businesses() {
-            let business = state.world.get_business(*business_id).ok_or(
-                StateValidationError::InvalidEnterpriseSupportingBusiness {
-                    enterprise: enterprise.id(),
-                    business: *business_id,
-                },
-            )?;
-            network_functions.extend(business.functions().iter().copied());
-        }
-        for function in definition.required_network_functions() {
-            if !network_functions.contains(function) {
-                return Err(StateValidationError::EnterpriseNetworkRequirementMissing {
-                    enterprise: enterprise.id(),
-                    function: *function,
-                });
-            }
-        }
-    }
-    for cycle in state.enterprises.cycles() {
-        let enterprise = state
-            .enterprises
-            .get_enterprise(cycle.enterprise())
-            .ok_or(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
-        let economics = registry.get_enterprise(enterprise.kind()).economics();
-        let (expected_gross, expected_cost, expected_net) = crate::enterprises::enterprise_execution::resolve_historical_enterprise_cycle_financials(
-            registry, state, cycle,
-        )
-        .map_err(|_| StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() })?;
-        if cycle.gross_revenue() != expected_gross
-            || cycle.operating_cost() != expected_cost
-            || cycle.net_cash() != expected_net
-        {
-            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
-        }
-        let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
-        // Notability must agree with the production rule in `enterprise_execution`: a notable
-        // variance, a net-losing settlement, a drawn vice inquiry, or street heat that appeared
-        // or changed since the previous settlement makes the manager's cycle report
-        // player-visible. A sustained identical surcharge is a known cost and settles as
-        // routine. Heat is read from the committed cycles rather than recomputed, because the
-        // investigations that produced it may since have closed; it must still be a whole
-        // number of the authored per-case surcharge.
-        let per_case = economics.heat_surcharge_per_active_case().cents();
-        if cycle.investigation_heat().cents() < 0
-            || (per_case == 0 && cycle.investigation_heat().cents() != 0)
-            || (per_case > 0 && cycle.investigation_heat().cents() % per_case != 0)
-        {
-            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
-        }
-        // Settlement order is sequential-ID order, so the prior settlement is the highest
-        // indexed cycle ID below this one; walking every earlier cycle per cycle would be
-        // quadratic in settled history.
-        let previous_heat = state
-            .enterprises
-            .prior_cycle(cycle.enterprise(), cycle.id())
-            .map(|prior| prior.investigation_heat());
-        let heat_reportable =
-            crate::enterprises::enterprise_execution::enterprise_heat_change_is_reportable(
-                previous_heat,
-                cycle.investigation_heat(),
-            );
-        let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
-            || heat_reportable
-            || cycle.net_cash() < crate::finance::Money::ZERO
-            || cycle.drew_vice_attention()
-        {
-            AttentionClass::Notable
-        } else {
-            AttentionClass::Routine
-        };
-        if variance > u32::from(economics.gross_variance_basis_points())
-            || cycle.attention() != expected_attention
-        {
-            return Err(StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() });
-        }
-    }
-    Ok(())
-}
-
 fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
     let checks = [
         ("world", state.world.has_consistent_indexes()),
@@ -1102,239 +842,7 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
             return Err(StateValidationError::IndexInconsistency { subsystem });
         }
     }
-    validate_finance_indexes_and_ledger(state)?;
-    Ok(())
-}
-
-/// Finance ownership, ledger, and balance coherence in ONE pass over the append-only
-/// transaction history: every per-transaction index-membership, posting, arithmetic, and
-/// budget-authority check runs while the referenced-account set and derived balances are
-/// accumulated, so per-tick validation walks campaign-length history once instead of once
-/// per concern. Posting-level membership and balance accumulation use dense vectors keyed
-/// by raw account id (ids are allocated monotonically), keeping the hottest loop free of
-/// ordered-map traversals without weakening any check.
-fn validate_finance_indexes_and_ledger(state: &AppState) -> Result<(), StateValidationError> {
-    if !state.finance.has_consistent_primary_keys() {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "finance",
-        });
-    }
-    // Forward membership plus exact-count agreement proves bidirectional index coherence:
-    // ids are unique and each account or transaction occupies at most one slot per key, so
-    // matching entry totals rule out stale, duplicate, or foreign index entries.
-    let mut account_count = 0_usize;
-    for account in state.finance.accounts() {
-        if account.version() == 0 {
-            return Err(StateValidationError::InvalidFinancialAccount {
-                account: account.id(),
-            });
-        }
-        let owner = account.owner().entity();
-        if !is_entity_present(state, owner) {
-            return Err(StateValidationError::MissingEntity {
-                context: "financial account owner",
-                entity: owner,
-            });
-        }
-        if !state
-            .finance
-            .account_is_indexed_for_owner(account.id(), account.owner())
-        {
-            return Err(StateValidationError::IndexInconsistency {
-                subsystem: "finance",
-            });
-        }
-        account_count += 1;
-    }
-    if state.finance.indexed_account_entries() != account_count {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "finance",
-        });
-    }
-
-    // Dense scratch keyed by raw account id; sized by the largest persisted account so any
-    // posting beyond it is the missing-entity rejection below rather than an allocation.
-    let highest_account = state
-        .finance
-        .account_id_bounds()
-        .map_or(0, |(_, highest)| highest) as usize;
-    let mut account_present = vec![false; highest_account + 1];
-    let mut derived_balance_cents = vec![0_i64; highest_account + 1];
-    let mut derived_account_versions = vec![0_u32; highest_account + 1];
-    for account in state.finance.accounts() {
-        let raw = account.id().raw() as usize;
-        account_present[raw] = true;
-        // Every account opens at version 1. The ledger pass below advances this once for each
-        // transaction that touched the account, exactly mirroring `apply_transaction`.
-        derived_account_versions[raw] = 1;
-    }
-
-    let mut expected_mandate_entries = 0_usize;
-    let mut derived_budget_totals: BTreeMap<
-        (
-            MandateId,
-            crate::core::time::SimTime,
-            crate::core::time::SimTime,
-        ),
-        i64,
-    > = BTreeMap::new();
-    for transaction in state.finance.transactions() {
-        if transaction.memo().trim().is_empty() || transaction.postings().len() < 2 {
-            return Err(StateValidationError::InvalidLedgerTransaction {
-                transaction: transaction.id(),
-            });
-        }
-        if transaction.occurred_at() > state.now() {
-            return Err(StateValidationError::FutureTimestamp {
-                context: "ledger transaction",
-            });
-        }
-        let mut net_cents = 0_i64;
-        let mut seen_accounts = BTreeSet::new();
-        for posting in transaction.postings() {
-            if posting.amount == crate::finance::Money::ZERO
-                || !seen_accounts.insert(posting.account)
-            {
-                return Err(StateValidationError::InvalidLedgerTransaction {
-                    transaction: transaction.id(),
-                });
-            }
-            let raw = posting.account.raw() as usize;
-            if raw >= account_present.len() || !account_present[raw] {
-                return Err(StateValidationError::MissingEntity {
-                    context: "ledger posting account",
-                    entity: EntityRef::FinancialAccount(posting.account),
-                });
-            }
-            net_cents = net_cents.checked_add(posting.amount.cents()).ok_or(
-                StateValidationError::LedgerArithmeticOverflow {
-                    transaction: transaction.id(),
-                },
-            )?;
-            derived_balance_cents[raw] = derived_balance_cents[raw]
-                .checked_add(posting.amount.cents())
-                .ok_or(StateValidationError::FinancialBalanceMismatch)?;
-            derived_account_versions[raw] = derived_account_versions[raw].checked_add(1).ok_or(
-                StateValidationError::InvalidFinancialAccount {
-                    account: posting.account,
-                },
-            )?;
-        }
-        if net_cents != 0 {
-            return Err(StateValidationError::UnbalancedLedgerTransaction {
-                transaction: transaction.id(),
-                net_cents,
-            });
-        }
-        if let Some(usage) = transaction.budget_usage() {
-            expected_mandate_entries += 1;
-            if !state
-                .finance
-                .transaction_is_indexed_for_mandate(transaction.id(), usage.mandate())
-            {
-                return Err(StateValidationError::IndexInconsistency {
-                    subsystem: "finance",
-                });
-            }
-            let mandate = state.delegation.get_mandate(usage.mandate()).ok_or(
-                StateValidationError::MissingEntity {
-                    context: "ledger budget mandate",
-                    entity: EntityRef::Mandate(usage.mandate()),
-                },
-            )?;
-            if state.world.get_character(usage.manager()).is_none() {
-                return Err(StateValidationError::MissingEntity {
-                    context: "ledger budget manager",
-                    entity: EntityRef::Character(usage.manager()),
-                });
-            }
-            if state.finance.get_account(usage.funding_account()).is_none() {
-                return Err(StateValidationError::MissingEntity {
-                    context: "ledger budget funding account",
-                    entity: EntityRef::FinancialAccount(usage.funding_account()),
-                });
-            }
-            let expected_outflow = usage.amount().cents().checked_neg();
-            let matching_posting = expected_outflow.is_some_and(|expected| {
-                transaction.postings().iter().any(|posting| {
-                    posting.account == usage.funding_account() && posting.amount.cents() == expected
-                })
-            });
-            // A usage snapshot from the mandate's current version is fully re-derivable: no
-            // later revision has erased the budget terms that authorized it. Pin its funding
-            // account and exact period window to those current terms so save tampering cannot
-            // move charged spend into a different aggregate key and manufacture fresh budget
-            // capacity. Older versions remain historical snapshots because legitimate mandate
-            // revisions may have changed or removed those terms.
-            let current_budget_matches = if usage.mandate_version() == mandate.version() {
-                mandate.budget().is_some_and(|budget| {
-                    let window = budget.period.window(transaction.occurred_at());
-                    mandate.status() == crate::delegation::MandateStatus::Active
-                        && budget.funding_account == usage.funding_account()
-                        && usage.amount() <= budget.limit
-                        && usage.period_start() == window.start()
-                        && usage.period_end() == window.end()
-                })
-            } else {
-                true
-            };
-            if usage.amount().cents() <= 0
-                || mandate.manager() != usage.manager()
-                || usage.mandate_version() == 0
-                || usage.mandate_version() > mandate.version()
-                || (usage.mandate_version() == mandate.version()
-                    && !mandate.scopes().contains(&usage.scope()))
-                || !current_budget_matches
-                || usage.period_start() >= usage.period_end()
-                || transaction.occurred_at() < usage.period_start()
-                || transaction.occurred_at() >= usage.period_end()
-                || !matching_posting
-            {
-                return Err(StateValidationError::InvalidBudgetUsage {
-                    transaction: transaction.id(),
-                });
-            }
-            // Re-derive the running per-period charge total in the same pass, so the
-            // aggregate the budget checks read must agree with the transaction history.
-            let key = (usage.mandate(), usage.period_start(), usage.period_end());
-            let total = derived_budget_totals.entry(key).or_insert(0);
-            *total = total.checked_add(usage.amount().cents()).ok_or(
-                StateValidationError::LedgerArithmeticOverflow {
-                    transaction: transaction.id(),
-                },
-            )?;
-        }
-    }
-    if state.finance.indexed_mandate_entries() != expected_mandate_entries {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "finance",
-        });
-    }
-    // The budget-charge aggregate must agree exactly with the re-derived per-period totals.
-    let aggregate_matches = state.finance.budget_used_entries().all(|(key, total)| {
-        derived_budget_totals
-            .get(key)
-            .is_some_and(|derived| *derived == total.cents())
-    }) && derived_budget_totals.len()
-        == state.finance.budget_used_entry_count();
-    if !aggregate_matches {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "finance",
-        });
-    }
-    if !state
-        .finance
-        .balances_agree_with_derived_cents(&derived_balance_cents)
-    {
-        return Err(StateValidationError::FinancialBalanceMismatch);
-    }
-    for account in state.finance.accounts() {
-        if derived_account_versions[account.id().raw() as usize] != account.version() {
-            return Err(StateValidationError::InvalidFinancialAccount {
-                account: account.id(),
-            });
-        }
-    }
+    finance::validate_finance_indexes_and_ledger(state)?;
     Ok(())
 }
 

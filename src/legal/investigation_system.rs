@@ -435,8 +435,10 @@ fn validate_investigation_transition_dependencies(
 /// between the deadline index scan and this call simply keeps the case active and decay retries on
 /// the refreshed deadline. Only cases carrying a case-origination link (an operation or enterprise
 /// whose exposure opened them) are eligible: institution-authored casework keeps its lifecycle
-/// until an explicit staff decision. A case whose evidence identified a concrete character is a
-/// real, actionable lead and is never auto-shelved.
+/// until an explicit staff decision. Identifying a concrete character does not manufacture
+/// perpetual institutional activity: if the case produces no further work or evidence for the
+/// full cold window, it shelves like any other originated file. A case whose every actionable
+/// identified subject is already detained closes instead because custody cleared its live work.
 /// Shelving releases the case's investigators, and a later incident sharing the shelf's subject
 /// matter resumes the same file (`find_resumable_shelf`) rather than starting from silence.
 pub(crate) fn apply_cold_case_decay(
@@ -480,37 +482,12 @@ pub(crate) fn apply_cold_case_decay(
         {
             continue;
         }
-        // An originated case whose every identified subject is in custody is fully
-        // worked: the institutional trail ends, so the case closes rather than sitting active
-        // forever. Closing is allowed while arrests hold (cleared by arrest); cases with
-        // subjects still at large keep their investigator attention.
-        let identified_subjects: Vec<CharacterId> = record
-            .subjects()
-            .iter()
-            .filter_map(|subject| match subject {
-                EntityRef::Character(character) => Some(*character),
-                EntityRef::Organization(_)
-                | EntityRef::Neighborhood(_)
-                | EntityRef::Business(_)
-                | EntityRef::Operation(_)
-                | EntityRef::Investigation(_)
-                | EntityRef::Evidence(_)
-                | EntityRef::FinancialAccount(_)
-                | EntityRef::DecisionRequest(_)
-                | EntityRef::Mandate(_)
-                | EntityRef::Enterprise(_) => None,
-            })
-            .filter(|character| {
-                record.evidence().iter().any(|evidence_id| {
-                    let evidence = state
-                        .legal
-                        .get_evidence(*evidence_id)
-                        .expect("investigation evidence index must reference persisted evidence");
-                    evidence.subject() == EntityRef::Character(*character)
-                        && evidence_is_actionable_case_lead(evidence)
-                })
-            })
-            .collect();
+        // An originated case whose every actionable identified subject is in custody is fully
+        // worked: the institutional trail ends, so the case closes rather than shelving while
+        // its subjects are held. An at-large lead does not defeat the inactivity rule forever;
+        // without new evidence or work for the authored window, the file shelves and releases
+        // its investigator seat until a later incident reactivates it.
+        let identified_subjects = actionable_character_subjects(state, record);
         if !identified_subjects.is_empty()
             && identified_subjects.iter().all(|character| {
                 state
@@ -528,15 +505,44 @@ pub(crate) fn apply_cold_case_decay(
             closed.push(investigation);
             continue;
         }
-        if !identified_subjects.is_empty() {
-            continue;
-        }
         validate_transition_investigation(state, investigation, InvestigationTransition::Suspend)?
             .commit(state)?;
         // The transition commit refreshes the lead's personal knowledge to "shelved".
         suspended.push(investigation);
     }
     Ok(ColdCaseDecayOutcome { suspended, closed })
+}
+
+fn actionable_character_subjects(
+    state: &AppState,
+    investigation: &crate::legal::InvestigationRecord,
+) -> Vec<CharacterId> {
+    investigation
+        .evidence()
+        .iter()
+        .filter_map(|evidence_id| {
+            let evidence = state
+                .legal
+                .get_evidence(*evidence_id)
+                .expect("investigation evidence index must reference persisted evidence");
+            if !evidence_is_actionable_case_lead(evidence) {
+                return None;
+            }
+            match evidence.subject() {
+                EntityRef::Character(character) => Some(character),
+                EntityRef::Organization(_)
+                | EntityRef::Neighborhood(_)
+                | EntityRef::Business(_)
+                | EntityRef::Operation(_)
+                | EntityRef::Investigation(_)
+                | EntityRef::Evidence(_)
+                | EntityRef::FinancialAccount(_)
+                | EntityRef::DecisionRequest(_)
+                | EntityRef::Mandate(_)
+                | EntityRef::Enterprise(_) => None,
+            }
+        })
+        .collect()
 }
 
 /// Cold-window decay results, split so observers can distinguish shelved cases from cases

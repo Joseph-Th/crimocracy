@@ -62,6 +62,7 @@ pub struct TickOutcome {
     pub staffed_prosecution_cases: Vec<(ProsecutionCaseId, CharacterId)>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
+    pub custody_releases: Vec<crate::core::id::ArrestId>,
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
@@ -84,7 +85,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Phase order is the contract: opportunity expiry first so its durable lifecycle report is
     // available to every same-minute consumer; then operations (start, deadline aborts, police
     // arrivals, resolution), legal institutional work (staffing, detective work, custody,
-    // informants, representation, cold decay), economy cycles (businesses, enterprises),
+    // informants, bounded custody release, representation, cold decay), economy cycles
+    // (businesses, enterprises),
     // then the day-boundary governance cluster: payroll, reputation (decay before current
     // consequences), recruitment, delegated expansion (which consumes current police fear), and
     // executive synthesis last so the due brief sees everything above.
@@ -125,6 +127,16 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("valid state should resolve detainee informant recruitment decisions");
     let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
         .expect("valid state should record due informant disclosures");
+    // The current foundation does not model charging, bail, or trial. Release detainees after
+    // the authored custody window, but only after informant recruitment/disclosure so the
+    // one-day detainee decision has its intended opportunity before the two-day custody cap.
+    // Automatic legal support follows so policy retainers whose custody just ended conclude in
+    // this same minute instead of lingering until the next tick.
+    let custody_releases = crate::legal::arrest_system::apply_due_custody_releases(
+        state,
+        registry.legal().maximum_detention(),
+    )
+    .expect("valid state should release custody that reached the authored maximum");
     // Automatic legal-support governance runs last in the custody cluster: it sees every
     // arrest made this minute and retains counsel through the canonical representation path
     // when the organization's standing policy promises it.
@@ -179,6 +191,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         staffed_prosecution_cases,
         informant_recruitments,
         informant_disclosures,
+        custody_releases,
         automatic_legal_support,
         business_cycles,
         enterprise_cycles,

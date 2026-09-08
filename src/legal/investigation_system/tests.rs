@@ -1738,9 +1738,9 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
         "questionable evidence must not promote a person into permanent identified-subject status"
     );
 
-    // A short cold window shelves originated files without an actionable identified suspect.
-    // A merely questionable identification still cools; a case backed by strong reliable
-    // evidence against a concrete character remains active.
+    // A short cold window shelves every originated file that receives no further institutional
+    // work. Identifying a suspect changes the case graph, but does not hold a detective seat
+    // forever when the available evidence never reaches the autonomous custody bar.
     let identified = validate_incident_intake(
         &state,
         IncidentIntakeDraft {
@@ -1793,7 +1793,7 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
     assert_eq!(
         suspended,
         ColdCaseDecayOutcome {
-            suspended: vec![case, questionable_lead],
+            suspended: vec![case, questionable_lead, identified],
             closed: Vec::new()
         }
     );
@@ -1816,7 +1816,7 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
             .get_investigation(identified)
             .expect("identified case should persist")
             .status(),
-        InvestigationStatus::Active
+        InvestigationStatus::Suspended
     );
     validate_state(&state).expect("cold decay state should validate");
     validate_invariants(&state);

@@ -4,6 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::legal::investigation_system::{
     InvestigationError, InvestigationTransition, validate_add_evidence,
@@ -682,6 +683,124 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
         1
     );
     validate_state(&fixture.state).expect("released custody history should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn due_custody_release_bounds_detention_at_the_authored_window() {
+    let mut fixture = fixture();
+    let arrest = arrest_fixture(&mut fixture);
+    let maximum_detention = fixture.registry.legal().maximum_detention();
+
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        maximum_detention.as_minutes() - 1,
+    ));
+    assert!(
+        apply_due_custody_releases(&mut fixture.state, maximum_detention)
+            .expect("pre-deadline custody pass should resolve")
+            .is_empty(),
+        "detention must remain active until the complete authored window elapses"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(arrest)
+            .map(|record| record.status()),
+        Some(ArrestStatus::Detained)
+    );
+
+    // The release deadline is derived from persisted arrest time plus the authored legal
+    // definition, so restoring one minute before the cap must preserve the exact next-tick
+    // release rather than resetting or extending custody.
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("pre-release custody should build a save envelope");
+    let bytes = bincode::serialize(&envelope).expect("custody save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("custody save should deserialize");
+    fixture.state = restore_save(&fixture.registry, decoded)
+        .expect("pre-release custody should restore with its deadline intact");
+
+    let outcome = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(
+        outcome.custody_releases,
+        vec![arrest],
+        "the canonical minute pipeline must surface the authored custody release"
+    );
+    let record = fixture
+        .state
+        .legal()
+        .get_arrest(arrest)
+        .expect("released arrest remains durable history");
+    assert_eq!(record.status(), ArrestStatus::Released);
+    assert_eq!(record.released_at(), Some(fixture.state.now()));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("bounded custody release state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+        .expect("two independent strong items should produce autonomous custody");
+    assert_eq!(arrests.len(), 1);
+    let first = arrests[0];
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(first)
+            .expect("autonomous arrest should persist")
+            .evidence(),
+        &BTreeSet::from([fixture.evidence, corroborating])
+    );
+
+    validate_release_arrest(&fixture.state, first)
+        .expect("autonomous custody should remain canonically releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    assert!(
+        apply_autonomous_evidence_arrests(&mut fixture.state)
+            .expect("post-release autonomous custody pass should resolve")
+            .is_empty(),
+        "unchanged evidence must not create an automatic release/re-arrest loop"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_for_investigation(fixture.investigation)
+            .count(),
+        1
+    );
+
+    // Explicit legal action remains distinct from the conservative autonomous conversion.
+    let explicit_rearrest = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence]),
+        },
+    )
+    .expect("the canonical command may deliberately re-arrest after release")
+    .commit(&mut fixture.state)
+    .expect("explicit re-arrest should commit");
+    assert_ne!(explicit_rearrest, first);
+    validate_state(&fixture.state).expect("one-shot autonomous custody state should validate");
     validate_invariants(&fixture.state);
 }
 

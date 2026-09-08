@@ -42,6 +42,7 @@ pub struct LegalConfigDefinition {
     pub(super) cold_case_window: SimDuration,
     pub(super) witness_interview_attempt_limit: u8,
     pub(super) informant_decision_delay: SimDuration,
+    pub(super) maximum_detention: SimDuration,
 }
 
 impl LegalConfigDefinition {
@@ -60,6 +61,12 @@ impl LegalConfigDefinition {
     /// How long after detention a detainee faces their single informant-recruitment decision.
     pub fn informant_decision_delay(self) -> SimDuration {
         self.informant_decision_delay
+    }
+
+    /// Maximum continuous custody duration modeled before release. This bounds detention in
+    /// the current foundation, which deliberately does not model charging, bail, or trial.
+    pub fn maximum_detention(self) -> SimDuration {
+        self.maximum_detention
     }
 }
 
@@ -273,6 +280,31 @@ mod tests {
                     && rule.approach == Some(RecruitmentApproach::Protection)
                     && rule.adjustment > 0)
         );
+    }
+
+    #[test]
+    fn authored_legal_timing_keeps_informant_decision_inside_bounded_custody() {
+        let legal = build_registry().legal();
+        assert_eq!(
+            legal.informant_decision_delay(),
+            SimDuration::from_minutes(1_440)
+        );
+        assert_eq!(legal.maximum_detention(), SimDuration::from_minutes(2_880));
+        assert!(legal.maximum_detention() > legal.informant_decision_delay());
+    }
+
+    #[test]
+    fn legal_registry_rejects_a_custody_window_that_cannot_reach_the_informant_decision() {
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_legal(LegalConfigSpec {
+                cold_case_window: SimDuration::from_minutes(1_440),
+                witness_interview_attempt_limit: 2,
+                informant_decision_delay: SimDuration::from_minutes(1_440),
+                maximum_detention: SimDuration::from_minutes(1_440),
+            }),
+            Err(RegistryBuildError::InvalidLegalMaximumDetention)
+        ));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::patrol_system::is_canonical_patrol_schedule;
-use crate::legal::{PatrolDeploymentStatus, PoliceResponseStatus};
+use crate::legal::{PatrolDeploymentStatus, PoliceResponseRecord, PoliceResponseStatus};
 use crate::world::OrganizationKind;
 
 pub(super) fn validate_jurisdictions(state: &AppState) -> Result<(), StateValidationError> {
@@ -83,81 +83,109 @@ pub(super) fn validate_patrol_deployments(state: &AppState) -> Result<(), StateV
 
 pub(super) fn validate_police_responses(state: &AppState) -> Result<(), StateValidationError> {
     for response in state.legal.police_responses() {
-        let authority = state.world.get_organization(response.authority()).ok_or(
-            StateValidationError::InvalidPoliceResponse {
-                response: response.id(),
-            },
-        )?;
-        if authority.kind() != OrganizationKind::LawEnforcement
-            || state
-                .world
-                .get_neighborhood(response.neighborhood())
-                .is_none()
-            || response.version() == 0
-            || response.dispatched_at() >= response.arrival_due_at()
-            || response.dispatched_at() > state.now()
-        {
-            return Err(StateValidationError::InvalidPoliceResponse {
-                response: response.id(),
-            });
-        }
-        let operation = state
-            .operations
-            .get_operation(response.source_operation())
-            .ok_or(StateValidationError::InvalidPoliceResponse {
-                response: response.id(),
-            })?;
-        let jurisdiction = state.legal.get_jurisdiction(response.authority()).ok_or(
-            StateValidationError::InvalidPoliceResponse {
-                response: response.id(),
-            },
-        )?;
-        if operation.police_response() != Some(response.id())
-            || operation.started_at() != Some(response.dispatched_at())
-            || response.jurisdiction_version() == 0
-            || response.jurisdiction_version() > jurisdiction.version()
-        {
-            return Err(StateValidationError::InvalidPoliceResponse {
-                response: response.id(),
-            });
-        }
-        if let Some(patrol) = response.patrol() {
-            let deployment = state
-                .legal
-                .get_patrol_deployment(patrol.deployment())
-                .ok_or(StateValidationError::InvalidPoliceResponse {
-                    response: response.id(),
-                })?;
-            if patrol.version() == 0
-                || patrol.version() > deployment.version()
-                || deployment.organization() != response.authority()
-                || deployment.neighborhood() != response.neighborhood()
-            {
-                return Err(StateValidationError::InvalidPoliceResponse {
-                    response: response.id(),
-                });
-            }
-        }
-        match response.status() {
-            PoliceResponseStatus::Dispatched => {
-                if response.arrived_at().is_some() || response.version() != 1 {
-                    return Err(StateValidationError::InvalidPoliceResponse {
-                        response: response.id(),
-                    });
-                }
-            }
-            PoliceResponseStatus::Arrived => {
-                if response.arrived_at().is_none_or(|arrived_at| {
-                    arrived_at < response.arrival_due_at() || arrived_at > state.now()
-                }) || response.version() != 2
-                {
-                    return Err(StateValidationError::InvalidPoliceResponse {
-                        response: response.id(),
-                    });
-                }
-            }
-        }
+        validate_police_response(state, response)?;
     }
 
     Ok(())
+}
+
+fn validate_police_response(
+    state: &AppState,
+    response: &PoliceResponseRecord,
+) -> Result<(), StateValidationError> {
+    validate_police_response_definition(state, response)?;
+    validate_police_response_links(state, response)?;
+    validate_police_response_patrol(state, response)?;
+    validate_police_response_lifecycle(state, response)
+}
+
+fn validate_police_response_definition(
+    state: &AppState,
+    response: &PoliceResponseRecord,
+) -> Result<(), StateValidationError> {
+    let authority = state
+        .world
+        .get_organization(response.authority())
+        .ok_or_else(|| invalid_police_response(response))?;
+    if authority.kind() != OrganizationKind::LawEnforcement
+        || state
+            .world
+            .get_neighborhood(response.neighborhood())
+            .is_none()
+        || response.version() == 0
+        || response.dispatched_at() >= response.arrival_due_at()
+        || response.dispatched_at() > state.now()
+    {
+        return Err(invalid_police_response(response));
+    }
+    Ok(())
+}
+
+fn validate_police_response_links(
+    state: &AppState,
+    response: &PoliceResponseRecord,
+) -> Result<(), StateValidationError> {
+    let operation = state
+        .operations
+        .get_operation(response.source_operation())
+        .ok_or_else(|| invalid_police_response(response))?;
+    let jurisdiction = state
+        .legal
+        .get_jurisdiction(response.authority())
+        .ok_or_else(|| invalid_police_response(response))?;
+    if operation.police_response() != Some(response.id())
+        || operation.started_at() != Some(response.dispatched_at())
+        || response.jurisdiction_version() == 0
+        || response.jurisdiction_version() > jurisdiction.version()
+    {
+        return Err(invalid_police_response(response));
+    }
+    Ok(())
+}
+
+fn validate_police_response_patrol(
+    state: &AppState,
+    response: &PoliceResponseRecord,
+) -> Result<(), StateValidationError> {
+    let Some(patrol) = response.patrol() else {
+        return Ok(());
+    };
+    let deployment = state
+        .legal
+        .get_patrol_deployment(patrol.deployment())
+        .ok_or_else(|| invalid_police_response(response))?;
+    if patrol.version() == 0
+        || patrol.version() > deployment.version()
+        || deployment.organization() != response.authority()
+        || deployment.neighborhood() != response.neighborhood()
+    {
+        return Err(invalid_police_response(response));
+    }
+    Ok(())
+}
+
+fn validate_police_response_lifecycle(
+    state: &AppState,
+    response: &PoliceResponseRecord,
+) -> Result<(), StateValidationError> {
+    let valid = match response.status() {
+        PoliceResponseStatus::Dispatched => {
+            response.arrived_at().is_none() && response.version() == 1
+        }
+        PoliceResponseStatus::Arrived => {
+            response.arrived_at().is_some_and(|arrived_at| {
+                arrived_at >= response.arrival_due_at() && arrived_at <= state.now()
+            }) && response.version() == 2
+        }
+    };
+    if !valid {
+        return Err(invalid_police_response(response));
+    }
+    Ok(())
+}
+
+fn invalid_police_response(response: &PoliceResponseRecord) -> StateValidationError {
+    StateValidationError::InvalidPoliceResponse {
+        response: response.id(),
+    }
 }

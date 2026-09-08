@@ -173,6 +173,8 @@ pub(crate) enum RegistryBuildError {
     InvalidLegalInterviewLimit,
     #[error("legal informant decision delay must be positive")]
     InvalidLegalInformantDelay,
+    #[error("legal maximum detention must be positive and exceed the informant decision delay")]
+    InvalidLegalMaximumDetention,
     #[error("missing upkeep configuration definition")]
     MissingUpkeepConfig,
     #[error("duplicate upkeep configuration definition")]
@@ -286,10 +288,16 @@ impl RegistryBuilder {
         if spec.informant_decision_delay.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidLegalInformantDelay);
         }
+        if spec.maximum_detention.as_minutes() == 0
+            || spec.maximum_detention <= spec.informant_decision_delay
+        {
+            return Err(RegistryBuildError::InvalidLegalMaximumDetention);
+        }
         self.legal = Some(LegalConfigDefinition {
             cold_case_window: spec.cold_case_window,
             witness_interview_attempt_limit: spec.witness_interview_attempt_limit,
             informant_decision_delay: spec.informant_decision_delay,
+            maximum_detention: spec.maximum_detention,
         });
         Ok(())
     }

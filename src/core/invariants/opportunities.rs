@@ -7,210 +7,263 @@ use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::OperationExposureLevel;
-use crate::opportunities::OpportunityResolution;
-use crate::reports::ReportKind;
+use crate::opportunities::{OpportunityRecord, OpportunityResolution};
+use crate::reports::{ReportKind, ReportRecord};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 
 pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValidationError> {
-    // Reused target-coverage set across opportunities; clearing keeps the exact-set
-    // comparison identical without allocating per record.
     let mut covered_targets = BTreeSet::<EntityRef>::new();
     for opportunity in state.opportunities.opportunities() {
-        let organization = state
-            .world
-            .get_organization(opportunity.organization())
-            .ok_or(StateValidationError::InvalidOpportunity {
-                opportunity: opportunity.id(),
-            })?;
-        let context = opportunity.context().operation();
-        if organization.kind() != OrganizationKind::Criminal
-            || context.targets().is_empty()
-            || opportunity.source_information().is_empty()
-            || opportunity.summary().trim().is_empty()
-            || opportunity.discovered_at() > state.now()
-            || opportunity.version() == 0
-            || opportunity
-                .valid_until()
-                .is_some_and(|valid_until| valid_until <= opportunity.discovered_at())
-        {
-            return Err(StateValidationError::InvalidOpportunity {
-                opportunity: opportunity.id(),
-            });
-        }
+        validate_opportunity(state, opportunity, &mut covered_targets)?;
+    }
+    Ok(())
+}
 
-        for target in context.targets() {
-            if !is_entity_present(state, *target) {
-                return Err(StateValidationError::InvalidOpportunity {
-                    opportunity: opportunity.id(),
-                });
-            }
-        }
-        covered_targets.clear();
-        for source in opportunity.source_information() {
-            let information = state.intelligence.get_information(*source).ok_or(
-                StateValidationError::InvalidOpportunity {
-                    opportunity: opportunity.id(),
-                },
-            )?;
-            if information.holder() != KnowledgeHolder::Organization(opportunity.organization())
-                || information.recorded_at() > opportunity.discovered_at()
-                || !context.targets().contains(&information.subject())
-            {
-                return Err(StateValidationError::InvalidOpportunity {
-                    opportunity: opportunity.id(),
-                });
-            }
-            covered_targets.insert(information.subject());
-        }
-        if covered_targets != *context.targets() {
-            return Err(StateValidationError::InvalidOpportunity {
-                opportunity: opportunity.id(),
-            });
-        }
+fn validate_opportunity(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    covered_targets: &mut BTreeSet<EntityRef>,
+) -> Result<(), StateValidationError> {
+    validate_opportunity_definition(state, opportunity)?;
+    validate_opportunity_targets(state, opportunity)?;
+    validate_opportunity_sources(state, opportunity, covered_targets)?;
+    validate_opportunity_report(state, opportunity)?;
+    validate_opportunity_resolution(state, opportunity, covered_targets)
+}
 
-        let report = state.reports.get_report(opportunity.report()).ok_or(
-            StateValidationError::InvalidOpportunity {
-                opportunity: opportunity.id(),
-            },
-        )?;
-        // Element-wise comparison so per-record validation never clones the target set.
-        let expected_entities_contains = |entities: &BTreeSet<EntityRef>| {
-            entities.len() == context.targets().len() + 1
-                && entities.contains(&EntityRef::Organization(opportunity.organization()))
-                && context
-                    .targets()
-                    .iter()
-                    .all(|target| entities.contains(target))
-        };
-        let expected_sources = opportunity.source_information();
-        if report.recipient() != opportunity.organization()
-            || report.kind() != ReportKind::Opportunity
-            || report.generated_at() != opportunity.discovered_at()
-            || report.entries().len() != 1
-            || !report.entries().first().is_some_and(|entry| {
-                entry.attention == AttentionClass::Notable
-                    && entry.summary == opportunity.summary()
-                    && entry.sources.len() == expected_sources.len()
-                    && entry
-                        .sources
-                        .iter()
-                        .zip(expected_sources.iter())
-                        .all(|(source, expected)| source == expected)
-                    && expected_entities_contains(&entry.entities)
-                    && entry.decision.is_none()
-            })
-        {
-            return Err(StateValidationError::InvalidOpportunity {
-                opportunity: opportunity.id(),
-            });
-        }
+fn validate_opportunity_definition(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+) -> Result<(), StateValidationError> {
+    let organization = state
+        .world
+        .get_organization(opportunity.organization())
+        .ok_or_else(|| invalid_opportunity(opportunity))?;
+    let context = opportunity.context().operation();
+    if organization.kind() != OrganizationKind::Criminal
+        || context.targets().is_empty()
+        || opportunity.source_information().is_empty()
+        || opportunity.summary().trim().is_empty()
+        || opportunity.discovered_at() > state.now()
+        || opportunity.version() == 0
+        || opportunity
+            .valid_until()
+            .is_some_and(|valid_until| valid_until <= opportunity.discovered_at())
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
 
-        match opportunity.resolution() {
-            None => {
-                if opportunity.version() != 1
-                    || opportunity
-                        .valid_until()
-                        .is_some_and(|valid_until| valid_until <= state.now())
-                {
-                    return Err(StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    });
-                }
-            }
-            Some(OpportunityResolution::Dismissed { at }) => {
-                if opportunity.version() != 2
-                    || at < opportunity.discovered_at()
-                    || at > state.now()
-                    || opportunity
-                        .valid_until()
-                        .is_some_and(|valid_until| at >= valid_until)
-                {
-                    return Err(StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    });
-                }
-            }
-            Some(OpportunityResolution::Expired { at, report }) => {
-                let expiry_report = state.reports.get_report(report).ok_or(
-                    StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    },
-                )?;
-                if opportunity.version() != 2
-                    || opportunity.valid_until() != Some(at)
-                    || at > state.now()
-                    || expiry_report.recipient() != opportunity.organization()
-                    || expiry_report.kind() != ReportKind::Opportunity
-                    || expiry_report.generated_at() < at
-                    || expiry_report.generated_at() > state.now()
-                    || expiry_report.entries().len() != 1
-                    || !expiry_report.entries().first().is_some_and(|entry| {
-                        entry.attention == AttentionClass::Notable
-                            && entry.summary
-                                == crate::opportunities::opportunity_system::expiry_report_summary(
-                                    opportunity.summary(),
-                                )
-                            && entry.sources.len() == expected_sources.len()
-                            && entry
-                                .sources
-                                .iter()
-                                .zip(expected_sources.iter())
-                                .all(|(source, expected)| source == expected)
-                            && expected_entities_contains(&entry.entities)
-                            && entry.decision.is_none()
-                    })
-                    || state
-                        .opportunities
-                        .opportunity_for_report(report)
-                        .map(|record| record.id())
-                        != Some(opportunity.id())
-                {
-                    return Err(StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    });
-                }
-            }
-            Some(OpportunityResolution::Converted { at, operation }) => {
-                let operation = state.operations.get_operation(operation).ok_or(
-                    StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    },
-                )?;
-                let operation_targets: BTreeSet<_> = operation
-                    .objective()
-                    .referenced_entities()
-                    .into_iter()
-                    .collect();
-                if opportunity.version() != 2
-                    || at < opportunity.discovered_at()
-                    || at > state.now()
-                    || at > operation.scheduled_for()
-                    || opportunity
-                        .valid_until()
-                        .is_some_and(|valid_until| at >= valid_until)
-                    || operation.responsible_organization() != opportunity.organization()
-                    || operation.kind() != context.operation_kind()
-                // A converted operation acts against one of the discovered targets; its
-                // objective carries exactly one referenced entity (see conversion matching).
-                    || operation_targets.len() != 1
-                    || !operation_targets
-                        .iter()
-                        .all(|target| context.targets().contains(target))
-                    || state
-                        .opportunities
-                        .opportunity_for_operation(operation.id())
-                        .map(|record| record.id())
-                        != Some(opportunity.id())
-                {
-                    return Err(StateValidationError::InvalidOpportunity {
-                        opportunity: opportunity.id(),
-                    });
-                }
-            }
+fn validate_opportunity_targets(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+) -> Result<(), StateValidationError> {
+    for target in opportunity.context().operation().targets() {
+        if !is_entity_present(state, *target) {
+            return Err(invalid_opportunity(opportunity));
         }
     }
     Ok(())
+}
+
+fn validate_opportunity_sources(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    covered_targets: &mut BTreeSet<EntityRef>,
+) -> Result<(), StateValidationError> {
+    let context = opportunity.context().operation();
+    covered_targets.clear();
+    for source in opportunity.source_information() {
+        let information = state
+            .intelligence
+            .get_information(*source)
+            .ok_or_else(|| invalid_opportunity(opportunity))?;
+        if information.holder() != KnowledgeHolder::Organization(opportunity.organization())
+            || information.recorded_at() > opportunity.discovered_at()
+            || !context.targets().contains(&information.subject())
+        {
+            return Err(invalid_opportunity(opportunity));
+        }
+        covered_targets.insert(information.subject());
+    }
+    if covered_targets != context.targets() {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn validate_opportunity_report(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+) -> Result<(), StateValidationError> {
+    let report = state
+        .reports
+        .get_report(opportunity.report())
+        .ok_or_else(|| invalid_opportunity(opportunity))?;
+    if report.recipient() != opportunity.organization()
+        || report.kind() != ReportKind::Opportunity
+        || report.generated_at() != opportunity.discovered_at()
+        || !opportunity_report_entry_matches(opportunity, report, opportunity.summary())
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn opportunity_report_entry_matches(
+    opportunity: &OpportunityRecord,
+    report: &ReportRecord,
+    expected_summary: &str,
+) -> bool {
+    let context = opportunity.context().operation();
+    let expected_sources = opportunity.source_information();
+    report.entries().len() == 1
+        && report.entries().first().is_some_and(|entry| {
+            entry.attention == AttentionClass::Notable
+                && entry.summary == expected_summary
+                && entry.sources.len() == expected_sources.len()
+                && entry
+                    .sources
+                    .iter()
+                    .zip(expected_sources.iter())
+                    .all(|(source, expected)| source == expected)
+                && entry.entities.len() == context.targets().len() + 1
+                && entry
+                    .entities
+                    .contains(&EntityRef::Organization(opportunity.organization()))
+                && context
+                    .targets()
+                    .iter()
+                    .all(|target| entry.entities.contains(target))
+                && entry.decision.is_none()
+        })
+}
+
+fn validate_opportunity_resolution(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    operation_targets: &mut BTreeSet<EntityRef>,
+) -> Result<(), StateValidationError> {
+    match opportunity.resolution() {
+        None => validate_open_opportunity(state, opportunity),
+        Some(OpportunityResolution::Dismissed { at }) => {
+            validate_dismissed_opportunity(state, opportunity, at)
+        }
+        Some(OpportunityResolution::Expired { at, report }) => {
+            validate_expired_opportunity(state, opportunity, at, report)
+        }
+        Some(OpportunityResolution::Converted { at, operation }) => {
+            validate_converted_opportunity(state, opportunity, at, operation, operation_targets)
+        }
+    }
+}
+
+fn validate_open_opportunity(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+) -> Result<(), StateValidationError> {
+    if opportunity.version() != 1
+        || opportunity
+            .valid_until()
+            .is_some_and(|valid_until| valid_until <= state.now())
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn validate_dismissed_opportunity(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    at: crate::core::time::SimTime,
+) -> Result<(), StateValidationError> {
+    if opportunity.version() != 2
+        || at < opportunity.discovered_at()
+        || at > state.now()
+        || opportunity
+            .valid_until()
+            .is_some_and(|valid_until| at >= valid_until)
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn validate_expired_opportunity(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    at: crate::core::time::SimTime,
+    report: crate::core::id::ReportId,
+) -> Result<(), StateValidationError> {
+    let expiry_report = state
+        .reports
+        .get_report(report)
+        .ok_or_else(|| invalid_opportunity(opportunity))?;
+    let expected_summary =
+        crate::opportunities::opportunity_system::expiry_report_summary(opportunity.summary());
+    if opportunity.version() != 2
+        || opportunity.valid_until() != Some(at)
+        || at > state.now()
+        || expiry_report.recipient() != opportunity.organization()
+        || expiry_report.kind() != ReportKind::Opportunity
+        || expiry_report.generated_at() < at
+        || expiry_report.generated_at() > state.now()
+        || !opportunity_report_entry_matches(opportunity, expiry_report, &expected_summary)
+        || state
+            .opportunities
+            .opportunity_for_report(report)
+            .map(|record| record.id())
+            != Some(opportunity.id())
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn validate_converted_opportunity(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    at: crate::core::time::SimTime,
+    operation_id: crate::core::id::OperationId,
+    operation_targets: &mut BTreeSet<EntityRef>,
+) -> Result<(), StateValidationError> {
+    let operation = state
+        .operations
+        .get_operation(operation_id)
+        .ok_or_else(|| invalid_opportunity(opportunity))?;
+    operation_targets.clear();
+    operation_targets.extend(operation.objective().referenced_entities());
+    let context = opportunity.context().operation();
+    if opportunity.version() != 2
+        || at < opportunity.discovered_at()
+        || at > state.now()
+        || at > operation.scheduled_for()
+        || opportunity
+            .valid_until()
+            .is_some_and(|valid_until| at >= valid_until)
+        || operation.responsible_organization() != opportunity.organization()
+        || operation.kind() != context.operation_kind()
+        || operation_targets.len() != 1
+        || !operation_targets
+            .iter()
+            .all(|target| context.targets().contains(target))
+        || state
+            .opportunities
+            .opportunity_for_operation(operation.id())
+            .map(|record| record.id())
+            != Some(opportunity.id())
+    {
+        return Err(invalid_opportunity(opportunity));
+    }
+    Ok(())
+}
+
+fn invalid_opportunity(opportunity: &OpportunityRecord) -> StateValidationError {
+    StateValidationError::InvalidOpportunity {
+        opportunity: opportunity.id(),
+    }
 }
 
 pub(super) fn validate_operation_exposure_links(
@@ -219,13 +272,38 @@ pub(super) fn validate_operation_exposure_links(
     resolution: &crate::operations::OperationResolutionRecord,
 ) -> Result<(), StateValidationError> {
     let exposure = resolution.exposure();
+    validate_exposure_location(state, operation, exposure)?;
+    validate_exposure_identity(operation, exposure)?;
+    match exposure.investigation() {
+        None => {
+            if !exposure.evidence().is_empty() {
+                return Err(invalid_operation_exposure(operation));
+            }
+            Ok(())
+        }
+        Some(investigation_id) => {
+            validate_exposure_investigation(state, operation, resolution, investigation_id)
+        }
+    }
+}
+
+fn validate_exposure_location(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    exposure: &crate::operations::OperationExposureRecord,
+) -> Result<(), StateValidationError> {
     if let Some(neighborhood) = exposure.neighborhood()
         && state.world.get_neighborhood(neighborhood).is_none()
     {
-        return Err(StateValidationError::InvalidOperationExposure {
-            operation: operation.id(),
-        });
+        return Err(invalid_operation_exposure(operation));
     }
+    Ok(())
+}
+
+fn validate_exposure_identity(
+    operation: &crate::operations::OperationRecord,
+    exposure: &crate::operations::OperationExposureRecord,
+) -> Result<(), StateValidationError> {
     let participants: BTreeSet<_> = std::iter::once(operation.leader())
         .chain(operation.roles().values().copied())
         .collect();
@@ -235,113 +313,118 @@ pub(super) fn validate_operation_exposure_links(
                 .identified_character()
                 .is_some_and(|character| participants.contains(&character))
             {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
+                return Err(invalid_operation_exposure(operation));
             }
         }
         OperationExposureLevel::None
         | OperationExposureLevel::Trace
         | OperationExposureLevel::Witnessed => {
             if exposure.identified_character().is_some() {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-        }
-    }
-
-    match exposure.investigation() {
-        None => {
-            if !exposure.evidence().is_empty() {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-        }
-        Some(investigation_id) => {
-            if exposure.level() == OperationExposureLevel::None
-                || exposure.neighborhood().is_none()
-                || exposure.evidence().len() != 1
-            {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-            let investigation = state.legal.get_investigation(investigation_id).ok_or(
-                StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                },
-            )?;
-            let owner = state.world.get_organization(investigation.owner()).ok_or(
-                StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                },
-            )?;
-            if !matches!(
-                owner.kind(),
-                OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
-            ) || investigation.opened_at() != resolution.resolved_at()
-                || !investigation
-                    .subjects()
-                    .contains(&EntityRef::Operation(operation.id()))
-            {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-            if let Some(character) = exposure.identified_character()
-                && !investigation
-                    .subjects()
-                    .contains(&EntityRef::Character(character))
-            {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
-            }
-            let evidence_id = *exposure
-                .evidence()
-                .iter()
-                .next()
-                .expect("validated operation exposure contains one evidence record");
-            let evidence = state.legal.get_evidence(evidence_id).ok_or(
-                StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                },
-            )?;
-            let expected_subject = exposure
-                .identified_character()
-                .map(EntityRef::Character)
-                .unwrap_or(EntityRef::Operation(operation.id()));
-            let expected_strength = match exposure.level() {
-                OperationExposureLevel::None => {
-                    unreachable!("non-exposure cannot have legal evidence")
-                }
-                OperationExposureLevel::Trace => EvidenceStrength::Weak,
-                OperationExposureLevel::Witnessed => EvidenceStrength::Corroborating,
-                OperationExposureLevel::Identifying => EvidenceStrength::Strong,
-            };
-            let expected_reliability = match exposure.level() {
-                OperationExposureLevel::None => {
-                    unreachable!("non-exposure cannot have legal evidence")
-                }
-                OperationExposureLevel::Trace => EvidenceReliability::Questionable,
-                OperationExposureLevel::Witnessed => EvidenceReliability::Credible,
-                OperationExposureLevel::Identifying => EvidenceReliability::HighlyReliable,
-            };
-            if evidence.investigation() != investigation_id
-                || evidence.custodian() != investigation.owner()
-                || evidence.subject() != expected_subject
-                || evidence.origin() != Some(EntityRef::Operation(operation.id()))
-                || evidence.strength() != expected_strength
-                || evidence.reliability() != expected_reliability
-                || evidence.discovered_at() != resolution.resolved_at()
-            {
-                return Err(StateValidationError::InvalidOperationExposure {
-                    operation: operation.id(),
-                });
+                return Err(invalid_operation_exposure(operation));
             }
         }
     }
     Ok(())
+}
+
+fn validate_exposure_investigation(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    investigation_id: crate::core::id::InvestigationId,
+) -> Result<(), StateValidationError> {
+    let exposure = resolution.exposure();
+    if exposure.level() == OperationExposureLevel::None
+        || exposure.neighborhood().is_none()
+        || exposure.evidence().len() != 1
+    {
+        return Err(invalid_operation_exposure(operation));
+    }
+    let investigation = state
+        .legal
+        .get_investigation(investigation_id)
+        .ok_or_else(|| invalid_operation_exposure(operation))?;
+    let owner = state
+        .world
+        .get_organization(investigation.owner())
+        .ok_or_else(|| invalid_operation_exposure(operation))?;
+    if !matches!(
+        owner.kind(),
+        OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
+    ) || investigation.opened_at() != resolution.resolved_at()
+        || !investigation
+            .subjects()
+            .contains(&EntityRef::Operation(operation.id()))
+    {
+        return Err(invalid_operation_exposure(operation));
+    }
+    if let Some(character) = exposure.identified_character()
+        && !investigation
+            .subjects()
+            .contains(&EntityRef::Character(character))
+    {
+        return Err(invalid_operation_exposure(operation));
+    }
+    validate_exposure_evidence(state, operation, resolution, investigation)
+}
+
+fn validate_exposure_evidence(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    investigation: &crate::legal::InvestigationRecord,
+) -> Result<(), StateValidationError> {
+    let exposure = resolution.exposure();
+    let evidence_id = *exposure
+        .evidence()
+        .iter()
+        .next()
+        .expect("validated operation exposure contains one evidence record");
+    let evidence = state
+        .legal
+        .get_evidence(evidence_id)
+        .ok_or_else(|| invalid_operation_exposure(operation))?;
+    let expected_subject = exposure
+        .identified_character()
+        .map(EntityRef::Character)
+        .unwrap_or(EntityRef::Operation(operation.id()));
+    let (expected_strength, expected_reliability) = exposure_evidence_quality(exposure.level());
+    if evidence.investigation() != investigation.id()
+        || evidence.custodian() != investigation.owner()
+        || evidence.subject() != expected_subject
+        || evidence.origin() != Some(EntityRef::Operation(operation.id()))
+        || evidence.strength() != expected_strength
+        || evidence.reliability() != expected_reliability
+        || evidence.discovered_at() != resolution.resolved_at()
+    {
+        return Err(invalid_operation_exposure(operation));
+    }
+    Ok(())
+}
+
+fn exposure_evidence_quality(
+    level: OperationExposureLevel,
+) -> (EvidenceStrength, EvidenceReliability) {
+    match level {
+        OperationExposureLevel::None => unreachable!("non-exposure cannot have legal evidence"),
+        OperationExposureLevel::Trace => {
+            (EvidenceStrength::Weak, EvidenceReliability::Questionable)
+        }
+        OperationExposureLevel::Witnessed => (
+            EvidenceStrength::Corroborating,
+            EvidenceReliability::Credible,
+        ),
+        OperationExposureLevel::Identifying => (
+            EvidenceStrength::Strong,
+            EvidenceReliability::HighlyReliable,
+        ),
+    }
+}
+
+fn invalid_operation_exposure(
+    operation: &crate::operations::OperationRecord,
+) -> StateValidationError {
+    StateValidationError::InvalidOperationExposure {
+        operation: operation.id(),
+    }
 }
