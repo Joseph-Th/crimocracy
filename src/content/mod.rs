@@ -5,9 +5,7 @@ use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
 use crate::intelligence::InformationTopic;
 use crate::legal::{EvidenceKind, InvestigationWorkKind};
-use crate::operations::{
-    ALL_OPERATION_APPROACHES, ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind,
-};
+use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind};
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessDisruptionSpec, BusinessEconomicsDefinition, EnterpriseEconomicsDefinition,
@@ -28,7 +26,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 39;
+pub const CURRENT_CONTENT_REVISION: u32 = 40;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -70,14 +68,17 @@ pub fn build_registry() -> Registry {
         })
         .unwrap_or_else(|error| panic!("invalid legal registry: {error}"));
     register_policies(&mut builder);
-    let approaches: BTreeSet<_> = ALL_OPERATION_APPROACHES.into_iter().collect();
     for kind in ALL_OPERATION_KINDS {
+        let approaches = supported_operation_approaches(kind)
+            .iter()
+            .copied()
+            .collect();
         let roles = required_roles(kind);
         builder
             .register_operation(
                 kind,
                 operation_name(kind),
-                approaches.clone(),
+                approaches,
                 roles.clone(),
                 operation_execution(kind),
             )
@@ -114,12 +115,10 @@ fn register_laundering(builder: &mut RegistryBuilder) {
             // The front keeps a meaningful cut: laundering is a service the legitimate
             // business charges for, not a free conversion button.
             fee_basis_points: 1_500,
-            // A front can plausibly hide 100% of one legitimate cycle's gross per transfer:
-            // one resale still needs at most two daily sweeps (front capacity ~$270, resale
-            // ~$400), but the PRESS diversification wait now closes in ~2 days instead of
-            // ~4, keeping the standing-down interactive while preserving the capacity-
-            // rejection as the visible pacing signal. Larger diversification still needs
-            // additional fronts, not just waiting.
+            // A front can plausibly hide 100% of one legitimate cycle's gross per transfer.
+            // Ordinary resale proceeds fit within a small number of daily sweeps while larger
+            // diversification still requires additional fronts, preserving capacity as a
+            // visible strategic constraint rather than a free conversion path.
             plausibility_gross_basis_points: 10_000,
         })
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
@@ -132,8 +131,8 @@ fn register_reputation(builder: &mut RegistryBuilder) {
             // One point per day: a witnessed job stays in an audience's memory for weeks,
             // not forever, and never manufactures impressions that were never touched.
             daily_decay_step: 1,
-            // Lowered so a single witnessed exposure plus a vice inquiry visibly throttles
-            // delegated expansion: heat must be managed, not ignored.
+            // A witnessed exposure plus a vice inquiry can visibly throttle delegated
+            // expansion, making police posture a strategic constraint rather than decoration.
             expansion_police_fear_ceiling: 50,
             witnessed_exposure_police_fear: 8,
             identifying_exposure_police_fear: 10,
@@ -158,11 +157,10 @@ fn register_executive_brief(builder: &mut RegistryBuilder) {
 fn register_upkeep(builder: &mut RegistryBuilder) {
     builder
         .register_upkeep(UpkeepConfigSpec {
-            // Daily street wage per member: visible next to one enterprise cycle, so an
-            // idle organization feels carrying costs and headcount is a real decision.
-            // Raised to $32 to make headcount a real carrying-cost decision — a 4-person
-            // crew costs $128/day, close to one delegated cycle's net, so a hot district
-            // with heat tax visibly tightens the surplus without starving in week one.
+            // Daily street wage per member is visible next to one enterprise cycle, so an
+            // idle organization feels carrying costs and headcount remains a real decision.
+            // District heat can tighten the resulting surplus without making a small crew
+            // immediately insolvent.
             per_member_daily: Money::from_cents(32_00),
             shortfall_resentment: 12,
         })
@@ -744,10 +742,51 @@ fn operation_name(kind: OperationKind) -> &'static str {
         OperationKind::GamblingEvent => "Gambling event",
         OperationKind::Extraction => "Extraction",
         OperationKind::Sabotage => "Sabotage",
-        OperationKind::Bribery => "Bribery",
         OperationKind::Arson => "Arson",
     }
 }
+fn supported_operation_approaches(kind: OperationKind) -> &'static [OperationApproach] {
+    match kind {
+        OperationKind::Burglary | OperationKind::DocumentTheft => &[
+            OperationApproach::Covert,
+            OperationApproach::Deceptive,
+            OperationApproach::InsideAssistance,
+            OperationApproach::Opportunistic,
+        ],
+        OperationKind::Robbery => &[
+            OperationApproach::Deceptive,
+            OperationApproach::Intimidating,
+            OperationApproach::Violent,
+            OperationApproach::InsideAssistance,
+            OperationApproach::Opportunistic,
+        ],
+        OperationKind::Hijacking
+        | OperationKind::Intimidation
+        | OperationKind::WitnessPressure
+        | OperationKind::Extraction => &[
+            OperationApproach::Covert,
+            OperationApproach::Deceptive,
+            OperationApproach::Intimidating,
+            OperationApproach::Violent,
+            OperationApproach::InsideAssistance,
+            OperationApproach::Opportunistic,
+        ],
+        OperationKind::Smuggling | OperationKind::Surveillance | OperationKind::GamblingEvent => &[
+            OperationApproach::Covert,
+            OperationApproach::Deceptive,
+            OperationApproach::InsideAssistance,
+            OperationApproach::Opportunistic,
+        ],
+        OperationKind::Sabotage | OperationKind::Arson => &[
+            OperationApproach::Covert,
+            OperationApproach::Deceptive,
+            OperationApproach::Violent,
+            OperationApproach::InsideAssistance,
+            OperationApproach::Opportunistic,
+        ],
+    }
+}
+
 fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
     let roles: &[RoleKind] = match kind {
         OperationKind::Burglary => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
@@ -761,10 +800,89 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::GamblingEvent => &[RoleKind::Coordinator],
         OperationKind::Extraction => &[RoleKind::Coordinator, RoleKind::Driver],
         OperationKind::Sabotage => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
-        OperationKind::Bribery => &[RoleKind::Coordinator, RoleKind::Negotiator],
         OperationKind::Arson => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
     };
     roles.iter().copied().collect()
+}
+
+/// Roles whose capability can materially contribute to this operation kind. Required roles are
+/// a subset; additional entries are optional specialists the planner may deliberately assign.
+fn supported_operation_roles(kind: OperationKind) -> &'static [RoleKind] {
+    match kind {
+        OperationKind::Burglary => &[
+            RoleKind::Coordinator,
+            RoleKind::EntrySpecialist,
+            RoleKind::SafeSpecialist,
+            RoleKind::Lookout,
+            RoleKind::Driver,
+            RoleKind::InsideContact,
+        ],
+        OperationKind::Robbery => &[
+            RoleKind::Coordinator,
+            RoleKind::Muscle,
+            RoleKind::Driver,
+            RoleKind::Lookout,
+            RoleKind::SafeSpecialist,
+            RoleKind::InsideContact,
+        ],
+        OperationKind::Hijacking => &[
+            RoleKind::Coordinator,
+            RoleKind::Driver,
+            RoleKind::Lookout,
+            RoleKind::Muscle,
+            RoleKind::InsideContact,
+        ],
+        OperationKind::Smuggling => &[
+            RoleKind::Coordinator,
+            RoleKind::Driver,
+            RoleKind::Lookout,
+            RoleKind::InsideContact,
+            RoleKind::Negotiator,
+        ],
+        OperationKind::Intimidation | OperationKind::WitnessPressure => &[
+            RoleKind::Coordinator,
+            RoleKind::Muscle,
+            RoleKind::Negotiator,
+            RoleKind::InsideContact,
+        ],
+        OperationKind::Surveillance => &[
+            RoleKind::Surveillance,
+            RoleKind::Lookout,
+            RoleKind::Driver,
+            RoleKind::InsideContact,
+            RoleKind::Coordinator,
+        ],
+        OperationKind::DocumentTheft => &[
+            RoleKind::Coordinator,
+            RoleKind::EntrySpecialist,
+            RoleKind::SafeSpecialist,
+            RoleKind::Lookout,
+            RoleKind::Driver,
+            RoleKind::InsideContact,
+        ],
+        OperationKind::GamblingEvent => &[
+            RoleKind::Coordinator,
+            RoleKind::Negotiator,
+            RoleKind::InsideContact,
+            RoleKind::Lookout,
+            RoleKind::Muscle,
+        ],
+        OperationKind::Extraction => &[
+            RoleKind::Coordinator,
+            RoleKind::Driver,
+            RoleKind::Muscle,
+            RoleKind::Lookout,
+            RoleKind::InsideContact,
+            RoleKind::EntrySpecialist,
+        ],
+        OperationKind::Sabotage | OperationKind::Arson => &[
+            RoleKind::Coordinator,
+            RoleKind::EntrySpecialist,
+            RoleKind::Driver,
+            RoleKind::Lookout,
+            RoleKind::InsideContact,
+        ],
+    }
 }
 
 fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
@@ -782,55 +900,18 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         // Sabotage is deliberate property damage: quieter than robbery, slower than
         // intimidation, and heavily dependent on knowing the target's layout.
         OperationKind::Sabotage => (55, 48, 30, 40),
-        // Bribery buys police goodwill rather than material value: low exposure but
-        // hard without inside knowledge and social leverage.
-        OperationKind::Bribery => (40, 58, 20, 32),
         // Arson is high-risk message violence: short, exposed, and heavily penalized
         // by police presence — the blunt counterpart to sabotage.
         OperationKind::Arson => (30, 60, 55, 62),
     };
-    let role_capabilities = BTreeMap::from([
-        (
-            RoleKind::Driver,
-            capability_for_operation_role(RoleKind::Driver),
-        ),
-        (
-            RoleKind::Lookout,
-            capability_for_operation_role(RoleKind::Lookout),
-        ),
-        (
-            RoleKind::EntrySpecialist,
-            capability_for_operation_role(RoleKind::EntrySpecialist),
-        ),
-        (
-            RoleKind::SafeSpecialist,
-            capability_for_operation_role(RoleKind::SafeSpecialist),
-        ),
-        (
-            RoleKind::Muscle,
-            capability_for_operation_role(RoleKind::Muscle),
-        ),
-        (
-            RoleKind::InsideContact,
-            capability_for_operation_role(RoleKind::InsideContact),
-        ),
-        (
-            RoleKind::Coordinator,
-            capability_for_operation_role(RoleKind::Coordinator),
-        ),
-        (
-            RoleKind::Surveillance,
-            capability_for_operation_role(RoleKind::Surveillance),
-        ),
-        (
-            RoleKind::Negotiator,
-            capability_for_operation_role(RoleKind::Negotiator),
-        ),
-    ]);
+    let role_capabilities = supported_operation_roles(kind)
+        .iter()
+        .copied()
+        .map(|role| (role, capability_for_operation_role(role)))
+        .collect();
     let leader_capability = match kind {
         OperationKind::Surveillance => CapabilityKind::Surveillance,
         OperationKind::WitnessPressure => CapabilityKind::Intimidation,
-        OperationKind::Bribery => CapabilityKind::Negotiation,
         OperationKind::Burglary
         | OperationKind::Robbery
         | OperationKind::Hijacking
@@ -842,8 +923,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         | OperationKind::Sabotage
         | OperationKind::Arson => CapabilityKind::Management,
     };
-    let approach_difficulty_adjustments = ALL_OPERATION_APPROACHES
-        .into_iter()
+    let approach_difficulty_adjustments = supported_operation_approaches(kind)
+        .iter()
+        .copied()
         .map(|approach| {
             let adjustment = match approach {
                 OperationApproach::Covert => -5,
@@ -856,8 +938,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             (approach, adjustment)
         })
         .collect();
-    let exposure_approach_adjustments = ALL_OPERATION_APPROACHES
-        .into_iter()
+    let exposure_approach_adjustments = supported_operation_approaches(kind)
+        .iter()
+        .copied()
         .map(|approach| {
             let adjustment = match approach {
                 OperationApproach::Covert => -12,
@@ -888,8 +971,6 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::GamblingEvent => (35, 15, None, 10, 16),
         OperationKind::Extraction => (18, 10, Some(8), 18, 24),
         OperationKind::Sabotage => (24, 12, Some(8), 14, 20),
-        // Bribery never triggers a mid-execution police response — it targets police.
-        OperationKind::Bribery => (60, 18, None, 8, 10),
         OperationKind::Arson => (14, 8, Some(5), 20, 26),
     };
     OperationExecutionDefinition {
@@ -959,13 +1040,11 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
             | OperationKind::Sabotage
-            | OperationKind::Bribery
             | OperationKind::Arson => None,
         },
         cash_proceeds: match kind {
             // Robbery takes the till directly; intimidation collects protection money;
-            // a gambling event keeps the house edge; a smuggling run is paid on delivery;
-            // bribery extracts a kickback skim from the venue.
+            // a gambling event keeps the house edge; a smuggling run is paid on delivery.
             OperationKind::Robbery => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 40_000,
                 partial_take_basis_points: 8_000,
@@ -981,10 +1060,6 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             OperationKind::Smuggling => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 18_000,
                 partial_take_basis_points: 4_000,
-            }),
-            OperationKind::Bribery => Some(OperationCashProceedsDefinition {
-                business_take_basis_points: 12_000,
-                partial_take_basis_points: 2_500,
             }),
             OperationKind::Burglary
             | OperationKind::Hijacking
@@ -1009,7 +1084,7 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
             EvidenceKind::WitnessTestimony
         }
         OperationKind::Surveillance => EvidenceKind::Surveillance,
-        OperationKind::GamblingEvent | OperationKind::Bribery => EvidenceKind::FinancialRecord,
+        OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
         // Sabotage and arson leave physical traces at the scene like any other hands-on crime.
         // Intake evidence cannot be ForensicAnalysis: the legal model derives that kind only
         // from investigator lab work on an already-open case, and a ForensicAnalysis intake
@@ -1061,12 +1136,6 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
         OperationKind::GamblingEvent => &[
             InformationTopic::PoliceActivity,
             InformationTopic::Personnel,
-            InformationTopic::MarketAccess,
-        ],
-        OperationKind::Bribery => &[
-            InformationTopic::Personnel,
-            InformationTopic::Relationship,
-            InformationTopic::PoliceActivity,
             InformationTopic::MarketAccess,
         ],
         OperationKind::Sabotage | OperationKind::Arson => &[

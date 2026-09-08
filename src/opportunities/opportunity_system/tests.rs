@@ -24,6 +24,7 @@ use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
     CharacterDraft, OrganizationDraft,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct OpportunityFixture {
@@ -34,6 +35,67 @@ struct OpportunityFixture {
     leader: crate::core::id::CharacterId,
     entry_specialist: crate::core::id::CharacterId,
     source: InformationId,
+}
+
+#[derive(Clone, Serialize)]
+struct OpportunityRecordWire {
+    id: OpportunityId,
+    organization: OrganizationId,
+    context: OpportunityContext,
+    discovered_at: SimTime,
+    valid_until: Option<SimTime>,
+    source_information: BTreeSet<InformationId>,
+    summary: String,
+    report: ReportId,
+    resolution: Option<OpportunityResolution>,
+    version: u32,
+}
+
+fn opportunity_record_wire(record: &OpportunityRecord) -> OpportunityRecordWire {
+    OpportunityRecordWire {
+        id: record.id(),
+        organization: record.organization(),
+        context: record.context().clone(),
+        discovered_at: record.discovered_at(),
+        valid_until: record.valid_until(),
+        source_information: record.source_information().clone(),
+        summary: record.summary().to_owned(),
+        report: record.report(),
+        resolution: record.resolution(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_opportunity(
+    envelope: SaveEnvelope,
+    original: &OpportunityRecord,
+    replacement: &OpportunityRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("opportunity should serialize");
+    let mirror = opportunity_record_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("opportunity mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement opportunity should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized opportunity must appear exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout opportunity corruption must remain decodable")
 }
 
 fn make_fixture() -> OpportunityFixture {
@@ -249,6 +311,105 @@ fn discovery_requires_organization_knowledge_and_creates_a_provenance_report() {
 }
 
 #[test]
+fn conversion_rejects_operation_whose_schedule_already_passed() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("opportunity should commit");
+    let operation = authorize_matching_operation(&mut fixture);
+    fixture.state.advance_clock(SimDuration::from_minutes(11));
+
+    let error = match validate_convert_opportunity(&fixture.state, opportunity, operation) {
+        Ok(_) => panic!("an overdue authorized job cannot consume a still-open opportunity"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        OpportunityError::OperationSchedulePassed {
+            operation,
+            scheduled_for: SimTime::from_minutes(10),
+            now: SimTime::from_minutes(11),
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("rejected conversion must preserve opportunity")
+            .status(),
+        OpportunityStatus::Open
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn conversion_rejects_same_minute_plan_that_first_starts_at_expiry() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(1)),
+    )
+    .expect("one-minute opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("one-minute opportunity should commit");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Too-late same-minute burglary".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: fixture.organization,
+            leader: fixture.leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(fixture.business),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, fixture.leader),
+                (RoleKind::EntrySpecialist, fixture.entry_specialist),
+            ]),
+            intelligence: BTreeSet::from([fixture.source]),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now(),
+        },
+    )
+    .expect("same-minute plan should independently authorize")
+    .commit(&mut fixture.state)
+    .expect("same-minute plan should commit");
+
+    let error = match validate_convert_opportunity(&fixture.state, opportunity, operation) {
+        Ok(_) => panic!("a job that first starts on expiry cannot consume the opportunity"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        OpportunityError::OperationStartsAfterWindow {
+            operation,
+            earliest_start: SimTime::from_minutes(1),
+            valid_until: SimTime::from_minutes(1),
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("rejected conversion must preserve opportunity")
+            .status(),
+        OpportunityStatus::Open
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery() {
     let mut fixture = make_fixture();
     let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
@@ -394,6 +555,69 @@ fn conversion_requires_exact_authorized_operation_and_survives_save_round_trip()
     );
     validate_state(&restored).expect("restored opportunity state should validate");
     validate_invariants(&restored);
+}
+
+#[test]
+fn restore_rejects_conversion_recorded_before_operation_authorization() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("opportunity should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(5));
+    let operation = authorize_matching_operation(&mut fixture);
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("matching operation should convert after authorization")
+        .commit(&mut fixture.state)
+        .expect("conversion should commit");
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("linked operation should persist")
+            .authorized_at(),
+        SimTime::from_minutes(5)
+    );
+
+    let record = fixture
+        .state
+        .opportunities()
+        .get_opportunity(opportunity)
+        .expect("converted opportunity should persist");
+    assert_eq!(
+        record.resolution(),
+        Some(OpportunityResolution::Converted {
+            at: SimTime::from_minutes(5),
+            operation,
+        })
+    );
+    let mut corrupted = opportunity_record_wire(record);
+    corrupted.resolution = Some(OpportunityResolution::Converted {
+        at: SimTime::from_minutes(4),
+        operation,
+    });
+    let envelope = replace_serialized_opportunity(
+        build_save(&fixture.registry, &fixture.state)
+            .expect("valid converted opportunity should save before corruption"),
+        record,
+        &corrupted,
+    );
+
+    let error = restore_save(&fixture.registry, envelope)
+        .expect_err("conversion provenance cannot predate operation authorization");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOpportunity {
+                opportunity: invalid
+            }
+        ) if invalid == opportunity
+    ));
 }
 
 #[test]

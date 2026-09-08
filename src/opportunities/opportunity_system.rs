@@ -80,11 +80,20 @@ pub enum OpportunityError {
     #[error("opportunity {0} has no validity deadline and cannot expire automatically")]
     MissingValidityDeadline(OpportunityId),
     #[error(
-        "operation {operation} is scheduled at or after opportunity validity deadline {valid_until:?}"
+        "operation {operation} cannot begin until {earliest_start:?}, at or after opportunity validity deadline {valid_until:?}"
     )]
-    OperationScheduledAfterWindow {
+    OperationStartsAfterWindow {
         operation: OperationId,
+        earliest_start: SimTime,
         valid_until: SimTime,
+    },
+    #[error(
+        "operation {operation} schedule {scheduled_for:?} already passed before conversion at {now:?}"
+    )]
+    OperationSchedulePassed {
+        operation: OperationId,
+        scheduled_for: SimTime,
+        now: SimTime,
     },
     #[error(
         "opportunity {opportunity} does not expire until {valid_until:?}; current time is {now:?}"
@@ -446,6 +455,13 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
+    if state.now() > operation.scheduled_for() {
+        return Err(OpportunityError::OperationSchedulePassed {
+            operation: operation.id(),
+            scheduled_for: operation.scheduled_for(),
+            now: state.now(),
+        });
+    }
     if let Some(existing) = state
         .opportunities
         .opportunity_for_operation(operation.id())
@@ -506,12 +522,15 @@ fn validate_conversion_match(
     // execute inside the window, not one scheduled after the opportunity has closed. Otherwise the
     // "valid until" deadline could be consumed by an operation that never runs while the situation
     // was live.
+    let earliest_start =
+        crate::operations::operation_system::resolve_operation_earliest_start(operation);
     if opportunity
         .valid_until()
-        .is_some_and(|valid_until| operation.scheduled_for() >= valid_until)
+        .is_some_and(|valid_until| earliest_start >= valid_until)
     {
-        return Err(OpportunityError::OperationScheduledAfterWindow {
+        return Err(OpportunityError::OperationStartsAfterWindow {
             operation: operation.id(),
+            earliest_start,
             valid_until: opportunity
                 .valid_until()
                 .expect("expiry-checked opportunity has a validity window"),

@@ -19,15 +19,17 @@ use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationRecord, OperationStatus,
 };
+use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use std::collections::BTreeSet;
 
 pub(crate) fn validate_deadline_missed_operation(
+    registry: &Registry,
     state: &AppState,
     operation: OperationId,
 ) -> Result<ValidatedOperationAbort, OperationError> {
-    if !has_missed_operation_deadline(state, operation) {
+    if !has_missed_operation_deadline(registry, state, operation) {
         return Err(OperationError::DeadlineNotMissed { operation });
     }
     validate_operation_abort(state, operation, OperationAbortCause::DeadlineMissed)
@@ -246,22 +248,13 @@ fn validate_operation_abort(
         (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::BeforeStart
         }
-        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
-            if resolve_earliest_operation_deadline(record)
-                .is_some_and(|deadline| state.now() >= deadline) =>
-        {
+        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed) => {
             OperationAbortPhase::BeforeStart
         }
-        (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed)
-            if resolve_earliest_operation_deadline(record)
-                .is_some_and(|deadline| state.now() >= deadline) =>
-        {
+        (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed) => {
             OperationAbortPhase::InProgress
         }
-        (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed)
-            if resolve_earliest_operation_deadline(record)
-                .is_some_and(|deadline| state.now() >= deadline) =>
-        {
+        (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed) => {
             OperationAbortPhase::AwaitingDecision
         }
         (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
@@ -499,12 +492,21 @@ fn build_abort_summary(
                     unreachable!("terminal operations cannot miss an active deadline")
                 }
             };
-            Ok(format!(
-                "{} missed its completion deadline at minute {} {}.",
-                operation.title(),
-                deadline.as_minutes(),
-                phase,
-            ))
+            if operation.status() == OperationStatus::Authorized && state.now() < deadline {
+                Ok(format!(
+                    "{} could no longer meet its completion deadline at minute {} {}.",
+                    operation.title(),
+                    deadline.as_minutes(),
+                    phase,
+                ))
+            } else {
+                Ok(format!(
+                    "{} missed its completion deadline at minute {} {}.",
+                    operation.title(),
+                    deadline.as_minutes(),
+                    phase,
+                ))
+            }
         }
     }
 }

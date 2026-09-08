@@ -32,8 +32,6 @@ pub(crate) enum AutonomousExpansionError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Enterprise(#[from] EnterpriseError),
-    #[error("active enterprise {enterprise} has no valid current working-capital runway")]
-    InvalidCommittedRunway { enterprise: EnterpriseId },
     #[error("working-capital reservations overflowed for account {account}")]
     WorkingCapitalOverflow { account: FinancialAccountId },
 }
@@ -174,25 +172,31 @@ fn apply_organization_autonomous_expansion(
         ) else {
             break;
         };
-        let selected = mandates
-            .iter()
-            .enumerate()
-            .filter_map(|(index, mandate)| {
-                decide_autonomous_expansion(
-                    registry,
-                    state,
-                    organization,
-                    mandate,
-                    available_working_capital,
-                )
-                .map(|plan| (index, mandate.id(), plan))
-            })
-            .min_by(
-                |(_, left_mandate, left_plan), (_, right_mandate, right_plan)| {
-                    compare_expansion_plans(left_plan, right_plan)
-                        .then(left_mandate.cmp(right_mandate))
-                },
-            );
+        let mut selected: Option<(usize, crate::core::id::MandateId, AutonomousExpansionPlan)> =
+            None;
+        for (index, mandate) in mandates.iter().enumerate() {
+            let Some(plan) = decide_autonomous_expansion(
+                registry,
+                state,
+                organization,
+                mandate,
+                available_working_capital,
+            )?
+            else {
+                continue;
+            };
+            let candidate = (index, mandate.id(), plan);
+            let replace = selected
+                .as_ref()
+                .is_none_or(|(_, selected_mandate, selected_plan)| {
+                    compare_expansion_plans(&candidate.2, selected_plan)
+                        .then(candidate.1.cmp(selected_mandate))
+                        .is_lt()
+                });
+            if replace {
+                selected = Some(candidate);
+            }
+        }
         let Some((mandate_index, _, plan)) = selected else {
             break;
         };
@@ -288,7 +292,7 @@ fn decide_autonomous_expansion(
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
-) -> Option<AutonomousExpansionPlan> {
+) -> Result<Option<AutonomousExpansionPlan>, AutonomousExpansionError> {
     let district_scopes = resolve_ranked_district_scopes(state, organization, mandate);
     let business_scopes: Vec<ResponsibilityScope> = mandate
         .scopes()
@@ -326,7 +330,7 @@ fn decide_autonomous_expansion(
             &district_scopes,
             &owned_venues,
             &mut candidates,
-        );
+        )?;
         collect_business_scope_candidates(
             &economics,
             kind,
@@ -335,7 +339,7 @@ fn decide_autonomous_expansion(
             &business_scopes,
             &owned_venues,
             &mut candidates,
-        );
+        )?;
         if has_enterprise_function_scope {
             collect_enterprise_function_candidates(
                 &economics,
@@ -345,11 +349,11 @@ fn decide_autonomous_expansion(
                 enterprise_function_scope,
                 &owned_venues,
                 &mut candidates,
-            );
+            )?;
         }
     }
 
-    candidates.into_iter().min_by(compare_expansion_plans)
+    Ok(candidates.into_iter().min_by(compare_expansion_plans))
 }
 
 fn resolve_ranked_district_scopes(
@@ -398,7 +402,7 @@ fn collect_enterprise_function_candidates(
     scope: ResponsibilityScope,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) {
+) -> Result<(), AutonomousExpansionError> {
     for neighborhood in economics.state.world().neighborhoods() {
         let neighborhood_id = neighborhood.id();
         let leads = resolve_neighborhood_influence(economics.state, neighborhood_id)
@@ -421,8 +425,9 @@ fn collect_enterprise_function_candidates(
             },
             owned_venues,
             candidates,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn collect_district_candidates(
@@ -432,7 +437,7 @@ fn collect_district_candidates(
     district_scopes: &[(usize, ResponsibilityScope)],
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) {
+) -> Result<(), AutonomousExpansionError> {
     for (authority_rank, scope) in district_scopes.iter().copied() {
         let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
             continue;
@@ -448,8 +453,9 @@ fn collect_district_candidates(
             },
             owned_venues,
             candidates,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn collect_neighborhood_scope_candidates(
@@ -459,12 +465,12 @@ fn collect_neighborhood_scope_candidates(
     authority: NeighborhoodExpansionAuthority,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) {
+) -> Result<(), AutonomousExpansionError> {
     if definition.required_business_functions().is_empty() {
         let Some(supporting_businesses) =
             resolve_support_network(definition, owned_venues, None, authority.scope)
         else {
-            return;
+            return Ok(());
         };
         if let Some(candidate) = build_ranked_candidate(
             economics,
@@ -473,10 +479,10 @@ fn collect_neighborhood_scope_candidates(
             authority.scope,
             EnterpriseLocation::Neighborhood(authority.neighborhood),
             supporting_businesses,
-        ) {
+        )? {
             candidates.push(candidate);
         }
-        return;
+        return Ok(());
     }
 
     collect_hosted_candidates_in_neighborhood(
@@ -486,7 +492,7 @@ fn collect_neighborhood_scope_candidates(
         authority,
         owned_venues,
         candidates,
-    );
+    )
 }
 
 fn collect_hosted_candidates_in_neighborhood(
@@ -496,7 +502,7 @@ fn collect_hosted_candidates_in_neighborhood(
     authority: NeighborhoodExpansionAuthority,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) {
+) -> Result<(), AutonomousExpansionError> {
     for (business_id, business) in owned_venues {
         if business.neighborhood() != authority.neighborhood
             || !host_satisfies_business_requirements(definition, business)
@@ -518,10 +524,11 @@ fn collect_hosted_candidates_in_neighborhood(
             authority.scope,
             EnterpriseLocation::Business(*business_id),
             supporting_businesses,
-        ) {
+        )? {
             candidates.push(candidate);
         }
     }
+    Ok(())
 }
 
 fn collect_business_scope_candidates(
@@ -532,7 +539,7 @@ fn collect_business_scope_candidates(
     business_scopes: &[ResponsibilityScope],
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) {
+) -> Result<(), AutonomousExpansionError> {
     let requires_host = !definition.required_business_functions().is_empty();
     for scope in business_scopes {
         let ResponsibilityScope::Business(business_id) = scope else {
@@ -556,10 +563,11 @@ fn collect_business_scope_candidates(
             *scope,
             EnterpriseLocation::Business(*business_id),
             supporting_businesses,
-        ) {
+        )? {
             candidates.push(candidate);
         }
     }
+    Ok(())
 }
 
 fn build_ranked_candidate(
@@ -569,9 +577,9 @@ fn build_ranked_candidate(
     scope: ResponsibilityScope,
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
-) -> Option<AutonomousExpansionPlan> {
+) -> Result<Option<AutonomousExpansionPlan>, AutonomousExpansionError> {
     if enterprise_location_is_occupied(economics.state, kind, location) {
-        return None;
+        return Ok(None);
     }
     let (required_working_capital, expected_net_cash) =
         resolve_current_enterprise_financial_projection(
@@ -585,9 +593,9 @@ fn build_ranked_candidate(
     if required_working_capital > economics.available_working_capital
         || expected_net_cash <= Money::ZERO
     {
-        return None;
+        return Ok(None);
     }
-    Some(AutonomousExpansionPlan {
+    Ok(Some(AutonomousExpansionPlan {
         authority_rank,
         expected_net_cash,
         kind,
@@ -595,7 +603,7 @@ fn build_ranked_candidate(
         location,
         supporting_businesses,
         required_working_capital,
-    })
+    }))
 }
 
 fn compare_expansion_plans(
@@ -724,10 +732,7 @@ fn resolve_committed_working_capital(
             enterprise.kind(),
             enterprise.location(),
             enterprise.supporting_businesses().len(),
-        )
-        .ok_or(AutonomousExpansionError::InvalidCommittedRunway {
-            enterprise: enterprise.id(),
-        })?;
+        )?;
         reserve_working_capital(&mut reservations, enterprise.cash_account(), required)?;
     }
     Ok(reservations)

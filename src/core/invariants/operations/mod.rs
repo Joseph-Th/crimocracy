@@ -22,6 +22,8 @@ use crate::operations::operation_execution::{
 };
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
+    resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
+    resolve_operation_earliest_start, try_resolve_operation_earliest_start,
 };
 use crate::operations::police_response_integration::resolve_police_arrival_delay;
 use crate::operations::property_disposition::resolve_property_liquidation_value;
@@ -29,8 +31,8 @@ use crate::operations::surveillance_integration::{
     is_supported_surveillance_target, is_valid_persisted_surveillance_information,
 };
 use crate::operations::{
-    OperationAbortPhase, OperationConstraint, OperationContingency, OperationKind,
-    OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
+    OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
+    OperationKind, OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
 };
 use crate::registry::{OperationDefinition, OperationExecutionDefinition, Registry};
 use crate::reports::ReportKind;
@@ -105,6 +107,36 @@ fn validate_authored_operation_plan(
                             + crate::core::time::SimDuration::from_minutes(delay)
             })
     });
+    let deadline_window_is_valid = resolve_deadline_without_execution_window(
+        execution,
+        operation
+            .started_at()
+            .unwrap_or_else(|| resolve_operation_earliest_start(operation)),
+        operation.constraints(),
+    )
+    .is_none();
+    let authored_window_is_representable = operation
+        .started_at()
+        .unwrap_or_else(|| resolve_operation_earliest_start(operation))
+        .as_minutes()
+        .checked_add(u64::from(execution.duration().as_minutes()))
+        .is_some();
+    let before_start_deadline_abort_is_valid = operation.abort_record().is_none_or(|abort| {
+        if abort.phase() != OperationAbortPhase::BeforeStart
+            || abort.cause() != OperationAbortCause::DeadlineMissed
+        {
+            return true;
+        }
+        resolve_earliest_operation_deadline(operation).is_some_and(|deadline| {
+            abort.aborted_at() >= deadline
+                || resolve_deadline_without_execution_window(
+                    execution,
+                    abort.aborted_at(),
+                    operation.constraints(),
+                )
+                .is_some()
+        })
+    });
     if !definition
         .supported_approaches()
         .contains(&operation.approach())
@@ -131,6 +163,9 @@ fn validate_authored_operation_plan(
         || (operation.started_at().is_some()
             && execution.operation_entry_offset().is_some()
             && operation.entry_at().is_none())
+        || !authored_window_is_representable
+        || !deadline_window_is_valid
+        || !before_start_deadline_abort_is_valid
         || !police_response_matches_authorship
     {
         return Err(invalid_operation_definition(operation));
@@ -327,10 +362,22 @@ fn validate_operation(
 }
 
 fn validate_operation_definition(
-    _state: &AppState,
+    state: &AppState,
     operation: &OperationRecord,
 ) -> Result<(), StateValidationError> {
-    if operation.title().trim().is_empty() || operation.version() == 0 {
+    let Some(earliest_start) = try_resolve_operation_earliest_start(operation) else {
+        return Err(StateValidationError::InvalidOperationDefinition {
+            operation: operation.id(),
+        });
+    };
+    if operation.title().trim().is_empty()
+        || operation.version() == 0
+        || operation.authorized_at() > operation.scheduled_for()
+        || operation.authorized_at() > state.now()
+        || operation
+            .started_at()
+            .is_some_and(|started_at| started_at < earliest_start)
+    {
         return Err(StateValidationError::InvalidOperationDefinition {
             operation: operation.id(),
         });
@@ -355,7 +402,13 @@ fn validate_operation_actors(
             | OperationStatus::InProgress
             | OperationStatus::AwaitingDecision
     );
+    let mut role_participants = BTreeSet::new();
     for participant in operation.roles().values() {
+        if !role_participants.insert(*participant) {
+            return Err(StateValidationError::InvalidOperationDefinition {
+                operation: operation.id(),
+            });
+        }
         let participant_record =
             state
                 .world
@@ -901,7 +954,6 @@ fn validate_operation_discoveries(
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
         | OperationKind::Sabotage
-        | OperationKind::Bribery
         | OperationKind::Arson => {
             if !resolution.discovered_information().is_empty() {
                 return Err(StateValidationError::InvalidOperationDiscovery {

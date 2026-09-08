@@ -89,11 +89,6 @@ pub enum StateValidationError {
     InvalidContactDisclosure { disclosure: ContactDisclosureId },
     #[error("active operation {operation} has an inactive or foreign leader")]
     ActiveOperationInvalidLeader { operation: OperationId },
-    #[error("active operation {operation} has inactive participant {participant}")]
-    ActiveOperationInvalidParticipant {
-        operation: OperationId,
-        participant: CharacterId,
-    },
     #[error("active operation {operation} has a foreign participant {participant}")]
     ActiveOperationForeignParticipant {
         operation: OperationId,
@@ -217,11 +212,6 @@ pub enum StateValidationError {
     MandateHasNoScopes { mandate: crate::core::id::MandateId },
     #[error("mandate {mandate} has invalid persisted version 0")]
     InvalidMandateVersion { mandate: MandateId },
-    #[error("active mandate {mandate} has invalid manager {manager}")]
-    ActiveMandateInvalidManager {
-        mandate: crate::core::id::MandateId,
-        manager: CharacterId,
-    },
     #[error("mandate {mandate} manager {manager} belongs to a different organization")]
     MandateManagerOrganizationMismatch {
         mandate: crate::core::id::MandateId,

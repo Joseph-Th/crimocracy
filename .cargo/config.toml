@@ -1,11 +1,7 @@
 [alias]
-# ── inner loop: type-check (fastest, no linking) ─────────────────────────────
-# The inner loop while editing: `cargo check-fast` then `cargo test-focused <domain>`.
-# Warm: 0.06s (no change) / ~6s after touching one lib file. Use this while iterating;
-# only run `verify.cmd -Fast` when the behavior is ready for the iteration gate.
+# Inner-loop checks avoid linking and keep focused domain tests cheap to invoke.
 check-fast = ["check", "--locked", "--lib"]
-# Check both lib and harness surface in one invocation — cheaper than two
-# separate checks because cargo shares the lib build. Warm: ~0.45s.
+# Check both library and harness surfaces in one invocation so Cargo shares the library build.
 check-all = ["check", "--locked", "--lib", "--example", "gameplay_harness"]
 # Harness surface only (adapter-facing example) without lib tests.
 check-harness = ["check", "--locked", "--example", "gameplay_harness"]
@@ -25,7 +21,7 @@ test-focused = ["test", "--locked", "--lib", "--quiet"]
 test-all = ["test", "--locked", "--lib", "--quiet"]
 # Optimized-behavior lane: when overflow/wrapping could differ under opt.
 test-release = ["test", "--locked", "--release", "--quiet"]
-# Soak stress test only (mixed-state invariant exercise, ~1s).
+# Soak stress test only (mixed-state invariant exercise).
 soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
 # Quick single-domain aliases — sugar over `cargo test-focused <domain>`.
 # Each still compiles the single lib test binary, but filters execution to one domain.
@@ -39,28 +35,14 @@ test-recruitment = ["test", "--locked", "--lib", "--quiet", "recruitment"]
 test-delegation = ["test", "--locked", "--lib", "--quiet", "delegation"]
 
 # ── gameplay harness ──────────────────────────────────────────────────────────
-# All harness execution uses [profile.harness] (dev semantics, opt-level 1):
-# warm runs are ~10x faster than dev and lib caches in target/debug are never
-# disturbed. Harness output is quiet by default; the harness itself prints
-# its own narrative readouts. Use --quiet to suppress cargo's build log.
+# Harness execution uses [profile.harness] so gameplay runs keep a separate cache.
+# The harness itself owns narrative output; Cargo build logging stays quiet.
 harness = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness"]
 harness-rush = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
 harness-press = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
 harness-recon = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
-# Full controlled comparison (narrative rotation + probes + batches, ~5s, artifacts in target/harness-runs/).
+# Full controlled comparison (narrative rotation, probes, and matched-seed batches).
 harness-full = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
-
-[build]
-# Incremental is disabled in [profile.dev] (measured slower for this crate:
-# cache encode/decode > reuse for the large lib test binary) and enabled for
-# the single-binary harness profile (measured much faster: 75s -> 9-16s).
-# verify.ps1 pins CARGO_INCREMENTAL=0 around dev stages so an inherited var
-# cannot re-enable dev incremental, and clears it around harness-profile
-# stages so [profile.harness] governs. `verify.ps1 -Jobs N` caps parallelism.
-#
-# Windows tip: exclude the repository `target\` directory from Defender
-# real-time scanning — it can add 30-60s to cold builds on some machines.
-# Settings -> Virus & threat protection -> Exclusions -> Add folder.
 
 [term]
 quiet = false

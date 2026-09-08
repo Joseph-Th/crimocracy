@@ -98,6 +98,8 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationOutcomeMarginRange(OperationKind),
     #[error("operation {0:?} approach difficulty adjustments must be in -50..=50")]
     InvalidOperationApproachAdjustment(OperationKind),
+    #[error("operation {0:?} must support at least one approach")]
+    MissingOperationApproaches(OperationKind),
     #[error("operation {0:?} must define at least one relevant intelligence topic")]
     MissingOperationIntelligenceTopics(OperationKind),
     #[error("operation {0:?} intelligence difficulty reduction must be in 0..=50")]
@@ -149,9 +151,23 @@ pub(crate) enum RegistryBuildError {
         approach: OperationApproach,
     },
     #[error(
+        "operation {operation:?} has a difficulty adjustment for unsupported approach {approach:?}"
+    )]
+    UnexpectedOperationApproachAdjustment {
+        operation: OperationKind,
+        approach: OperationApproach,
+    },
+    #[error(
         "operation {operation:?} has no exposure adjustment for supported approach {approach:?}"
     )]
     MissingOperationExposureApproachAdjustment {
+        operation: OperationKind,
+        approach: OperationApproach,
+    },
+    #[error(
+        "operation {operation:?} has an exposure adjustment for unsupported approach {approach:?}"
+    )]
+    UnexpectedOperationExposureApproachAdjustment {
         operation: OperationKind,
         approach: OperationApproach,
     },
@@ -699,6 +715,9 @@ impl RegistryBuilder {
         required_roles: BTreeSet<RoleKind>,
         execution: OperationExecutionDefinition,
     ) -> Result<(), RegistryBuildError> {
+        if supported_approaches.is_empty() {
+            return Err(RegistryBuildError::MissingOperationApproaches(kind));
+        }
         if execution.difficulty.duration.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidOperationDuration(kind));
         }
@@ -847,6 +866,24 @@ impl RegistryBuilder {
             {
                 return Err(
                     RegistryBuildError::MissingOperationExposureApproachAdjustment {
+                        operation: kind,
+                        approach: *approach,
+                    },
+                );
+            }
+        }
+        for approach in execution.difficulty.approach_difficulty_adjustments.keys() {
+            if !supported_approaches.contains(approach) {
+                return Err(RegistryBuildError::UnexpectedOperationApproachAdjustment {
+                    operation: kind,
+                    approach: *approach,
+                });
+            }
+        }
+        for approach in execution.exposure.approach_adjustments.keys() {
+            if !supported_approaches.contains(approach) {
+                return Err(
+                    RegistryBuildError::UnexpectedOperationExposureApproachAdjustment {
                         operation: kind,
                         approach: *approach,
                     },

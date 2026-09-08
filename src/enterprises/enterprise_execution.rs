@@ -150,6 +150,11 @@ pub enum EnterpriseError {
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("enterprise economics overflowed while resolving cycle {0}")]
     ArithmeticOverflow(EnterpriseId),
+    #[error("enterprise economics overflowed while projecting {kind:?} at {location:?}")]
+    ProjectionArithmeticOverflow {
+        kind: EnterpriseKind,
+        location: EnterpriseLocation,
+    },
     #[error(
         "enterprise {enterprise} changed after validation; expected version {expected}, found {found}"
     )]
@@ -1783,19 +1788,24 @@ pub(crate) fn resolve_current_enterprise_operating_cost(
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
-) -> Option<Money> {
-    let profile = resolve_location_profile(state, location).ok()?;
-    let neighborhood = resolve_location_neighborhood(state, location).ok()?;
+) -> Result<Money, EnterpriseError> {
+    let profile = resolve_location_profile(state, location)?;
+    let neighborhood = resolve_location_neighborhood(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
+    let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
     let predictable =
-        resolve_predictable_operating_cost(economics, profile, supporting_business_count)?;
+        resolve_predictable_operating_cost(economics, profile, supporting_business_count)
+            .ok_or_else(projection_overflow)?;
     let heat = economics
         .heat_surcharge_per_active_case()
         .checked_mul(i64::from(count_district_originated_cases(
             state,
             neighborhood,
-        )))?;
-    predictable.checked_add(heat)
+        )))
+        .ok_or_else(projection_overflow)?;
+    predictable
+        .checked_add(heat)
+        .ok_or_else(projection_overflow)
 }
 
 /// Zero-variance financial projection for a proposed enterprise under current district pressure.
@@ -1809,10 +1819,12 @@ pub(crate) fn resolve_current_enterprise_financial_projection(
     location: EnterpriseLocation,
     supporting_business_count: usize,
     management: Option<Rating>,
-) -> Option<(Money, Money)> {
-    let profile = resolve_location_profile(state, location).ok()?;
+) -> Result<(Money, Money), EnterpriseError> {
+    let profile = resolve_location_profile(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
-    let gross = resolve_gross_before_variance_value(economics, profile, management)?;
+    let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
+    let gross = resolve_gross_before_variance_value(economics, profile, management)
+        .ok_or_else(projection_overflow)?;
     let operating_cost = resolve_current_enterprise_operating_cost(
         registry,
         state,
@@ -1820,8 +1832,10 @@ pub(crate) fn resolve_current_enterprise_financial_projection(
         location,
         supporting_business_count,
     )?;
-    let expected_net_cash = gross.checked_sub(operating_cost)?;
-    Some((operating_cost, expected_net_cash))
+    let expected_net_cash = gross
+        .checked_sub(operating_cost)
+        .ok_or_else(projection_overflow)?;
+    Ok((operating_cost, expected_net_cash))
 }
 
 fn resolve_predictable_operating_cost(

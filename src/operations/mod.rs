@@ -37,7 +37,6 @@ pub enum OperationKind {
     GamblingEvent,
     Extraction,
     Sabotage,
-    Bribery,
     Arson,
 }
 
@@ -53,16 +52,12 @@ impl OperationKind {
     pub(crate) const fn can_take_cash(self) -> bool {
         matches!(
             self,
-            Self::Robbery
-                | Self::Smuggling
-                | Self::Intimidation
-                | Self::GamblingEvent
-                | Self::Bribery
+            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent
         )
     }
 }
 
-pub const ALL_OPERATION_KINDS: [OperationKind; 13] = [
+pub const ALL_OPERATION_KINDS: [OperationKind; 12] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
     OperationKind::Hijacking,
@@ -74,7 +69,6 @@ pub const ALL_OPERATION_KINDS: [OperationKind; 13] = [
     OperationKind::GamblingEvent,
     OperationKind::Extraction,
     OperationKind::Sabotage,
-    OperationKind::Bribery,
     OperationKind::Arson,
 ];
 
@@ -689,6 +683,7 @@ struct OperationCommand {
     intelligence: BTreeSet<InformationId>,
     constraints: Vec<OperationConstraint>,
     contingencies: Vec<OperationContingency>,
+    authorized_at: SimTime,
     scheduled_for: SimTime,
 }
 
@@ -765,6 +760,10 @@ impl OperationRecord {
 
     pub fn contingencies(&self) -> &[OperationContingency] {
         &self.command.contingencies
+    }
+
+    pub fn authorized_at(&self) -> SimTime {
+        self.command.authorized_at
     }
 
     pub fn scheduled_for(&self) -> SimTime {

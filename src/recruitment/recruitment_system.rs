@@ -296,19 +296,61 @@ pub fn find_recruitment_candidates(
             state,
             candidate,
             target_organization,
-        ) || validate_reassign_character(
+        ) {
+            continue;
+        }
+        if let Err(error) = validate_reassign_character(
             state,
             candidate,
             Some(target_organization),
             Some(recruiter),
-        )
-        .is_err()
-        {
-            continue;
+        ) {
+            if candidate_reassignment_is_temporarily_blocked(error) {
+                continue;
+            }
+            return Err(error.into());
         }
         candidates.push(candidate);
     }
     Ok(candidates)
+}
+
+/// Reassignment failures that describe a currently unavailable prospect rather than broken
+/// world state. Candidate discovery is a query, so routine workload/custody/leadership bindings
+/// exclude a prospect without turning the whole discovery pass into an error. Every structural,
+/// hierarchy, identity, or impossible business-only error propagates instead of being silently
+/// erased by a blanket `is_err()` filter.
+fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
+    match error {
+        WorldError::ActiveOperationAssignment { .. }
+        | WorldError::ActiveMandateAssignment { .. }
+        | WorldError::ActiveInvestigationAssignment { .. }
+        | WorldError::ActiveArrestAssignment { .. }
+        | WorldError::ActiveProsecutionAssignment { .. }
+        | WorldError::ActiveInformantHandlerAssignment { .. }
+        | WorldError::ActiveInstitutionalContactHandler { .. }
+        | WorldError::ActiveInstitutionalContactAssignment { .. }
+        | WorldError::DirectReportAssignment { .. } => true,
+        WorldError::EmptyName
+        | WorldError::MissingOrganization(_)
+        | WorldError::MissingCharacter(_)
+        | WorldError::MissingNeighborhood(_)
+        | WorldError::MissingBusiness(_)
+        | WorldError::BusinessOwnershipUnchanged { .. }
+        | WorldError::CharacterReassignmentUnchanged { .. }
+        | WorldError::StaleBusiness { .. }
+        | WorldError::BusinessOwnerChanged { .. }
+        | WorldError::ActiveEnterpriseSupport { .. }
+        | WorldError::ActiveEnterpriseHost { .. }
+        | WorldError::SupervisorOrganizationMismatch { .. }
+        | WorldError::SupervisorWithoutOrganization { .. }
+        | WorldError::SelfSupervision { .. }
+        | WorldError::SupervisionCycle { .. }
+        | WorldError::DetainedSupervisor { .. }
+        | WorldError::StaleCharacter { .. }
+        | WorldError::InvalidPlayerOrganization(_)
+        | WorldError::IdExhaustion(_) => false,
+    }
 }
 
 /// Autonomous recruitment pass: applies due delegated recruitment attempts for every

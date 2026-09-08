@@ -207,6 +207,7 @@ fn due_in_progress_operations_preserve_resolution_chronology_before_id_order() {
     .expect("earlier higher-ID operation should commit");
     assert!(later_due_lower_id < earlier_due_higher_id);
 
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(
         &registry,
         &mut state,
@@ -214,7 +215,7 @@ fn due_in_progress_operations_preserve_resolution_chronology_before_id_order() {
         OperationTransition::Begin,
     )
     .expect("higher-ID operation should begin first");
-    state.advance_clock(SimDuration::from_minutes(10));
+    state.advance_clock(SimDuration::from_minutes(9));
     apply_transition(
         &registry,
         &mut state,
@@ -248,10 +249,9 @@ fn due_in_progress_operations_preserve_resolution_chronology_before_id_order() {
 
 #[test]
 fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() {
-    // A plan scheduled for the current minute begins on the next canonical tick, so a
-    // deadline anchored to the schedule alone (deadline == scheduled_for + entry_offset + 1)
-    // used to authorize cleanly and then panic the tick when begin re-derived the same rule
-    // one minute later. The gate must anchor on the earliest possible begin instead.
+    // A current-minute plan begins on the next canonical tick. Burglary's entry milestone is
+    // ten minutes after that begin, so minute 11 leaves no usable execution time before the
+    // milestone while minute 12 leaves one minute and is admissible.
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let crew = insert_character(
         &mut state,
@@ -270,6 +270,7 @@ fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() 
     // Burglary carries an authored 10-minute entry offset and requires an entry specialist.
     draft.kind = OperationKind::Burglary;
     draft.objective = OperationObjective::AcquireProperty { target };
+    draft.approach = OperationApproach::Covert;
     draft.roles = BTreeMap::from([
         (RoleKind::Coordinator, leader),
         (RoleKind::EntrySpecialist, crew),
@@ -279,13 +280,34 @@ fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() 
     )];
     let error = validate_authorize_operation(&registry, &state, draft.clone())
         .expect_err("a deadline that only fits a begin at the schedule minute must be rejected");
-    assert_eq!(error, OperationError::DeadlineBeforeStart);
+    assert_eq!(error, OperationError::DeadlineLeavesNoExecutionWindow);
 
     draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
         SimTime::from_minutes(12),
     )];
     validate_authorize_operation(&registry, &state, draft)
         .expect("one spare minute above entry offset admits the guaranteed next-tick begin");
+}
+
+#[test]
+fn authorization_rejects_future_operation_whose_duration_exceeds_simulation_clock() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let duration = u64::from(
+        registry
+            .get_operation(OperationKind::Intimidation)
+            .execution()
+            .duration()
+            .as_minutes(),
+    );
+    assert!(duration > 0);
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.scheduled_for = SimTime::from_minutes(u64::MAX - duration + 1);
+
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("an operation whose authored duration crosses the clock horizon must reject");
+    assert_eq!(error, OperationError::SimulationTimeOverflow);
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_invariants(&state);
 }
 
 #[test]
@@ -340,6 +362,7 @@ fn invalid_terminal_transition_leaves_operation_unchanged() {
     .commit(&mut state)
     .expect("validated operation should remain current");
 
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("authorized operation should begin");
     apply_transition(&registry, &mut state, operation, OperationTransition::Abort)
@@ -421,7 +444,7 @@ fn operation_rejects_one_character_filling_multiple_roles() {
         leader,
         objective: OperationObjective::ObtainCash { target },
         approach: OperationApproach::Intimidating,
-        roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Lookout, leader)]),
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Muscle, leader)]),
         intelligence: BTreeSet::new(),
         constraints: Vec::new(),
         contingencies: Vec::new(),
@@ -434,7 +457,7 @@ fn operation_rejects_one_character_filling_multiple_roles() {
         error,
         OperationError::DuplicateRoleParticipant {
             character: leader,
-            first_role: RoleKind::Lookout,
+            first_role: RoleKind::Muscle,
             second_role: RoleKind::Coordinator,
         }
     );
@@ -517,7 +540,7 @@ fn operation_rejects_overlapping_participant_assignment_until_prior_operation_is
 #[test]
 fn operation_allows_non_overlapping_future_assignment() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
-    let first = validate_authorize_operation(
+    validate_authorize_operation(
         &registry,
         &state,
         make_test_draft(organization, leader, target),
@@ -526,18 +549,64 @@ fn operation_allows_non_overlapping_future_assignment() {
     .commit(&mut state)
     .expect("first operation should commit");
     let mut later = make_test_draft(organization, leader, target);
-    later.scheduled_for = state
-        .operations()
-        .get_operation(first)
-        .expect("first operation should persist")
-        .scheduled_for()
+    later.scheduled_for = SimTime::from_minutes(1)
         + registry
             .get_operation(OperationKind::Intimidation)
             .execution()
             .duration();
 
     validate_authorize_operation(&registry, &state, later)
-        .expect("a future operation after the prior window should validate");
+        .expect("a future operation at the prior operation's real end should validate");
+    validate_invariants(&state);
+}
+
+#[test]
+fn current_minute_authorization_reserves_crew_through_its_real_next_tick_window() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let first = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("first operation should validate")
+    .commit(&mut state)
+    .expect("first operation should commit");
+    let duration = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .duration();
+    let mut overlapping = make_test_draft(organization, leader, target);
+    overlapping.scheduled_for = SimTime::ZERO + duration;
+
+    let error = validate_authorize_operation(&registry, &state, overlapping)
+        .expect_err("the first operation actually starts next tick and still occupies this minute");
+    assert_eq!(
+        error,
+        OperationError::ParticipantBusy {
+            character: leader,
+            operation: first,
+        }
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn deadline_constrained_authorization_releases_crew_at_the_deadline() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let mut first = make_test_draft(organization, leader, target);
+    first.scheduled_for = SimTime::from_minutes(10);
+    first.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+        SimTime::from_minutes(20),
+    )];
+    validate_authorize_operation(&registry, &state, first)
+        .expect("deadline-constrained operation should validate")
+        .commit(&mut state)
+        .expect("deadline-constrained operation should commit");
+    let mut later = make_test_draft(organization, leader, target);
+    later.scheduled_for = SimTime::from_minutes(20);
+
+    validate_authorize_operation(&registry, &state, later)
+        .expect("the binding deadline should end the earlier crew reservation");
     validate_invariants(&state);
 }
 
@@ -691,6 +760,7 @@ fn in_progress_authority_abort_records_causal_artifacts_and_survives_save_round_
     .expect("operation fixture should validate")
     .commit(&mut state)
     .expect("operation fixture should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin");
     state.advance_clock(crate::core::time::SimDuration::from_minutes(5));
@@ -707,7 +777,7 @@ fn in_progress_authority_abort_records_causal_artifacts_and_survives_save_round_
     let abort = record
         .abort_record()
         .expect("started abort should persist its provenance");
-    assert_eq!(abort.aborted_at(), SimTime::from_minutes(5));
+    assert_eq!(abort.aborted_at(), SimTime::from_minutes(6));
     assert_eq!(abort.phase(), OperationAbortPhase::InProgress);
     assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
     assert!(record.resolution().is_none());
@@ -765,6 +835,7 @@ fn abort_token_rejects_time_staleness_without_partial_mutation() {
     .expect("operation fixture should validate")
     .commit(&mut state)
     .expect("operation fixture should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin");
     let abort =
@@ -778,8 +849,8 @@ fn abort_token_rejects_time_staleness_without_partial_mutation() {
         error,
         OperationError::StaleAbortTime {
             operation,
-            expected: SimTime::ZERO,
-            found: SimTime::from_minutes(1),
+            expected: SimTime::from_minutes(1),
+            found: SimTime::from_minutes(2),
         }
     );
     let record = state
@@ -817,6 +888,59 @@ fn missing_required_role_is_rejected_before_id_allocation() {
 }
 
 #[test]
+fn stock_registry_rejects_incoherent_surveillance_approach() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let draft = OperationDraft {
+        title: "Overt surveillance".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation { target },
+        approach: OperationApproach::Violent,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: state.now(),
+    };
+
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("violent surveillance is a different criminal act, not an observation plan");
+    assert_eq!(error, OperationError::UnsupportedApproach);
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
+fn operation_rejects_irrelevant_specialist_role() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let specialist = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Safe Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("specialist fixture should validate");
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.roles.insert(RoleKind::SafeSpecialist, specialist);
+
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("a safe specialist has no execution function in intimidation");
+    assert_eq!(
+        error,
+        OperationError::UnsupportedRole(RoleKind::SafeSpecialist)
+    );
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
 fn operation_cannot_begin_before_scheduled_time() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let mut draft = make_test_draft(organization, leader, target);
@@ -833,7 +957,13 @@ fn operation_cannot_begin_before_scheduled_time() {
 
     let error = apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect_err("operation must not begin early");
-    assert_eq!(error, OperationError::StartBeforeScheduled(operation));
+    assert_eq!(
+        error,
+        OperationError::StartBeforeEarliestStart {
+            operation,
+            earliest_start: SimTime::from_minutes(30),
+        }
+    );
     let record = state
         .operations()
         .get_operation(operation)
@@ -916,10 +1046,11 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
         .expect("deadline-constrained operation should validate")
         .commit(&mut state)
         .expect("deadline-constrained operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin before its deadline");
 
-    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(9));
     let outcome = crate::core::simulation::run_tick(&registry, &mut state);
 
     assert!(outcome.resolved_operations.is_empty());
@@ -994,11 +1125,12 @@ fn missed_deadline_scan_preserves_deadline_chronology_before_operation_id() {
         .expect("earlier-deadline operation should commit");
     assert!(lower_id < higher_id);
 
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, lower_id, OperationTransition::Begin)
         .expect("lower-ID operation should begin");
     apply_transition(&registry, &mut state, higher_id, OperationTransition::Begin)
         .expect("higher-ID operation should begin");
-    state.advance_clock(crate::core::time::SimDuration::from_minutes(21));
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(20));
 
     assert_eq!(
         find_due_operations_with_missed_deadlines(&state),
@@ -1074,6 +1206,7 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
         .expect("decision-capable operation should validate")
         .commit(&mut state)
         .expect("decision-capable operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin before its deadline");
     // The dispatched response arrives and pauses the operation pending leadership.
@@ -1181,6 +1314,32 @@ fn authorization_expires_if_scheduled_time_passes_before_commit() {
             now: 3,
         }
     );
+    assert_eq!(
+        state
+            .operations()
+            .operations_for_organization(organization)
+            .count(),
+        0
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn authorization_commit_rechecks_deadline_against_actual_authorization_minute() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.scheduled_for = SimTime::from_minutes(10);
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+        SimTime::from_minutes(11),
+    )];
+    let validated = validate_authorize_operation(&registry, &state, draft)
+        .expect("deadline leaves one minute when authorization is still prospective");
+
+    state.advance_clock(SimDuration::from_minutes(10));
+    let error = validated
+        .commit(&mut state)
+        .expect_err("committing on the schedule minute shifts begin to the next tick");
+    assert_eq!(error, OperationError::DeadlineLeavesNoExecutionWindow);
     assert_eq!(
         state
             .operations()

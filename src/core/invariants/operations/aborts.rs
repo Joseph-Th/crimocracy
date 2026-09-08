@@ -36,7 +36,7 @@ pub(super) fn validate_operation_abort_links(
     operation_after_action_reports: &mut BTreeSet<ReportId>,
     operation_history_events: &mut BTreeSet<crate::core::id::HistoryEventId>,
 ) -> Result<(), StateValidationError> {
-    if abort.aborted_at() > state.now() {
+    if abort.aborted_at() < operation.authorized_at() || abort.aborted_at() > state.now() {
         return Err(invalid_abort(operation));
     }
 
@@ -74,8 +74,7 @@ fn validate_before_start_abort(
         (OperationAbortCause::DeadlineMissed, Some(artifacts)) => {
             if operation.started_at().is_some()
                 || operation.resolution_due_at().is_some()
-                || resolve_completion_deadline(operation)
-                    .is_none_or(|deadline| deadline > abort.aborted_at())
+                || resolve_completion_deadline(operation).is_none()
             {
                 return Err(invalid_abort(operation));
             }

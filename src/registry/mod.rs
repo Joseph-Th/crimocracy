@@ -455,6 +455,67 @@ mod tests {
     }
 
     #[test]
+    fn operation_definition_rejects_empty_or_inert_approach_authorship() {
+        let (approaches, roles, execution) = burglary_operation_parts();
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                BTreeSet::new(),
+                roles.clone(),
+                execution.clone(),
+            ),
+            Err(RegistryBuildError::MissingOperationApproaches(
+                OperationKind::Burglary
+            ))
+        ));
+
+        let mut difficulty_extra = execution.clone();
+        difficulty_extra
+            .difficulty
+            .approach_difficulty_adjustments
+            .insert(OperationApproach::Violent, 0);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                difficulty_extra,
+            ),
+            Err(RegistryBuildError::UnexpectedOperationApproachAdjustment {
+                operation: OperationKind::Burglary,
+                approach: OperationApproach::Violent,
+            })
+        ));
+
+        let mut exposure_extra = execution;
+        exposure_extra
+            .exposure
+            .approach_adjustments
+            .insert(OperationApproach::Violent, 0);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                exposure_extra,
+            ),
+            Err(
+                RegistryBuildError::UnexpectedOperationExposureApproachAdjustment {
+                    operation: OperationKind::Burglary,
+                    approach: OperationApproach::Violent,
+                }
+            )
+        ));
+    }
+
+    #[test]
     fn executive_brief_definition_rejects_invalid_cadence_attention_and_entry_limit() {
         let valid = ExecutiveBriefDefinitionSpec {
             cadence: SimDuration::from_minutes(1_440),

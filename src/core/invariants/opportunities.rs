@@ -239,10 +239,15 @@ fn validate_converted_opportunity(
     if opportunity.version() != 2
         || at < opportunity.discovered_at()
         || at > state.now()
+        || at < operation.authorized_at()
         || at > operation.scheduled_for()
         || opportunity
             .valid_until()
             .is_some_and(|valid_until| at >= valid_until)
+        || opportunity.valid_until().is_some_and(|valid_until| {
+            crate::operations::operation_system::resolve_operation_earliest_start(operation)
+                >= valid_until
+        })
         || operation.responsible_organization() != opportunity.organization()
         || operation.kind() != context.operation_kind()
         || operation_targets.len() != 1

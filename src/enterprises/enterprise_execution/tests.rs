@@ -32,7 +32,9 @@ use crate::legal::{
     Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
     IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft, JurisdictionDraft,
 };
-use crate::operations::operation_system::validate_authorize_operation;
+use crate::operations::operation_system::{
+    OperationTransition, apply_transition, validate_authorize_operation,
+};
 use crate::operations::{
     OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
 };
@@ -55,6 +57,75 @@ struct EnterpriseFixture {
     location: EnterpriseLocation,
     cash: FinancialAccountId,
     settlement: FinancialAccountId,
+}
+
+/// Opens a district-pressure case from an operation that actually occurred. The provenance
+/// operation is started through the simulation tick and then stood down through the canonical
+/// authority transition so it releases its participant instead of leaving a synthetic,
+/// permanently-authorized booking behind.
+fn open_originated_pressure_case(
+    registry: &Registry,
+    fixture: &mut EnterpriseFixture,
+    police: OrganizationId,
+    title: &str,
+    target: EntityRef,
+) {
+    let manager = fixture.authority.manager;
+    let origin = validate_authorize_operation(
+        registry,
+        &fixture.state,
+        OperationDraft {
+            title: format!("{title} origin patrol"),
+            kind: OperationKind::Surveillance,
+            responsible_organization: fixture.organization,
+            leader: manager,
+            objective: OperationObjective::GatherInformation { target },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut fixture.state)
+    .expect("origin operation should commit");
+    let start = run_tick(registry, &mut fixture.state);
+    assert!(
+        start.started_operations.contains(&origin),
+        "origin operation must actually begin before it can ground a pressure case"
+    );
+    apply_transition(
+        registry,
+        &mut fixture.state,
+        origin,
+        OperationTransition::Abort,
+    )
+    .expect("origin attempt should stand down cleanly after beginning");
+    validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([fixture.organization]),
+            witness: None,
+        },
+    )
+    .expect("pressure case intake should validate")
+    .commit(&mut fixture.state)
+    .expect("pressure case intake should commit");
 }
 
 #[derive(Clone, Serialize)]
@@ -993,52 +1064,8 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     .expect("spanning jurisdiction should validate")
     .commit(&mut fixture.state)
     .expect("spanning jurisdiction should commit");
-    let manager = fixture.authority.manager;
-
     let open_heat_case = |fixture: &mut EnterpriseFixture, title: &str, target| {
-        let origin = validate_authorize_operation(
-            &registry,
-            &fixture.state,
-            OperationDraft {
-                title: format!("{title} origin patrol"),
-                kind: OperationKind::Surveillance,
-                responsible_organization: fixture.organization,
-                leader: manager,
-                objective: OperationObjective::GatherInformation { target },
-                approach: OperationApproach::Covert,
-                roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
-                intelligence: BTreeSet::new(),
-                constraints: Vec::new(),
-                contingencies: Vec::new(),
-                scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
-            },
-        )
-        .expect("origin operation should validate")
-        .commit(&mut fixture.state)
-        .expect("origin operation should commit");
-        validate_incident_intake(
-            &fixture.state,
-            IncidentIntakeDraft {
-                owner: police,
-                title: title.to_owned(),
-                subjects: BTreeSet::from([EntityRef::Operation(origin)]),
-                evidence: vec![IncidentEvidenceDraft {
-                    subject: EntityRef::Operation(origin),
-                    origin: Some(EntityRef::Operation(origin)),
-                    kind: EvidenceKind::Surveillance,
-                    strength: EvidenceStrength::Weak,
-                    reliability: EvidenceReliability::Questionable,
-                    admissibility: Admissibility::Unknown,
-                    discovered_at: fixture.state.now(),
-                }],
-                origin: Some(EntityRef::Operation(origin)),
-                notified_organizations: BTreeSet::from([fixture.organization]),
-                witness: None,
-            },
-        )
-        .expect("incident intake should validate")
-        .commit(&mut fixture.state)
-        .expect("incident intake should commit");
+        open_originated_pressure_case(&registry, fixture, police, title, target);
     };
     let due_cycle = |fixture: &mut EnterpriseFixture| {
         fixture
@@ -1146,54 +1173,14 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
     .expect("jurisdiction should validate")
     .commit(&mut fixture.state)
     .expect("jurisdiction should commit");
-    let manager = fixture.authority.manager;
-
     let open_case = |fixture: &mut EnterpriseFixture, title: &str| {
-        let origin = validate_authorize_operation(
+        open_originated_pressure_case(
             &registry,
-            &fixture.state,
-            OperationDraft {
-                title: format!("{title} origin patrol"),
-                kind: OperationKind::Surveillance,
-                responsible_organization: fixture.organization,
-                leader: manager,
-                objective: OperationObjective::GatherInformation {
-                    target: EntityRef::Neighborhood(local_neighborhood),
-                },
-                approach: OperationApproach::Covert,
-                roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
-                intelligence: BTreeSet::new(),
-                constraints: Vec::new(),
-                contingencies: Vec::new(),
-                scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
-            },
-        )
-        .expect("origin operation should validate")
-        .commit(&mut fixture.state)
-        .expect("origin operation should commit");
-        validate_incident_intake(
-            &fixture.state,
-            IncidentIntakeDraft {
-                owner: police,
-                title: title.to_owned(),
-                subjects: BTreeSet::from([EntityRef::Operation(origin)]),
-                evidence: vec![IncidentEvidenceDraft {
-                    subject: EntityRef::Operation(origin),
-                    origin: Some(EntityRef::Operation(origin)),
-                    kind: EvidenceKind::Surveillance,
-                    strength: EvidenceStrength::Weak,
-                    reliability: EvidenceReliability::Questionable,
-                    admissibility: Admissibility::Unknown,
-                    discovered_at: fixture.state.now(),
-                }],
-                origin: Some(EntityRef::Operation(origin)),
-                notified_organizations: BTreeSet::from([fixture.organization]),
-                witness: None,
-            },
-        )
-        .expect("incident intake should validate")
-        .commit(&mut fixture.state)
-        .expect("incident intake should commit");
+            fixture,
+            police,
+            title,
+            EntityRef::Neighborhood(local_neighborhood),
+        );
     };
     let settle_cycle = |fixture: &mut EnterpriseFixture| {
         // Settle one due cycle and return the attention class its plan carried.
@@ -4018,52 +4005,13 @@ fn open_district_pressure_case(
     title: &str,
     neighborhood: crate::core::id::NeighborhoodId,
 ) {
-    let manager = fixture.authority.manager;
-    let origin = validate_authorize_operation(
+    open_originated_pressure_case(
         registry,
-        &fixture.state,
-        OperationDraft {
-            title: format!("{title} origin patrol"),
-            kind: OperationKind::Surveillance,
-            responsible_organization: fixture.organization,
-            leader: manager,
-            objective: OperationObjective::GatherInformation {
-                target: EntityRef::Neighborhood(neighborhood),
-            },
-            approach: OperationApproach::Covert,
-            roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
-            intelligence: BTreeSet::new(),
-            constraints: Vec::new(),
-            contingencies: Vec::new(),
-            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
-        },
-    )
-    .expect("origin operation should validate")
-    .commit(&mut fixture.state)
-    .expect("origin operation should commit");
-    validate_incident_intake(
-        &fixture.state,
-        IncidentIntakeDraft {
-            owner: police,
-            title: title.to_owned(),
-            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
-            evidence: vec![IncidentEvidenceDraft {
-                subject: EntityRef::Operation(origin),
-                origin: Some(EntityRef::Operation(origin)),
-                kind: EvidenceKind::Surveillance,
-                strength: EvidenceStrength::Weak,
-                reliability: EvidenceReliability::Questionable,
-                admissibility: Admissibility::Unknown,
-                discovered_at: fixture.state.now(),
-            }],
-            origin: Some(EntityRef::Operation(origin)),
-            notified_organizations: BTreeSet::from([fixture.organization]),
-            witness: None,
-        },
-    )
-    .expect("pressure case intake should validate")
-    .commit(&mut fixture.state)
-    .expect("pressure case intake should commit");
+        fixture,
+        police,
+        title,
+        EntityRef::Neighborhood(neighborhood),
+    );
 }
 
 fn find_vice_investigation(

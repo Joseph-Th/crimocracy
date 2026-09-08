@@ -28,7 +28,7 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 | Intelligence | Provenance-bearing information with typed topics, holder indexes, transfers, lineage | `src/intelligence/` via `intelligence_system` |
 | Reports and history | Player-facing reports, executive briefs, financial reports, Notable standing reports when the player organization's own street reputation shifts, entity-linked campaign events | `src/reports/` and `src/history/` |
 | Finance | Typed accounts, allocator-neutral planned account openings for composite transactions, and balanced multi-account ledger | `src/finance/` via `finance_system` |
-| Operations | Semantic plans (objectives, approaches, roles, participant reservations, intelligence, timing, contingencies) resolving deterministically through exposure, surveillance, and police response; cause-specific atomic aborts for authority, deadlines, decisions, police arrival, and participant detention; after-action records; debrief-derived district police knowledge from pre-entry police-arrival aborts; recent-take depletion on repeated targets; venue-sensitive property disposition with proceeds held as cash; custody release through extraction; sabotage/arson-driven business disruption; bribery cash takes | `src/operations/` via `operation_system` (authorization/start), `operation_abort` (abort lifecycle/artifacts), and `operation_execution` (resolution) |
+| Operations | Semantic plans (objectives, approaches, roles, participant reservations, intelligence, timing, contingencies) resolving deterministically through exposure, surveillance, and police response; cause-specific atomic aborts for authority, deadlines, decisions, police arrival, and participant detention; after-action records; debrief-derived district police knowledge from pre-entry police-arrival aborts; recent-take depletion on repeated targets; venue-sensitive property disposition with proceeds held as cash; custody release through extraction; sabotage/arson-driven business disruption | `src/operations/` via `operation_system` (authorization/start), `operation_abort` (abort lifecycle/artifacts), and `operation_execution` (resolution) |
 | Opportunities | Information-backed discovery with an open/dismissed/expired/converted lifecycle | `src/opportunities/` via `opportunity_system` |
 | Decisions | Durable typed requests with recipient/context indexes, versioned resolution or explicit cancellation, attention classes | `src/decisions/` via `decision_system` |
 | Delegation | Organization-owned mandates with responsibility scopes, policy overrides, budget authority, revision, revocation, dependency checks | `src/delegation/` via `delegation_system` |
@@ -70,8 +70,8 @@ These are scope boundaries, not evidence for unmodeled design goals.
 These two numbers gate `core::persistence::restore_save` (`src/core/persistence.rs`):
 mismatched saves are rejected. Keep them in sync with the owners.
 
-The current authored content revision is 39.
+The current authored content revision is 40.
 
-The current in-memory state schema version is 71.
+The current in-memory state schema version is 72.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

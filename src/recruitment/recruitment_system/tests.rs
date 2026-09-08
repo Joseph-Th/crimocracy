@@ -39,6 +39,47 @@ struct Fixture {
     candidate: CharacterId,
 }
 
+#[test]
+fn candidate_discovery_skips_temporarily_bound_prospects() {
+    let mut fixture = fixture();
+    let subordinate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Candidate's Soldier".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.candidate),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("direct-report fixture should validate");
+
+    let candidates = find_recruitment_candidates(
+        &fixture.registry,
+        &fixture.state,
+        fixture.target,
+        fixture.recruiter,
+    )
+    .expect("ordinary personnel obligations should filter rather than fail discovery");
+    assert!(candidates.is_empty());
+    assert_eq!(
+        validate_reassign_character(
+            &fixture.state,
+            fixture.candidate,
+            Some(fixture.target),
+            Some(fixture.recruiter),
+        )
+        .expect_err("candidate should remain blocked by their direct report"),
+        WorldError::DirectReportAssignment {
+            character: fixture.candidate,
+            direct_report: subordinate,
+        }
+    );
+    validate_invariants(&fixture.state);
+}
+
 fn tamper_serialized_summary(
     envelope: SaveEnvelope,
     summary: &str,

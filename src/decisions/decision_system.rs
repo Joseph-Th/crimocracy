@@ -894,7 +894,7 @@ pub fn validate_resolve_decision(
                 // deadline: only an abort strictly after the deadline records `DeadlineMissed`.
                 DecisionResponse::Abort => Some(Box::new(
                     if has_operation_deadline_fully_passed(state, operation) {
-                        validate_deadline_missed_operation(state, operation)?
+                        validate_deadline_missed_operation(registry, state, operation)?
                     } else {
                         validate_decision_abort_operation(state, operation, decision)?
                     },

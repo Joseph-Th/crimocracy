@@ -37,8 +37,9 @@ use crate::operations::property_disposition::{
     validate_deposit_operation_cash, validate_dispose_property,
 };
 use crate::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationContingency,
-    OperationDraft, OperationKind, OperationObjective, OperationStatus, RoleKind,
+    OperationAbortCause, OperationAbortPhase, OperationApproach, OperationConstraint,
+    OperationContingency, OperationDraft, OperationKind, OperationObjective, OperationStatus,
+    RoleKind,
 };
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::world::world_system::{
@@ -511,6 +512,26 @@ fn make_exposed_operation_fixture(
     NeighborhoodId,
     OperationId,
 ) {
+    make_exposed_operation_fixture_with_constraints(
+        kind,
+        assign_jurisdiction,
+        contingencies,
+        Vec::new(),
+    )
+}
+
+fn make_exposed_operation_fixture_with_constraints(
+    kind: OperationKind,
+    assign_jurisdiction: bool,
+    contingencies: Vec<OperationContingency>,
+    constraints: Vec<OperationConstraint>,
+) -> (
+    Registry,
+    AppState,
+    OrganizationId,
+    NeighborhoodId,
+    OperationId,
+) {
     let registry = build_registry();
     let mut state = AppState::new(0xE710_1933);
     let organization = insert_organization(
@@ -654,25 +675,46 @@ fn make_exposed_operation_fixture(
         },
     )
     .expect("exposure specialist should validate");
-    let (title, objective) = if kind == OperationKind::Burglary {
-        (
+    let (title, objective, approach, roles) = match kind {
+        OperationKind::Burglary => (
             "Observed burglary".to_owned(),
             OperationObjective::AcquireProperty {
                 target: EntityRef::Business(business),
             },
-        )
-    } else {
-        assert_eq!(
-            kind,
-            OperationKind::Sabotage,
-            "exposure fixture supports only scene-trace operation kinds"
-        );
-        (
+            OperationApproach::Covert,
+            BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::EntrySpecialist, specialist),
+            ]),
+        ),
+        OperationKind::Sabotage => (
             "Observed sabotage".to_owned(),
             OperationObjective::DisruptBusiness {
                 target: EntityRef::Business(business),
             },
-        )
+            OperationApproach::Covert,
+            BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::EntrySpecialist, specialist),
+            ]),
+        ),
+        OperationKind::Intimidation => (
+            "Observed intimidation".to_owned(),
+            OperationObjective::ObtainCash {
+                target: EntityRef::Business(business),
+            },
+            OperationApproach::Intimidating,
+            BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        ),
+        OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Surveillance
+        | OperationKind::WitnessPressure
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::Extraction
+        | OperationKind::Arson => panic!("exposure fixture does not support {kind:?}"),
     };
     let operation = validate_authorize_operation(
         &registry,
@@ -683,13 +725,10 @@ fn make_exposed_operation_fixture(
             responsible_organization: organization,
             leader,
             objective,
-            approach: OperationApproach::Covert,
-            roles: BTreeMap::from([
-                (RoleKind::Coordinator, leader),
-                (RoleKind::EntrySpecialist, specialist),
-            ]),
+            approach,
+            roles,
             intelligence: BTreeSet::new(),
-            constraints: Vec::new(),
+            constraints,
             contingencies,
             scheduled_for: SimTime::from_minutes(1),
         },
@@ -1160,6 +1199,394 @@ fn police_arrival_decision_pauses_and_shifts_operation_resolution_schedule() {
     }
     validate_state(&state).expect("resumed operation state should validate");
     validate_invariants(&state);
+}
+
+#[test]
+fn resume_allows_current_minute_follow_up_when_next_tick_start_equals_shifted_end() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture_with_constraints(
+            OperationKind::Intimidation,
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
+                6,
+            ))],
+        );
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started intimidation should persist");
+    let organization = operation_record.responsible_organization();
+    let leader = operation_record.leader();
+    let target = operation_record
+        .objective()
+        .referenced_entities()
+        .into_iter()
+        .find_map(|entity| match entity {
+            EntityRef::Business(business) => Some(business),
+            EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => None,
+        })
+        .expect("intimidation fixture must target its business");
+    let due_at = operation_record
+        .resolution_due_at()
+        .expect("started intimidation must have a due time");
+
+    let paused_at = loop {
+        let outcome = run_tick(&registry, &mut state);
+        if !outcome.decision_requests.is_empty() {
+            break outcome.now;
+        }
+        assert!(outcome.resolved_operations.is_empty());
+    };
+    assert_eq!(
+        paused_at + SimDuration::ONE_MINUTE,
+        due_at,
+        "fixture must pause with exactly one minute of execution remaining"
+    );
+    let decision_id = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("police-arrival decision should be pending");
+
+    let follow_up = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Boundary follow-up".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("current-minute follow-up actually begins next tick at the paused job's end")
+    .commit(&mut state)
+    .expect("boundary follow-up should commit");
+
+    validate_resolve_decision(
+        &registry,
+        &state,
+        decision_id,
+        organization,
+        DecisionResponse::Continue,
+    )
+    .expect("resume should not treat the follow-up's authored minute as occupied")
+    .commit(&mut state)
+    .expect("boundary resume should commit through the canonical decision path");
+    let resumed = state
+        .operations()
+        .get_operation(operation)
+        .expect("resumed operation should persist");
+    assert_eq!(resumed.status(), OperationStatus::InProgress);
+    assert_eq!(resumed.resolution_due_at(), Some(due_at));
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(follow_up)
+            .expect("follow-up should persist")
+            .scheduled_for(),
+        paused_at
+    );
+    validate_state(&state).expect("boundary resume state should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture_with_constraints(
+            OperationKind::Intimidation,
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
+                6,
+            ))],
+        );
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started operation should persist");
+    let organization = operation_record.responsible_organization();
+    let leader = operation_record.leader();
+    let target = operation_record
+        .objective()
+        .referenced_entities()
+        .into_iter()
+        .find_map(|entity| match entity {
+            EntityRef::Business(business) => Some(business),
+            EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => None,
+        })
+        .expect("fixture operation must target a business");
+
+    while state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .status()
+        != OperationStatus::AwaitingDecision
+    {
+        run_tick(&registry, &mut state);
+    }
+    assert_eq!(state.now(), SimTime::from_minutes(5));
+
+    let follow_up = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Deferred boundary follow-up".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("follow-up is valid if the pending decision resolves immediately")
+    .commit(&mut state)
+    .expect("boundary follow-up should commit");
+
+    let boundary = run_tick(&registry, &mut state);
+    assert_eq!(boundary.now, SimTime::from_minutes(6));
+    assert!(boundary.started_operations.is_empty());
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(follow_up)
+            .expect("blocked follow-up should persist")
+            .status(),
+        OperationStatus::Authorized
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("paused operation should persist")
+            .status(),
+        OperationStatus::AwaitingDecision
+    );
+
+    let deadline_cleanup = run_tick(&registry, &mut state);
+    assert_eq!(deadline_cleanup.now, SimTime::from_minutes(7));
+    assert!(deadline_cleanup.started_operations.is_empty());
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("deadline-aborted operation should persist")
+            .status(),
+        OperationStatus::Aborted
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(follow_up)
+            .expect("follow-up should remain queued until the next tick")
+            .status(),
+        OperationStatus::Authorized
+    );
+
+    let retry = run_tick(&registry, &mut state);
+    assert_eq!(retry.now, SimTime::from_minutes(8));
+    assert_eq!(retry.started_operations, vec![follow_up]);
+    validate_state(&state).expect("deferred follow-up state should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture_with_constraints(
+            OperationKind::Intimidation,
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
+                6,
+            ))],
+        );
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started operation should persist");
+    let organization = operation_record.responsible_organization();
+    let leader = operation_record.leader();
+    let target = operation_record
+        .objective()
+        .referenced_entities()
+        .into_iter()
+        .find_map(|entity| match entity {
+            EntityRef::Business(business) => Some(business),
+            EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => None,
+        })
+        .expect("fixture operation must target a business");
+
+    while state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .status()
+        != OperationStatus::AwaitingDecision
+    {
+        run_tick(&registry, &mut state);
+    }
+    assert_eq!(state.now(), SimTime::from_minutes(5));
+
+    let entry_specialist = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Deadline Entry Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("entry specialist fixture should validate");
+    let follow_up = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Deadline-compressed follow-up".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::EntrySpecialist, entry_specialist),
+            ]),
+            intelligence: BTreeSet::new(),
+            constraints: vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
+                17,
+            ))],
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("one executable minute remains if the follow-up begins on the next tick")
+    .commit(&mut state)
+    .expect("deadline-compressed follow-up should commit");
+
+    let first_due = run_tick(&registry, &mut state);
+    assert_eq!(first_due.now, SimTime::from_minutes(6));
+    assert!(first_due.started_operations.is_empty());
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(follow_up)
+            .expect("participant-blocked follow-up should persist")
+            .status(),
+        OperationStatus::Authorized
+    );
+
+    let impossible = run_tick(&registry, &mut state);
+    assert_eq!(impossible.now, SimTime::from_minutes(7));
+    assert!(impossible.started_operations.is_empty());
+    let follow_up_record = state
+        .operations()
+        .get_operation(follow_up)
+        .expect("deadline-aborted follow-up should persist");
+    assert_eq!(follow_up_record.status(), OperationStatus::Aborted);
+    assert_eq!(
+        follow_up_record.abort_record().map(|abort| abort.phase()),
+        Some(OperationAbortPhase::BeforeStart)
+    );
+    assert_eq!(
+        follow_up_record.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::DeadlineMissed)
+    );
+    let artifacts = follow_up_record
+        .abort_record()
+        .and_then(|abort| abort.artifacts())
+        .expect("pre-start deadline miss should surface after-action artifacts");
+    assert!(
+        state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("deadline-miss information should persist")
+            .summary()
+            .contains("could no longer meet its completion deadline"),
+        "an early infeasibility abort must not claim the literal deadline already passed"
+    );
+    validate_state(&state)
+        .expect("immediate deadline-abort state should remain structurally valid");
+    validate_invariants(&state);
+
+    let envelope = build_save(&registry, &state)
+        .expect("early deadline-abort state should pass registry-aware save validation");
+    let bytes = bincode::serialize(&envelope).expect("deadline-abort save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("deadline-abort save should deserialize");
+    let restored = restore_save(&registry, decoded)
+        .expect("registry-aware restore should accept canonical early deadline abort");
+    let restored_follow_up = restored
+        .operations()
+        .get_operation(follow_up)
+        .expect("early deadline-aborted operation should survive restore");
+    assert_eq!(restored_follow_up.status(), OperationStatus::Aborted);
+    assert_eq!(
+        restored_follow_up.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::DeadlineMissed)
+    );
+    validate_state(&restored).expect("restored early deadline-abort state should validate");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored early deadline-abort state should match authored operation timing");
 }
 
 #[test]

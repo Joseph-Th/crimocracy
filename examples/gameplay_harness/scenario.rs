@@ -1097,11 +1097,9 @@ pub fn establish_harbor_expansion(
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     // Authored float target for the second book, clamped to what the canal till actually holds
-    // above its working-capital floor: a lean early run must not reject the capitalization
-    // transfer, so the beat moves whatever idle cash exists instead of asserting an amount.
-    // Lowered to $50 to stay reachable even when the home district is heavily heated and
-    // daily laundering competes for the same street cash; the floor is waived here because
-    // the harbor book is a strategic diversification, not daily laundering.
+    // Keep the capitalization target reachable even when the home district is heavily heated
+    // and daily laundering competes for the same street cash. This strategic diversification
+    // may move whatever idle cash is available because it is not an ordinary laundering sweep.
     const EXPANSION_FLOAT_TARGET_CENTS: i64 = 5_000;
     let canal_cash = scenario
         .state

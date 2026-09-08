@@ -34,7 +34,7 @@ use crate::operations::operation_execution::{
     validate_operation_resolution_plan,
 };
 use crate::operations::operation_system::{
-    OperationTransition, apply_transition, find_due_authorized_operations,
+    OperationError, OperationTransition, apply_transition, find_due_authorized_operations,
     find_due_operations_with_missed_deadlines, has_missed_operation_deadline,
 };
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
@@ -221,15 +221,25 @@ fn run_operations_phase(
     let due_authorized = find_due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
     for operation in due_authorized {
-        if has_missed_operation_deadline(state, operation) {
-            validate_deadline_missed_operation(state, operation)
+        if has_missed_operation_deadline(registry, state, operation) {
+            validate_deadline_missed_operation(registry, state, operation)
                 .expect("a missed operation deadline must validate")
                 .commit(state)
                 .expect("a missed operation deadline must commit atomically");
         } else {
-            apply_transition(registry, state, operation, OperationTransition::Begin)
-                .expect("due authorized operation must support the begin transition");
-            started_operations.push(operation);
+            match apply_transition(registry, state, operation, OperationTransition::Begin) {
+                Ok(()) => started_operations.push(operation),
+                // A future assignment can become temporarily unavailable when an earlier
+                // operation remains paused longer than projected at authorization time. The due
+                // operation stays Authorized and retries on later ticks. Deadline infeasibility
+                // is handled by the shared pre-check above and therefore never defers silently.
+                Err(OperationError::ParticipantBusy { .. }) => {}
+                Err(error) => {
+                    panic!(
+                        "due authorized operation could not begin through its canonical path: {error}"
+                    )
+                }
+            }
         }
     }
     for operation in find_due_operations_with_missed_deadlines(state) {
@@ -250,7 +260,7 @@ fn run_operations_phase(
             .commit(state)
             .expect("automatic deadline decision abort must commit atomically");
         } else {
-            validate_deadline_missed_operation(state, operation)
+            validate_deadline_missed_operation(registry, state, operation)
                 .expect("an overdue in-progress operation must validate a deadline abort")
                 .commit(state)
                 .expect("an overdue in-progress operation must abort atomically");
