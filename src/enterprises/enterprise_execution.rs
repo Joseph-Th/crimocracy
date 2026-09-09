@@ -6,7 +6,7 @@ use economics::{
     resolve_basis_point_variance, resolve_gross_before_variance, resolve_operating_cost,
 };
 pub(crate) use economics::{
-    resolve_current_enterprise_financial_projection, resolve_current_enterprise_operating_cost,
+    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
     resolve_historical_enterprise_cycle_financials,
 };
 
@@ -1502,7 +1502,7 @@ pub(crate) fn can_authority_cover_location(
     }
 }
 
-fn resolve_location_neighborhood(
+pub(crate) fn resolve_location_neighborhood(
     state: &AppState,
     location: EnterpriseLocation,
 ) -> Result<crate::core::id::NeighborhoodId, EnterpriseError> {

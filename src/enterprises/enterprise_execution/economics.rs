@@ -1,9 +1,6 @@
 //! Enterprise revenue, cost, projection, and historical financial re-derivation.
 
-use super::{
-    EnterpriseError, count_district_originated_cases, resolve_location_neighborhood,
-    resolve_location_profile,
-};
+use super::{EnterpriseError, resolve_location_profile};
 use crate::core::id::EnterpriseId;
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
@@ -104,19 +101,19 @@ fn resolve_operating_cost_with_heat(
     })
 }
 
-/// Current one-cycle operating runway for a proposed enterprise configuration, before any gross
-/// is earned. Unlike the base authored cost, this includes the district's police burden, every
-/// selected support-business surcharge, and the currently active originated-case heat. Autonomous
-/// expansion uses this exact production-cost composition instead of maintaining parallel math.
-pub(crate) fn resolve_current_enterprise_operating_cost(
+/// One-cycle operating runway for a proposed enterprise configuration, before any gross is
+/// earned. `observed_active_cases` is an explicit decision input owned by the caller so planning
+/// cannot silently acquire omniscient access to the live legal graph. The arithmetic remains the
+/// same composition used by production settlement once its actual case count is known.
+pub(crate) fn resolve_enterprise_operating_cost_projection(
     registry: &Registry,
     state: &AppState,
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
+    observed_active_cases: u32,
 ) -> Result<Money, EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
-    let neighborhood = resolve_location_neighborhood(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
     let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
     let predictable =
@@ -124,39 +121,38 @@ pub(crate) fn resolve_current_enterprise_operating_cost(
             .ok_or_else(projection_overflow)?;
     let heat = economics
         .heat_surcharge_per_active_case()
-        .checked_mul(i64::from(count_district_originated_cases(
-            state,
-            neighborhood,
-        )))
+        .checked_mul(i64::from(observed_active_cases))
         .ok_or_else(projection_overflow)?;
     predictable
         .checked_add(heat)
         .ok_or_else(projection_overflow)
 }
 
-/// Zero-variance financial projection for a proposed enterprise under current district pressure.
-/// Returns `(operating_cost, expected_net_cash)`. This is a read-only decision input, not a
-/// persisted forecast: an eventual cycle still draws its authored variance and re-reads current
-/// case pressure through the production settlement path.
-pub(crate) fn resolve_current_enterprise_financial_projection(
+/// Zero-variance financial projection for a proposed enterprise under the caller's observed
+/// district pressure. Returns `(operating_cost, expected_net_cash)`. This is a read-only decision
+/// input, not a persisted forecast: an eventual cycle still draws its authored variance and reads
+/// the actual case pressure through the production settlement path.
+pub(crate) fn resolve_enterprise_financial_projection(
     registry: &Registry,
     state: &AppState,
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
     management: Option<Rating>,
+    observed_active_cases: u32,
 ) -> Result<(Money, Money), EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
     let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
     let gross = resolve_gross_before_variance_value(economics, profile, management)
         .ok_or_else(projection_overflow)?;
-    let operating_cost = resolve_current_enterprise_operating_cost(
+    let operating_cost = resolve_enterprise_operating_cost_projection(
         registry,
         state,
         kind,
         location,
         supporting_business_count,
+        observed_active_cases,
     )?;
     let expected_net_cash = gross
         .checked_sub(operating_cost)

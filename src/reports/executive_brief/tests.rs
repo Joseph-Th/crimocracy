@@ -251,6 +251,52 @@ fn synthesis_prioritizes_pending_decisions_filters_routine_and_deduplicates_sour
 }
 
 #[test]
+fn source_entry_limit_prefers_newer_items_within_the_same_attention_class() {
+    let mut fixture = make_test_brief_fixture();
+    for index in 0..9 {
+        record_report(
+            &mut fixture.state,
+            fixture.organization,
+            &format!("Chronology source {index}"),
+            vec![entry(
+                AttentionClass::Notable,
+                &format!("Chronology item {index}."),
+            )],
+        );
+        if index < 8 {
+            fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+        }
+    }
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_432));
+
+    let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
+        .expect("daily brief should rank the bounded same-priority source set");
+    assert!(
+        plan.entries
+            .iter()
+            .any(|entry| entry.summary == "Chronology item 8."),
+        "the newest same-priority development must survive the source cap"
+    );
+    assert!(
+        !plan
+            .entries
+            .iter()
+            .any(|entry| entry.summary == "Chronology item 0."),
+        "the oldest same-priority source should be the one displaced by the cap"
+    );
+    assert!(
+        plan.entries
+            .last()
+            .expect("bounded source overflow should be disclosed")
+            .summary
+            .contains("1 additional item")
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn registry_validation_rejects_forged_off_cadence_executive_brief() {
     let mut fixture = make_test_brief_fixture();
     let report = fixture

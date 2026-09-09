@@ -10,8 +10,9 @@ use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::enterprise_execution::{
     EnterpriseError, can_authority_cover_location, enterprise_location_is_occupied,
-    resolve_current_enterprise_financial_projection, resolve_current_enterprise_operating_cost,
-    validate_establish_enterprise, validate_establish_enterprise_with_openings,
+    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
+    resolve_location_neighborhood, validate_establish_enterprise,
+    validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
@@ -56,9 +57,13 @@ struct AutonomousExpansionPlan {
 struct ExpansionEconomicsContext<'a> {
     registry: &'a Registry,
     state: &'a AppState,
+    organization: OrganizationId,
+    observed_district_pressure: &'a ObservedDistrictPressure,
     management: Option<Rating>,
     available_working_capital: Money,
 }
+
+type ObservedDistrictPressure = BTreeMap<(OrganizationId, NeighborhoodId), u32>;
 
 #[derive(Clone, Copy)]
 struct NeighborhoodExpansionAuthority {
@@ -94,7 +99,9 @@ pub(crate) fn apply_due_autonomous_enterprises(
     // establishment in this pass makes another claim on that same pool. Keep those commitments
     // as a read-only planning projection so delegated managers cannot multiply-count one dollar
     // of liquidity across several rackets without inventing a second authoritative ledger.
-    let mut working_capital_reservations = resolve_committed_working_capital(registry, state)?;
+    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
+    let mut working_capital_reservations =
+        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
     let mandates = resolve_eligible_expansion_mandates(registry, state, player_organization)?;
     let mut established = Vec::new();
     for (organization, organization_mandates) in mandates {
@@ -103,6 +110,7 @@ pub(crate) fn apply_due_autonomous_enterprises(
             state,
             organization,
             organization_mandates,
+            &observed_district_pressure,
             &mut working_capital_reservations,
         )?);
     }
@@ -161,6 +169,7 @@ fn apply_organization_autonomous_expansion(
     state: &mut AppState,
     organization: OrganizationId,
     mut mandates: Vec<crate::delegation::MandateRecord>,
+    observed_district_pressure: &ObservedDistrictPressure,
     working_capital_reservations: &mut BTreeMap<FinancialAccountId, Money>,
 ) -> Result<Vec<EnterpriseId>, AutonomousExpansionError> {
     let mut established = Vec::new();
@@ -181,6 +190,7 @@ fn apply_organization_autonomous_expansion(
                 organization,
                 mandate,
                 available_working_capital,
+                observed_district_pressure,
             )?
             else {
                 continue;
@@ -292,6 +302,7 @@ fn decide_autonomous_expansion(
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
+    observed_district_pressure: &ObservedDistrictPressure,
 ) -> Result<Option<AutonomousExpansionPlan>, AutonomousExpansionError> {
     let district_scopes = resolve_ranked_district_scopes(state, organization, mandate);
     let business_scopes: Vec<ResponsibilityScope> = mandate
@@ -317,6 +328,8 @@ fn decide_autonomous_expansion(
     let economics = ExpansionEconomicsContext {
         registry,
         state,
+        organization,
+        observed_district_pressure,
         management,
         available_working_capital,
     };
@@ -581,15 +594,21 @@ fn build_ranked_candidate(
     if enterprise_location_is_occupied(economics.state, kind, location) {
         return Ok(None);
     }
-    let (required_working_capital, expected_net_cash) =
-        resolve_current_enterprise_financial_projection(
-            economics.registry,
-            economics.state,
-            kind,
-            location,
-            supporting_businesses.len(),
-            economics.management,
-        )?;
+    let observed_active_cases = resolve_observed_district_case_count(
+        economics.state,
+        economics.observed_district_pressure,
+        economics.organization,
+        location,
+    )?;
+    let (required_working_capital, expected_net_cash) = resolve_enterprise_financial_projection(
+        economics.registry,
+        economics.state,
+        kind,
+        location,
+        supporting_businesses.len(),
+        economics.management,
+        observed_active_cases,
+    )?;
     if required_working_capital > economics.available_working_capital
         || expected_net_cash <= Money::ZERO
     {
@@ -720,22 +739,96 @@ fn resolve_max_autonomous_working_capital(
 fn resolve_committed_working_capital(
     registry: &Registry,
     state: &AppState,
+    observed_district_pressure: &ObservedDistrictPressure,
 ) -> Result<BTreeMap<FinancialAccountId, Money>, AutonomousExpansionError> {
     let mut reservations = BTreeMap::new();
     for enterprise in state.enterprises().enterprises() {
         if enterprise.status() != EnterpriseStatus::Active {
             continue;
         }
-        let required = resolve_current_enterprise_operating_cost(
+        let observed_active_cases = resolve_observed_district_case_count(
+            state,
+            observed_district_pressure,
+            enterprise.organization(),
+            enterprise.location(),
+        )?;
+        let required = resolve_enterprise_operating_cost_projection(
             registry,
             state,
             enterprise.kind(),
             enterprise.location(),
             enterprise.supporting_businesses().len(),
+            observed_active_cases,
         )?;
         reserve_working_capital(&mut reservations, enterprise.cash_account(), required)?;
     }
     Ok(reservations)
+}
+
+/// Most recent district-pressure count the organization can infer from its own settled rackets.
+/// The autonomous planner must not inspect live investigations: an unseen case is uncertainty,
+/// not free foresight. Once one of the organization's enterprises settles in the district, its
+/// recorded street-heat surcharge becomes legitimate operating history for later planning. The
+/// complete map is derived once per daily pass so candidate evaluation remains linear in world
+/// history rather than rescanning an organization's rackets for every proposed location.
+fn resolve_observed_district_pressure(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<ObservedDistrictPressure, AutonomousExpansionError> {
+    let mut latest_observations = BTreeMap::new();
+    for enterprise in state.enterprises().enterprises() {
+        let Some(cycle) = state.enterprises().latest_cycle(enterprise.id()) else {
+            continue;
+        };
+        let per_case = registry
+            .get_enterprise(enterprise.kind())
+            .economics()
+            .heat_surcharge_per_active_case()
+            .cents();
+        if per_case <= 0 {
+            continue;
+        }
+        let heat = cycle.investigation_heat().cents();
+        debug_assert!(heat >= 0 && heat % per_case == 0);
+        let inferred = u32::try_from(heat / per_case).unwrap_or(u32::MAX);
+        let key = (cycle.occurred_at(), cycle.id());
+        let neighborhood = resolve_location_neighborhood(state, enterprise.location())?;
+        let observation = latest_observations
+            .entry((enterprise.organization(), neighborhood))
+            .or_insert((key, inferred));
+        if key > observation.0 {
+            *observation = (key, inferred);
+        }
+    }
+    let maximum_age = u64::from(registry.legal().cold_case_window().as_minutes());
+    Ok(latest_observations
+        .into_iter()
+        .filter_map(|(district, ((observed_at, _), count))| {
+            let age = state
+                .now()
+                .as_minutes()
+                .checked_sub(observed_at.as_minutes())
+                .expect("persisted enterprise cycles cannot occur in the future");
+            // Legal cold-case decay shelves originated cases once a complete inactivity window
+            // has elapsed, and that phase runs before delegated expansion on the same tick.
+            // Drop an equally old operating observation here as well so planning cannot retain
+            // pressure the legal owner has already declared cold.
+            (age < maximum_age).then_some((district, count))
+        })
+        .collect())
+}
+
+fn resolve_observed_district_case_count(
+    state: &AppState,
+    observed_district_pressure: &ObservedDistrictPressure,
+    organization: OrganizationId,
+    location: EnterpriseLocation,
+) -> Result<u32, AutonomousExpansionError> {
+    let neighborhood = resolve_location_neighborhood(state, location)?;
+    Ok(observed_district_pressure
+        .get(&(organization, neighborhood))
+        .copied()
+        .unwrap_or(0))
 }
 
 fn reserve_working_capital(

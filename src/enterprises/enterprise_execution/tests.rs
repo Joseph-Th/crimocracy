@@ -20,9 +20,11 @@ use crate::finance::finance_system::{insert_account, validate_record_transaction
 use crate::finance::{
     FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
+use crate::intelligence::InformationTopic;
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
-    validate_add_evidence, validate_incident_intake, validate_open_investigation,
+    apply_cold_case_decay, validate_add_evidence, validate_incident_intake,
+    validate_open_investigation,
 };
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
 use crate::legal::{
@@ -170,25 +172,36 @@ fn replace_serialized_ownership_change(
 /// operation is started through the simulation tick and then stood down through the canonical
 /// authority transition so it releases its participant instead of leaving a synthetic,
 /// permanently-authorized booking behind.
+#[derive(Clone, Copy)]
+struct PressureCaseOrigin {
+    organization: OrganizationId,
+    manager: crate::core::id::CharacterId,
+}
+
 fn open_originated_pressure_case(
     registry: &Registry,
     fixture: &mut EnterpriseFixture,
     police: OrganizationId,
+    case_origin: PressureCaseOrigin,
     title: &str,
     target: EntityRef,
+    notified_organizations: BTreeSet<OrganizationId>,
 ) {
-    let manager = fixture.authority.manager;
+    let PressureCaseOrigin {
+        organization: origin_organization,
+        manager: origin_manager,
+    } = case_origin;
     let origin = validate_authorize_operation(
         registry,
         &fixture.state,
         OperationDraft {
             title: format!("{title} origin patrol"),
             kind: OperationKind::Surveillance,
-            responsible_organization: fixture.organization,
-            leader: manager,
+            responsible_organization: origin_organization,
+            leader: origin_manager,
             objective: OperationObjective::GatherInformation { target },
             approach: OperationApproach::Covert,
-            roles: BTreeMap::from([(RoleKind::Surveillance, manager)]),
+            roles: BTreeMap::from([(RoleKind::Surveillance, origin_manager)]),
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
@@ -226,7 +239,7 @@ fn open_originated_pressure_case(
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(origin)),
-            notified_organizations: BTreeSet::from([fixture.organization]),
+            notified_organizations,
             witness: None,
         },
     )
@@ -1239,7 +1252,18 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     .commit(&mut fixture.state)
     .expect("spanning jurisdiction should commit");
     let open_heat_case = |fixture: &mut EnterpriseFixture, title: &str, target| {
-        open_originated_pressure_case(&registry, fixture, police, title, target);
+        open_originated_pressure_case(
+            &registry,
+            fixture,
+            police,
+            PressureCaseOrigin {
+                organization: fixture.organization,
+                manager: fixture.authority.manager,
+            },
+            title,
+            target,
+            BTreeSet::from([fixture.organization]),
+        );
     };
     let due_cycle = |fixture: &mut EnterpriseFixture| {
         fixture
@@ -1352,8 +1376,13 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
             &registry,
             fixture,
             police,
+            PressureCaseOrigin {
+                organization: fixture.organization,
+                manager: fixture.authority.manager,
+            },
             title,
             EntityRef::Neighborhood(local_neighborhood),
+            BTreeSet::from([fixture.organization]),
         );
     };
     let settle_cycle = |fixture: &mut EnterpriseFixture| {
@@ -2715,11 +2744,12 @@ fn autonomous_expansion_is_a_daily_cadence_gate() {
 fn autonomous_expansion_requires_one_current_cycle_of_working_capital() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
-    let required = resolve_current_enterprise_operating_cost(
+    let required = resolve_enterprise_operating_cost_projection(
         &registry,
         &fixture.state,
         EnterpriseKind::Protection,
         fixture.location,
+        0,
         0,
     )
     .expect("fixture enterprise operating cost should fit");
@@ -2745,15 +2775,257 @@ fn autonomous_expansion_requires_one_current_cycle_of_working_capital() {
 }
 
 #[test]
-fn autonomous_expansion_skips_unaffordable_candidate_for_best_affordable_kind() {
+fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
-    let protection = establish_protection(&registry, &mut fixture);
-    let protection_runway = resolve_current_enterprise_operating_cost(
+    let base_runway = resolve_enterprise_operating_cost_projection(
         &registry,
         &fixture.state,
         EnterpriseKind::Protection,
         fixture.location,
+        0,
+        0,
+    )
+    .expect("base protection runway should fit");
+    let hidden_case_runway = resolve_enterprise_operating_cost_projection(
+        &registry,
+        &fixture.state,
+        EnterpriseKind::Protection,
+        fixture.location,
+        0,
+        1,
+    )
+    .expect("heated protection runway should fit");
+    assert!(
+        hidden_case_runway > base_runway,
+        "authored case pressure must materially change the actual operating runway"
+    );
+    fund_enterprise_fixture_cash(&mut fixture, base_runway.cents());
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let police = insert_district_police(
+        &registry,
+        &mut fixture,
+        "Hidden Pressure Bureau",
+        neighborhood,
+    );
+    let other_crew = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Other Market Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("other crew should validate");
+    let other_scout = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Other Crew Scout".to_owned(),
+            organization: Some(other_crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("other crew scout should validate");
+    open_originated_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        PressureCaseOrigin {
+            organization: other_crew,
+            manager: other_scout,
+        },
+        "Unreported district inquiry",
+        EntityRef::Neighborhood(neighborhood),
+        BTreeSet::from([other_crew]),
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_investigations()
+            .filter(|investigation| investigation.owner() == police)
+            .count(),
+        1
+    );
+    assert!(
+        fixture
+            .state
+            .intelligence()
+            .information_for_holder(KnowledgeHolder::Organization(fixture.organization))
+            .all(|information| information.topic() != InformationTopic::LegalActivity),
+        "the rival must not receive legal knowledge for the deliberately unreported case"
+    );
+
+    let remainder = u32::try_from(1_440_u64 - fixture.state.now().as_minutes())
+        .expect("same-day remainder must fit simulation duration");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(remainder));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("unobserved pressure must not become autonomous planning foresight");
+    assert_eq!(
+        established.len(),
+        1,
+        "a delegated manager with no observed heat should plan from the known base runway"
+    );
+    let enterprise = fixture
+        .state
+        .enterprises()
+        .get_enterprise(established[0])
+        .expect("autonomous establishment should persist");
+    assert_eq!(enterprise.kind(), EnterpriseKind::Protection);
+    assert_eq!(enterprise.location(), fixture.location);
+    validate_state(&fixture.state).expect("non-oracle autonomous expansion should stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_discards_stale_observed_district_pressure() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let base_runway = resolve_enterprise_operating_cost_projection(
+        &registry,
+        &fixture.state,
+        EnterpriseKind::Protection,
+        fixture.location,
+        0,
+        0,
+    )
+    .expect("base protection runway should fit");
+    let heated_runway = resolve_enterprise_operating_cost_projection(
+        &registry,
+        &fixture.state,
+        EnterpriseKind::Protection,
+        fixture.location,
+        0,
+        1,
+    )
+    .expect("heated protection runway should fit");
+    assert!(heated_runway > base_runway);
+
+    let retired = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let police = insert_district_police(
+        &registry,
+        &mut fixture,
+        "Historical Pressure Bureau",
+        neighborhood,
+    );
+    open_district_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        "Historical district inquiry",
+        neighborhood,
+    );
+    settle_cycle_inner(&registry, &mut fixture, retired);
+    let observed = fixture
+        .state
+        .enterprises()
+        .latest_cycle(retired)
+        .expect("heated cycle should persist");
+    assert_eq!(
+        observed.investigation_heat(),
+        registry
+            .get_enterprise(EnterpriseKind::Protection)
+            .economics()
+            .heat_surcharge_per_active_case(),
+        "the organization must first have a real settled heat observation"
+    );
+    validate_suspend_enterprise(&fixture.state, retired)
+        .expect("heated enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("heated enterprise suspension should commit");
+    validate_retire_enterprise(&fixture.state, retired)
+        .expect("suspended enterprise should retire")
+        .commit(&mut fixture.state)
+        .expect("heated enterprise retirement should commit");
+
+    // Normalize liquid cash to exactly the quiet runway. If the retired racket's last observed
+    // heat were remembered forever, that stale surcharge would make the replacement appear
+    // unaffordable and permanently block re-entry.
+    let cash_balance = fixture
+        .state
+        .finance()
+        .get_account(fixture.cash)
+        .expect("fixture cash should persist")
+        .balance();
+    let adjustment = base_runway
+        .checked_sub(cash_balance)
+        .expect("fixture cash normalization should fit");
+    if adjustment != Money::ZERO {
+        validate_record_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Normalize stale-pressure regression runway".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: fixture.cash,
+                        amount: adjustment,
+                    },
+                    LedgerPosting {
+                        account: fixture.settlement,
+                        amount: adjustment
+                            .checked_neg()
+                            .expect("runway adjustment should negate"),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .expect("cash normalization should validate")
+        .commit(&mut fixture.state)
+        .expect("cash normalization should commit");
+    }
+
+    let cold_window = registry.legal().cold_case_window();
+    fixture.state.advance_clock(cold_window);
+    apply_cold_case_decay(&mut fixture.state, cold_window)
+        .expect("historical originated case should decay");
+    let minute_in_day = fixture.state.now().as_minutes() % crate::core::time::DAY_MINUTES;
+    if minute_in_day != 0 {
+        fixture.state.advance_clock(SimDuration::from_minutes(
+            u32::try_from(crate::core::time::DAY_MINUTES - minute_in_day)
+                .expect("same-day boundary remainder must fit duration"),
+        ));
+    }
+
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("stale observed heat should not block later autonomous re-entry");
+    assert_eq!(established.len(), 1);
+    let replacement = fixture
+        .state
+        .enterprises()
+        .get_enterprise(established[0])
+        .expect("replacement enterprise should persist");
+    assert_eq!(replacement.kind(), EnterpriseKind::Protection);
+    assert_eq!(replacement.location(), fixture.location);
+    validate_state(&fixture.state).expect("stale-pressure recovery state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_skips_unaffordable_candidate_for_best_affordable_kind() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let protection = establish_protection(&registry, &mut fixture);
+    let protection_runway = resolve_enterprise_operating_cost_projection(
+        &registry,
+        &fixture.state,
+        EnterpriseKind::Protection,
+        fixture.location,
+        0,
         0,
     )
     .expect("existing protection runway should fit");
@@ -2887,11 +3159,12 @@ fn autonomous_expansion_can_reenter_a_slot_released_by_retirement() {
 fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
-    let one_runway = resolve_current_enterprise_operating_cost(
+    let one_runway = resolve_enterprise_operating_cost_projection(
         &registry,
         &fixture.state,
         EnterpriseKind::Protection,
         fixture.location,
+        0,
         0,
     )
     .expect("protection runway should fit");
@@ -2913,11 +3186,12 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
         },
     )
     .expect("second neighborhood should validate");
-    let second_runway = resolve_current_enterprise_operating_cost(
+    let second_runway = resolve_enterprise_operating_cost_projection(
         &registry,
         &fixture.state,
         EnterpriseKind::Protection,
         EnterpriseLocation::Neighborhood(second_neighborhood),
+        0,
         0,
     )
     .expect("second protection runway should fit");
@@ -3507,9 +3781,9 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         .advance_clock(SimDuration::from_minutes(1_439));
 
     // Prove the organization really would expand at this boundary if it read the stale
-    // pre-consequence posture. Heavy case pressure makes the source district economically
-    // unattractive, so the control must choose the separate clean governed district rather than
-    // relying on the very pressure that is supposed to trigger the reputation gate.
+    // pre-consequence posture. The control intentionally does not assert a destination: delegated
+    // planning may use only pressure the organization has actually observed, while these synthetic
+    // district cases exist only to force the same-tick vice consequence below.
     let mut stale_posture_control = fixture.state.clone();
     stale_posture_control.advance_clock(SimDuration::ONE_MINUTE);
     let stale_expansion = apply_due_autonomous_enterprises(&registry, &mut stale_posture_control)
@@ -3519,14 +3793,12 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         1,
         "the regression requires a genuinely eligible expansion under the old posture"
     );
-    assert_eq!(
+    assert!(
         stale_posture_control
             .enterprises()
             .get_enterprise(stale_expansion[0])
-            .expect("control expansion should persist")
-            .location(),
-        EnterpriseLocation::Neighborhood(expansion_neighborhood),
-        "profit-aware planning should move the expansion away from the heavily pressured district"
+            .is_some(),
+        "control expansion should persist"
     );
 
     let outcome = run_tick(&registry, &mut fixture.state);
@@ -4353,8 +4625,13 @@ fn open_district_pressure_case(
         registry,
         fixture,
         police,
+        PressureCaseOrigin {
+            organization: fixture.organization,
+            manager: fixture.authority.manager,
+        },
         title,
         EntityRef::Neighborhood(neighborhood),
+        BTreeSet::from([fixture.organization]),
     );
 }
 

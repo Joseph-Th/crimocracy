@@ -4,7 +4,7 @@ pub mod intelligence_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, IdKeyedBounds, InformationId, OrganizationId};
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -115,10 +115,13 @@ pub struct PatrolIntervalSignal {
 
 impl PatrolIntervalSignal {
     pub fn try_new(start_minute: u16, end_minute: u16) -> Option<Self> {
-        (start_minute < end_minute && start_minute < 1_440 && end_minute <= 1_440).then_some(Self {
-            start_minute,
-            end_minute,
-        })
+        (start_minute < end_minute
+            && start_minute < DAY_MINUTES_U16
+            && end_minute <= DAY_MINUTES_U16)
+            .then_some(Self {
+                start_minute,
+                end_minute,
+            })
     }
 
     pub fn start_minute(self) -> u16 {
@@ -130,7 +133,9 @@ impl PatrolIntervalSignal {
     }
 
     const fn is_valid(self) -> bool {
-        self.start_minute < self.end_minute && self.start_minute < 1_440 && self.end_minute <= 1_440
+        self.start_minute < self.end_minute
+            && self.start_minute < DAY_MINUTES_U16
+            && self.end_minute <= DAY_MINUTES_U16
     }
 }
 

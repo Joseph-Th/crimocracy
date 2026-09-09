@@ -3796,6 +3796,189 @@ fn control_plane_surveillance_targets_proxy_to_their_owner_footprint() {
 }
 
 #[test]
+fn independent_witness_pressure_uses_case_geography_for_police_risk() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x517A_7E13);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Civilian Pressure Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("pressure crew should validate");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Civilian Witness Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("witness precinct should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Civilian Witness Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(50).expect("fixture wealth should validate"),
+                    commercial_activity: Rating::try_new(50)
+                        .expect("fixture commerce should validate"),
+                    illicit_demand: Rating::try_new(50).expect("fixture demand should validate"),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(85)
+                        .expect("fixture police presence should validate"),
+                },
+            },
+        },
+    )
+    .expect("witness neighborhood should validate");
+    let newer_neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Later Civilian Witness Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(50).expect("fixture wealth should validate"),
+                    commercial_activity: Rating::try_new(50)
+                        .expect("fixture commerce should validate"),
+                    illicit_demand: Rating::try_new(50).expect("fixture demand should validate"),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(20)
+                        .expect("fixture police presence should validate"),
+                },
+            },
+        },
+    )
+    .expect("later witness neighborhood should validate");
+    validate_set_jurisdiction(
+        &state,
+        JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([neighborhood, newer_neighborhood]),
+            case_intake_priority: Rating::try_new(80)
+                .expect("fixture case priority should validate"),
+        },
+    )
+    .expect("witness jurisdiction should validate")
+    .commit(&mut state)
+    .expect("witness jurisdiction should commit");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Civilian Pressure Leader".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Intimidation,
+                Rating::try_new(80).expect("fixture intimidation should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("pressure leader should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Independent Civilian Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("civilian witness should validate");
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Civilian witness case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Neighborhood(neighborhood)]),
+        },
+    )
+    .expect("witness case should validate")
+    .commit(&mut state)
+    .expect("witness case should commit");
+    crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation,
+            witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("civilian witness should register on the case")
+    .commit(&mut state)
+    .expect("civilian witness registration should commit");
+    let newer_investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Later civilian witness case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Neighborhood(newer_neighborhood)]),
+        },
+    )
+    .expect("later witness case should validate")
+    .commit(&mut state)
+    .expect("later witness case should commit");
+    crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation: newer_investigation,
+            witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("civilian witness should register on the later case")
+    .commit(&mut state)
+    .expect("later civilian witness registration should commit");
+    let pressure = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Pressure independent civilian".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(witness),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .expect("civilian witness pressure should authorize")
+    .commit(&mut state)
+    .expect("civilian witness pressure should commit");
+
+    let alert = resolve_operation_police_alert_context(
+        &registry,
+        &state,
+        pressure,
+        SimTime::from_minutes(1),
+    );
+    assert_eq!(
+        alert.neighborhood(),
+        Some(newer_neighborhood),
+        "one civilian encounter must use the latest pressureable case geography instead of inheriting the strongest police presence across every live witness case"
+    );
+    validate_state(&state).expect("civilian witness venue attribution should stay valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() {
     let (registry, mut original, police, _neighborhood, operation) =
         make_exposed_business_operation_fixture(true);

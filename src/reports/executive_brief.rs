@@ -48,6 +48,7 @@ struct SourceEntryKey {
 #[derive(Clone, Debug)]
 struct SourceCandidate {
     report: ReportId,
+    generated_at: SimTime,
     entry_index: usize,
     entry: ReportEntry,
 }
@@ -95,7 +96,13 @@ pub fn decide_executive_brief(
         .map(|report| report.id());
 
     let mut pending: Vec<_> = state.decisions().pending_for_recipient(recipient).collect();
-    pending.sort_by_key(|decision| (Reverse(decision.attention()), decision.id()));
+    pending.sort_by_key(|decision| {
+        (
+            Reverse(decision.attention()),
+            decision.requested_at(),
+            decision.id(),
+        )
+    });
     let pending_decisions = pending
         .iter()
         .map(|decision| DecisionDependency {
@@ -120,7 +127,8 @@ pub fn decide_executive_brief(
     source_candidates.sort_by_key(|candidate| {
         (
             Reverse(candidate.entry.attention),
-            candidate.report,
+            Reverse(candidate.generated_at),
+            Reverse(candidate.report),
             candidate.entry_index,
         )
     });
@@ -210,6 +218,7 @@ fn collect_source_candidates(
             }
             candidates.push(SourceCandidate {
                 report: report.id(),
+                generated_at: report.generated_at(),
                 entry_index,
                 entry: entry.clone(),
             });
@@ -321,7 +330,13 @@ fn validate_plan_dependencies(
         .decisions()
         .pending_for_recipient(plan.recipient)
         .collect();
-    current_pending.sort_by_key(|decision| (Reverse(decision.attention()), decision.id()));
+    current_pending.sort_by_key(|decision| {
+        (
+            Reverse(decision.attention()),
+            decision.requested_at(),
+            decision.id(),
+        )
+    });
     let current_pending: Vec<_> = current_pending
         .into_iter()
         .map(|decision| DecisionDependency {

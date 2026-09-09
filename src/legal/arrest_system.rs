@@ -553,10 +553,11 @@ pub fn validate_release_arrest(
     })
 }
 
-/// Releases detainees whose modeled custody window has elapsed. The current legal foundation
-/// intentionally stops before charging, bail, and trial, so an arrest cannot imply permanent
-/// confinement merely because no higher legal layer exists to advance it. The authored window
-/// is long enough for the detainee informant decision to occur first.
+/// Releases detainees whose modeled custody window has elapsed. Prosecution referral and review
+/// can continue after release, but charging, bail, trial, and sentence custody remain outside the
+/// current legal foundation, so an arrest cannot imply permanent confinement merely because no
+/// modeled court-custody layer exists to advance it. The authored window is long enough for the
+/// detainee informant decision to occur first.
 pub(crate) fn apply_due_custody_releases(
     state: &mut AppState,
     maximum_detention: crate::core::time::SimDuration,

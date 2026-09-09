@@ -435,6 +435,141 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
 }
 
 #[test]
+fn achieved_surveillance_carries_every_observed_patrol_window_in_typed_signal() {
+    let mut fixture = fixture(100, false);
+    let windows = [60_u16, 180, 300, 420, 540]
+        .into_iter()
+        .map(|start| {
+            PatrolWindow::try_new(
+                DayMinute::try_new(start).expect("fixture minute should validate"),
+                30,
+                rating(80),
+            )
+            .expect("fixture patrol window should validate")
+        })
+        .collect::<Vec<_>>();
+    validate_establish_patrol_deployment(
+        &fixture.state,
+        PatrolDeploymentDraft {
+            organization: fixture.police,
+            neighborhood: fixture.neighborhood,
+            windows,
+        },
+    )
+    .expect("five-window patrol should validate")
+    .commit(&mut fixture.state)
+    .expect("five-window patrol should commit");
+
+    let neighborhood = fixture.neighborhood;
+    let surveillance = authorize_surveillance(&mut fixture, EntityRef::Neighborhood(neighborhood));
+    resolve_with_zero_variance(&mut fixture, surveillance);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(surveillance)
+        .and_then(|record| record.resolution())
+        .expect("neighborhood surveillance should resolve");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Achieved
+    );
+    let information = fixture
+        .state
+        .intelligence()
+        .get_information(*resolution.discovered_information().iter().next().unwrap())
+        .expect("patrol observation should persist");
+    let expected = [60_u16, 180, 300, 420, 540]
+        .into_iter()
+        .map(|start| {
+            PatrolIntervalSignal::try_new(start, start + 30)
+                .expect("expected patrol interval should validate")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        information.signal(),
+        Some(&InformationSignal::PatrolPattern {
+            intervals: expected
+        })
+    );
+    assert!(information.summary().contains("roughly 09:00-09:30"));
+    assert!(
+        !information
+            .summary()
+            .contains("additional recurring window")
+    );
+    validate_state(&fixture.state).expect("complete patrol signal state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn achieved_surveillance_keeps_short_and_wrapped_patrol_windows_bounded() {
+    let mut fixture = fixture(100, false);
+    validate_establish_patrol_deployment(
+        &fixture.state,
+        PatrolDeploymentDraft {
+            organization: fixture.police,
+            neighborhood: fixture.neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(721).expect("short-window start should validate"),
+                    5,
+                    rating(80),
+                )
+                .expect("short patrol window should validate"),
+                PatrolWindow::try_new(
+                    DayMinute::try_new(1_430).expect("wrapped-window start should validate"),
+                    40,
+                    rating(60),
+                )
+                .expect("wrapped patrol window should validate"),
+            ],
+        },
+    )
+    .expect("short and wrapped patrol schedule should validate")
+    .commit(&mut fixture.state)
+    .expect("short and wrapped patrol schedule should commit");
+
+    let neighborhood = fixture.neighborhood;
+    let surveillance = authorize_surveillance(&mut fixture, EntityRef::Neighborhood(neighborhood));
+    resolve_with_zero_variance(&mut fixture, surveillance);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(surveillance)
+        .and_then(|record| record.resolution())
+        .expect("neighborhood surveillance should resolve");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Achieved
+    );
+    let information = fixture
+        .state
+        .intelligence()
+        .get_information(*resolution.discovered_information().iter().next().unwrap())
+        .expect("patrol observation should persist");
+    assert_eq!(
+        information.signal(),
+        Some(&InformationSignal::PatrolPattern {
+            intervals: BTreeSet::from([
+                PatrolIntervalSignal::try_new(0, 30).expect("wrapped patrol head should validate"),
+                PatrolIntervalSignal::try_new(720, 750)
+                    .expect("short patrol approximation should validate"),
+                PatrolIntervalSignal::try_new(1_410, 1_440)
+                    .expect("wrapped patrol tail should validate"),
+            ]),
+        })
+    );
+    assert!(information.summary().contains("roughly 12:00-12:30"));
+    assert!(information.summary().contains("roughly 23:30-00:30"));
+    assert!(
+        !information.summary().contains("all day"),
+        "a short rounded patrol window must never inflate into all-day coverage"
+    );
+    validate_state(&fixture.state).expect("bounded patrol approximation should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn organization_surveillance_resolution_stales_when_visible_member_is_detained_after_planning() {
     let mut fixture = fixture(100, false);
     let rival = insert_organization(

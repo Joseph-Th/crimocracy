@@ -10,8 +10,9 @@ use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
     resolve_patrol_presence_snapshot,
 };
+use crate::operations::operation_objective::pressureable_witness_targets;
 use crate::operations::{
-    OperationExposureFactors, OperationExposureLevel, OperationObjective,
+    OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
     OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
@@ -76,6 +77,64 @@ pub(super) fn resolve_operation_venue_entities(
             .and_then(|arrest| state.legal.get_investigation(arrest.investigation()))
             .map(|investigation| vec![EntityRef::Organization(investigation.owner())])
             .unwrap_or_else(|| vec![EntityRef::Character(*target)]),
+        OperationObjective::Frighten {
+            target: EntityRef::Character(target),
+        } if record.kind() == OperationKind::WitnessPressure => {
+            let character = EntityRef::Character(*target);
+            // A character with an organization or personally owned premises already has the
+            // ordinary world-footprint proxy. Case geography is only needed for a civilian with
+            // no modeled location of their own.
+            if !resolve_target_neighborhoods(state, vec![character]).is_empty() {
+                return vec![character];
+            }
+
+            // A civilian can be registered in several live cases, but one encounter cannot occur
+            // in several districts at once. Use the most-recent case whose cooperation this job
+            // can actually affect. If pressureability disappears while the job is in flight,
+            // retain only the most-recent foreign registration as a durable physical proxy.
+            let pressureable =
+                pressureable_witness_targets(state, record.responsible_organization(), *target)
+                    .into_iter()
+                    .map(|(case_witness, _)| {
+                        state.legal.get_case_witness(case_witness).expect(
+                            "pressureable witness target must reference a persisted registration",
+                        )
+                    })
+                    .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()));
+            let selected = pressureable.or_else(|| {
+                state
+                    .legal
+                    .case_witnesses_for_character(*target)
+                    .filter(|case_witness| {
+                        state
+                            .legal
+                            .get_investigation(case_witness.investigation())
+                            .expect("case-witness index must reference a persisted investigation")
+                            .owner()
+                            != record.responsible_organization()
+                    })
+                    .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()))
+            });
+            let Some(case_witness) = selected else {
+                return vec![character];
+            };
+            let investigation = state
+                .legal
+                .get_investigation(case_witness.investigation())
+                .expect("selected witness registration must reference a persisted investigation");
+            let case_neighborhoods =
+                resolve_investigation_target_neighborhoods(state, investigation);
+            if case_neighborhoods.is_empty() {
+                // A manually authored case can have no geographically resolvable subject. Its
+                // authority jurisdiction remains a better proxy than treating the encounter as
+                // occurring nowhere.
+                vec![character, EntityRef::Organization(investigation.owner())]
+            } else {
+                let mut entities = vec![character];
+                entities.extend(case_neighborhoods.into_iter().map(EntityRef::Neighborhood));
+                entities
+            }
+        }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::ObtainCash { .. }
         | OperationObjective::Frighten { .. }

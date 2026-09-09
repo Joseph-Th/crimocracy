@@ -6,7 +6,7 @@ use crate::core::id::{
     OrganizationId, PatrolDeploymentId,
 };
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::intelligence::intelligence_system::{
     ValidatedInformation, validate_record_information, validate_record_information_with_signal,
@@ -726,24 +726,10 @@ fn patrol_summary(
         .copied()
         .map(approximate_patrol_window)
         .collect::<Vec<_>>();
-    let extra = patrol
-        .deployments
-        .iter()
-        .map(|deployment| deployment.windows.len())
-        .sum::<usize>()
-        .saturating_sub(windows.len());
-    let extra_clause = if extra == 0 {
-        String::new()
-    } else {
-        format!(
-            ", plus {extra} additional recurring window{}",
-            if extra == 1 { "" } else { "s" }
-        )
-    };
-    let minute = u16::try_from(observed_at.as_minutes() % 1_440)
+    let minute = u16::try_from(observed_at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     format!(
-        "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}{extra_clause}. Around {}, activity was {}.",
+        "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}. Around {}, activity was {}.",
         windows.join(", "),
         format_day_minute(rounded_half_hour(minute)),
         police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
@@ -769,70 +755,77 @@ fn observed_patrol_windows(patrol: &PatrolPatternSnapshot) -> Vec<PatrolWindow> 
         .deployments
         .iter()
         .flat_map(|deployment| deployment.windows.iter().copied())
-        .take(4)
         .collect()
 }
 
 fn approximate_patrol_intervals(window: PatrolWindow) -> Vec<PatrolIntervalSignal> {
-    if window.duration_minutes() == 1_440 {
+    let Some((start, end)) = approximate_patrol_bounds(window) else {
         return vec![
-            PatrolIntervalSignal::try_new(0, 1_440).expect("all-day patrol interval must be valid"),
+            PatrolIntervalSignal::try_new(0, DAY_MINUTES_U16)
+                .expect("all-day patrol interval must be valid"),
         ];
-    }
-    let start = rounded_half_hour(window.start().value());
-    let end = rounded_half_hour(
-        u16::try_from(
-            (u32::from(window.start().value()) + u32::from(window.duration_minutes())) % 1_440,
-        )
-        .expect("patrol window minute remainder must fit u16"),
-    );
-    match start.cmp(&end) {
-        std::cmp::Ordering::Less => vec![
+    };
+    if end > start {
+        return vec![
             PatrolIntervalSignal::try_new(start, end)
                 .expect("ordered patrol interval must be valid"),
-        ],
-        std::cmp::Ordering::Greater => {
-            let mut intervals = vec![
-                PatrolIntervalSignal::try_new(start, 1_440)
-                    .expect("wrapped patrol tail must be valid"),
-            ];
-            if end > 0 {
-                intervals.push(
-                    PatrolIntervalSignal::try_new(0, end)
-                        .expect("wrapped patrol head must be valid"),
-                );
-            }
-            intervals
-        }
-        std::cmp::Ordering::Equal => vec![
-            PatrolIntervalSignal::try_new(0, 1_440)
-                .expect("ambiguous rounded patrol window is conservatively all-day"),
-        ],
+        ];
     }
+    let mut intervals = vec![
+        PatrolIntervalSignal::try_new(start, DAY_MINUTES_U16)
+            .expect("wrapped patrol tail must be valid"),
+    ];
+    if end > 0 {
+        intervals.push(
+            PatrolIntervalSignal::try_new(0, end).expect("wrapped patrol head must be valid"),
+        );
+    }
+    intervals
 }
 
 fn approximate_patrol_window(window: PatrolWindow) -> String {
-    if window.duration_minutes() == 1_440 {
+    let Some((start, end)) = approximate_patrol_bounds(window) else {
         return format!("all day ({})", police_presence_label(window.presence()));
-    }
-    let start = rounded_half_hour(window.start().value());
-    let end = rounded_half_hour(
-        u16::try_from(
-            (u32::from(window.start().value()) + u32::from(window.duration_minutes())) % 1_440,
-        )
-        .expect("patrol window minute remainder must fit u16"),
-    );
+    };
+    let display_end = if end == DAY_MINUTES_U16 { 0 } else { end };
     format!(
         "roughly {}-{} ({})",
         format_day_minute(start),
-        format_day_minute(end),
+        format_day_minute(display_end),
         police_presence_label(window.presence())
     )
 }
 
+/// Expands an observed patrol window to containing half-hour boundaries. Rounding both endpoints
+/// independently to the nearest half hour can collapse a real short window to identical times;
+/// treating that collapse as all-day presence would turn a few observed minutes into twenty-four
+/// hours of actionable police coverage. Containing bounds preserve uncertainty without inventing
+/// coverage the observation disproves. `None` means the conservative expansion covers the full day.
+fn approximate_patrol_bounds(window: PatrolWindow) -> Option<(u16, u16)> {
+    const BUCKET_MINUTES: u32 = 30;
+    let day = u32::from(DAY_MINUTES_U16);
+    let start = u32::from(window.start().value());
+    let end = start + u32::from(window.duration_minutes());
+    let approximate_start = start / BUCKET_MINUTES * BUCKET_MINUTES;
+    let approximate_end = end.div_ceil(BUCKET_MINUTES) * BUCKET_MINUTES;
+    if approximate_end - approximate_start >= day {
+        return None;
+    }
+    let start = u16::try_from(approximate_start % day)
+        .expect("half-hour patrol start must fit minute-of-day width");
+    let end = if approximate_end <= day {
+        u16::try_from(approximate_end).expect("same-day patrol end must fit interval width")
+    } else {
+        u16::try_from(approximate_end % day)
+            .expect("wrapped patrol end must fit minute-of-day width")
+    };
+    debug_assert_ne!(start, end);
+    Some((start, end))
+}
+
 fn rounded_half_hour(minute: u16) -> u16 {
     let rounded = (u32::from(minute) + 15) / 30 * 30;
-    u16::try_from(rounded % 1_440).expect("rounded day minute must fit u16")
+    u16::try_from(rounded % u32::from(DAY_MINUTES_U16)).expect("rounded day minute must fit u16")
 }
 
 fn format_day_minute(minute: u16) -> String {

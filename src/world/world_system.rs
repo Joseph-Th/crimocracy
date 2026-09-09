@@ -1,9 +1,9 @@
 //! Canonical world mutation systems; sibling `world` types remain passive records and indexes.
 
 use crate::core::id::{
-    ArrestId, BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, EnterpriseId,
-    IdExhaustionError, IdKind, InformantId, InvestigationId, MandateId, NeighborhoodId,
-    OperationId, OrganizationId, ProsecutionCaseId,
+    ArrestId, BusinessId, BusinessOwnershipChangeId, CharacterId, ContactId, DecisionRequestId,
+    EnterpriseId, IdExhaustionError, IdKind, InformantId, InvestigationId, MandateId,
+    NeighborhoodId, OperationId, OrganizationId, ProsecutionCaseId,
 };
 use crate::core::state::AppState;
 use crate::core::version::{
@@ -41,6 +41,14 @@ pub enum WorldError {
         "character {character} already has this organization and supervisor; reassignment unchanged"
     )]
     CharacterReassignmentUnchanged { character: CharacterId },
+    #[error(
+        "character {character} cannot join organization {organization} while recruitment approval {decision} still owns that route"
+    )]
+    PendingRecruitmentApprovalAssignment {
+        character: CharacterId,
+        organization: OrganizationId,
+        decision: DecisionRequestId,
+    },
     #[error(
         "business {business} changed after validation; expected version {expected}, found {found}"
     )]
@@ -242,6 +250,7 @@ pub struct ValidatedCharacterReassignment {
     character: CharacterId,
     organization: Option<OrganizationId>,
     supervisor: Option<CharacterId>,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
     expected_version: u32,
 }
 
@@ -264,6 +273,7 @@ impl ValidatedCharacterReassignment {
             self.character,
             self.organization,
             self.supervisor,
+            self.allowed_recruitment_approval,
         )?;
         state
             .world
@@ -278,6 +288,36 @@ pub fn validate_reassign_character(
     organization: Option<OrganizationId>,
     supervisor: Option<CharacterId>,
 ) -> Result<ValidatedCharacterReassignment, WorldError> {
+    validate_reassign_character_with_approval(state, character, organization, supervisor, None)
+}
+
+/// Recruitment approval is the one route allowed to move a candidate into an organization while
+/// that exact decision is still pending. Generic world reassignment must not bypass a decision the
+/// organization has not resolved yet, while the approved recruitment transaction must be able to
+/// perform the membership mutation before it marks the decision resolved.
+pub(crate) fn validate_reassign_character_for_recruitment_approval(
+    state: &AppState,
+    character: CharacterId,
+    organization: OrganizationId,
+    supervisor: CharacterId,
+    decision: DecisionRequestId,
+) -> Result<ValidatedCharacterReassignment, WorldError> {
+    validate_reassign_character_with_approval(
+        state,
+        character,
+        Some(organization),
+        Some(supervisor),
+        Some(decision),
+    )
+}
+
+fn validate_reassign_character_with_approval(
+    state: &AppState,
+    character: CharacterId,
+    organization: Option<OrganizationId>,
+    supervisor: Option<CharacterId>,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
+) -> Result<ValidatedCharacterReassignment, WorldError> {
     let record = state
         .world
         .get_character(character)
@@ -287,13 +327,20 @@ pub fn validate_reassign_character(
         // invalidate every outstanding validated token pinned to this character.
         return Err(WorldError::CharacterReassignmentUnchanged { character });
     }
-    validate_reassignment_preconditions(state, character, organization, supervisor)?;
+    validate_reassignment_preconditions(
+        state,
+        character,
+        organization,
+        supervisor,
+        allowed_recruitment_approval,
+    )?;
     ensure_version_can_advance(record.version(), "character")?;
 
     Ok(ValidatedCharacterReassignment {
         character,
         organization,
         supervisor,
+        allowed_recruitment_approval,
         expected_version: record.version(),
     })
 }
@@ -307,6 +354,7 @@ fn validate_reassignment_preconditions(
     character: CharacterId,
     organization: Option<OrganizationId>,
     supervisor: Option<CharacterId>,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
 ) -> Result<(), WorldError> {
     let record = state
         .world
@@ -329,6 +377,18 @@ fn validate_reassignment_preconditions(
     let organization_changed = organization != record.organization();
     let supervisor_changed = supervisor != record.supervisor();
     if organization_changed {
+        if let Some(organization) = organization
+            && let Some(decision) = state
+                .decisions()
+                .pending_for_recruitment_approval(organization, character)
+            && Some(decision) != allowed_recruitment_approval
+        {
+            return Err(WorldError::PendingRecruitmentApprovalAssignment {
+                character,
+                organization,
+                decision,
+            });
+        }
         validate_organization_change_release(state, character, organization)?;
     }
     if organization_changed || supervisor_changed {

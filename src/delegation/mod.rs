@@ -6,7 +6,7 @@ use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
 };
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::core::version::advance_version_preflighted;
 use crate::finance::Money;
 use crate::world::{PolicyKind, PolicySetting};
@@ -80,8 +80,8 @@ pub enum BudgetPeriod {
 impl BudgetPeriod {
     pub const fn duration_minutes(self) -> u64 {
         match self {
-            Self::Daily => 1_440,
-            Self::Weekly => 10_080,
+            Self::Daily => DAY_MINUTES,
+            Self::Weekly => DAY_MINUTES * 7,
         }
     }
 

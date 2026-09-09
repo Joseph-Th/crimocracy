@@ -65,7 +65,7 @@ fn interval_presence_stays_exact_across_the_full_clock_range() {
         PatrolDeploymentDraft {
             organization: police,
             neighborhood,
-            windows: vec![window(0, MINUTES_PER_DAY, 80)],
+            windows: vec![window(0, DAY_MINUTES_U16, 80)],
         },
     )
     .expect("full-day patrol deployment should validate")

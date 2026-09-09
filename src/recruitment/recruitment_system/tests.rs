@@ -21,6 +21,7 @@ use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, 
 use crate::recruitment::autonomous_recruitment::{
     AutonomousRecruitmentError, apply_due_autonomous_recruitment,
 };
+use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::reports::ReportKind;
 use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
 use crate::reputation::{AudienceKind, ReputationDimension};
@@ -620,6 +621,168 @@ fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
 }
 
 #[test]
+fn autonomous_recruitment_shared_prospect_favors_stronger_relationship_over_mandate_order() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let earlier_mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let stronger_organization = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Stronger Recruiting Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second recruiting organization should validate");
+    let stronger_recruiter = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Stronger Rival Recruiter".to_owned(),
+            organization: Some(stronger_organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Negotiation, rating(90))]),
+            traits: BTreeSet::from([TraitKind::Charismatic]),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("stronger recruiter should validate");
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        stronger_recruiter,
+        relationship(95, 95, 0, 90, 10, 0, 80),
+    )
+    .expect("stronger candidate relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("stronger candidate relationship should commit");
+    let later_mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: stronger_organization,
+            manager: stronger_recruiter,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("stronger personnel mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("stronger personnel mandate should commit");
+    assert!(
+        earlier_mandate < later_mandate,
+        "fixture must give the weaker recruiter the earlier mandate ID"
+    );
+    let weaker_support = recruitment_relationship_support(
+        registry.recruitment(),
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.candidate, fixture.recruiter)
+            .expect("weaker relationship should persist")
+            .dimensions(),
+    );
+    let stronger_support = recruitment_relationship_support(
+        registry.recruitment(),
+        fixture
+            .state
+            .social()
+            .get_relationship(fixture.candidate, stronger_recruiter)
+            .expect("stronger relationship should persist")
+            .dimensions(),
+    );
+    assert!(stronger_support > weaker_support);
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("shared-prospect autonomous recruitment should resolve");
+    assert_eq!(
+        outcome.attempts.len(),
+        1,
+        "a prospect receives at most one autonomous pitch in one cadence pass"
+    );
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("winning autonomous pitch should persist");
+    assert_eq!(attempt.candidate(), fixture.candidate);
+    assert_eq!(
+        attempt.recruiter(),
+        stronger_recruiter,
+        "visible relationship strength must decide prospect contention before mandate ID"
+    );
+    assert_eq!(attempt.target_organization(), stronger_organization);
+    validate_state(&fixture.state).expect("relationship-prioritized contention should stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn delegated_autonomous_recruitment_skips_candidate_with_pending_approval_route() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let request = validate_request_recruitment_approval(
+        &registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager waits on the existing recruitment route.".to_owned(),
+        },
+    )
+    .expect("approval route should validate")
+    .commit(&mut fixture.state)
+    .expect("approval route should commit");
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("organization policy should become delegated");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("a blocked pair is ordinary unavailability, not an autonomous pass failure");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        Some(request.decision),
+        "the still-pending decision continues to own this organization-candidate route"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("blocked candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("blocked autonomous route should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn approval_required_recruitment_executes_only_after_approval() {
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, None);
@@ -730,6 +893,77 @@ fn approval_required_recruitment_executes_only_after_approval() {
         DecisionResponse::Approve
     );
     validate_state(&fixture.state).expect("approved recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn pending_recruitment_approval_cannot_be_bypassed_by_generic_membership_reassignment() {
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager requests authority to recruit a rival associate."
+                .to_owned(),
+        },
+    )
+    .expect("recruitment approval should validate")
+    .commit(&mut fixture.state)
+    .expect("recruitment approval should commit");
+
+    let error = validate_reassign_character(
+        &fixture.state,
+        fixture.candidate,
+        Some(fixture.target),
+        Some(fixture.recruiter),
+    )
+    .expect_err("generic world reassignment must not bypass a pending recruitment decision");
+    assert_eq!(
+        error,
+        crate::world::world_system::WorldError::PendingRecruitmentApprovalAssignment {
+            character: fixture.candidate,
+            organization: fixture.target,
+            decision: request.decision,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+
+    let resolution = validate_resolve_decision(
+        &fixture.registry,
+        &fixture.state,
+        request.decision,
+        fixture.target,
+        DecisionResponse::Approve,
+    )
+    .expect("the decision-owned recruitment route must remain approvable")
+    .commit(&mut fixture.state)
+    .expect("the approved route should complete membership atomically");
+    assert!(resolution.recruitment_attempt.is_some());
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("approved candidate should persist")
+            .organization(),
+        Some(fixture.target)
+    );
+    validate_state(&fixture.state).expect("decision-owned reassignment should remain valid");
     validate_invariants(&fixture.state);
 }
 

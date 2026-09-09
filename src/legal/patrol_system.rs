@@ -2,7 +2,7 @@
 
 use crate::core::id::{IdExhaustionError, NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
     DayMinute, PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
@@ -10,8 +10,6 @@ use crate::legal::{
 use crate::world::{OrganizationKind, Rating};
 use std::collections::BTreeMap;
 use thiserror::Error;
-
-const MINUTES_PER_DAY: u16 = 1_440;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatrolDeploymentTransition {
@@ -353,7 +351,7 @@ pub(crate) fn resolve_patrol_presence_snapshot(
     neighborhood: NeighborhoodId,
     at: SimTime,
 ) -> PatrolPresenceSnapshot {
-    let minute = u16::try_from(at.as_minutes() % u64::from(MINUTES_PER_DAY))
+    let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     // An explicit patrol schedule is authoritative: once an authority models deployments in a
     // neighborhood, its windows define street presence there and a coverage gap means no one is
@@ -397,7 +395,7 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
     }
 
     let mut deployment_versions = BTreeMap::new();
-    let mut daily_presence = [0_u8; MINUTES_PER_DAY as usize];
+    let mut daily_presence = [0_u8; DAY_MINUTES_U16 as usize];
     let mut has_deployment = false;
     for deployment in state
         .legal
@@ -409,7 +407,7 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
             let start_minute = usize::from(window.start().value());
             let presence = window.presence().value();
             for offset in 0..usize::from(window.duration_minutes()) {
-                let minute = (start_minute + offset) % usize::from(MINUTES_PER_DAY);
+                let minute = (start_minute + offset) % usize::from(DAY_MINUTES_U16);
                 daily_presence[minute] = daily_presence[minute].max(presence);
             }
         }
@@ -425,7 +423,7 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
         .as_minutes()
         .checked_sub(start.as_minutes())
         .expect("ordered patrol interval must have a positive duration");
-    let day_minutes = u64::from(MINUTES_PER_DAY);
+    let day_minutes = u64::from(DAY_MINUTES_U16);
     // Presence is bounded by 100 for every simulated minute, so a u128 accumulator can represent
     // the exact sum across the entire u64 clock range. Saturating u64 arithmetic would silently
     // flatten sufficiently long intervals and produce a materially wrong average.
@@ -468,7 +466,7 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
             presence: fallback,
         };
     };
-    let minute = u16::try_from(at.as_minutes() % u64::from(MINUTES_PER_DAY))
+    let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     // Same authoritative-schedule contract as `resolve_patrol_presence_snapshot`: an off-window
     // minute inside a modeled deployment is a real coverage gap (zero presence, slowest allowed
@@ -595,11 +593,11 @@ fn schedule_has_no_overlap(windows: &[PatrolWindow]) -> bool {
 }
 
 fn first_overlapping_minute(windows: &[PatrolWindow]) -> Option<DayMinute> {
-    let mut occupied = [false; MINUTES_PER_DAY as usize];
+    let mut occupied = [false; DAY_MINUTES_U16 as usize];
     for window in windows {
         for offset in 0..window.duration_minutes() {
             let minute = (u32::from(window.start().value()) + u32::from(offset))
-                % u32::from(MINUTES_PER_DAY);
+                % u32::from(DAY_MINUTES_U16);
             let index = usize::try_from(minute).expect("minute-of-day must fit usize");
             if occupied[index] {
                 return Some(
@@ -614,9 +612,9 @@ fn first_overlapping_minute(windows: &[PatrolWindow]) -> Option<DayMinute> {
 }
 
 fn is_minute_within_patrol_window(window: PatrolWindow, minute: u16) -> bool {
-    let elapsed = (u32::from(minute) + u32::from(MINUTES_PER_DAY)
+    let elapsed = (u32::from(minute) + u32::from(DAY_MINUTES_U16)
         - u32::from(window.start().value()))
-        % u32::from(MINUTES_PER_DAY);
+        % u32::from(DAY_MINUTES_U16);
     elapsed < u32::from(window.duration_minutes())
 }
 

@@ -14,7 +14,7 @@ use crate::core::id::{
     PatrolDeploymentId, PoliceResponseId, ProsecutionCaseId, ProsecutionReferralId, ReportId,
     WitnessStatementId,
 };
-use crate::core::time::SimTime;
+use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use crate::delegation::MandateAuthority;
 use crate::finance::Money;
 use crate::world::Rating;
@@ -1085,7 +1085,7 @@ impl JurisdictionRecord {
 pub struct DayMinute(u16);
 
 impl DayMinute {
-    pub const MAX: u16 = 1_439;
+    pub const MAX: u16 = DAY_MINUTES_U16 - 1;
 
     pub fn try_new(value: u16) -> Result<Self, DayMinuteError> {
         if value <= Self::MAX {
@@ -1125,7 +1125,7 @@ pub struct PatrolWindow {
 
 impl PatrolWindow {
     pub const MIN_DURATION_MINUTES: u16 = 1;
-    pub const MAX_DURATION_MINUTES: u16 = 1_440;
+    pub const MAX_DURATION_MINUTES: u16 = DAY_MINUTES_U16;
 
     pub fn try_new(
         start: DayMinute,

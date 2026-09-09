@@ -40,6 +40,7 @@ use crate::reports::report_system::{ReportError, ValidatedReport, validate_recor
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
     ValidatedCharacterReassignment, WorldError, validate_reassign_character,
+    validate_reassign_character_for_recruitment_approval,
 };
 use crate::world::{ApprovalPolicy, OrganizationKind, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
@@ -388,7 +389,8 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::InformantHandlerConflict { .. }
         | WorldError::ActiveInstitutionalContactHandler { .. }
         | WorldError::ActiveInstitutionalContactAssignment { .. }
-        | WorldError::DirectReportAssignment { .. } => true,
+        | WorldError::DirectReportAssignment { .. }
+        | WorldError::PendingRecruitmentApprovalAssignment { .. } => true,
         WorldError::EmptyName
         | WorldError::MissingOrganization(_)
         | WorldError::MissingCharacter(_)
@@ -417,7 +419,17 @@ pub(crate) fn decide_recruitment_attempt(
     state: &AppState,
     draft: RecruitmentDraft,
 ) -> Result<RecruitmentPlan, RecruitmentError> {
-    let (candidate, recruiter) = validate_recruitment_request(registry, state, draft)?;
+    decide_recruitment_attempt_with_approval(registry, state, draft, None)
+}
+
+fn decide_recruitment_attempt_with_approval(
+    registry: &Registry,
+    state: &AppState,
+    draft: RecruitmentDraft,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
+) -> Result<RecruitmentPlan, RecruitmentError> {
+    let (candidate, recruiter) =
+        validate_recruitment_request(registry, state, draft, allowed_recruitment_approval)?;
     let recruiter_relationship = state
         .social
         .get_relationship(draft.candidate, draft.recruiter)
@@ -648,7 +660,7 @@ pub(crate) fn validate_approved_recruitment_attempt(
     validate_recruitment_plan_with_authority(
         registry,
         state,
-        decide_recruitment_attempt(registry, state, draft)?,
+        decide_recruitment_attempt_with_approval(registry, state, draft, Some(decision))?,
         persisted_authority,
         Some(MandateRecruitmentGuard {
             authority: resolved_authority,
@@ -667,12 +679,15 @@ fn validate_recruitment_plan_with_authority(
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
     validate_plan_state_snapshot(state, &plan)?;
     validate_plan_definition(registry.recruitment(), state, &plan)?;
+    let approval_decision = match &authority {
+        RecruitmentAuthority::ApprovedDecision { decision, .. } => Some(*decision),
+        RecruitmentAuthority::ExecutiveApproval | RecruitmentAuthority::Delegated { .. } => None,
+    };
     let reassignment = if plan.context.outcome == RecruitmentOutcome::Accepted {
-        Some(validate_reassign_character(
+        Some(validate_recruitment_reassignment(
             state,
-            plan.draft.candidate,
-            Some(plan.draft.target_organization),
-            Some(plan.draft.recruiter),
+            plan.draft,
+            approval_decision,
         )?)
     } else {
         None
@@ -1069,6 +1084,7 @@ fn validate_recruitment_request<'a>(
     registry: &Registry,
     state: &'a AppState,
     draft: RecruitmentDraft,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
 ) -> Result<
     (
         &'a crate::world::CharacterRecord,
@@ -1083,13 +1099,31 @@ fn validate_recruitment_request<'a>(
         draft.candidate,
         draft.target_organization,
     )?;
-    validate_reassign_character(
-        state,
-        draft.candidate,
-        Some(draft.target_organization),
-        Some(draft.recruiter),
-    )?;
+    validate_recruitment_reassignment(state, draft, allowed_recruitment_approval)?;
     Ok((candidate, recruiter))
+}
+
+fn validate_recruitment_reassignment(
+    state: &AppState,
+    draft: RecruitmentDraft,
+    allowed_recruitment_approval: Option<DecisionRequestId>,
+) -> Result<ValidatedCharacterReassignment, WorldError> {
+    if let Some(decision) = allowed_recruitment_approval {
+        validate_reassign_character_for_recruitment_approval(
+            state,
+            draft.candidate,
+            draft.target_organization,
+            draft.recruiter,
+            decision,
+        )
+    } else {
+        validate_reassign_character(
+            state,
+            draft.candidate,
+            Some(draft.target_organization),
+            Some(draft.recruiter),
+        )
+    }
 }
 
 fn validate_recruitment_request_base(
