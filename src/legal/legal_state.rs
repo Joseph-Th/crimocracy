@@ -899,14 +899,15 @@ impl LegalState {
         );
     }
 
-    /// Adds incident-declared subject matter to an existing investigation while preserving the
-    /// subject index. Incident intake uses this when a suspended originated shelf is resumed:
-    /// opening a new file and continuing an old one must not disagree about what the same
-    /// validated incident is about merely because some fresh evidence is still weak.
-    pub(crate) fn extend_investigation_subjects(
+    /// Extends an existing investigation with the full context of a later validated incident:
+    /// declared subjects remain indexed even while some fresh evidence is still weak, and every
+    /// explicit external notification recipient retains the same case-visibility sightline they
+    /// would have received if the incident had opened a new file.
+    pub(crate) fn extend_investigation_incident_context(
         &mut self,
         investigation_id: InvestigationId,
         subjects: BTreeSet<EntityRef>,
+        notified_organizations: BTreeSet<OrganizationId>,
     ) {
         let mut added = Vec::new();
         {
@@ -919,7 +920,11 @@ impl LegalState {
                     added.push(subject);
                 }
             }
-            if added.is_empty() {
+            let mut notifications_changed = false;
+            for organization in notified_organizations {
+                notifications_changed |= investigation.notified_organizations.insert(organization);
+            }
+            if added.is_empty() && !notifications_changed {
                 return;
             }
             investigation.version = advance_version_preflighted(investigation.version);

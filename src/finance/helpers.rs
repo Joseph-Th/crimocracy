@@ -5,13 +5,13 @@ use crate::core::time::SimTime;
 use crate::finance::{LedgerPosting, Money};
 
 /// Weighted contribution of a rating point value without overflow.
-pub fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
+pub(crate) fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
     per_point.checked_mul(i64::from(rating))
 }
 
 /// Applies a basis-point variance (-10000..+10000 maps to 0..200%) to an amount.
 /// Rounds half away from zero so upside and downside variances are symmetric.
-pub fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> Option<Money> {
+pub(crate) fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> Option<Money> {
     let factor = 10_000_i128 + i128::from(basis_points);
     let scaled = i128::from(amount.cents()).checked_mul(factor)?;
     let sign = if scaled < 0 { -1 } else { 1 };
@@ -22,7 +22,7 @@ pub fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> Option<
 
 /// Reduces an amount to its basis-point share (`0..=10_000` maps to 0..100%), rounded half
 /// away from zero to match the crate's single rounding convention.
-pub fn resolve_basis_point_share(amount: Money, basis_points: u32) -> Option<Money> {
+pub(crate) fn resolve_basis_point_share(amount: Money, basis_points: u32) -> Option<Money> {
     let scaled = i128::from(amount.cents()).checked_mul(i128::from(basis_points))?;
     let negative = scaled < 0;
     let adjusted = (scaled.abs() + 5_000) / 10_000;
@@ -33,7 +33,7 @@ pub fn resolve_basis_point_share(amount: Money, basis_points: u32) -> Option<Mon
 
 /// Builds a balanced two-posting settlement for a net cash amount.
 /// The settlement account is the fictitious counterparty.
-pub fn build_settlement_postings(
+pub(crate) fn build_settlement_postings(
     cash: FinancialAccountId,
     settlement: FinancialAccountId,
     net: Money,
@@ -53,7 +53,7 @@ pub fn build_settlement_postings(
 /// Renders a cents amount as leader-readable dollars (`"$1,234.56"`, `"-$12.30"`).
 /// Player-facing reports quote people talking about money, so raw cent counts stay
 /// confined to diagnostics and ledger internals.
-pub fn format_money_cents(cents: i64) -> String {
+pub(crate) fn format_money_cents(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
     let whole = abs / 100;
@@ -72,7 +72,7 @@ pub fn format_money_cents(cents: i64) -> String {
 /// Describes a gross-variance draw as leader-readable language instead of basis points.
 /// Cycle reports are how managers and accountants talk, so small draws read as "close to
 /// plan" and material ones as an approximate percentage over or under expectations.
-pub fn describe_gross_variance(basis_points: i16) -> String {
+pub(crate) fn describe_gross_variance(basis_points: i16) -> String {
     let magnitude = i32::from(basis_points).unsigned_abs();
     if magnitude < 500 {
         "gross came in close to plan".to_owned()
@@ -86,15 +86,15 @@ pub fn describe_gross_variance(basis_points: i16) -> String {
 /// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit`.
 /// `newest_first` must be ordered newest settlement first — cycle indexes are id-ordered and
 /// cycle IDs are allocated sequentially, so a reversed `cycles_for` scan provides that
-/// directly and the scan touches at most `limit + 1` records no matter how much history
-/// accumulates. Cycles settled at or before the loss-streak anchor predate the current grace
+/// directly and the scan touches at most `limit` records no matter how much history accumulates.
+/// Cycles settled at or before the loss-streak anchor predate the current grace
 /// window (a resumed operation starts counting fresh) and end the scan, because everything
 /// older is older still. Shared verbatim by enterprise and business economies so chronic-loss
 /// semantics can never drift between them.
-pub fn count_trailing_losing_cycles<T>(
-    newest_first: &[T],
-    occurred_at: impl Fn(&T) -> SimTime,
-    net_cash: impl Fn(&T) -> Money,
+pub(crate) fn count_trailing_losing_cycles<T: Copy>(
+    newest_first: impl IntoIterator<Item = T>,
+    occurred_at: impl Fn(T) -> SimTime,
+    net_cash: impl Fn(T) -> Money,
     anchor: Option<SimTime>,
     limit: u8,
 ) -> u32 {

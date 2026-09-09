@@ -488,7 +488,7 @@ fn resolve_completion_deadline(operation: &OperationRecord) -> Option<SimTime> {
         .constraints()
         .iter()
         .filter_map(|constraint| match constraint {
-            OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            OperationConstraint::CompleteBy(deadline) => Some(*deadline),
             OperationConstraint::RequireIntelligenceTopic(_) => None,
         })
         .min()
@@ -688,7 +688,7 @@ fn validate_operation_constraints(
 ) -> Result<(), StateValidationError> {
     for constraint in operation.constraints() {
         match constraint {
-            OperationConstraint::CompleteBefore(deadline) => {
+            OperationConstraint::CompleteBy(deadline) => {
                 if operation.scheduled_for() >= *deadline {
                     return Err(invalid_runtime(operation));
                 }

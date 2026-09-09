@@ -1,11 +1,11 @@
-//! Durable typed decision records for authority exceptions and organizational approvals; `decision_system` owns request and resolution transactions.
+//! Durable typed decision records for authority exceptions and organizational approvals; `decision_system` owns request, resolution, and cancellation transactions.
 
 pub mod decision_system;
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, OperationId, OrganizationId, PoliceResponseId,
+    CharacterId, DecisionRequestId, MandateId, OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
@@ -142,6 +142,9 @@ impl DecisionResolution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionCancellationReason {
     OperationParticipantDetained(CharacterId),
+    /// The mandate snapshot behind a recruitment approval was permanently superseded by a
+    /// revision or revocation, so the old request can no longer be approved coherently.
+    RecruitmentAuthorityChanged(MandateId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

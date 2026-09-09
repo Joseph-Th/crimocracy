@@ -127,9 +127,9 @@ pub enum OperationError {
         found: Option<ArrestId>,
     },
     #[error(
-        "extraction for detainee {character} would finish at {planned_end:?}, after current custody ends at {custody_ends_at:?}"
+        "extraction for detainee {character} would finish at {planned_end:?}, but custody ends at {custody_ends_at:?} and must still be active through completion"
     )]
-    ExtractionOutlivesCustody {
+    ExtractionMissesCustodyWindow {
         character: CharacterId,
         planned_end: SimTime,
         custody_ends_at: SimTime,
@@ -594,7 +594,7 @@ fn validate_authorization_constraints(
 ) -> Result<(), OperationError> {
     for constraint in &draft.constraints {
         match constraint {
-            crate::operations::OperationConstraint::CompleteBefore(_) => {}
+            crate::operations::OperationConstraint::CompleteBy(_) => {}
             crate::operations::OperationConstraint::RequireIntelligenceTopic(topic) => {
                 // Reconnaissance prerequisite: organization-held intelligence of exactly this
                 // topic, already validated for objective relevance, must back the plan.
@@ -677,7 +677,7 @@ pub(crate) fn resolve_deadline_without_execution_window(
     let earliest_deadline = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            crate::operations::OperationConstraint::CompleteBy(deadline) => Some(*deadline),
             crate::operations::OperationConstraint::RequireIntelligenceTopic(_) => None,
         });
     let entry_offset = u64::from(
@@ -768,7 +768,7 @@ fn projected_authorized_operation_window(
         .checked_add(registry.get_operation(kind).execution().duration())
         .unwrap_or(SimTime::from_minutes(u64::MAX));
     for constraint in constraints {
-        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
+        let crate::operations::OperationConstraint::CompleteBy(deadline) = constraint else {
             continue;
         };
         if *deadline < end {
@@ -809,8 +809,8 @@ fn validate_extraction_custody_window(
         .arrested_at()
         .checked_add(registry.legal().maximum_detention())
         .ok_or(OperationError::SimulationTimeOverflow)?;
-    if planned_end > custody_ends_at {
-        return Err(OperationError::ExtractionOutlivesCustody {
+    if planned_end >= custody_ends_at {
+        return Err(OperationError::ExtractionMissesCustodyWindow {
             character: target,
             planned_end,
             custody_ends_at,
@@ -1110,7 +1110,7 @@ pub(crate) fn resolve_earliest_operation_deadline(record: &OperationRecord) -> O
         .constraints()
         .iter()
         .filter_map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBefore(deadline) => Some(*deadline),
+            crate::operations::OperationConstraint::CompleteBy(deadline) => Some(*deadline),
             crate::operations::OperationConstraint::RequireIntelligenceTopic(_) => None,
         })
         .min()
@@ -1275,7 +1275,7 @@ pub(crate) fn validate_begin_operation(
         .checked_add(duration)
         .ok_or(OperationError::SimulationTimeOverflow)?;
     for constraint in record.constraints() {
-        let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
+        let crate::operations::OperationConstraint::CompleteBy(deadline) = constraint else {
             continue;
         };
         if *deadline < resolution_due_at {

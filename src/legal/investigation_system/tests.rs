@@ -28,6 +28,343 @@ fn rating(value: u8) -> Rating {
 }
 
 #[test]
+fn resumed_incident_preserves_every_organization_explicitly_notified_of_the_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xA11C_E5E1);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Continuation Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let first_crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "First Notified Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("first crew fixture should validate");
+    let second_crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Second Notified Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second crew fixture should validate");
+    let shared_subject = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Shared Commercial Lead".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("shared subject fixture should validate");
+    let (_, first_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, first_crew, "First notification");
+    let shelf = open_test_origin_incident(
+        &mut state,
+        police,
+        first_crew,
+        first_origin,
+        "First notified incident",
+    );
+    validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation: shelf,
+            custodian: police,
+            subject: EntityRef::Organization(shared_subject),
+            origin: Some(EntityRef::Operation(first_origin)),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Unknown,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("shared-subject evidence should validate")
+    .commit(&mut state)
+    .expect("shared-subject evidence should commit");
+    validate_transition_investigation(&state, shelf, InvestigationTransition::Suspend)
+        .expect("fixture shelf should suspend")
+        .commit(&mut state)
+        .expect("fixture suspension should commit");
+
+    let (_, second_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, second_crew, "Second notification");
+    let resumed = validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Overlapping second incident".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Operation(second_origin),
+                EntityRef::Organization(shared_subject),
+            ]),
+            evidence: vec![
+                crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Operation(second_origin),
+                    origin: Some(EntityRef::Operation(second_origin)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                },
+                crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Organization(shared_subject),
+                    origin: Some(EntityRef::Operation(second_origin)),
+                    kind: EvidenceKind::Document,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::Credible,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                },
+            ],
+            origin: Some(EntityRef::Operation(second_origin)),
+            notified_organizations: BTreeSet::from([second_crew, shared_subject]),
+            witness: None,
+        },
+    )
+    .expect("overlapping second incident should validate")
+    .commit(&mut state)
+    .expect("overlapping incident should resume the shelf");
+    assert!(resumed.resumed_shelf);
+    assert_eq!(resumed.investigation, shelf);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(shelf)
+            .expect("continued shelf should persist")
+            .notified_organizations(),
+        &BTreeSet::from([first_crew, second_crew, shared_subject]),
+        "resumption must retain the old visibility recipient and add every newly notified organization"
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("continued notification state should save"),
+    )
+    .expect("continued notification state should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_investigation(shelf)
+            .expect("restored shelf should persist")
+            .notified_organizations(),
+        &BTreeSet::from([first_crew, second_crew, shared_subject])
+    );
+    validate_state(&restored).expect("restored notification provenance should validate");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn incident_intake_rejects_legal_institutions_as_external_notification_recipients() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xBAD0_71F1);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Notification Owner".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Notification Subject".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let (_, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Invalid notification");
+    let investigation_next = state.ids.next_raw(IdKind::Investigation);
+    let evidence_next = state.ids.next_raw(IdKind::Evidence);
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Invalid notification recipient".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([police]),
+            witness: None,
+        },
+    ) {
+        Ok(_) => panic!("a legal institution cannot use the external case-notification channel"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        InvestigationError::InvalidNotifiedOrganization(police)
+    );
+    assert_eq!(
+        state.ids.next_raw(IdKind::Investigation),
+        investigation_next
+    );
+    assert_eq!(state.ids.next_raw(IdKind::Evidence), evidence_next);
+    assert!(state.legal().investigations().next().is_none());
+    validate_invariants(&state);
+}
+
+#[test]
+fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xD091_CA7E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Duplicate Witness Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Duplicate Witness Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Repeat Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let (_, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Duplicate witness");
+    let first = validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "First witness incident".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: Some(crate::legal::IncidentWitnessDraft {
+                character: witness,
+                cooperation: crate::legal::WitnessCooperation::Reluctant,
+            }),
+        },
+    )
+    .expect("first witness incident should validate")
+    .commit(&mut state)
+    .expect("first witness incident should commit");
+    let case_witness = first
+        .case_witness
+        .expect("first incident should register its named witness");
+    validate_transition_investigation(
+        &state,
+        first.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .expect("fixture case should suspend")
+    .commit(&mut state)
+    .expect("fixture suspension should commit");
+    let before = state
+        .legal()
+        .get_investigation(first.investigation)
+        .expect("shelf should persist")
+        .clone();
+    let witness_next = state.ids.next_raw(IdKind::CaseWitness);
+    let evidence_next = state.ids.next_raw(IdKind::Evidence);
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Repeated witness incident".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: Some(crate::legal::IncidentWitnessDraft {
+                character: witness,
+                cooperation: crate::legal::WitnessCooperation::Cooperative,
+            }),
+        },
+    ) {
+        Ok(_) => panic!("one investigation cannot register the same named witness twice"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        InvestigationError::DuplicateIncidentWitness {
+            investigation: first.investigation,
+            witness,
+            existing: case_witness,
+        }
+    );
+    assert_eq!(state.ids.next_raw(IdKind::CaseWitness), witness_next);
+    assert_eq!(state.ids.next_raw(IdKind::Evidence), evidence_next);
+    let after = state
+        .legal()
+        .get_investigation(first.investigation)
+        .expect("rejected continuation must retain the shelf");
+    assert_eq!(after.status(), InvestigationStatus::Suspended);
+    assert_eq!(after.version(), before.version());
+    assert_eq!(
+        state
+            .legal()
+            .case_witnesses_for_investigation(first.investigation)
+            .count(),
+        1
+    );
+    validate_state(&state).expect("duplicate-witness rejection must preserve valid state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn investigation_subject_cannot_be_assigned_to_investigate_their_own_case() {
     let registry = build_registry();
     let mut state = AppState::new(0x5E1F_C45E);
@@ -185,7 +522,7 @@ fn resumable_shelf_prefers_exact_origin_over_broader_subject_overlap() {
             },
         ],
         origin: Some(EntityRef::Operation(exact_origin)),
-        notified_organizations: BTreeSet::new(),
+        notified_organizations: BTreeSet::from([criminal]),
         witness: None,
     };
     let resumed = validate_incident_intake(&state, draft)
@@ -210,6 +547,123 @@ fn resumable_shelf_prefers_exact_origin_over_broader_subject_overlap() {
         .expect("same-origin shelf continuation should remain structurally valid");
     validate_state_against_registry(&registry, &state)
         .expect("same-origin shelf continuation should remain authored-state valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn originated_incident_requires_its_responsible_organization_to_be_notified() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0A11_CE55);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Origin Notification Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Origin Notification Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let (_, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Missing notification");
+    let investigation_next = state.ids.next_raw(IdKind::Investigation);
+    let evidence_next = state.ids.next_raw(IdKind::Evidence);
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Missing responsible notification".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::new(),
+            witness: None,
+        },
+    ) {
+        Ok(_) => panic!("originated incident must notify its responsible organization"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        InvestigationError::OriginOrganizationNotNotified {
+            origin: EntityRef::Operation(origin),
+            organization: criminal,
+        }
+    );
+    assert_eq!(
+        state.ids.next_raw(IdKind::Investigation),
+        investigation_next
+    );
+    assert_eq!(state.ids.next_raw(IdKind::Evidence), evidence_next);
+    assert!(state.legal().investigations().next().is_none());
+    validate_invariants(&state);
+}
+
+#[test]
+fn institution_authored_incident_cannot_fabricate_external_case_notification_visibility() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1A57_17A7);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Institution Intake Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Unrelated Notification Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Institution-authored notification fabrication".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Organization(criminal),
+                origin: None,
+                kind: EvidenceKind::Document,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::Credible,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: None,
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: None,
+        },
+    ) {
+        Ok(_) => panic!("institution-authored intake cannot fabricate external notification"),
+        Err(error) => error,
+    };
+    assert_eq!(error, InvestigationError::NotificationsRequireCaseOrigin);
+    assert!(state.legal().investigations().next().is_none());
     validate_invariants(&state);
 }
 

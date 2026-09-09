@@ -757,14 +757,12 @@ fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limi
         .enterprises
         .get_enterprise(enterprise)
         .and_then(|record| record.loss_streak_anchor());
-    let newest_first: Vec<_> = state
-        .enterprises
-        .cycles_for(enterprise)
-        .rev()
-        .take(usize::from(limit))
-        .collect();
     crate::finance::helpers::count_trailing_losing_cycles(
-        &newest_first,
+        state
+            .enterprises
+            .cycles_for(enterprise)
+            .rev()
+            .take(usize::from(limit)),
         |cycle| cycle.occurred_at(),
         |cycle| cycle.net_cash(),
         anchor,

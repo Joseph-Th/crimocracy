@@ -1990,9 +1990,7 @@ fn resume_allows_current_minute_follow_up_when_next_tick_start_equals_shifted_en
             OperationKind::Intimidation,
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
-            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
-                6,
-            ))],
+            vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
     let started = run_tick(&registry, &mut state);
     assert_eq!(started.started_operations, vec![operation]);
@@ -2099,9 +2097,7 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
             OperationKind::Intimidation,
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
-            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
-                6,
-            ))],
+            vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
     assert_eq!(
         run_tick(&registry, &mut state).started_operations,
@@ -2220,9 +2216,7 @@ fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
             OperationKind::Intimidation,
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
-            vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
-                6,
-            ))],
+            vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
     assert_eq!(
         run_tick(&registry, &mut state).started_operations,
@@ -2294,9 +2288,7 @@ fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
                 (RoleKind::EntrySpecialist, entry_specialist),
             ]),
             intelligence: BTreeSet::new(),
-            constraints: vec![OperationConstraint::CompleteBefore(SimTime::from_minutes(
-                17,
-            ))],
+            constraints: vec![OperationConstraint::CompleteBy(SimTime::from_minutes(17))],
             contingencies: Vec::new(),
             scheduled_for: state.now(),
         },
@@ -3127,7 +3119,7 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect_err("an extraction cannot be planned beyond the target's current custody");
     assert!(matches!(
         impossible_error,
-        OperationError::ExtractionOutlivesCustody {
+        OperationError::ExtractionMissesCustodyWindow {
             character,
             planned_end,
             custody_ends_at,
@@ -3135,6 +3127,108 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
             && planned_end == impossible_start + extraction_duration
             && custody_ends_at == state.now() + maximum_detention
     ));
+
+    // Completion at the release instant is also too late: the custody relationship ends at that
+    // instant, so the operation must finish strictly before it rather than racing the release pass.
+    let boundary_start = SimTime::from_minutes(
+        state.now().as_minutes()
+            + u64::from(maximum_detention.as_minutes() - extraction_duration.as_minutes()),
+    );
+    let boundary_error = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Boundary extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: boundary_start,
+        },
+    )
+    .expect_err("an extraction must finish before the custody release instant");
+    assert!(matches!(
+        boundary_error,
+        OperationError::ExtractionMissesCustodyWindow {
+            character,
+            planned_end,
+            custody_ends_at,
+        } if character == detainee
+            && planned_end == boundary_start + extraction_duration
+            && custody_ends_at == state.now() + maximum_detention
+    ));
+
+    // If an already-running extraction is delayed until the custody cap, mandatory release is the
+    // first same-minute lifecycle action. The operation then records a practical failure instead
+    // of receiving credit for breaking custody that legally ended at the same instant.
+    let mut expiry_state = state.clone();
+    let expiry_extraction = validate_authorize_operation(
+        &registry,
+        &expiry_state,
+        OperationDraft {
+            title: "Expired-custody extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: expiry_state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("early extraction should validate")
+    .commit(&mut expiry_state)
+    .expect("early extraction should commit");
+    let start_outcome = run_tick(&registry, &mut expiry_state);
+    assert_eq!(start_outcome.started_operations, vec![expiry_extraction]);
+    let release_at = expiry_state
+        .legal()
+        .get_arrest(arrest)
+        .expect("fixture arrest should persist")
+        .arrested_at()
+        + maximum_detention;
+    let minutes_until_pre_release = release_at
+        .as_minutes()
+        .checked_sub(expiry_state.now().as_minutes() + 1)
+        .expect("fresh extraction starts before custody release");
+    expiry_state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(minutes_until_pre_release).expect("fixture detention window must fit u32"),
+    ));
+    let expiry_outcome = run_tick(&registry, &mut expiry_state);
+    assert_eq!(expiry_outcome.now, release_at);
+    assert_eq!(expiry_outcome.custody_releases, vec![arrest]);
+    assert_eq!(expiry_outcome.resolved_operations, vec![expiry_extraction]);
+    let expiry_resolution = expiry_state
+        .operations()
+        .get_operation(expiry_extraction)
+        .and_then(|record| record.resolution())
+        .expect("expired-custody extraction should still resolve");
+    assert_eq!(
+        expiry_resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(
+        expiry_resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::ExtractionCustodyEnded)
+    );
+    assert_eq!(expiry_resolution.extraction_arrest(), None);
+    assert_eq!(
+        expiry_state
+            .legal()
+            .get_arrest(arrest)
+            .and_then(|record| record.released_at()),
+        Some(release_at)
+    );
+    validate_state(&expiry_state).expect("custody-boundary extraction state should validate");
+    validate_invariants(&expiry_state);
 
     let extraction = validate_authorize_operation(
         &registry,
@@ -4141,7 +4235,6 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
             .and_then(|response| response.arrived_at()),
         Some(response_due)
     );
-    // One police response must never produce two leadership decisions.
     // One police response must never produce two leadership decisions: once its arrival
     // decision exists the operation is decision-blocked, and after resolution the response
     // is no longer a freshly-due dispatch.

@@ -96,7 +96,9 @@ fn validate_investigation_origin_visibility(
         }
         return Ok(());
     };
-    let responsible_organization = investigation_origin_organization(state, investigation, origin)?;
+    let responsible_organization =
+        crate::legal::investigation_system::case_origin_responsible_organization(state, origin)
+            .ok_or_else(|| invalid_investigation_activity(investigation))?;
     if investigation.notified_organizations().is_empty()
         || !investigation
             .notified_organizations()
@@ -105,34 +107,6 @@ fn validate_investigation_origin_visibility(
         return Err(invalid_investigation_activity(investigation));
     }
     Ok(())
-}
-
-fn investigation_origin_organization(
-    state: &AppState,
-    investigation: &InvestigationRecord,
-    origin: EntityRef,
-) -> Result<crate::core::id::OrganizationId, StateValidationError> {
-    match origin {
-        EntityRef::Operation(operation) => state
-            .operations
-            .get_operation(operation)
-            .map(|operation| operation.responsible_organization())
-            .ok_or_else(|| invalid_investigation_activity(investigation)),
-        EntityRef::Enterprise(enterprise) => state
-            .enterprises
-            .get_enterprise(enterprise)
-            .map(|enterprise| enterprise.organization())
-            .ok_or_else(|| invalid_investigation_activity(investigation)),
-        EntityRef::Organization(_)
-        | EntityRef::Character(_)
-        | EntityRef::Neighborhood(_)
-        | EntityRef::Business(_)
-        | EntityRef::Investigation(_)
-        | EntityRef::Evidence(_)
-        | EntityRef::FinancialAccount(_)
-        | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_) => Err(invalid_investigation_activity(investigation)),
-    }
 }
 
 fn validate_notified_organizations(
@@ -144,14 +118,8 @@ fn validate_notified_organizations(
             .world
             .get_organization(*notified)
             .ok_or_else(|| invalid_investigation_activity(investigation))?;
-        if !matches!(
+        if !crate::legal::investigation_system::is_valid_case_notification_organization_kind(
             organization.kind(),
-            OrganizationKind::Criminal
-                | OrganizationKind::Political
-                | OrganizationKind::Press
-                | OrganizationKind::Labor
-                | OrganizationKind::Civic
-                | OrganizationKind::Commercial
         ) {
             return Err(invalid_investigation_activity(investigation));
         }

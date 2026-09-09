@@ -2,7 +2,7 @@
 
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
+    ArrestId, CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
     InvestigationWorkId, OrganizationId,
 };
 use crate::core::state::AppState;
@@ -107,6 +107,17 @@ pub enum InvestigationError {
     },
     #[error("entity {0:?} cannot originate a case")]
     InvalidCaseOrigin(EntityRef),
+    #[error("organization {0} cannot be recorded as an external case notification recipient")]
+    InvalidNotifiedOrganization(OrganizationId),
+    #[error("case notifications require an operation or enterprise origin")]
+    NotificationsRequireCaseOrigin,
+    #[error(
+        "case origin {origin:?} belongs to organization {organization}, which must be included among the notified organizations"
+    )]
+    OriginOrganizationNotNotified {
+        origin: EntityRef,
+        organization: OrganizationId,
+    },
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]
     ForensicAnalysisRequiresInvestigationWork,
     #[error(
@@ -134,6 +145,14 @@ pub enum InvestigationError {
     },
     #[error("character {character} is a subject of this case and cannot be its named witness")]
     WitnessIsCaseSubject { character: CharacterId },
+    #[error(
+        "character {witness} is already registered as case witness {existing} for investigation {investigation}"
+    )]
+    DuplicateIncidentWitness {
+        investigation: InvestigationId,
+        witness: CharacterId,
+        existing: CaseWitnessId,
+    },
     #[error("lead case-activity knowledge could not be recorded: {0}")]
     CaseKnowledge(#[from] crate::intelligence::intelligence_system::IntelligenceError),
     #[error(transparent)]
@@ -954,16 +973,31 @@ impl ValidatedIncidentIntake {
                 .legal
                 .get_investigation(shelf)
                 .expect("resumable incident shelf must still exist");
-            let adds_subjects = self
+            if let Some(witness) = &self.draft.witness
+                && let Some(existing) = state.legal.case_witness_for(shelf, witness.character)
+            {
+                return Err(InvestigationError::DuplicateIncidentWitness {
+                    investigation: shelf,
+                    witness: witness.character,
+                    existing: existing.id(),
+                });
+            }
+            let adds_incident_context = self
                 .draft
                 .subjects
                 .difference(record.subjects())
                 .next()
-                .is_some();
+                .is_some()
+                || self
+                    .draft
+                    .notified_organizations
+                    .difference(record.notified_organizations())
+                    .next()
+                    .is_some();
             let advances = self
                 .evidence_count()?
                 .checked_add(u32::from(self.draft.witness.is_some()))
-                .and_then(|count| count.checked_add(u32::from(adds_subjects)))
+                .and_then(|count| count.checked_add(u32::from(adds_incident_context)))
                 .and_then(|count| count.checked_add(1))
                 .ok_or_else(|| VersionCapacityError::new("investigation"))?;
             ensure_version_can_advance_by(record.version(), advances, "investigation")?;
@@ -992,6 +1026,7 @@ impl ValidatedIncidentIntake {
         // The draft is consumed by this commit, so its subject set moves into the record
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);
+        let notified_organizations = std::mem::take(&mut self.draft.notified_organizations);
         let investigation = match self.resuming {
             Some((shelf, _)) => {
                 // Canonical resume: revalidates the lifecycle gate and refreshes the lead's
@@ -1002,7 +1037,16 @@ impl ValidatedIncidentIntake {
                 // the same semantic boundary on continuation instead of making weak-but-valid
                 // non-character subject matter disappear merely because this incident found a
                 // resumable shelf.
-                state.legal.extend_investigation_subjects(shelf, subjects);
+                // Continuation carries the full incident visibility contract forward. A shelf
+                // can be resumed by a later incident with overlapping subject matter even when
+                // that incident came from another organization; dropping the new notification
+                // recipient here would make canonical authority surveillance forget that the
+                // organization was explicitly told about the continued case.
+                state.legal.extend_investigation_incident_context(
+                    shelf,
+                    subjects,
+                    notified_organizations,
+                );
                 shelf
             }
             None => {
@@ -1020,7 +1064,7 @@ impl ValidatedIncidentIntake {
                     evidence: Default::default(),
                     opened_at: state.now(),
                     origin: self.draft.origin,
-                    notified_organizations: self.draft.notified_organizations,
+                    notified_organizations,
                     last_activity_at: state.now(),
                     version: 1,
                 });
@@ -1156,11 +1200,30 @@ fn validate_incident_intake_dependencies(
         }
     }
     for organization in &draft.notified_organizations {
-        if !is_entity_present(state, EntityRef::Organization(*organization)) {
-            return Err(InvestigationError::MissingEntity(EntityRef::Organization(
+        let record = state.world.get_organization(*organization).ok_or(
+            InvestigationError::MissingEntity(EntityRef::Organization(*organization)),
+        )?;
+        if !is_valid_case_notification_organization_kind(record.kind()) {
+            return Err(InvestigationError::InvalidNotifiedOrganization(
                 *organization,
-            )));
+            ));
         }
+    }
+    match draft.origin {
+        Some(origin) => {
+            let organization = case_origin_responsible_organization(state, origin)
+                .expect("validated case origin must resolve its responsible organization");
+            if !draft.notified_organizations.contains(&organization) {
+                return Err(InvestigationError::OriginOrganizationNotNotified {
+                    origin,
+                    organization,
+                });
+            }
+        }
+        None if !draft.notified_organizations.is_empty() => {
+            return Err(InvestigationError::NotificationsRequireCaseOrigin);
+        }
+        None => {}
     }
     if let Some(witness) = &draft.witness {
         state
@@ -1243,6 +1306,50 @@ fn validate_incident_intake_dependencies(
         }
     }
     Ok(())
+}
+
+/// Resolves the organization whose activity caused an originated case. Keeping this mapping in
+/// the legal owner prevents incident validation and persisted-state validation from drifting on
+/// what operation/enterprise provenance means for case visibility.
+pub(crate) fn case_origin_responsible_organization(
+    state: &AppState,
+    origin: EntityRef,
+) -> Option<OrganizationId> {
+    match origin {
+        EntityRef::Operation(operation) => state
+            .operations
+            .get_operation(operation)
+            .map(|operation| operation.responsible_organization()),
+        EntityRef::Enterprise(enterprise) => state
+            .enterprises
+            .get_enterprise(enterprise)
+            .map(|enterprise| enterprise.organization()),
+        EntityRef::Organization(_)
+        | EntityRef::Character(_)
+        | EntityRef::Neighborhood(_)
+        | EntityRef::Business(_)
+        | EntityRef::Investigation(_)
+        | EntityRef::Evidence(_)
+        | EntityRef::FinancialAccount(_)
+        | EntityRef::DecisionRequest(_)
+        | EntityRef::Mandate(_) => None,
+    }
+}
+
+/// Originated case visibility belongs only to external organizations that can legitimately be
+/// told about enforcement attention. Legal institutions own or work cases through their own
+/// canonical records; recording them as an external notification recipient would fabricate the
+/// same visibility channel that criminal/civic organizations later consume through surveillance.
+pub(crate) const fn is_valid_case_notification_organization_kind(kind: OrganizationKind) -> bool {
+    matches!(
+        kind,
+        OrganizationKind::Criminal
+            | OrganizationKind::Political
+            | OrganizationKind::Press
+            | OrganizationKind::Labor
+            | OrganizationKind::Civic
+            | OrganizationKind::Commercial
+    )
 }
 
 #[cfg(test)]

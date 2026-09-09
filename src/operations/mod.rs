@@ -196,7 +196,8 @@ impl OperationObjective {
 /// injury, or collateral-damage axis to act on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationConstraint {
-    CompleteBefore(SimTime),
+    /// Inclusive completion deadline. The operation may resolve on this minute but not after it.
+    CompleteBy(SimTime),
     /// Authorization gate: the plan must carry organization-held intelligence of the given
     /// topic relevant to the objective before it may be authorized. Consumed by operation
     /// validation; reconnaissance is therefore a planning prerequisite, not flavor.

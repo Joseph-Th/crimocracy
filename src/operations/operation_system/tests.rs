@@ -275,14 +275,14 @@ fn authorization_rejects_a_deadline_that_cannot_accommodate_a_next_tick_begin() 
         (RoleKind::Coordinator, leader),
         (RoleKind::EntrySpecialist, crew),
     ]);
-    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
         SimTime::from_minutes(11),
     )];
     let error = validate_authorize_operation(&registry, &state, draft.clone())
         .expect_err("a deadline that only fits a begin at the schedule minute must be rejected");
     assert_eq!(error, OperationError::DeadlineLeavesNoExecutionWindow);
 
-    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
         SimTime::from_minutes(12),
     )];
     validate_authorize_operation(&registry, &state, draft)
@@ -628,7 +628,7 @@ fn deadline_constrained_authorization_releases_crew_at_the_deadline() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let mut first = make_test_draft(organization, leader, target);
     first.scheduled_for = SimTime::from_minutes(10);
-    first.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+    first.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
         SimTime::from_minutes(20),
     )];
     validate_authorize_operation(&registry, &state, first)
@@ -1013,7 +1013,7 @@ fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
     draft.scheduled_for = SimTime::from_minutes(30);
     draft
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(40),
         ));
     let operation = validate_authorize_operation(&registry, &state, draft)
@@ -1072,7 +1072,7 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
     let mut draft = make_test_draft(organization, leader, target);
     draft
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(10),
         ));
     let operation = validate_authorize_operation(&registry, &state, draft)
@@ -1137,7 +1137,7 @@ fn missed_deadline_scan_preserves_deadline_chronology_before_operation_id() {
     later_deadline.title = "Later deadline lower id".to_owned();
     later_deadline
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(20),
         ));
     let lower_id = validate_authorize_operation(&registry, &state, later_deadline)
@@ -1149,7 +1149,7 @@ fn missed_deadline_scan_preserves_deadline_chronology_before_operation_id() {
     earlier_deadline.title = "Earlier deadline higher id".to_owned();
     earlier_deadline
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(10),
         ));
     let higher_id = validate_authorize_operation(&registry, &state, earlier_deadline)
@@ -1180,7 +1180,7 @@ fn deadline_constrained_operation_resolves_on_its_clamped_deadline_minute() {
     let mut draft = make_test_draft(organization, leader, target);
     draft
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(10),
         ));
     let operation = validate_authorize_operation(&registry, &state, draft)
@@ -1229,7 +1229,7 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
     let mut draft = make_test_draft(organization, leader, target);
     draft
         .constraints
-        .push(crate::operations::OperationConstraint::CompleteBefore(
+        .push(crate::operations::OperationConstraint::CompleteBy(
             SimTime::from_minutes(10),
         ));
     draft
@@ -1362,7 +1362,7 @@ fn authorization_commit_rechecks_deadline_against_actual_authorization_minute() 
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let mut draft = make_test_draft(organization, leader, target);
     draft.scheduled_for = SimTime::from_minutes(10);
-    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBefore(
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
         SimTime::from_minutes(11),
     )];
     let validated = validate_authorize_operation(&registry, &state, draft)

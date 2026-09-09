@@ -388,7 +388,12 @@ fn validate_cancelled_operation_decision(
     let cancellation = decision
         .cancellation()
         .ok_or_else(|| invalid_decision_context(decision))?;
-    let DecisionCancellationReason::OperationParticipantDetained(character) = cancellation.reason();
+    let character = match cancellation.reason() {
+        DecisionCancellationReason::OperationParticipantDetained(character) => character,
+        DecisionCancellationReason::RecruitmentAuthorityChanged(_) => {
+            return Err(invalid_decision_context(decision));
+        }
+    };
     let abort = operation.abort_record();
     if operation.status() != OperationStatus::Aborted
         || !operation.participants().contains(&character)
@@ -508,8 +513,39 @@ fn validate_recruitment_approval_lifecycle(
         DecisionStatus::Resolved => {
             validate_resolved_recruitment_approval(decision, linked_attempt)
         }
-        DecisionStatus::Cancelled => Err(invalid_decision_context(decision)),
+        DecisionStatus::Cancelled => {
+            validate_cancelled_recruitment_approval(state, decision, context, linked_attempt)
+        }
     }
+}
+
+fn validate_cancelled_recruitment_approval(
+    state: &AppState,
+    decision: &DecisionRequestRecord,
+    context: RecruitmentApprovalContext,
+    linked_attempt: Option<&crate::recruitment::RecruitmentAttemptRecord>,
+) -> Result<(), StateValidationError> {
+    let cancellation = decision
+        .cancellation()
+        .ok_or_else(|| invalid_decision_context(decision))?;
+    let mandate_id = match cancellation.reason() {
+        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate) => mandate,
+        DecisionCancellationReason::OperationParticipantDetained(_) => {
+            return Err(invalid_decision_context(decision));
+        }
+    };
+    let authority = context.authority();
+    let mandate = state
+        .delegation
+        .get_mandate(mandate_id)
+        .ok_or_else(|| invalid_decision_context(decision))?;
+    if authority.authority().mandate != mandate_id
+        || authority.mandate_version() >= mandate.version()
+        || linked_attempt.is_some()
+    {
+        return Err(invalid_decision_context(decision));
+    }
+    Ok(())
 }
 
 fn validate_pending_recruitment_approval(

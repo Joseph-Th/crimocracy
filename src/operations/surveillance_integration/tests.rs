@@ -190,17 +190,26 @@ fn fixture(observer_skill: u8, with_patrol: bool) -> Fixture {
 }
 
 fn authorize_surveillance(fixture: &mut Fixture, target: EntityRef) -> OperationId {
+    authorize_surveillance_for(fixture, fixture.crew, fixture.observer, target)
+}
+
+fn authorize_surveillance_for(
+    fixture: &mut Fixture,
+    organization: OrganizationId,
+    observer: CharacterId,
+    target: EntityRef,
+) -> OperationId {
     validate_authorize_operation(
         &fixture.registry,
         &fixture.state,
         OperationDraft {
             title: "Observe target".to_owned(),
             kind: OperationKind::Surveillance,
-            responsible_organization: fixture.crew,
-            leader: fixture.observer,
+            responsible_organization: organization,
+            leader: observer,
             objective: OperationObjective::GatherInformation { target },
             approach: OperationApproach::Covert,
-            roles: BTreeMap::from([(RoleKind::Surveillance, fixture.observer)]),
+            roles: BTreeMap::from([(RoleKind::Surveillance, observer)]),
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
@@ -870,6 +879,137 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
     );
     assert!(closed_observation.summary().contains("closed"));
     validate_state(&fixture.state).expect("closed-case recheck state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn resumed_case_notification_grants_new_organization_authority_sightline() {
+    let mut fixture = fixture(100, false);
+    let police = fixture.police;
+    let business = fixture.business;
+    let incident = authorize_surveillance(&mut fixture, EntityRef::Business(business));
+    resolve_with_zero_variance(&mut fixture, incident);
+
+    let case = validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Initial crew incident".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(incident)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Operation(incident),
+                origin: Some(EntityRef::Operation(incident)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Operation(incident)),
+            notified_organizations: BTreeSet::from([fixture.crew]),
+            witness: None,
+        },
+    )
+    .expect("initial incident intake should validate")
+    .commit(&mut fixture.state)
+    .expect("initial incident intake should commit")
+    .investigation;
+
+    fixture.state.advance_clock(SimDuration::from_minutes(121));
+    let decay = apply_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
+        .expect("cold-case decay should suspend the inactive case");
+    assert_eq!(decay.suspended, vec![case]);
+
+    let second_crew = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Southside Observation Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second crew should validate");
+    let second_observer = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Iris Venn".to_owned(),
+            organization: Some(second_crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Surveillance, rating(100)),
+                (CapabilityKind::Management, rating(100)),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second observer should validate");
+
+    let resumed = validate_incident_intake(
+        &fixture.state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Continued crew incident".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(incident)]),
+            evidence: vec![IncidentEvidenceDraft {
+                subject: EntityRef::Operation(incident),
+                origin: Some(EntityRef::Operation(incident)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: fixture.state.now(),
+            }],
+            origin: Some(EntityRef::Operation(incident)),
+            notified_organizations: BTreeSet::from([fixture.crew, second_crew]),
+            witness: None,
+        },
+    )
+    .expect("continued incident should find and validate the suspended shelf")
+    .commit(&mut fixture.state)
+    .expect("continued incident should resume the shelf");
+    assert_eq!(resumed.investigation, case);
+    assert!(resumed.resumed_shelf);
+
+    let recheck = authorize_surveillance_for(
+        &mut fixture,
+        second_crew,
+        second_observer,
+        EntityRef::Organization(police),
+    );
+    resolve_with_zero_variance(&mut fixture, recheck);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(recheck)
+        .and_then(|record| record.resolution())
+        .expect("second crew authority surveillance should resolve");
+    assert_eq!(resolution.discovered_information().len(), 1);
+    let observation = fixture
+        .state
+        .intelligence()
+        .get_information(
+            *resolution
+                .discovered_information()
+                .iter()
+                .next()
+                .expect("authority recheck should discover case activity"),
+        )
+        .expect("authority case-activity observation should persist");
+    assert_eq!(
+        observation.holder(),
+        KnowledgeHolder::Organization(second_crew)
+    );
+    assert_eq!(observation.topic(), InformationTopic::LegalActivity);
+    assert_eq!(observation.subject(), EntityRef::Organization(police));
+    assert_eq!(
+        observation.signal(),
+        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    );
+
+    validate_state(&fixture.state)
+        .expect("resumed notification sightline should remain structurally valid");
     validate_invariants(&fixture.state);
 }
 

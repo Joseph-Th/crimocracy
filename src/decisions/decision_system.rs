@@ -2,8 +2,8 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
-    PoliceResponseId, RecruitmentAttemptId,
+    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, MandateId, OperationId,
+    OrganizationId, PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -265,6 +265,73 @@ pub(crate) fn validate_cancel_operation_decision_for_detention(
         expected_decision_version: decision.version(),
         cancelled_at: state.now(),
     }))
+}
+
+/// Frozen set of pending recruitment approvals whose mandate authority is about to be
+/// superseded. Mandate revision/revocation composes this decision-owned lifecycle change so an
+/// obsolete approval never remains pending with an Approve option that can no longer succeed.
+#[derive(Debug)]
+pub(crate) struct ValidatedRecruitmentApprovalCancellations {
+    mandate: MandateId,
+    decisions: Vec<(DecisionRequestId, u32)>,
+    cancelled_at: SimTime,
+}
+
+impl ValidatedRecruitmentApprovalCancellations {
+    pub(crate) fn is_current(&self, state: &AppState) -> bool {
+        state.now() == self.cancelled_at
+            && pending_recruitment_approvals_for_mandate(state, self.mandate) == self.decisions
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        for (decision, _) in self.decisions {
+            state.decisions.cancel(
+                decision,
+                build_cancellation(
+                    self.cancelled_at,
+                    DecisionCancellationReason::RecruitmentAuthorityChanged(self.mandate),
+                ),
+            );
+        }
+    }
+}
+
+pub(crate) fn validate_cancel_recruitment_approvals_for_mandate_change(
+    state: &AppState,
+    mandate: MandateId,
+) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
+    let decisions = pending_recruitment_approvals_for_mandate(state, mandate);
+    for (decision, _) in &decisions {
+        let record = state
+            .decisions
+            .get_decision(*decision)
+            .expect("pending recruitment approval scan must reference a persisted decision");
+        ensure_version_can_advance(record.version(), "decision request")?;
+    }
+    Ok(ValidatedRecruitmentApprovalCancellations {
+        mandate,
+        decisions,
+        cancelled_at: state.now(),
+    })
+}
+
+fn pending_recruitment_approvals_for_mandate(
+    state: &AppState,
+    mandate: MandateId,
+) -> Vec<(DecisionRequestId, u32)> {
+    state
+        .decisions
+        .decisions()
+        .filter(|decision| decision.status() == DecisionStatus::Pending)
+        .filter(|decision| {
+            matches!(
+                decision.context(),
+                DecisionContext::RecruitmentApproval(context)
+                    if context.authority().authority().mandate == mandate
+            )
+        })
+        .map(|decision| (decision.id(), decision.version()))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

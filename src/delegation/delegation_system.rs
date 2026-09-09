@@ -6,6 +6,10 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::decisions::decision_system::{
+    ValidatedRecruitmentApprovalCancellations,
+    validate_cancel_recruitment_approvals_for_mandate_change,
+};
 use crate::delegation::{
     BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord, MandateStatus,
     ResolvedMandateAuthority, ResponsibilityScope, build_mandate_record,
@@ -109,6 +113,8 @@ pub enum DelegationError {
         enterprise: EnterpriseId,
         scope: ResponsibilityScope,
     },
+    #[error("pending recruitment approvals for mandate {0} changed after validation")]
+    RecruitmentApprovalSetChanged(MandateId),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -192,6 +198,7 @@ pub struct ValidatedMandateRevision {
     manager: CharacterId,
     organization: OrganizationId,
     expected_manager_version: u32,
+    approval_cancellations: ValidatedRecruitmentApprovalCancellations,
 }
 
 impl ValidatedMandateRevision {
@@ -223,6 +230,9 @@ impl ValidatedMandateRevision {
         validate_scope_liveness(state, &self.draft.scopes)?;
         validate_standing_orders(&self.draft.standing_orders)?;
         validate_budget_authority(state, self.organization, self.draft.budget)?;
+        if !self.approval_cancellations.is_current(state) {
+            return Err(DelegationError::RecruitmentApprovalSetChanged(self.mandate));
+        }
         let MandateRevisionDraft {
             scopes,
             standing_orders,
@@ -231,6 +241,7 @@ impl ValidatedMandateRevision {
         state
             .delegation
             .revise(self.mandate, scopes, standing_orders, budget);
+        self.approval_cancellations.commit_preflighted(state);
         Ok(())
     }
 }
@@ -263,6 +274,8 @@ pub fn validate_revise_mandate(
     )?;
     validate_enterprise_scope_dependencies(state, mandate, &draft.scopes)?;
     let manager = validate_manager(state, record.manager(), record.organization())?;
+    let approval_cancellations =
+        validate_cancel_recruitment_approvals_for_mandate_change(state, mandate)?;
     Ok(ValidatedMandateRevision {
         mandate,
         draft,
@@ -270,6 +283,7 @@ pub fn validate_revise_mandate(
         manager: record.manager(),
         organization: record.organization(),
         expected_manager_version: manager.version(),
+        approval_cancellations,
     })
 }
 
@@ -277,6 +291,7 @@ pub fn validate_revise_mandate(
 pub struct ValidatedMandateRevocation {
     mandate: MandateId,
     expected_version: u32,
+    approval_cancellations: ValidatedRecruitmentApprovalCancellations,
 }
 
 impl ValidatedMandateRevocation {
@@ -297,7 +312,11 @@ impl ValidatedMandateRevocation {
         }
         ensure_version_can_advance(record.version(), "mandate")?;
         validate_no_active_enterprise_dependencies(state, self.mandate)?;
+        if !self.approval_cancellations.is_current(state) {
+            return Err(DelegationError::RecruitmentApprovalSetChanged(self.mandate));
+        }
         state.delegation.revoke(self.mandate);
+        self.approval_cancellations.commit_preflighted(state);
         Ok(())
     }
 }
@@ -315,9 +334,12 @@ pub fn validate_revoke_mandate(
     }
     ensure_version_can_advance(record.version(), "mandate")?;
     validate_no_active_enterprise_dependencies(state, mandate)?;
+    let approval_cancellations =
+        validate_cancel_recruitment_approvals_for_mandate_change(state, mandate)?;
     Ok(ValidatedMandateRevocation {
         mandate,
         expected_version: record.version(),
+        approval_cancellations,
     })
 }
 

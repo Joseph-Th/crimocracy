@@ -11,7 +11,8 @@ use crate::decisions::decision_system::{
     DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
 };
 use crate::decisions::{
-    DecisionContext, DecisionResponse, DecisionStatus, RecruitmentApprovalRequestDraft,
+    DecisionCancellationReason, DecisionContext, DecisionResponse, DecisionStatus,
+    RecruitmentApprovalRequestDraft,
 };
 use crate::delegation::delegation_system::{validate_assign_mandate, validate_revoke_mandate};
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
@@ -2273,7 +2274,7 @@ fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_cha
 }
 
 #[test]
-fn delegated_channel_cannot_race_a_pending_recruitment_approval() {
+fn mandate_revision_cancels_stale_recruitment_approval_and_reopens_delegated_channel() {
     use crate::delegation::delegation_system::{MandateRevisionDraft, validate_revise_mandate};
 
     let mut fixture = fixture();
@@ -2296,9 +2297,9 @@ fn delegated_channel_cannot_race_a_pending_recruitment_approval() {
     .commit(&mut fixture.state)
     .expect("approval request should commit");
 
-    // Leadership loosens the standing order while the request is still open: the manager
-    // may now recruit autonomously in general, but this candidate's pending approval keeps
-    // the pair exclusive across channels.
+    // Leadership loosens the standing order while the request is still open. The old approval
+    // snapshot is permanently obsolete after any mandate revision, so the revision must cancel
+    // it rather than leave a request whose Approve response can never succeed.
     validate_revise_mandate(
         &fixture.state,
         mandate,
@@ -2317,20 +2318,105 @@ fn delegated_channel_cannot_race_a_pending_recruitment_approval() {
     .commit(&mut fixture.state)
     .expect("mandate revision should commit");
 
-    let error = match validate_delegated_recruitment_attempt(
+    let cancelled = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("superseded approval should remain durable history");
+    assert_eq!(cancelled.status(), DecisionStatus::Cancelled);
+    assert_eq!(
+        cancelled
+            .cancellation()
+            .expect("superseded approval should record cancellation")
+            .reason(),
+        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        None
+    );
+    validate_delegated_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
         personnel_authority(&fixture, mandate),
         protection_draft(&fixture),
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("a pending approval must block the delegated channel"),
-    };
+    )
+    .expect("the revised delegated authority should no longer be blocked by an obsolete request");
+    validate_state(&fixture.state).expect("cancelled approval state should remain valid");
+    validate_invariants(&fixture.state);
+
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("cancelled approval state should save"),
+    )
+    .expect("cancelled approval state should restore");
+    let restored_decision = restored
+        .decisions()
+        .get_decision(request.decision)
+        .expect("cancelled approval should survive save restoration");
+    assert_eq!(restored_decision.status(), DecisionStatus::Cancelled);
     assert_eq!(
-        error,
-        RecruitmentError::PendingRecruitmentApproval {
-            decision: request.decision
-        }
+        restored_decision
+            .cancellation()
+            .expect("restored approval should retain cancellation provenance")
+            .reason(),
+        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
     );
-    validate_state(&fixture.state).expect("rejected race should preserve valid state");
+    validate_state(&restored).expect("restored cancelled approval state should validate");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn mandate_revocation_cancels_pending_recruitment_approval() {
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager requests authority to recruit a rival associate."
+                .to_owned(),
+        },
+    )
+    .expect("approval-required recruitment proposal should validate")
+    .commit(&mut fixture.state)
+    .expect("approval request should commit");
+
+    validate_revoke_mandate(&fixture.state, mandate)
+        .expect("mandate with no active enterprise dependency should revoke")
+        .commit(&mut fixture.state)
+        .expect("mandate revocation should cancel obsolete approvals atomically");
+
+    let cancelled = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("revoked approval should remain durable history");
+    assert_eq!(cancelled.status(), DecisionStatus::Cancelled);
+    assert_eq!(
+        cancelled
+            .cancellation()
+            .expect("revoked approval should record cancellation")
+            .reason(),
+        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        None
+    );
+    validate_state(&fixture.state).expect("revoked approval state should remain valid");
+    validate_invariants(&fixture.state);
 }

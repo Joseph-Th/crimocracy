@@ -1,7 +1,7 @@
 //! Durable monetary accounts and balanced ledger records; `finance_system` owns all financial mutation.
 
 pub mod finance_system;
-pub mod helpers;
+pub(crate) mod helpers;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKeyedBounds;

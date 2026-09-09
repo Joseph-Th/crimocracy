@@ -1,10 +1,12 @@
 //! Immutable code-owned registry: definition types, validated lookup tables, and assembly.
 //!
 //! Sibling files: `definitions.rs` owns the authored definition types; `builder.rs` owns
-//! registration and validation; this module owns the `Registry` lookup surface.
+//! registration and completeness validation; `operation_validation.rs` owns operation-specific
+//! authoring contracts; this module owns the `Registry` lookup surface.
 
 mod builder;
 mod definitions;
+mod operation_validation;
 
 pub use definitions::*;
 
