@@ -15,7 +15,7 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ReputationError {
-    #[error("organization {0} does not exist or is inactive")]
+    #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error(transparent)]
     Report(#[from] ReportError),
@@ -504,7 +504,7 @@ mod tests {
         )
         .expect("delta on a live organization should apply");
         assert_eq!(after, baseline + 7);
-        assert_eq!(state.reputation.len(), 1);
+        assert_eq!(state.reputation.records().count(), 1);
         let record = state
             .reputation
             .get_record(organization, AudienceKind::Police)
@@ -563,7 +563,7 @@ mod tests {
             Ok(_) => panic!("unknown organizations must be rejected"),
         };
         assert_eq!(error, ReputationError::MissingOrganization(missing));
-        assert!(state.reputation.is_empty());
+        assert!(state.reputation.records().next().is_none());
     }
 
     #[test]
@@ -581,7 +581,8 @@ mod tests {
         .expect("consequences should apply");
         let touched: Vec<AudienceKind> = state
             .reputation
-            .records_for_organization(organization)
+            .records()
+            .filter(|record| record.organization() == organization)
             .filter(|record| {
                 crate::reputation::ALL_REPUTATION_DIMENSIONS
                     .iter()
@@ -943,7 +944,7 @@ mod tests {
 
         // The reputation moved, but no Standing report exists: this organization is not
         // the player, and rival street standing is not free information.
-        assert_eq!(state.reputation.len(), 3);
+        assert_eq!(state.reputation.records().count(), 3);
         assert_eq!(standing_reports(&state, organization), 0);
         validate_invariants(&state);
     }
@@ -982,7 +983,7 @@ mod tests {
             error,
             ReputationError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
         ));
-        assert_eq!(state.reputation.len(), 0);
+        assert_eq!(state.reputation.records().count(), 0);
         assert_eq!(standing_reports(&state, organization), 0);
     }
 

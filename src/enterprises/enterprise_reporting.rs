@@ -1,16 +1,12 @@
 //! Read-only financial aggregation over enterprise cycle history; ledger-backed cycle records remain the source of truth.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{EnterpriseId, NeighborhoodId, OrganizationId};
+use crate::core::id::OrganizationId;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-#[cfg(test)]
-use crate::enterprises::EnterpriseLocation;
 use crate::enterprises::{EnterpriseKind, EnterpriseRecord};
 use crate::finance::Money;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -37,30 +33,10 @@ pub enum EnterpriseReportingError {
     InvalidWindow,
     #[error("financial reporting window ends after current simulation time")]
     FutureWindow,
-    #[error("enterprise {0} does not exist")]
-    MissingEnterprise(EnterpriseId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
-    #[error("neighborhood {0} does not exist")]
-    MissingNeighborhood(NeighborhoodId),
     #[error("enterprise financial aggregation overflowed")]
     ArithmeticOverflow,
-}
-
-/// Test-only drill-down: production reporting aggregates at the organization level.
-#[cfg(test)]
-pub fn resolve_enterprise_financial_summary(
-    state: &AppState,
-    enterprise: EnterpriseId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<EnterpriseFinancialSummary, EnterpriseReportingError> {
-    validate_window(state, period_start, period_end)?;
-    let record = state
-        .enterprises()
-        .get_enterprise(enterprise)
-        .ok_or(EnterpriseReportingError::MissingEnterprise(enterprise))?;
-    resolve_summary(state, [record], period_start, period_end)
 }
 
 pub fn resolve_organization_enterprise_financial_summary(
@@ -81,40 +57,6 @@ pub fn resolve_organization_enterprise_financial_summary(
         period_start,
         period_end,
     )
-}
-
-/// Test-only drill-down: production reporting aggregates at the organization level.
-#[cfg(test)]
-pub fn resolve_neighborhood_enterprise_financial_summary(
-    state: &AppState,
-    neighborhood: NeighborhoodId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<EnterpriseFinancialSummary, EnterpriseReportingError> {
-    validate_window(state, period_start, period_end)?;
-    if state.world().get_neighborhood(neighborhood).is_none() {
-        return Err(EnterpriseReportingError::MissingNeighborhood(neighborhood));
-    }
-    let mut enterprise_ids: BTreeSet<EnterpriseId> = state
-        .enterprises()
-        .enterprises_at(EnterpriseLocation::Neighborhood(neighborhood))
-        .map(EnterpriseRecord::id)
-        .collect();
-    for business in state.world().businesses_in_neighborhood(neighborhood) {
-        enterprise_ids.extend(
-            state
-                .enterprises()
-                .enterprises_at(EnterpriseLocation::Business(business.id()))
-                .map(EnterpriseRecord::id),
-        );
-    }
-    let enterprises = enterprise_ids.into_iter().map(|id| {
-        state
-            .enterprises()
-            .get_enterprise(id)
-            .expect("enterprise location indexes must reference persisted enterprises")
-    });
-    resolve_summary(state, enterprises, period_start, period_end)
 }
 
 fn validate_window(
@@ -226,8 +168,8 @@ mod tests {
     use crate::core::time::SimDuration;
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
-    use crate::enterprises::EnterpriseDraft;
     use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+    use crate::enterprises::{EnterpriseDraft, EnterpriseLocation};
     use crate::finance::finance_system::insert_account;
     use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
     use crate::world::world_system::{insert_character, insert_neighborhood, insert_organization};
@@ -236,6 +178,7 @@ mod tests {
         NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
         Rating,
     };
+    use std::collections::BTreeSet;
 
     fn rating(value: u8) -> Rating {
         Rating::try_new(value).expect("fixture rating must be valid")
@@ -315,7 +258,7 @@ mod tests {
         )
         .expect("settlement account fixture should validate");
         state.advance_clock(SimDuration::from_minutes(10));
-        let enterprise = validate_establish_enterprise(
+        validate_establish_enterprise(
             &registry,
             &state,
             EnterpriseDraft {
@@ -336,13 +279,13 @@ mod tests {
         .commit(&mut state)
         .expect("enterprise fixture should commit");
 
-        let summary = resolve_enterprise_financial_summary(
+        let summary = resolve_organization_enterprise_financial_summary(
             &state,
-            enterprise,
+            organization,
             SimTime::ZERO,
             SimTime::from_minutes(9),
         )
-        .expect("historical summary should resolve");
+        .expect("historical organization summary should resolve");
         assert_eq!(summary.totals.enterprise_count, 0);
         assert_eq!(summary.totals.cycle_count, 0);
         assert!(summary.by_kind.is_empty());

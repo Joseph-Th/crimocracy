@@ -206,12 +206,12 @@ fn validate_enterprise_schedule(
 }
 
 fn validate_enterprise_status(
-    _state: &AppState,
+    state: &AppState,
     enterprise: &EnterpriseRecord,
     refs: &EnterpriseAuthorityRefs<'_>,
 ) -> Result<(), StateValidationError> {
     match enterprise.status() {
-        EnterpriseStatus::Active => validate_active_enterprise(enterprise, refs),
+        EnterpriseStatus::Active => validate_active_enterprise(state, enterprise, refs),
         EnterpriseStatus::Suspended | EnterpriseStatus::Retired => {
             if enterprise.next_cycle_at().is_some() {
                 return Err(StateValidationError::InvalidEnterpriseSchedule {
@@ -224,6 +224,7 @@ fn validate_enterprise_status(
 }
 
 fn validate_active_enterprise(
+    state: &AppState,
     enterprise: &EnterpriseRecord,
     refs: &EnterpriseAuthorityRefs<'_>,
 ) -> Result<(), StateValidationError> {
@@ -241,11 +242,21 @@ fn validate_active_enterprise(
             business.neighborhood(),
         )
     });
+    let host_is_owned = match enterprise.location() {
+        EnterpriseLocation::Neighborhood(_) => true,
+        EnterpriseLocation::Business(business_id) => state
+            .world
+            .get_business(business_id)
+            .is_some_and(|business| {
+                business.owner() == BusinessOwner::Organization(enterprise.organization())
+            }),
+    };
     if refs.manager.organization() != Some(enterprise.organization())
         || refs.mandate.status() != MandateStatus::Active
         || !refs.mandate.scopes().contains(&authority.scope)
         || !authority_covers_location
         || !authority_covers_support
+        || !host_is_owned
         || refs.supporting_businesses.iter().any(|business| {
             business.owner() != BusinessOwner::Organization(enterprise.organization())
         })

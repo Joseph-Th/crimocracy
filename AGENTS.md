@@ -32,8 +32,10 @@ Harness   (evaluation surface, smoke/full, player-visible only) ─┘
 
 ## 2. System tower — the single mental model
 
-The codebase is a tower of linked abstractions, not a bag of modules. Every layer
-depends only on layers below it.
+The codebase is a tower of linked abstractions, not a bag of modules. The tower describes
+ownership and orchestration responsibility rather than a literal Rust import DAG: lower-level
+owners do not patch higher-domain state, while orchestrating domains may use peer read APIs and
+validated integration paths where the model requires feedback.
 
 ```text
 Layer 4 — Orchestrating domains (transact across many owners)
@@ -43,7 +45,7 @@ Layer 4 — Orchestrating domains (transact across many owners)
 Layer 3 — Mid domains (cross-reference, own mutations)
   finance  delegation  reputation  decisions  contacts  opportunities  recruitment
               \         |            |           |           |            |
-Layer 2 — Leaf / low-dependency domains (no cross-domain writes)
+Layer 2 — Foundational domain owners (low-dependency state)
   world  social  intelligence  history  reports
               \    |        |         |       /
 Layer 1 — Immutable authoring
@@ -53,7 +55,7 @@ Layer 0 — Foundations (everyone depends on these)
   core::{id, time, entity, attention, state, simulation, persistence, invariants}
 ```
 
-The authoritative dependency DAG, `AppState` ownership map, persistence model, and
+The authoritative dependency policy, `AppState` ownership map, persistence model, and
 source map live in [`ARCHITECTURE.md`](ARCHITECTURE.md). `src/lib.rs` is the
 authoritative top-level module inventory.
 

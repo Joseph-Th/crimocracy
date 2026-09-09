@@ -213,15 +213,33 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
                 },
             },
             information_quality: RecruitmentInformationQualityDefinition {
-                unknown_reliability: 20,
-                unreliable_reliability: 10,
-                mixed_reliability: 40,
-                generally_reliable: 70,
-                direct_access: 100,
-                vague_specificity: 25,
-                general_specificity: 50,
-                specific_specificity: 75,
-                precise_specificity: 100,
+                unknown_reliability: crate::intelligence::reliability_quality_score(
+                    crate::intelligence::Reliability::Unknown,
+                ),
+                unreliable_reliability: crate::intelligence::reliability_quality_score(
+                    crate::intelligence::Reliability::Unreliable,
+                ),
+                mixed_reliability: crate::intelligence::reliability_quality_score(
+                    crate::intelligence::Reliability::Mixed,
+                ),
+                generally_reliable: crate::intelligence::reliability_quality_score(
+                    crate::intelligence::Reliability::GenerallyReliable,
+                ),
+                direct_access: crate::intelligence::reliability_quality_score(
+                    crate::intelligence::Reliability::DirectAccess,
+                ),
+                vague_specificity: crate::intelligence::specificity_quality_score(
+                    crate::intelligence::Specificity::Vague,
+                ),
+                general_specificity: crate::intelligence::specificity_quality_score(
+                    crate::intelligence::Specificity::General,
+                ),
+                specific_specificity: crate::intelligence::specificity_quality_score(
+                    crate::intelligence::Specificity::Specific,
+                ),
+                precise_specificity: crate::intelligence::specificity_quality_score(
+                    crate::intelligence::Specificity::Precise,
+                ),
             },
             approach_drives: BTreeMap::from([
                 (

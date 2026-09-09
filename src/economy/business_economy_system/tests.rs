@@ -6,9 +6,7 @@ use crate::core::invariants::{validate_invariants, validate_state_against_regist
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::economy::BusinessEconomyDraft;
-use crate::economy::business_reporting::{
-    resolve_business_financial_summary, resolve_organization_business_financial_summary,
-};
+use crate::economy::business_reporting::resolve_organization_business_financial_summary;
 use crate::finance::finance_system::insert_account;
 use crate::finance::{FinancialAccountDraft, FinancialOwner};
 use crate::reports::ReportKind;
@@ -550,15 +548,16 @@ fn routine_business_cycle_records_causal_economics_and_balanced_settlement() {
         .base_operating_cost()
         .checked_add(expected_police)
         .expect("business cost should not overflow");
-    assert_eq!(plan.operating_cost(), expected_cost);
+    assert_eq!(plan.economics.operating_cost, expected_cost);
     assert_eq!(
-        plan.net_cash(),
-        plan.gross_revenue()
-            .checked_sub(plan.operating_cost())
+        plan.economics.net_cash,
+        plan.economics
+            .gross_revenue
+            .checked_sub(plan.economics.operating_cost)
             .expect("net cash should be gross - cost")
     );
-    assert_eq!(plan.attention(), AttentionClass::Routine);
-    assert!(plan.gross_revenue().cents() >= economics.base_gross().cents());
+    assert_eq!(plan.economics.attention, AttentionClass::Routine);
+    assert!(plan.economics.gross_revenue.cents() >= economics.base_gross().cents());
 
     let cycle = validate_business_cycle_plan(&fixture.state, plan)
         .expect("business cycle plan should validate")
@@ -838,7 +837,7 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
 
     let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
         .expect("material business variance should resolve");
-    assert_eq!(plan.attention(), AttentionClass::Notable);
+    assert_eq!(plan.economics.attention, AttentionClass::Notable);
     let cycle = validate_business_cycle_plan(&fixture.state, plan)
         .expect("material business cycle should validate")
         .commit(&mut fixture.state)
@@ -863,13 +862,6 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
     assert_eq!(information.source_kind(), InformationSourceKind::Accountant);
     assert_eq!(information.subject(), EntityRef::Business(fixture.business));
 
-    let business_summary = resolve_business_financial_summary(
-        &fixture.state,
-        fixture.business,
-        SimTime::ZERO,
-        fixture.state.now(),
-    )
-    .expect("business financial summary should resolve");
     let organization_summary = resolve_organization_business_financial_summary(
         &fixture.state,
         fixture.organization,
@@ -877,8 +869,19 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
         fixture.state.now(),
     )
     .expect("organization business summary should resolve");
-    assert_eq!(business_summary.totals, organization_summary.totals);
-    assert_eq!(business_summary.totals.notable_cycle_count, 1);
+    assert_eq!(organization_summary.totals.business_count, 1);
+    assert_eq!(organization_summary.totals.cycle_count, 1);
+    assert_eq!(organization_summary.totals.notable_cycle_count, 1);
+    assert!(organization_summary.totals.gross_revenue > Money::ZERO);
+    assert!(organization_summary.totals.operating_cost > Money::ZERO);
+    assert_eq!(
+        organization_summary.totals.net_cash,
+        organization_summary
+            .totals
+            .gross_revenue
+            .checked_sub(organization_summary.totals.operating_cost)
+            .expect("summary net should equal gross less operating cost")
+    );
 
     let report = validate_organization_financial_report(
         &fixture.state,
@@ -1136,7 +1139,7 @@ fn later_sabotage_does_not_rewrite_prior_cycle_disruption_history() {
         .advance_clock(SimDuration::from_minutes(1_440));
     let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
         .expect("normal due cycle should decide");
-    assert_eq!(plan.attention(), AttentionClass::Routine);
+    assert_eq!(plan.economics.attention, AttentionClass::Routine);
     let cycle = validate_business_cycle_plan(&fixture.state, plan)
         .expect("normal cycle should validate")
         .commit(&mut fixture.state)
@@ -1276,7 +1279,10 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
         .advance_clock(SimDuration::from_minutes(1_440));
     let disrupted_plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
         .expect("due cycle inside the disruption horizon should settle degraded");
-    assert_eq!(disrupted_plan.gross_revenue(), expected_disrupted_gross);
+    assert_eq!(
+        disrupted_plan.economics.gross_revenue,
+        expected_disrupted_gross
+    );
     validate_business_cycle_plan(&fixture.state, disrupted_plan)
         .expect("disrupted cycle plan should validate")
         .commit(&mut fixture.state)
@@ -1289,8 +1295,7 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
     let recovered_plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
         .expect("due cycle after the horizon should recover");
     assert_eq!(
-        recovered_plan.gross_revenue(),
-        normal_gross,
+        recovered_plan.economics.gross_revenue, normal_gross,
         "cycle after the horizon must earn undisrupted gross"
     );
     validate_invariants(&fixture.state);
@@ -1501,10 +1506,10 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
         let plan = decide_business_cycle(&registry, &state, business, -500)
             .expect("losing business cycle should decide");
         assert!(
-            plan.net_cash().cents() < 0,
+            plan.economics.net_cash.cents() < 0,
             "fixture must produce a losing settlement"
         );
-        assert_eq!(plan.attention(), AttentionClass::Notable);
+        assert_eq!(plan.economics.attention, AttentionClass::Notable);
         let cycle = validate_business_cycle_plan(&state, plan)
             .expect("losing cycle plan should validate")
             .commit(&mut state)
@@ -1564,7 +1569,7 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
         state.advance_clock(SimDuration::from_minutes(1_440));
         let plan = decide_business_cycle(&registry, &state, business, -500)
             .expect("post-resume losing cycle should decide");
-        assert!(plan.net_cash().cents() < 0);
+        assert!(plan.economics.net_cash.cents() < 0);
         validate_business_cycle_plan(&state, plan)
             .expect("post-resume losing plan should validate")
             .commit(&mut state)

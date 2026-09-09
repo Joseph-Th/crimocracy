@@ -566,7 +566,8 @@ fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );
@@ -650,7 +651,8 @@ fn approval_required_recruitment_executes_only_after_approval() {
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );
@@ -978,7 +980,8 @@ fn delegated_recruitment_token_rejects_organization_policy_change_without_mutati
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );
@@ -1027,7 +1030,8 @@ fn protection_offer_uses_only_candidate_known_legal_pressure_and_stales_when_kno
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );
@@ -1106,7 +1110,8 @@ fn expired_pressure_knowledge_neither_scores_nor_stales_a_validated_recruitment(
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         1
     );
@@ -1870,7 +1875,8 @@ fn refused_recruitment_near_clock_horizon_reports_cooldown_overflow_instead_of_p
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         1,
         "cooldown rejection must not record another attempt"
@@ -1909,7 +1915,8 @@ fn relationship_change_invalidates_validated_attempt_without_partial_mutation() 
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );
@@ -1949,7 +1956,8 @@ fn canonical_world_dependencies_block_poaching_a_manager_with_direct_reports() {
         fixture
             .state
             .recruitment()
-            .attempts_for_candidate(fixture.candidate)
+            .attempts()
+            .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
     );

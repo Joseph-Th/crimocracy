@@ -46,7 +46,7 @@ pub enum ContactError {
     MissingContact(CharacterId),
     #[error("institutional contact character {0} has no institution")]
     ContactHasNoInstitution(CharacterId),
-    #[error("institution {0} does not exist or is inactive")]
+    #[error("institution {0} does not exist")]
     InvalidInstitution(OrganizationId),
     #[error("criminal organization {0} cannot be used as an institutional contact source")]
     CriminalInstitution(OrganizationId),

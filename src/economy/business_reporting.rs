@@ -1,6 +1,6 @@
 //! Read-only legitimate business financial aggregation over persisted operating cycle history.
 
-use crate::core::id::{BusinessId, OrganizationId};
+use crate::core::id::OrganizationId;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::finance::Money;
@@ -32,28 +32,10 @@ pub enum BusinessReportingError {
     InvalidWindow,
     #[error("business reporting window ends after current simulation time")]
     FutureWindow,
-    #[error("business {0} does not exist")]
-    MissingBusiness(BusinessId),
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("business financial aggregation overflowed")]
     ArithmeticOverflow,
-}
-
-/// Test-only drill-down; production reporting aggregates at organization scope.
-#[cfg(test)]
-pub fn resolve_business_financial_summary(
-    state: &AppState,
-    business: BusinessId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Result<BusinessFinancialSummary, BusinessReportingError> {
-    validate_window(state, period_start, period_end)?;
-    let record = state
-        .world()
-        .get_business(business)
-        .ok_or(BusinessReportingError::MissingBusiness(business))?;
-    resolve_summary(state, [record], period_start, period_end, None)
 }
 
 pub fn resolve_organization_business_financial_summary(

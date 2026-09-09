@@ -752,7 +752,8 @@ fn open_case_is_unique_per_office_but_other_prosecutor_office_may_receive_referr
         fixture
             .state
             .legal()
-            .prosecution_cases_for_arrest(fixture.arrest)
+            .prosecution_cases()
+            .filter(|record| record.arrest() == fixture.arrest)
             .count(),
         2
     );
@@ -942,7 +943,8 @@ fn closed_case_survives_save_and_allows_later_reconsideration() {
     assert_eq!(
         restored
             .legal()
-            .prosecution_cases_for_arrest(fixture.arrest)
+            .prosecution_cases()
+            .filter(|record| record.arrest() == fixture.arrest)
             .count(),
         2
     );

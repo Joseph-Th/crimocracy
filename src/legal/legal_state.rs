@@ -295,13 +295,6 @@ impl LegalState {
     pub fn get_informant(&self, id: InformantId) -> Option<&InformantRecord> {
         self.informants.get(&id)
     }
-    #[cfg(test)]
-    pub fn get_informant_disclosure(
-        &self,
-        id: InformantDisclosureId,
-    ) -> Option<&InformantDisclosureRecord> {
-        self.informant_disclosures.get(&id)
-    }
     pub fn informant_for(
         &self,
         character: CharacterId,
@@ -355,16 +348,6 @@ impl LegalState {
                     .expect("active-arrest index must reference an arrest")
             })
     }
-    /// Test-only observation surface; production reads go through case-scoped getters.
-    #[cfg(test)]
-    pub fn arrests_for_character(
-        &self,
-        character: CharacterId,
-    ) -> impl Iterator<Item = &ArrestRecord> {
-        self.arrests
-            .values()
-            .filter(move |record| record.character() == character)
-    }
     pub fn arrests_for_investigation(
         &self,
         investigation: InvestigationId,
@@ -400,17 +383,6 @@ impl LegalState {
                     .get(id)
                     .expect("active-representation index must reference a representation")
             })
-    }
-    /// Test-only observation surface: production code reads representations through
-    /// `active_representation_for_arrest`.
-    #[cfg(test)]
-    pub fn representations_for_arrest(
-        &self,
-        arrest: ArrestId,
-    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
-        self.legal_representations
-            .values()
-            .filter(move |record| record.arrest() == arrest)
     }
     pub(crate) fn active_representations_for_contact(
         &self,
@@ -469,16 +441,6 @@ impl LegalState {
             .open_by_arrest_office
             .keys()
             .any(|(indexed_arrest, _)| *indexed_arrest == arrest)
-    }
-    /// Test-only observation surface; production reads go through case-scoped getters.
-    #[cfg(test)]
-    pub fn prosecution_cases_for_arrest(
-        &self,
-        arrest: ArrestId,
-    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
-        self.prosecution_cases
-            .values()
-            .filter(move |record| record.arrest() == arrest)
     }
     pub fn reviewing_prosecution_cases_for_prosecutor(
         &self,
@@ -578,14 +540,6 @@ impl LegalState {
                     .expect("jurisdiction-neighborhood index must reference a jurisdiction")
             })
     }
-    /// Test-only observation surface: production code reads evidence through case-scoped
-    /// getters, so this scans the record set instead of maintaining a by-origin index.
-    #[cfg(test)]
-    pub fn evidence_from_origin(&self, origin: EntityRef) -> impl Iterator<Item = &EvidenceRecord> {
-        self.evidence
-            .values()
-            .filter(move |record| record.origin() == Some(origin))
-    }
     pub fn derived_evidence_from(
         &self,
         source: EvidenceId,
@@ -600,24 +554,6 @@ impl LegalState {
                 self.evidence
                     .get(id)
                     .expect("derived-evidence index must reference evidence")
-            })
-    }
-    /// Test-only observation surface over the maintained subject index.
-    #[cfg(test)]
-    pub fn investigations_for_subject(
-        &self,
-        subject: EntityRef,
-    ) -> impl Iterator<Item = &InvestigationRecord> {
-        self.indexes
-            .investigations
-            .investigations_by_subject
-            .get(&subject)
-            .into_iter()
-            .flatten()
-            .map(|id| {
-                self.investigations
-                    .get(id)
-                    .expect("investigation-subject index must reference an investigation")
             })
     }
     pub fn case_witness_for(
@@ -725,16 +661,6 @@ impl LegalState {
             .range(..=now)
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
-    }
-    /// Test-only observation surface; production reads go through case-scoped getters.
-    #[cfg(test)]
-    pub fn evidence_of_kind(
-        &self,
-        kind: crate::legal::EvidenceKind,
-    ) -> impl Iterator<Item = &EvidenceRecord> {
-        self.evidence
-            .values()
-            .filter(move |record| record.kind() == kind)
     }
     pub fn investigations_for_investigator(
         &self,

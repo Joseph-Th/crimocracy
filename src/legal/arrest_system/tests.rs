@@ -600,12 +600,10 @@ fn custody_preflights_shared_case_version_budget_for_work_cancel_and_lead_releas
         },
     )
     .expect_err("custody must reject before two case-version advances exceed capacity");
-    match error {
-        ArrestError::VersionCapacity(error) => {
-            assert_eq!(error.record_kind(), "investigation");
-        }
-        other => panic!("unexpected custody capacity error: {other:?}"),
-    }
+    let ArrestError::VersionCapacity(error) = error else {
+        panic!("unexpected custody capacity error: {error:?}");
+    };
+    assert_eq!(error.record_kind(), "investigation");
     assert_eq!(
         fixture
             .state
@@ -802,7 +800,8 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
     assert_eq!(
         restored
             .legal()
-            .arrests_for_character(fixture.suspect)
+            .arrests()
+            .filter(|record| record.character() == fixture.suspect)
             .count(),
         2
     );
@@ -840,7 +839,8 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
         fixture
             .state
             .legal()
-            .arrests_for_character(fixture.suspect)
+            .arrests()
+            .filter(|record| record.character() == fixture.suspect)
             .count(),
         1
     );

@@ -94,10 +94,11 @@ pub(super) fn validate_operation_property_disposition(
             AccountKind::StreetCash | AccountKind::ConcealedCash
         )
         || settlement.kind() != AccountKind::Settlement
-        || state
-            .enterprises
-            .get_by_settlement_account(disposition.settlement_account())
-            .is_some()
+        || settlement_account_was_enterprise_reserved_at(
+            state,
+            disposition.settlement_account(),
+            disposition.disposed_at(),
+        )
     {
         return Err(invalid());
     }
@@ -235,10 +236,11 @@ pub(super) fn validate_operation_cash_disposition(
             AccountKind::StreetCash | AccountKind::ConcealedCash
         )
         || settlement.kind() != AccountKind::Settlement
-        || state
-            .enterprises
-            .get_by_settlement_account(disposition.settlement_account())
-            .is_some()
+        || settlement_account_was_enterprise_reserved_at(
+            state,
+            disposition.settlement_account(),
+            disposition.disposed_at(),
+        )
     {
         return Err(invalid());
     }
@@ -319,4 +321,20 @@ pub(super) fn validate_operation_cash_disposition(
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Whether an enterprise had already dedicated this organization settlement account when a
+/// historical operation disposition occurred. A later enterprise may legitimately reuse the
+/// account: disposition uses it as a one-off external balancing counterparty and does not reserve
+/// it forever. Equal timestamps are accepted because the persisted model has no cross-domain
+/// sequence number and the canonical disposition-then-establishment order is valid in one minute.
+fn settlement_account_was_enterprise_reserved_at(
+    state: &AppState,
+    account: crate::core::id::FinancialAccountId,
+    disposed_at: crate::core::time::SimTime,
+) -> bool {
+    state
+        .enterprises
+        .get_by_settlement_account(account)
+        .is_some_and(|enterprise| enterprise.established_at() < disposed_at)
 }

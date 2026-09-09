@@ -214,17 +214,17 @@ fn synthesis_prioritizes_pending_decisions_filters_routine_and_deduplicates_sour
 
     let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
         .expect("daily brief should synthesize current executive information");
-    assert_eq!(plan.entries().len(), 2);
-    assert_eq!(plan.entries()[0].attention, AttentionClass::Exception);
-    assert_eq!(plan.entries()[0].decision, Some(decision));
+    assert_eq!(plan.entries.len(), 2);
+    assert_eq!(plan.entries[0].attention, AttentionClass::Exception);
+    assert_eq!(plan.entries[0].decision, Some(decision));
     assert!(
-        plan.entries()[0]
+        plan.entries[0]
             .entities
             .contains(&EntityRef::DecisionRequest(decision))
     );
-    assert_eq!(plan.entries()[1].attention, AttentionClass::Notable);
+    assert_eq!(plan.entries[1].attention, AttentionClass::Notable);
     assert_eq!(
-        plan.entries()[1].summary,
+        plan.entries[1].summary,
         "Detectives increased questioning near the docks."
     );
 
@@ -373,10 +373,10 @@ fn source_entry_limit_preserves_priority_and_discloses_overflow() {
 
     let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
         .expect("dense source set should still produce a bounded brief");
-    assert_eq!(plan.entries().len(), 9);
-    assert_eq!(plan.entries()[0].attention, AttentionClass::Crisis);
-    assert_eq!(plan.entries()[1].attention, AttentionClass::Crisis);
-    assert!(plan.entries()[8].summary.contains("2 additional items"));
+    assert_eq!(plan.entries.len(), 9);
+    assert_eq!(plan.entries[0].attention, AttentionClass::Crisis);
+    assert_eq!(plan.entries[1].attention, AttentionClass::Crisis);
+    assert!(plan.entries[8].summary.contains("2 additional items"));
     validate_invariants(&fixture.state);
 }
 
@@ -412,9 +412,9 @@ fn resolved_decision_report_is_not_resurfaced_as_current_executive_work() {
 
     let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
         .expect("resolved decision history should not block the daily brief");
-    assert_eq!(plan.entries().len(), 1);
-    assert_eq!(plan.entries()[0].attention, AttentionClass::Routine);
-    assert!(plan.entries()[0].decision.is_none());
+    assert_eq!(plan.entries.len(), 1);
+    assert_eq!(plan.entries[0].attention, AttentionClass::Routine);
+    assert!(plan.entries[0].decision.is_none());
     validate_invariants(&fixture.state);
 }
 
@@ -433,7 +433,7 @@ fn next_brief_reads_only_reports_created_after_the_previous_brief() {
     let first_plan =
         decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
             .expect("first daily brief should plan");
-    assert_eq!(first_plan.entries()[0].summary, "Day one notable item.");
+    assert_eq!(first_plan.entries[0].summary, "Day one notable item.");
     validate_executive_brief_plan(&fixture.state, first_plan)
         .expect("first daily brief should validate")
         .commit(&mut fixture.state)
@@ -451,11 +451,11 @@ fn next_brief_reads_only_reports_created_after_the_previous_brief() {
     let second_plan =
         decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
             .expect("second daily brief should plan from the prior brief cursor");
-    assert_eq!(second_plan.entries().len(), 1);
-    assert_eq!(second_plan.entries()[0].summary, "Day two notable item.");
+    assert_eq!(second_plan.entries.len(), 1);
+    assert_eq!(second_plan.entries[0].summary, "Day two notable item.");
     assert!(
         !second_plan
-            .entries()
+            .entries
             .iter()
             .any(|entry| entry.summary == "Day one notable item.")
     );

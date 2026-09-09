@@ -177,7 +177,8 @@ fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
     let disclosure_record = fixture
         .state
         .legal()
-        .get_informant_disclosure(disclosure)
+        .informant_disclosures()
+        .find(|record| record.id() == disclosure)
         .expect("disclosure should persist");
     let evidence = fixture
         .state
@@ -307,7 +308,8 @@ fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins
     let disclosure = fixture
         .state
         .legal()
-        .get_informant_disclosure(disclosures[0])
+        .informant_disclosures()
+        .find(|record| record.id() == disclosures[0])
         .expect("autonomous disclosure should persist");
     assert_eq!(disclosure.informant(), informant);
     assert_eq!(disclosure.investigation(), fixture.investigation);
@@ -349,7 +351,8 @@ fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
     let first = fixture
         .state
         .legal()
-        .get_informant_disclosure(first_pass[0])
+        .informant_disclosures()
+        .find(|record| record.id() == first_pass[0])
         .expect("first disclosure should persist");
     assert_eq!(first.informant(), informant);
     assert_eq!(first.source_information(), information);
@@ -361,7 +364,8 @@ fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
     let second = fixture
         .state
         .legal()
-        .get_informant_disclosure(second_pass[0])
+        .informant_disclosures()
+        .find(|record| record.id() == second_pass[0])
         .expect("second disclosure should persist");
     assert_eq!(second.informant(), informant);
     assert_eq!(second.source_information(), information);
@@ -415,7 +419,8 @@ fn generic_evidence_path_cannot_forge_informant_statement() {
         fixture
             .state
             .legal()
-            .evidence_of_kind(EvidenceKind::InformantStatement)
+            .all_evidence()
+            .filter(|record| record.kind() == EvidenceKind::InformantStatement)
             .count(),
         0
     );
@@ -472,7 +477,8 @@ fn disclosure_token_rejects_case_change_without_partial_mutation() {
         fixture
             .state
             .legal()
-            .evidence_of_kind(EvidenceKind::InformantStatement)
+            .all_evidence()
+            .filter(|record| record.kind() == EvidenceKind::InformantStatement)
             .count(),
         0
     );
@@ -553,7 +559,8 @@ fn informant_relationship_is_exclusive_and_save_round_trip_preserves_history() {
     assert_eq!(
         restored
             .legal()
-            .get_informant_disclosure(disclosure)
+            .informant_disclosures()
+            .find(|record| record.id() == disclosure)
             .expect("disclosure should survive save")
             .source_information(),
         information

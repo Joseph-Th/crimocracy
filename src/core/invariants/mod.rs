@@ -89,7 +89,7 @@ pub enum StateValidationError {
     InvalidInstitutionalContact { contact: ContactId },
     #[error("institutional contact disclosure {disclosure} has invalid persisted provenance")]
     InvalidContactDisclosure { disclosure: ContactDisclosureId },
-    #[error("active operation {operation} has an inactive or foreign leader")]
+    #[error("active operation {operation} has a leader outside its responsible organization")]
     ActiveOperationInvalidLeader { operation: OperationId },
     #[error("active operation {operation} has a foreign participant {participant}")]
     ActiveOperationForeignParticipant {

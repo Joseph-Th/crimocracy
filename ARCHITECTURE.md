@@ -8,8 +8,11 @@ contracts.
 
 ## System tower
 
-The codebase is one tower of linked abstractions. Every layer depends only on
-layers below it; nothing depends upward.
+The codebase is organized as one tower of ownership and orchestration responsibilities.
+The layer diagram is not a literal Rust import graph: lower-level owners expose canonical
+state APIs, while cross-domain systems coordinate through those APIs and orchestrating domains
+may depend on peer domains for explicitly modeled integrations. Mutation ownership still flows
+through one canonical owner per consequential field.
 
 ```text
                   ┌─────────────────────────────────────────────┐
@@ -22,9 +25,9 @@ layers below it; nothing depends upward.
                   │  decisions · contacts · opportunities       │
                   │  recruitment  (cross-ref, own mutations)    │
                   ├─────────────────────────────────────────────┤
-                  │  Layer 2 — Leaf domains                     │
+                  │  Layer 2 — Foundational domain owners       │
                   │  world · social · intelligence · history    │
-                  │  reports  (no cross-domain writes)          │
+                  │  reports  (low-dependency state)            │
                   ├─────────────────────────────────────────────┤
                   │  Layer 1 — Immutable authoring              │
                   │  registry ◄── content::build_registry       │
@@ -40,7 +43,7 @@ layers below it; nothing depends upward.
                           run_tick (1 min) orchestrates all layers
 ```
 
-**Dependency DAG (no cycles) — the only allowed edges:**
+**Major dependency relationships and intentional peer integrations:**
 
 ```text
 core/id,time,attention,entity ──► every domain
@@ -54,6 +57,12 @@ legal ◄──► enterprises (vice inquiries)
 registry/content ──► everything reads it; nothing writes it after build_registry
 AppState (state.rs) owns all; simulation.rs orchestrates all
 ```
+
+This relationship map is intentionally not a DAG. The `legal`/`operations` and
+`legal`/`enterprises` pairs exchange read-only context and validated orchestration calls where
+crime creates legal consequences and legal pressure affects criminal activity. They do not share
+mutation ownership: each consequential record remains private to its owning domain, and
+cross-domain commits still pass through canonical owner APIs.
 
 File inventory: `src/lib.rs` is the authoritative top-level module list. `src/core/state.rs` is the
 cross-domain aggregate — any cross-domain question starts by finding which `AppState` field

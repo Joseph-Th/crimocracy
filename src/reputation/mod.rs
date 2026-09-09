@@ -107,26 +107,6 @@ impl ReputationState {
         self.records.get(&(organization, audience))
     }
 
-    #[cfg(test)]
-    pub fn records_for_organization(
-        &self,
-        organization: OrganizationId,
-    ) -> impl Iterator<Item = &ReputationRecord> {
-        self.records
-            .values()
-            .filter(move |record| record.organization() == organization)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
     pub(crate) fn records(&self) -> impl Iterator<Item = &ReputationRecord> {
         self.records.values()
     }

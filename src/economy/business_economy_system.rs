@@ -299,27 +299,6 @@ pub struct BusinessCyclePlan {
     accounts: BusinessCycleAccounts,
 }
 
-impl BusinessCyclePlan {
-    // Test-only drill-down: production consumers read the committed cycle records, not the
-    // intermediate plan, so these accessors exist solely for focused assertions.
-    #[cfg(test)]
-    pub fn gross_revenue(&self) -> Money {
-        self.economics.gross_revenue
-    }
-    #[cfg(test)]
-    pub fn operating_cost(&self) -> Money {
-        self.economics.operating_cost
-    }
-    #[cfg(test)]
-    pub fn net_cash(&self) -> Money {
-        self.economics.net_cash
-    }
-    #[cfg(test)]
-    pub fn attention(&self) -> AttentionClass {
-        self.economics.attention
-    }
-}
-
 pub fn decide_business_cycle(
     registry: &Registry,
     state: &AppState,

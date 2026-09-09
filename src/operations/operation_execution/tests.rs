@@ -1,5 +1,6 @@
 //! Focused tests for deterministic operation resolution, proceeds, exposure, and dispositions.
 
+use super::resolution_factors::resolve_target_neighborhoods;
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
@@ -50,9 +51,9 @@ use crate::world::world_system::{
     insert_organization, validate_reassign_character, validate_transfer_business_ownership,
 };
 use crate::world::{
-    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
-    DriveKind, NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
-    NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
+    CharacterDraft, DriveKind, NeighborhoodDraft, NeighborhoodEconomyProfile,
+    NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2861,6 +2862,69 @@ fn successful_cash_take_holds_proceeds_until_canonical_deposit() {
         Money::from_cents(-proceeds.amount().cents())
     );
 
+    // A disposition settlement account is a one-off external balancing counterparty, not a
+    // permanent reservation. Dedicating it to a new enterprise later in the same simulation
+    // minute is a canonical sequence and must remain valid across save/restore.
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("completed operation should persist before enterprise establishment");
+    let manager = operation_record.leader();
+    let OperationObjective::ObtainCash {
+        target: EntityRef::Business(target_business),
+    } = operation_record.objective()
+    else {
+        panic!("cash fixture changed objective")
+    };
+    let target_business = *target_business;
+    let neighborhood = state
+        .world()
+        .get_business(target_business)
+        .expect("cash target business should persist")
+        .neighborhood();
+    let scope = crate::delegation::ResponsibilityScope::Neighborhood(neighborhood);
+    let mandate = crate::delegation::delegation_system::validate_assign_mandate(
+        &state,
+        crate::delegation::MandateDraft {
+            organization,
+            manager,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("completed operation leader should accept a district mandate")
+    .commit(&mut state)
+    .expect("district mandate should commit");
+    let enterprise = crate::enterprises::enterprise_execution::validate_establish_enterprise(
+        &registry,
+        &state,
+        crate::enterprises::EnterpriseDraft {
+            kind: crate::enterprises::EnterpriseKind::Protection,
+            organization,
+            authority: crate::delegation::MandateAuthority {
+                mandate,
+                manager,
+                scope,
+            },
+            location: crate::enterprises::EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account,
+            settlement_account,
+        },
+    )
+    .expect("a historical disposition must not permanently reserve its settlement account")
+    .commit(&mut state)
+    .expect("later enterprise account dedication should commit");
+    assert_eq!(
+        state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("enterprise should persist")
+            .settlement_account(),
+        settlement_account
+    );
+
     assert!(matches!(
       validate_deposit_operation_cash(
         &state,
@@ -3706,7 +3770,8 @@ fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() 
         assert_eq!(
             state
                 .legal()
-                .evidence_from_origin(EntityRef::Operation(operation))
+                .all_evidence()
+                .filter(|record| record.origin() == Some(EntityRef::Operation(operation)))
                 .map(|record| record.id())
                 .collect::<Vec<_>>(),
             vec![evidence_id]
@@ -3778,7 +3843,8 @@ fn exposed_operation_without_jurisdiction_creates_no_implicit_case() {
     assert_eq!(
         state
             .legal()
-            .evidence_from_origin(EntityRef::Operation(operation))
+            .all_evidence()
+            .filter(|record| record.origin() == Some(EntityRef::Operation(operation)))
             .count(),
         0
     );
@@ -4758,6 +4824,46 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
                 .contains("liquidated through Fixture Pawn Exchange")
             && entry.summary.contains("$321.48")
     }));
+    let manager = achieved_state
+        .operations()
+        .get_operation(operation)
+        .expect("completed property operation should persist before enterprise establishment")
+        .leader();
+    let scope = crate::delegation::ResponsibilityScope::Neighborhood(neighborhood);
+    let mandate = crate::delegation::delegation_system::validate_assign_mandate(
+        &achieved_state,
+        crate::delegation::MandateDraft {
+            organization,
+            manager,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("completed property crew leader should accept a district mandate")
+    .commit(&mut achieved_state)
+    .expect("property-disposition district mandate should commit");
+    crate::enterprises::enterprise_execution::validate_establish_enterprise(
+        &registry,
+        &achieved_state,
+        crate::enterprises::EnterpriseDraft {
+            kind: crate::enterprises::EnterpriseKind::Protection,
+            organization,
+            authority: crate::delegation::MandateAuthority {
+                mandate,
+                manager,
+                scope,
+            },
+            location: crate::enterprises::EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account,
+            settlement_account,
+        },
+    )
+    .expect("historical property liquidation must not permanently reserve its settlement account")
+    .commit(&mut achieved_state)
+    .expect("later enterprise account dedication should commit after property liquidation");
+
     let restored = restore_save(
         &registry,
         build_save(&registry, &achieved_state).expect("property disposition state should save"),
@@ -5183,7 +5289,8 @@ fn resolution_token_rejects_changed_incident_jurisdiction() {
     assert_eq!(
         state
             .legal()
-            .evidence_from_origin(EntityRef::Operation(operation))
+            .all_evidence()
+            .filter(|record| record.origin() == Some(EntityRef::Operation(operation)))
             .count(),
         0
     );
@@ -5247,7 +5354,8 @@ fn resolution_token_rejects_new_jurisdiction_after_unrouted_validation() {
     assert_eq!(
         state
             .legal()
-            .evidence_from_origin(EntityRef::Operation(operation))
+            .all_evidence()
+            .filter(|record| record.origin() == Some(EntityRef::Operation(operation)))
             .count(),
         0
     );

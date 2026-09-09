@@ -15,10 +15,7 @@ use crate::delegation::delegation_system::{
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::EnterpriseKind;
 use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises;
-use crate::enterprises::enterprise_reporting::{
-    resolve_enterprise_financial_summary, resolve_neighborhood_enterprise_financial_summary,
-    resolve_organization_enterprise_financial_summary,
-};
+use crate::enterprises::enterprise_reporting::resolve_organization_enterprise_financial_summary;
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{
     FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -45,7 +42,7 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
     NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
-    OrganizationDraft, OrganizationKind,
+    OrganizationDraft, OrganizationKind, Rating,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,6 +54,116 @@ struct EnterpriseFixture {
     location: EnterpriseLocation,
     cash: FinancialAccountId,
     settlement: FinancialAccountId,
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessRecordWire {
+    id: BusinessId,
+    name: String,
+    kind: BusinessKind,
+    functions: BTreeSet<BusinessFunction>,
+    neighborhood: NeighborhoodId,
+    owner: BusinessOwner,
+    version: u32,
+}
+
+fn business_wire(record: &crate::world::BusinessRecord) -> BusinessRecordWire {
+    BusinessRecordWire {
+        id: record.id(),
+        name: record.name().to_owned(),
+        kind: record.kind(),
+        functions: record.functions().clone(),
+        neighborhood: record.neighborhood(),
+        owner: record.owner(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_business(
+    envelope: SaveEnvelope,
+    original: &crate::world::BusinessRecord,
+    replacement: &BusinessRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("business record should serialize");
+    let mirror = business_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("business mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement business should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized business must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout business corruption must remain decodable")
+}
+
+#[derive(Clone, Serialize)]
+struct BusinessOwnershipChangeRecordWire {
+    id: crate::core::id::BusinessOwnershipChangeId,
+    business: BusinessId,
+    previous_owner: Option<BusinessOwner>,
+    new_owner: BusinessOwner,
+    changed_at: SimTime,
+    resulting_business_version: u32,
+}
+
+fn ownership_change_wire(
+    record: &crate::world::BusinessOwnershipChangeRecord,
+) -> BusinessOwnershipChangeRecordWire {
+    BusinessOwnershipChangeRecordWire {
+        id: record.id(),
+        business: record.business(),
+        previous_owner: record.previous_owner(),
+        new_owner: record.new_owner(),
+        changed_at: record.changed_at(),
+        resulting_business_version: record.resulting_business_version(),
+    }
+}
+
+fn replace_serialized_ownership_change(
+    envelope: SaveEnvelope,
+    original: &crate::world::BusinessOwnershipChangeRecord,
+    replacement: &BusinessOwnershipChangeRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("ownership change should serialize");
+    let mirror = ownership_change_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("ownership-change mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement ownership change should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized ownership change must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout ownership corruption must remain decodable")
 }
 
 /// Opens a district-pressure case from an operation that actually occurred. The provenance
@@ -945,13 +1052,14 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
     )
     .expect("due enterprise cycle should resolve");
     assert_eq!(
-        plan.net_cash(),
-        plan.gross_revenue()
-            .checked_sub(plan.operating_cost())
+        plan.economics.net_cash,
+        plan.economics
+            .gross_revenue
+            .checked_sub(plan.economics.operating_cost)
             .expect("net should be gross - cost")
     );
-    assert!(plan.gross_revenue().cents() > 0);
-    assert!(plan.operating_cost().cents() > 0);
+    assert!(plan.economics.gross_revenue.cents() > 0);
+    assert!(plan.economics.operating_cost.cents() > 0);
 
     let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
         .expect("cycle plan should validate")
@@ -1145,9 +1253,9 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
         )
         .expect("due enterprise cycle should resolve");
         let (cost, heat, attention) = (
-            plan.operating_cost(),
-            plan.investigation_heat(),
-            plan.attention(),
+            plan.economics.operating_cost,
+            plan.economics.investigation_heat,
+            plan.economics.attention,
         );
         validate_enterprise_cycle_plan(&fixture.state, plan)
             .expect("cycle plan should validate")
@@ -1362,7 +1470,7 @@ fn settle_cycle_inner(
         EnterpriseCycleRandomness::new(0, u16::MAX),
     )
     .expect("due enterprise cycle should resolve");
-    let attention = plan.attention();
+    let attention = plan.economics.attention;
     validate_enterprise_cycle_plan(&fixture.state, plan)
         .expect("cycle plan should validate")
         .commit(&mut fixture.state)
@@ -1696,12 +1804,13 @@ fn alcohol_distribution_uses_owned_business_network_and_survives_save_before_cyc
     )
     .expect("valid alcohol distribution network should resolve a due cycle");
     assert_eq!(
-        plan.net_cash(),
-        plan.gross_revenue()
-            .checked_sub(plan.operating_cost())
+        plan.economics.net_cash,
+        plan.economics
+            .gross_revenue
+            .checked_sub(plan.economics.operating_cost)
             .expect("net should be gross - cost")
     );
-    assert!(plan.gross_revenue().cents() > plan.operating_cost().cents());
+    assert!(plan.economics.gross_revenue.cents() > plan.economics.operating_cost.cents());
     validate_enterprise_cycle_plan(&restored, plan)
         .expect("fresh alcohol distribution cycle should validate")
         .commit(&mut restored)
@@ -2465,7 +2574,7 @@ fn save_round_trip_preserves_due_schedule_and_deterministic_cycle_resolution() {
 }
 
 #[test]
-fn financial_reporting_drills_down_without_cached_totals() {
+fn organization_financial_reporting_rederives_cycle_totals_without_cached_state() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -2488,9 +2597,6 @@ fn financial_reporting_drills_down_without_cached_totals() {
 
     let period_start = SimTime::ZERO;
     let period_end = fixture.state.now();
-    let enterprise_summary =
-        resolve_enterprise_financial_summary(&fixture.state, enterprise, period_start, period_end)
-            .expect("enterprise financial summary should resolve");
     let organization_summary = resolve_organization_enterprise_financial_summary(
         &fixture.state,
         fixture.organization,
@@ -2498,29 +2604,16 @@ fn financial_reporting_drills_down_without_cached_totals() {
         period_end,
     )
     .expect("organization financial summary should resolve");
-    let neighborhood = match fixture.location {
-        EnterpriseLocation::Neighborhood(id) => id,
-        EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
-    };
-    let neighborhood_summary = resolve_neighborhood_enterprise_financial_summary(
-        &fixture.state,
-        neighborhood,
-        period_start,
-        period_end,
-    )
-    .expect("neighborhood financial summary should resolve");
 
-    assert_eq!(enterprise_summary.totals.enterprise_count, 1);
-    assert_eq!(enterprise_summary.totals.cycle_count, 2);
-    assert_eq!(enterprise_summary.totals.notable_cycle_count, 1);
-    assert_eq!(enterprise_summary.totals, organization_summary.totals);
-    assert_eq!(enterprise_summary.totals, neighborhood_summary.totals);
+    assert_eq!(organization_summary.totals.enterprise_count, 1);
+    assert_eq!(organization_summary.totals.cycle_count, 2);
+    assert_eq!(organization_summary.totals.notable_cycle_count, 1);
     assert_eq!(
-        enterprise_summary
+        organization_summary
             .by_kind
             .get(&EnterpriseKind::Protection)
             .expect("protection bucket should exist"),
-        &enterprise_summary.totals
+        &organization_summary.totals
     );
     let cycle_net = fixture
         .state
@@ -2530,7 +2623,7 @@ fn financial_reporting_drills_down_without_cached_totals() {
             total.checked_add(cycle.net_cash())
         })
         .expect("reporting fixture total should not overflow");
-    assert_eq!(enterprise_summary.totals.net_cash, cycle_net);
+    assert_eq!(organization_summary.totals.net_cash, cycle_net);
     assert_eq!(
         fixture
             .state
@@ -2538,7 +2631,7 @@ fn financial_reporting_drills_down_without_cached_totals() {
             .get_account(fixture.cash)
             .expect("cash account should exist")
             .balance(),
-        enterprise_summary.totals.net_cash
+        organization_summary.totals.net_cash
     );
     validate_invariants(&fixture.state);
 }
@@ -3853,10 +3946,10 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
         )
         .expect("losing enterprise cycle should decide");
         assert!(
-            plan.net_cash().cents() < 0,
+            plan.economics.net_cash.cents() < 0,
             "fixture must produce a losing settlement"
         );
-        assert_eq!(plan.attention(), AttentionClass::Notable);
+        assert_eq!(plan.economics.attention, AttentionClass::Notable);
         let cycle = validate_enterprise_cycle_plan(&state, plan)
             .expect("losing cycle plan should validate")
             .commit(&mut state)
@@ -3917,7 +4010,7 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             EnterpriseCycleRandomness::new(0, u16::MAX),
         )
         .expect("post-resume losing cycle should decide");
-        assert!(plan.net_cash().cents() < 0);
+        assert!(plan.economics.net_cash.cents() < 0);
         validate_enterprise_cycle_plan(&state, plan)
             .expect("post-resume losing plan should validate")
             .commit(&mut state)
@@ -4093,6 +4186,79 @@ fn retirement_is_terminal_and_requires_prior_suspension() {
 }
 
 #[test]
+fn restore_rejects_active_enterprise_at_foreign_owned_host() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Foreign Venue Owner".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("foreign owner fixture should validate");
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Invariant Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("owned hosted racket should validate")
+    .commit(&mut fixture.state)
+    .expect("owned hosted racket should commit");
+
+    let original = fixture
+        .state
+        .world()
+        .get_business(venue)
+        .expect("host business should persist");
+    let ownership = fixture
+        .state
+        .world()
+        .get_business_ownership_change_for_version(venue, original.version())
+        .expect("host's current ownership record should persist");
+    let mut corrupted = business_wire(original);
+    corrupted.owner = BusinessOwner::Organization(rival);
+    let mut corrupted_ownership = ownership_change_wire(ownership);
+    corrupted_ownership.new_owner = BusinessOwner::Organization(rival);
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("valid hosted enterprise should save before corruption");
+    let envelope = replace_serialized_business(envelope, original, &corrupted);
+    let envelope = replace_serialized_ownership_change(envelope, ownership, &corrupted_ownership);
+    let error = restore_save(&registry, envelope)
+        .expect_err("an active racket cannot survive restore at a foreign-owned host");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidEnterpriseAuthority {
+                enterprise: invalid,
+            }
+        ) if invalid == enterprise
+    ));
+}
+
+#[test]
 fn establishment_commit_rejects_a_host_venue_that_changed_after_validation() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -4227,7 +4393,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
         EnterpriseCycleRandomness::new(0, 0),
     )
     .expect("clean cycle plan should resolve");
-    assert_eq!(clean_plan.attention(), AttentionClass::Routine);
+    assert_eq!(clean_plan.economics.attention, AttentionClass::Routine);
     validate_enterprise_cycle_plan(&fixture.state, clean_plan)
         .expect("clean cycle plan should validate")
         .commit(&mut fixture.state)
@@ -4256,7 +4422,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
         EnterpriseCycleRandomness::new(0, 0),
     )
     .expect("hot cycle plan should resolve");
-    assert_eq!(hot_plan.attention(), AttentionClass::Notable);
+    assert_eq!(hot_plan.economics.attention, AttentionClass::Notable);
     validate_enterprise_cycle_plan(&fixture.state, hot_plan)
         .expect("hot cycle plan should validate")
         .commit(&mut fixture.state)
@@ -4647,7 +4813,7 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         EnterpriseCycleRandomness::new(0, u16::MAX),
     )
     .expect("initial hot cycle should resolve");
-    assert!(first.investigation_heat() > Money::ZERO);
+    assert!(first.economics.investigation_heat > Money::ZERO);
     validate_enterprise_cycle_plan(&fixture.state, first)
         .expect("initial hot cycle should validate")
         .commit(&mut fixture.state)
@@ -4701,9 +4867,9 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         EnterpriseCycleRandomness::new(0, 0),
     )
     .expect("unroutable hot cycle should still resolve");
-    assert!(unroutable.investigation_heat() > Money::ZERO);
+    assert!(unroutable.economics.investigation_heat > Money::ZERO);
     assert_eq!(
-        unroutable.attention(),
+        unroutable.economics.attention,
         AttentionClass::Routine,
         "an unchanged heat surcharge plus an unroutable vice roll is not fresh manager news"
     );
@@ -4840,12 +5006,12 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
     )
     .expect("quiet cycle plan should resolve");
     assert_eq!(
-        quiet_plan.investigation_heat(),
+        quiet_plan.economics.investigation_heat,
         Money::ZERO,
         "shelved casework must stop taxing the racket"
     );
     assert_eq!(
-        quiet_plan.attention(),
+        quiet_plan.economics.attention,
         AttentionClass::Notable,
         "leadership must be told when a previously visible street surcharge clears"
     );
@@ -4922,7 +5088,12 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
         fixture
             .state
             .legal()
-            .investigations_for_subject(EntityRef::Enterprise(enterprise))
+            .investigations()
+            .filter(|investigation| {
+                investigation
+                    .subjects()
+                    .contains(&EntityRef::Enterprise(enterprise))
+            })
             .filter(|investigation| {
                 investigation.owner() == police
                     && investigation.origin() == Some(EntityRef::Enterprise(enterprise))

@@ -685,7 +685,8 @@ fn incident_intake_cannot_forge_informant_statement() {
     assert_eq!(
         state
             .legal()
-            .evidence_of_kind(EvidenceKind::InformantStatement)
+            .all_evidence()
+            .filter(|record| record.kind() == EvidenceKind::InformantStatement)
             .count(),
         0
     );
@@ -1400,8 +1401,8 @@ fn scheduled_detective_work_blocks_case_transition_until_resolution_then_close_i
     }
     let reviewable = state
         .legal
-        .evidence_of_kind(EvidenceKind::Fingerprint)
-        .next()
+        .all_evidence()
+        .find(|record| record.kind() == EvidenceKind::Fingerprint)
         .expect("fingerprint evidence should exist")
         .id();
     let work = validate_schedule_investigation_work(
@@ -1944,7 +1945,8 @@ fn case_graph_indexes_track_shared_subjects_and_evidence_kinds() {
     assert_eq!(
         state
             .legal()
-            .investigations_for_subject(EntityRef::Character(character))
+            .investigations()
+            .filter(|record| record.subjects().contains(&EntityRef::Character(character)))
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![first, second]
@@ -1952,7 +1954,8 @@ fn case_graph_indexes_track_shared_subjects_and_evidence_kinds() {
     assert_eq!(
         state
             .legal()
-            .evidence_of_kind(EvidenceKind::KnownAssociation)
+            .all_evidence()
+            .filter(|record| record.kind() == EvidenceKind::KnownAssociation)
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![evidence]
@@ -1960,7 +1963,8 @@ fn case_graph_indexes_track_shared_subjects_and_evidence_kinds() {
     assert_eq!(
         state
             .legal()
-            .evidence_from_origin(EntityRef::Organization(criminal))
+            .all_evidence()
+            .filter(|record| record.origin() == Some(EntityRef::Organization(criminal)))
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![evidence]

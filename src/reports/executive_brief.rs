@@ -62,15 +62,6 @@ pub struct ExecutiveBriefPlan {
     entries: Vec<ReportEntry>,
 }
 
-impl ExecutiveBriefPlan {
-    // Test-only drill-down: production consumers read the committed report record, not the
-    // intermediate plan.
-    #[cfg(test)]
-    pub fn entries(&self) -> &[ReportEntry] {
-        &self.entries
-    }
-}
-
 pub fn is_executive_brief_due(registry: &Registry, at: SimTime) -> bool {
     let cadence = u64::from(registry.executive_brief().cadence().as_minutes());
     at != SimTime::ZERO && at.as_minutes().is_multiple_of(cadence)

@@ -1303,7 +1303,8 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     assert_eq!(
         restored
             .legal()
-            .representations_for_arrest(fixture.arrest)
+            .legal_representations()
+            .filter(|record| record.arrest() == fixture.arrest)
             .count(),
         2
     );

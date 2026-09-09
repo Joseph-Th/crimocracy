@@ -27,7 +27,7 @@ pub enum PoliceResponseError {
     MissingAuthority(OrganizationId),
     #[error("organization {0} cannot provide patrol response")]
     InvalidAuthority(OrganizationId),
-    #[error("neighborhood {0} does not exist or is inactive")]
+    #[error("neighborhood {0} does not exist")]
     InvalidNeighborhood(NeighborhoodId),
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
