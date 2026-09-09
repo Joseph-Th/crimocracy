@@ -106,6 +106,8 @@ pub enum RecruitmentError {
         organization: OrganizationId,
         next_eligible_at: SimTime,
     },
+    #[error("recruitment cooldown exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
     #[error("recruitment plan was decided at {expected:?}, but simulation time is now {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
     #[error(
@@ -405,7 +407,8 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::DetainedSupervisor { .. }
         | WorldError::StaleCharacter { .. }
         | WorldError::InvalidPlayerOrganization(_)
-        | WorldError::IdExhaustion(_) => false,
+        | WorldError::IdExhaustion(_)
+        | WorldError::VersionCapacity(_) => false,
     }
 }
 
@@ -1163,7 +1166,10 @@ fn validate_cooldown(
         .recruitment
         .latest_attempt_for(candidate, organization)
     {
-        let next_eligible_at = attempt.occurred_at() + definition.cooldown();
+        let next_eligible_at = attempt
+            .occurred_at()
+            .checked_add(definition.cooldown())
+            .ok_or(RecruitmentError::SimulationTimeOverflow)?;
         if state.now() < next_eligible_at {
             return Err(RecruitmentError::Cooldown {
                 candidate,

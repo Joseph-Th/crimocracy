@@ -719,7 +719,11 @@ fn validate_investigation_work_record_against_registry(
     derived_evidence: &mut BTreeSet<crate::core::id::EvidenceId>,
 ) -> Result<(), StateValidationError> {
     let definition = registry.get_investigation_work(work.kind());
-    if work.due_at() != work.scheduled_at() + definition.duration() {
+    let expected_due_at = work
+        .scheduled_at()
+        .checked_add(definition.duration())
+        .ok_or_else(|| invalid_investigation_work(work))?;
+    if work.due_at() != expected_due_at {
         return Err(invalid_investigation_work(work));
     }
     let Some(resolution) = work.resolution() else {

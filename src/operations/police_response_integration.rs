@@ -33,6 +33,8 @@ use thiserror::Error;
 pub(crate) enum PoliceResponseIntegrationError {
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
+    #[error("operation response timing exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
     #[error(transparent)]
     PoliceResponse(#[from] PoliceResponseError),
     #[error(transparent)]
@@ -97,7 +99,13 @@ pub(crate) fn decide_operation_police_response_start(
     let execution = registry.get_operation(record.kind()).execution();
     let entry_at = execution
         .operation_entry_offset()
-        .map(|offset| state.now() + offset);
+        .map(|offset| {
+            state
+                .now()
+                .checked_add(offset)
+                .ok_or(PoliceResponseIntegrationError::SimulationTimeOverflow)
+        })
+        .transpose()?;
     let alert = resolve_operation_police_alert_context(registry, state, operation, state.now());
     let Some(neighborhood) = alert.neighborhood() else {
         return Ok(OperationPoliceResponseStartPlan {
@@ -120,7 +128,10 @@ pub(crate) fn decide_operation_police_response_start(
     let patrol =
         resolve_authority_patrol_presence_snapshot(state, authority, neighborhood, state.now());
     let delay = resolve_police_arrival_delay(execution, patrol.presence.value());
-    let arrival_due_at = state.now() + SimDuration::from_minutes(delay);
+    let arrival_due_at = state
+        .now()
+        .checked_add(SimDuration::from_minutes(delay))
+        .ok_or(PoliceResponseIntegrationError::SimulationTimeOverflow)?;
     let dispatch = validate_dispatch_police_response(
         state,
         PoliceResponseDispatchDraft {

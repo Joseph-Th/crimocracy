@@ -351,6 +351,39 @@ fn operation_rejects_take_targets_owned_by_the_sponsoring_organization() {
 }
 
 #[test]
+fn delayed_begin_rejects_resolution_beyond_clock_horizon_without_starting_operation() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("ordinary operation should authorize")
+    .commit(&mut state)
+    .expect("ordinary operation should persist authorized");
+    let duration = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .duration();
+    state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+
+    let error = match validate_begin_operation(&registry, &state, operation) {
+        Ok(_) => panic!("late begin must reject when its resolution cannot be represented"),
+        Err(error) => error,
+    };
+    assert_eq!(error, OperationError::SimulationTimeOverflow);
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected begin must preserve authorized operation");
+    assert_eq!(record.status(), OperationStatus::Authorized);
+    assert!(record.started_at().is_none());
+    assert!(record.resolution_due_at().is_none());
+}
+
+#[test]
 fn invalid_terminal_transition_leaves_operation_unchanged() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let operation = validate_authorize_operation(

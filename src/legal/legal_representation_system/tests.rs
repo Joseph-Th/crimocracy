@@ -510,7 +510,8 @@ fn fixture_with_options(counsel_kind: OrganizationKind, supervised_defendant: bo
     .expect("counsel should validate");
     validate_set_relationship(&state, handler, counsel, relationship())
         .expect("lawyer relationship should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("relationship should commit");
     let contact = validate_establish_contact(
         &state,
         InstitutionalContactDraft {
@@ -821,7 +822,8 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
     .expect("replacement counsel should validate");
     validate_set_relationship(&fx.state, fx.handler, replacement_counsel, relationship())
         .expect("replacement counsel relationship should validate")
-        .commit(&mut fx.state);
+        .commit(&mut fx.state)
+        .expect("relationship should commit");
     let replacement_contact = validate_establish_contact(
         &fx.state,
         InstitutionalContactDraft {
@@ -921,7 +923,8 @@ fn automatic_legal_support_prefers_stronger_later_counsel() {
     .expect("stronger counsel should validate");
     validate_set_relationship(&fx.state, fx.handler, stronger_counsel, relationship())
         .expect("stronger counsel relationship should validate")
-        .commit(&mut fx.state);
+        .commit(&mut fx.state)
+        .expect("relationship should commit");
     let stronger_contact = validate_establish_contact(
         &fx.state,
         InstitutionalContactDraft {

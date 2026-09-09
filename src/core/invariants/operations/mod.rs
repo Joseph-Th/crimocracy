@@ -107,9 +107,10 @@ fn validate_authored_operation_plan(
                 let delay =
                     resolve_police_arrival_delay(execution, response.response_presence().value());
                 response.alert_score() >= execution.police_dispatch_threshold()
-                    && response.arrival_due_at()
-                        == response.dispatched_at()
-                            + crate::core::time::SimDuration::from_minutes(delay)
+                    && response
+                        .dispatched_at()
+                        .checked_add(crate::core::time::SimDuration::from_minutes(delay))
+                        == Some(response.arrival_due_at())
             })
     });
     let deadline_window_is_valid = resolve_deadline_without_execution_window(

@@ -11,6 +11,7 @@ use crate::core::id::{
     LedgerTransactionId, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::delegation::MandateAuthority;
 use crate::finance::Money;
 use serde::{Deserialize, Serialize};
@@ -526,11 +527,7 @@ impl EnterpriseState {
             .expect("validated enterprise disappeared before cycle commit");
         enterprise.runtime.last_cycle_at = Some(cycle.occurred_at());
         enterprise.runtime.next_cycle_at = Some(next_cycle_at);
-        enterprise.runtime.version = enterprise
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("enterprise version counter exhausted");
+        enterprise.runtime.version = advance_version_preflighted(enterprise.runtime.version);
         self.active_by_next_cycle
             .entry(next_cycle_at)
             .or_default()
@@ -597,11 +594,7 @@ impl EnterpriseState {
         if let Some(anchor) = loss_streak_anchor {
             record.runtime.loss_streak_anchor = Some(anchor);
         }
-        record.runtime.version = record
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("enterprise version counter exhausted");
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
     fn remove_active_mandate_index(

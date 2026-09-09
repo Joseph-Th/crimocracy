@@ -384,6 +384,98 @@ fn balanced_transaction_commits_all_account_balances_atomically() {
 }
 
 #[test]
+fn exhausted_account_version_rejects_ledger_transfer_before_any_balance_moves() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xF1A0_CAFE);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Version Capacity Ledger".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let source = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("source account should validate");
+    let destination = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("destination account should validate");
+    state
+        .finance
+        .accounts
+        .get_mut(&source)
+        .expect("source account should persist")
+        .version = u32::MAX;
+
+    let transaction_count_before = state.finance().transactions().count();
+    let source_balance_before = state
+        .finance()
+        .get_account(source)
+        .expect("source account should persist")
+        .balance();
+    let destination_balance_before = state
+        .finance()
+        .get_account(destination)
+        .expect("destination account should persist")
+        .balance();
+    let error = match validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Capacity-bound transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: source,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    ) {
+        Ok(_) => panic!("exhausted account version must reject before a ledger token exists"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, FinanceError::VersionCapacity(_)));
+    assert_eq!(
+        state
+            .finance()
+            .get_account(source)
+            .expect("rejected transfer must preserve source")
+            .balance(),
+        source_balance_before
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(destination)
+            .expect("rejected transfer must preserve destination")
+            .balance(),
+        destination_balance_before
+    );
+    assert_eq!(
+        state.finance().transactions().count(),
+        transaction_count_before
+    );
+}
+
+#[test]
 fn planned_account_transaction_opens_and_funds_account_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(32);

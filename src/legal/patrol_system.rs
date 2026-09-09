@@ -3,6 +3,7 @@
 use crate::core::id::{IdExhaustionError, NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
     DayMinute, PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
 };
@@ -50,6 +51,8 @@ pub enum PatrolError {
     MissingDeployment(PatrolDeploymentId),
     #[error("retired patrol deployment {0} cannot be revised")]
     RetiredDeployment(PatrolDeploymentId),
+    #[error("patrol deployment {0} already has the requested schedule")]
+    ScheduleUnchanged(PatrolDeploymentId),
     #[error(
         "patrol deployment {deployment} in status {status:?} cannot apply transition {transition:?}"
     )]
@@ -78,6 +81,8 @@ pub enum PatrolError {
     StaleTime { expected: SimTime, found: SimTime },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +179,7 @@ impl ValidatedPatrolRevision {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "patrol deployment")?;
         if record.status() == PatrolDeploymentStatus::Retired {
             return Err(PatrolError::RetiredDeployment(self.deployment));
         }
@@ -208,6 +214,11 @@ pub fn validate_revise_patrol_deployment(
     if record.status() == PatrolDeploymentStatus::Retired {
         return Err(PatrolError::RetiredDeployment(deployment));
     }
+    let windows = normalize_schedule(windows)?;
+    if record.windows() == windows.as_slice() {
+        return Err(PatrolError::ScheduleUnchanged(deployment));
+    }
+    ensure_version_can_advance(record.version(), "patrol deployment")?;
     validate_record_references(state, record.organization(), record.neighborhood())?;
     let expected_jurisdiction_version = if record.status() == PatrolDeploymentStatus::Active {
         validate_active_dependencies(state, record.organization(), record.neighborhood())?;
@@ -223,7 +234,7 @@ pub fn validate_revise_patrol_deployment(
     };
     Ok(ValidatedPatrolRevision {
         deployment,
-        windows: normalize_schedule(windows)?,
+        windows,
         expected_version: record.version(),
         expected_jurisdiction_version,
         validated_at: state.now(),
@@ -253,6 +264,7 @@ impl ValidatedPatrolTransition {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "patrol deployment")?;
         if self.target_status == PatrolDeploymentStatus::Active {
             let expected_jurisdiction_version = self
                 .expected_jurisdiction_version
@@ -304,6 +316,7 @@ pub fn validate_patrol_transition(
             });
         }
     };
+    ensure_version_can_advance(record.version(), "patrol deployment")?;
     validate_record_references(state, record.organization(), record.neighborhood())?;
     let expected_jurisdiction_version = if target_status == PatrolDeploymentStatus::Active {
         validate_active_dependencies(state, record.organization(), record.neighborhood())?;

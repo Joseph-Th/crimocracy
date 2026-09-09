@@ -167,6 +167,42 @@ fn make_fixture(
     }
 }
 
+#[test]
+fn held_work_schedule_rejects_clock_overflow_before_work_id_is_consumed() {
+    use crate::core::id::IdKind;
+
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let validated = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect("work should validate before the clock moves");
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .duration();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+    let next_work = fixture.state.ids.next_raw(IdKind::InvestigationWork);
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("held work token must reject an unrepresentable due time");
+    assert_eq!(error, InvestigationWorkError::SimulationTimeOverflow);
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::InvestigationWork),
+        next_work
+    );
+    assert_eq!(fixture.state.legal().investigation_work().count(), 0);
+}
+
 struct TestEvidenceDraft {
     investigation: InvestigationId,
     police: crate::core::id::OrganizationId,
@@ -302,6 +338,77 @@ fn autonomous_evidence_review_advances_to_each_reviewable_source_once() {
         "each reviewable source receives one autonomous attempt"
     );
     validate_state(&fixture.state).expect("multi-source review state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn detention_cancellation_token_stales_when_case_changes_before_commit() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect("review work should validate")
+    .commit(&mut fixture.state)
+    .expect("review work should schedule");
+    let cancellation =
+        validate_cancel_investigation_work_for_detention(&fixture.state, fixture.investigator)
+            .expect("detention cancellation should validate")
+            .expect("scheduled investigator should have work to cancel");
+    let expected_version = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist")
+        .version();
+
+    add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: fixture.investigation,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: EntityRef::Character(fixture.middle),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+    let found_version = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist")
+        .version();
+    assert_eq!(found_version, expected_version + 1);
+    assert_eq!(
+        cancellation
+            .ensure_current(&fixture.state)
+            .expect_err("case mutation must stale the cancellation token"),
+        InvestigationWorkError::StaleInvestigation {
+            investigation: fixture.investigation,
+            expected: expected_version,
+            found: found_version,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(work)
+            .expect("stale cancellation must preserve work")
+            .status(),
+        InvestigationWorkStatus::Scheduled
+    );
+    validate_state(&fixture.state).expect("stale cancellation must leave valid state");
     validate_invariants(&fixture.state);
 }
 

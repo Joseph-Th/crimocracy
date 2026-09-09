@@ -10,6 +10,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, resolve_mandate_authority, resolve_policy_for_manager,
 };
@@ -193,6 +194,8 @@ pub enum LegalRepresentationError {
     Report(#[from] ReportError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -727,6 +730,7 @@ impl ValidatedLegalRepresentationEnd {
                 self.representation,
             ));
         }
+        ensure_version_can_advance(record.version(), "legal representation")?;
         Ok(())
     }
 
@@ -860,6 +864,7 @@ pub fn validate_end_legal_representation(
             representation,
         ));
     }
+    ensure_version_can_advance(record.version(), "legal representation")?;
     let ended_at = state.now();
     let defendant = state.world.get_character(record.defendant()).ok_or(
         LegalRepresentationError::MissingDefendant(record.defendant()),

@@ -5,6 +5,7 @@ use crate::core::id::{
     BusinessId, CharacterId, InformationId, OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::time::{SimDuration, SimTime};
+use crate::core::version::advance_version_preflighted;
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord, OperationKind,
     OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
@@ -22,14 +23,17 @@ pub(crate) fn pause_duration_minutes(paused_at: SimTime, resumed_at: SimTime) ->
         .expect("operation cannot resume before its decision pause began")
 }
 
-/// Shifts a scheduled time forward across a decision pause; overflow breaks the simulation's
-/// minute-count invariant. `what` names the shifted field for the panic message.
-pub(crate) fn shift_past_pause(time: SimTime, paused_minutes: u64, what: &str) -> SimTime {
-    SimTime::from_minutes(
-        time.as_minutes()
-            .checked_add(paused_minutes)
-            .unwrap_or_else(|| panic!("operation {what} overflowed u64 minutes")),
-    )
+/// Read-only timing-capacity check shared by resume validation and overlap projection.
+pub(crate) fn checked_shift_past_pause(time: SimTime, paused_minutes: u64) -> Option<SimTime> {
+    time.as_minutes()
+        .checked_add(paused_minutes)
+        .map(SimTime::from_minutes)
+}
+
+/// Applies a shift already proved representable by the canonical resume validator.
+fn shift_past_pause_preflighted(time: SimTime, paused_minutes: u64) -> SimTime {
+    checked_shift_past_pause(time, paused_minutes)
+        .expect("operation resume timing capacity must be preflighted before mutation")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -354,10 +358,10 @@ impl OperationState {
             )
         };
         let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
-        let shifted_due_at = shift_past_pause(due_at, paused_minutes, "resolution time");
+        let shifted_due_at = shift_past_pause_preflighted(due_at, paused_minutes);
         let shifted_entry_at = entry_at.map(|entry_at| {
             if entry_at > paused_at {
-                shift_past_pause(entry_at, paused_minutes, "entry time")
+                shift_past_pause_preflighted(entry_at, paused_minutes)
             } else {
                 entry_at
             }
@@ -553,11 +557,7 @@ impl OperationState {
             "operation property may only be disposed once"
         );
         record.runtime.property_disposition = Some(disposition);
-        record.runtime.version = record
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("operation version counter exhausted");
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
     pub(crate) fn set_cash_disposition(
@@ -586,11 +586,7 @@ impl OperationState {
             "operation cash may only be deposited once"
         );
         record.runtime.cash_disposition = Some(disposition);
-        record.runtime.version = record
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("operation version counter exhausted");
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
     fn set_status(&mut self, id: OperationId, next: OperationStatus) {
@@ -628,11 +624,7 @@ impl OperationState {
             .get_mut(&id)
             .expect("validated operation disappeared before status commit");
         record.runtime.status = next;
-        record.runtime.version = record
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("operation version counter exhausted");
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
         self.by_status.entry(next).or_default().insert(id);
     }
 
@@ -791,6 +783,18 @@ impl OperationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_shift_reports_clock_capacity_instead_of_panicking() {
+        assert_eq!(
+            checked_shift_past_pause(SimTime::from_minutes(u64::MAX - 4), 4),
+            Some(SimTime::from_minutes(u64::MAX))
+        );
+        assert_eq!(
+            checked_shift_past_pause(SimTime::from_minutes(u64::MAX - 4), 5),
+            None
+        );
+    }
 
     #[test]
     fn recent_take_window_excludes_exact_lower_boundary_and_later_same_minute_ids() {

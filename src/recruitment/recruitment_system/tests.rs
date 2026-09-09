@@ -250,7 +250,8 @@ fn fixture() -> Fixture {
         relationship(55, 65, 10, 35, 15, 5, 10),
     )
     .expect("candidate-recruiter relationship should validate")
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("relationship should commit");
     Fixture {
         registry,
         state,
@@ -342,7 +343,8 @@ fn candidate_discovery_follows_incoming_relationships_not_global_roster() {
         relationship(90, 90, 0, 50, 0, 0, 0),
     )
     .expect("reverse-direction relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     let candidates = find_recruitment_candidates(
         &fixture.registry,
@@ -597,7 +599,8 @@ fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
         relationship(95, 95, 0, 80, 15, 0, 50),
     )
     .expect("strong delegated candidate relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     fixture
         .state
@@ -1121,7 +1124,8 @@ fn protection_offer_uses_drives_and_relationships_and_moves_accepted_candidate_a
         relationship(15, 25, 20, 10, 20, 75, 0),
     )
     .expect("incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     let plan = decide_recruitment_attempt(
         &fixture.registry,
@@ -1267,7 +1271,8 @@ fn recruitment_outcome_information_rejects_unauthored_persisted_summary() {
         relationship(15, 25, 20, 10, 20, 75, 0),
     )
     .expect("incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let attempt = validate_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -1317,7 +1322,8 @@ fn accepted_recruitment_history_rejects_unauthored_persisted_summary() {
         relationship(15, 25, 20, 10, 20, 75, 0),
     )
     .expect("incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let attempt = validate_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -1368,7 +1374,8 @@ fn later_reassignment_does_not_rewrite_accepted_recruitment_history() {
         relationship(15, 25, 20, 10, 20, 75, 0),
     )
     .expect("incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let attempt = validate_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -1436,7 +1443,8 @@ fn persisted_relationship_snapshots_keep_recruitment_history_valid_after_social_
         incumbent_dimensions,
     )
     .expect("incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let attempt = validate_recruitment_attempt(
         &fixture.registry,
         &fixture.state,
@@ -1453,7 +1461,8 @@ fn persisted_relationship_snapshots_keep_recruitment_history_valid_after_social_
         relationship(5, 10, 80, 0, 0, 60, 0),
     )
     .expect("later recruiter relationship change should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -1461,7 +1470,8 @@ fn persisted_relationship_snapshots_keep_recruitment_history_valid_after_social_
         relationship(80, 80, 0, 60, 60, 5, 0),
     )
     .expect("later incumbent relationship change should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     let record = fixture
         .state
@@ -1503,7 +1513,8 @@ fn strong_incumbent_attachment_can_produce_refusal_without_membership_mutation()
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
     .expect("strong incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -1511,7 +1522,8 @@ fn strong_incumbent_attachment_can_produce_refusal_without_membership_mutation()
         relationship(10, 20, 30, 5, 0, 0, 0),
     )
     .expect("weak recruiter relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let draft = RecruitmentDraft {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&fixture)
@@ -1553,7 +1565,8 @@ fn later_reassignment_does_not_rewrite_refused_recruitment_history() {
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
     .expect("strong incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -1561,7 +1574,8 @@ fn later_reassignment_does_not_rewrite_refused_recruitment_history() {
         relationship(10, 20, 30, 5, 0, 0, 0),
     )
     .expect("weak recruiter relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let draft = RecruitmentDraft {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&fixture)
@@ -1615,7 +1629,8 @@ fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
     .expect("strong incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -1623,7 +1638,8 @@ fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
         relationship(10, 20, 30, 5, 0, 0, 0),
     )
     .expect("weak recruiter relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let draft = RecruitmentDraft {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&fixture)
@@ -1692,7 +1708,8 @@ fn linked_recruitment_member_report_rejects_persisted_summary_rewrite() {
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
     .expect("strong incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -1700,7 +1717,8 @@ fn linked_recruitment_member_report_rejects_persisted_summary_rewrite() {
         relationship(10, 20, 30, 5, 0, 0, 0),
     )
     .expect("weak recruiter relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let draft = RecruitmentDraft {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&fixture)
@@ -1768,7 +1786,8 @@ fn recruitment_cooldown_blocks_spam_and_allows_a_later_social_reassessment() {
         relationship(100, 100, 0, 100, 100, 0, 0),
     )
     .expect("attachment relationship should validate")
-    .commit(&mut refusal_fixture.state);
+    .commit(&mut refusal_fixture.state)
+    .expect("relationship should commit");
     let refusal_draft = RecruitmentDraft {
         approach: RecruitmentApproach::Advancement,
         ..protection_draft(&refusal_fixture)
@@ -1808,6 +1827,57 @@ fn recruitment_cooldown_blocks_spam_and_allows_a_later_social_reassessment() {
 }
 
 #[test]
+fn refused_recruitment_near_clock_horizon_reports_cooldown_overflow_instead_of_panicking() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(100, 100, 0, 100, 100, 0, 0),
+    )
+    .expect("strong incumbent attachment should validate")
+    .commit(&mut fixture.state)
+    .expect("strong incumbent attachment should commit");
+    let cooldown = fixture.registry.recruitment().cooldown();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(cooldown.as_minutes()) + 1,
+    ));
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    let attempt = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("first boundary recruitment attempt should validate")
+        .commit(&mut fixture.state)
+        .expect("refused boundary recruitment attempt should commit");
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(attempt)
+            .expect("boundary recruitment attempt should persist")
+            .outcome(),
+        RecruitmentOutcome::Refused,
+        "fixture must retain the candidate so the cooldown path is exercised"
+    );
+
+    assert_eq!(
+        decide_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+            .expect_err("unrepresentable cooldown endpoint must reject cleanly"),
+        RecruitmentError::SimulationTimeOverflow
+    );
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .attempts_for_candidate(fixture.candidate)
+            .count(),
+        1,
+        "cooldown rejection must not record another attempt"
+    );
+}
+
+#[test]
 fn relationship_change_invalidates_validated_attempt_without_partial_mutation() {
     let mut fixture = fixture();
     let token = validate_recruitment_attempt(
@@ -1823,7 +1893,8 @@ fn relationship_change_invalidates_validated_attempt_without_partial_mutation() 
         relationship(5, 5, 80, 0, 0, 0, 0),
     )
     .expect("relationship mutation should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let error = token
         .commit(&mut fixture.state)
         .expect_err("stale social decision must not commit");
@@ -1992,7 +2063,8 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
     .expect("strong incumbent relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
         fixture.candidate,
@@ -2000,7 +2072,8 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
         relationship(10, 20, 30, 5, 0, 0, 0),
     )
     .expect("weak recruiter relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     let autonomous_draft = RecruitmentDraft {
         target_organization: fixture.target,
@@ -2164,7 +2237,8 @@ fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_cha
         relationship(95, 95, 0, 80, 15, 0, 50),
     )
     .expect("strong candidate relationship should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
 
     fixture
         .state

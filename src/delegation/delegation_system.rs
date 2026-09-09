@@ -5,6 +5,7 @@ use crate::core::id::{
     OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::delegation::{
     BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord, MandateStatus,
     ResolvedMandateAuthority, ResponsibilityScope, build_mandate_record,
@@ -61,6 +62,8 @@ pub enum DelegationError {
     MissingMandate(MandateId),
     #[error("mandate {0} is not active")]
     InactiveMandate(MandateId),
+    #[error("mandate {0} already has the requested authority configuration")]
+    MandateUnchanged(MandateId),
     #[error("mandate {mandate} belongs to manager {expected}, not authority manager {manager}")]
     AuthorityManagerMismatch {
         mandate: MandateId,
@@ -108,6 +111,8 @@ pub enum DelegationError {
     },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -205,6 +210,7 @@ impl ValidatedMandateRevision {
         if record.status() != MandateStatus::Active {
             return Err(DelegationError::InactiveMandate(self.mandate));
         }
+        ensure_version_can_advance(record.version(), "mandate")?;
         validate_manager_snapshot(
             state,
             self.manager,
@@ -241,6 +247,13 @@ pub fn validate_revise_mandate(
     if record.status() != MandateStatus::Active {
         return Err(DelegationError::InactiveMandate(mandate));
     }
+    if record.scopes() == &draft.scopes
+        && record.standing_orders() == &draft.standing_orders
+        && record.budget() == draft.budget
+    {
+        return Err(DelegationError::MandateUnchanged(mandate));
+    }
+    ensure_version_can_advance(record.version(), "mandate")?;
     validate_mandate_content(
         state,
         record.organization(),
@@ -282,6 +295,7 @@ impl ValidatedMandateRevocation {
         if record.status() != MandateStatus::Active {
             return Err(DelegationError::InactiveMandate(self.mandate));
         }
+        ensure_version_can_advance(record.version(), "mandate")?;
         validate_no_active_enterprise_dependencies(state, self.mandate)?;
         state.delegation.revoke(self.mandate);
         Ok(())
@@ -299,6 +313,7 @@ pub fn validate_revoke_mandate(
     if record.status() != MandateStatus::Active {
         return Err(DelegationError::InactiveMandate(mandate));
     }
+    ensure_version_can_advance(record.version(), "mandate")?;
     validate_no_active_enterprise_dependencies(state, mandate)?;
     Ok(ValidatedMandateRevocation {
         mandate,

@@ -152,3 +152,28 @@ fn criminal_organization_cannot_receive_legal_jurisdiction() {
     assert_eq!(error, JurisdictionError::InvalidAuthorityKind(criminal));
     validate_invariants(&state);
 }
+
+#[test]
+fn identical_jurisdiction_assignment_is_rejected_without_version_churn() {
+    let (mut state, neighborhood, first, _second) = make_fixture();
+    let draft = || JurisdictionDraft {
+        organization: first,
+        neighborhoods: BTreeSet::from([neighborhood]),
+        case_intake_priority: Rating::try_new(70).expect("fixture priority should validate"),
+    };
+    validate_set_jurisdiction(&state, draft())
+        .expect("initial jurisdiction should validate")
+        .commit(&mut state)
+        .expect("initial jurisdiction should commit");
+    let before = bincode::serialize(&state).expect("fixture state should serialize");
+
+    let error = validate_set_jurisdiction(&state, draft())
+        .expect_err("identical jurisdiction replacement must be rejected");
+    assert_eq!(error, JurisdictionError::JurisdictionUnchanged(first));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before,
+        "unchanged jurisdiction must not invalidate routing snapshots"
+    );
+    validate_invariants(&state);
+}

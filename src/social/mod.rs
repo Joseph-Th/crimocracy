@@ -3,6 +3,7 @@
 pub mod relationship_system;
 
 use crate::core::id::CharacterId;
+use crate::core::version::advance_version_preflighted;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -154,10 +155,7 @@ impl SocialState {
         match self.relationships.get_mut(&key) {
             Some(record) => {
                 record.dimensions = dimensions;
-                record.version = record
-                    .version
-                    .checked_add(1)
-                    .expect("relationship version counter exhausted");
+                record.version = advance_version_preflighted(record.version);
             }
             None => {
                 self.relationships.insert(

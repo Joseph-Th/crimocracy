@@ -10,6 +10,7 @@ use crate::core::id::{
     OrganizationId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,11 +60,7 @@ impl CharacterStore {
         }
         record.membership.organization = organization;
         record.membership.supervisor = supervisor;
-        record.runtime.version = record
-            .runtime
-            .version
-            .checked_add(1)
-            .expect("character version counter exhausted");
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
         if let Some(new) = organization {
             self.by_organization.entry(new).or_default().insert(id);
         }
@@ -114,9 +111,7 @@ impl BusinessStore {
         debug_assert_eq!(change.previous_owner(), Some(previous_owner));
         debug_assert_eq!(
             change.resulting_business_version(),
-            previous_version
-                .checked_add(1)
-                .expect("business version counter exhausted")
+            advance_version_preflighted(previous_version)
         );
         self.remove_owner_index(business, previous_owner);
         let record = self

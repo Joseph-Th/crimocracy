@@ -256,11 +256,11 @@ pub(super) fn validate_business_economies_against_registry(
                 .ok_or(StateValidationError::InvalidBusinessEconomySchedule {
                     business: economy.business(),
                 })?;
-            let max_horizon = state.now().as_minutes().checked_add(duration).ok_or(
-                StateValidationError::InvalidBusinessEconomySchedule {
-                    business: economy.business(),
-                },
-            )?;
+            // This is an upper-bound proof for an already-persisted horizon, not a request to
+            // schedule new simulation work. Once `now + duration` exceeds the finite clock,
+            // every representable stored horizon is below that conceptual bound, so clamp the
+            // comparison ceiling rather than rejecting an otherwise valid old disruption.
+            let max_horizon = state.now().as_minutes().saturating_add(duration);
             let horizon = disrupted_through.as_minutes();
             if horizon < min_horizon || horizon > max_horizon {
                 return Err(StateValidationError::InvalidBusinessEconomySchedule {

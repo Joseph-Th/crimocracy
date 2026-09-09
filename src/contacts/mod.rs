@@ -5,6 +5,7 @@ pub mod contact_system;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{CharacterId, ContactDisclosureId, ContactId, InformationId, OrganizationId};
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::social::RelationshipDimensions;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -356,11 +357,7 @@ impl ContactState {
                 .expect("validated contact disappeared before termination commit");
             record.lifecycle.status = ContactStatus::Terminated;
             record.lifecycle.terminated_at = Some(terminated_at);
-            record.lifecycle.version = record
-                .lifecycle
-                .version
-                .checked_add(1)
-                .expect("contact version counter exhausted");
+            record.lifecycle.version = advance_version_preflighted(record.lifecycle.version);
             (record.sponsor(), record.handler(), record.contact())
         };
         let removed = self

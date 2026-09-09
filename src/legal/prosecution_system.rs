@@ -8,6 +8,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_record_information,
 };
@@ -136,6 +137,8 @@ pub enum ProsecutionError {
     Custody(#[from] ArrestError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -159,6 +162,8 @@ pub enum ProsecutionStaffingError {
     StaleProsecutor { prosecutor: CharacterId },
     #[error("prosecutor {prosecutor}'s reviewing assignments changed after detention preflight")]
     DetentionAssignmentsChanged { prosecutor: CharacterId },
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -179,6 +184,9 @@ impl ValidatedProsecutorDetentionRelease {
             return Err(ProsecutionStaffingError::DetentionAssignmentsChanged {
                 prosecutor: self.prosecutor,
             });
+        }
+        for (_, version) in &self.assignments {
+            ensure_version_can_advance(*version, "prosecution case")?;
         }
         Ok(())
     }
@@ -202,6 +210,9 @@ pub(crate) fn validate_release_prosecution_cases_for_detention(
         .filter(|case| case.status() == ProsecutionCaseStatus::Reviewing)
         .map(|case| (case.id(), case.version()))
         .collect();
+    for (_, version) in &assignments {
+        ensure_version_can_advance(*version, "prosecution case")?;
+    }
     // Keep an empty token too. A prosecutor can acquire a reviewing assignment after arrest
     // validation without changing their character version; the empty snapshot is what makes
     // that newly acquired responsibility stale the arrest instead of surviving custody.
@@ -231,6 +242,7 @@ impl ValidatedProsecutorAssignment {
         {
             return Err(ProsecutionStaffingError::StaleCase { case: self.case });
         }
+        ensure_version_can_advance(case.version(), "prosecution case")?;
         let prosecutor = state
             .world
             .get_character(self.prosecutor)
@@ -258,6 +270,7 @@ pub fn validate_assign_prosecutor(
         .legal
         .get_prosecution_case(case)
         .expect("validated prosecution case must exist");
+    ensure_version_can_advance(case_record.version(), "prosecution case")?;
     let prosecutor_record = state
         .world
         .get_character(prosecutor)
@@ -590,6 +603,7 @@ impl ValidatedProsecutionReferral {
                 found: case.version(),
             });
         }
+        ensure_version_can_advance(case.version(), "prosecution case")?;
         let investigation = state
             .legal
             .get_investigation(case.source_investigation())
@@ -663,6 +677,7 @@ pub fn validate_supplement_prosecution_case(
     draft: ProsecutionReferralDraft,
 ) -> Result<ValidatedProsecutionReferral, ProsecutionError> {
     let case = validate_supplement_dependencies(state, &draft)?;
+    ensure_version_can_advance(case.version(), "prosecution case")?;
     let investigation = state
         .legal
         .get_investigation(case.source_investigation())
@@ -925,6 +940,7 @@ impl ValidatedProsecutionCaseResolution {
                 found: case.version(),
             });
         }
+        ensure_version_can_advance(case.version(), "prosecution case")?;
         if case.assigned_prosecutor() != Some(self.prosecutor) {
             return Err(ProsecutionError::CaseUnstaffed { case: self.case });
         }
@@ -1005,6 +1021,7 @@ fn validate_prosecution_case_resolution(
     resolution: ProsecutionCaseResolution,
 ) -> Result<ValidatedProsecutionCaseResolution, ProsecutionError> {
     let case = validate_resolution_dependencies(state, case_id)?;
+    ensure_version_can_advance(case.version(), "prosecution case")?;
     let prosecutor = assigned_prosecutor(case)?;
     let lead = state
         .world

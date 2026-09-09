@@ -7,6 +7,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
@@ -108,6 +111,8 @@ pub enum InvestigationWorkError {
     StaleResolutionTime { expected: SimTime, found: SimTime },
     #[error("investigation work variance {variance} exceeds authored limit {limit}")]
     VarianceOutOfRange { variance: i8, limit: u8 },
+    #[error("investigation work scheduling exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
     #[error("investigation work source evidence {0} no longer belongs to the case")]
     InvalidSourceEvidence(EvidenceId),
     #[error("witness interview for work {work} could not record a statement: {error}")]
@@ -115,8 +120,12 @@ pub enum InvestigationWorkError {
         work: InvestigationWorkId,
         error: crate::legal::witness_system::WitnessError,
     },
+    #[error("case witness {witness} interview-attempt counter is exhausted")]
+    WitnessInterviewAttemptCapacity { witness: CaseWitnessId },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -146,6 +155,7 @@ impl ValidatedInvestigationWorkSchedule {
                 found: investigation.version(),
             });
         }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         let investigator = state.world.get_character(self.draft.investigator).ok_or(
             InvestigationWorkError::MissingInvestigator(self.draft.investigator),
         )?;
@@ -164,10 +174,13 @@ impl ValidatedInvestigationWorkSchedule {
         // source-set comparison is needed (and one could not report a meaningful
         // expected/found version pair).
 
-        let id = state.ids.next_investigation_work()?;
         let scheduled_at = state.now();
-        let due_at =
-            scheduled_at + crate::core::time::SimDuration::from_minutes(self.duration_minutes);
+        let due_at = scheduled_at
+            .checked_add(crate::core::time::SimDuration::from_minutes(
+                self.duration_minutes,
+            ))
+            .ok_or(InvestigationWorkError::SimulationTimeOverflow)?;
+        let id = state.ids.next_investigation_work()?;
         state
             .legal
             .insert_investigation_work(InvestigationWorkRecord {
@@ -197,6 +210,7 @@ pub(crate) struct ValidatedInvestigationWorkCancellation {
     work: InvestigationWorkId,
     investigator: CharacterId,
     expected_version: u32,
+    expected_investigation_version: u32,
     cancelled_at: SimTime,
 }
 
@@ -220,6 +234,18 @@ impl ValidatedInvestigationWorkCancellation {
         if work.status() != InvestigationWorkStatus::Scheduled {
             return Err(InvestigationWorkError::WorkNotScheduled(self.work));
         }
+        ensure_version_can_advance(work.version(), "investigation work")?;
+        let investigation = state.legal.get_investigation(work.investigation()).ok_or(
+            InvestigationWorkError::MissingInvestigation(work.investigation()),
+        )?;
+        if investigation.version() != self.expected_investigation_version {
+            return Err(InvestigationWorkError::StaleInvestigation {
+                investigation: investigation.id(),
+                expected: self.expected_investigation_version,
+                found: investigation.version(),
+            });
+        }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         if work.investigator() != self.investigator || state.now() != self.cancelled_at {
             return Err(InvestigationWorkError::StaleResolutionContext { work: self.work });
         }
@@ -248,10 +274,16 @@ pub(crate) fn validate_cancel_investigation_work_for_detention(
         .legal
         .get_investigation_work(work_id)
         .ok_or(InvestigationWorkError::MissingWork(work_id))?;
+    ensure_version_can_advance(work.version(), "investigation work")?;
+    let investigation = state.legal.get_investigation(work.investigation()).ok_or(
+        InvestigationWorkError::MissingInvestigation(work.investigation()),
+    )?;
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     Ok(Some(ValidatedInvestigationWorkCancellation {
         work: work_id,
         investigator,
         expected_version: work.version(),
+        expected_investigation_version: investigation.version(),
         cancelled_at: state.now(),
     }))
 }
@@ -269,11 +301,16 @@ pub fn validate_schedule_investigation_work(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must still exist");
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     let investigator = state
         .world
         .get_character(draft.investigator)
         .expect("validated investigator must still exist");
     let duration = registry.get_investigation_work(draft.kind).duration();
+    state
+        .now()
+        .checked_add(duration)
+        .ok_or(InvestigationWorkError::SimulationTimeOverflow)?;
     Ok(ValidatedInvestigationWorkSchedule {
         draft,
         source_evidence,
@@ -461,6 +498,7 @@ pub struct InvestigationWorkResolutionPlan {
     expected_work_version: u32,
     expected_investigation_version: u32,
     expected_investigator_version: u32,
+    expected_case_witness_version: Option<u32>,
     resolved_at: SimTime,
     outcome: InvestigationWorkOutcome,
     factors: InvestigationWorkFactors,
@@ -507,6 +545,13 @@ pub fn decide_investigation_work_resolution(
         .legal
         .get_investigation(work.investigation())
         .expect("validated scheduled work must have an investigation");
+    let expected_case_witness_version = work.focus().witness_id().map(|case_witness| {
+        state
+            .legal
+            .get_case_witness(case_witness)
+            .expect("validated interview focus must reference an existing witness")
+            .version()
+    });
     let (factors, margin) =
         resolve_work_factors_and_margin(definition, state, work, randomness.variance())?;
     let outcome = if margin >= definition.connected_margin() {
@@ -522,6 +567,7 @@ pub fn decide_investigation_work_resolution(
         expected_work_version: work.version(),
         expected_investigation_version: investigation.version(),
         expected_investigator_version: investigator.version(),
+        expected_case_witness_version,
         resolved_at: state.now(),
         outcome,
         factors,
@@ -770,6 +816,14 @@ impl ValidatedInvestigationWorkResolution {
         state: &mut AppState,
     ) -> Result<InvestigationWorkId, InvestigationWorkError> {
         validate_resolution_snapshot(state, &self.plan)?;
+        if let Some(statement) = &self.interview_statement {
+            statement.ensure_current(state).map_err(|error| {
+                InvestigationWorkError::InterviewStatementFailed {
+                    work: self.plan.work,
+                    error,
+                }
+            })?;
+        }
         let derived_evidence_draft = match self.plan.outcome {
             InvestigationWorkOutcome::Connected => {
                 // A connected interview is committed through the canonical witness-
@@ -1216,6 +1270,7 @@ fn validate_resolution_snapshot(
             found: work.version(),
         });
     }
+    ensure_version_can_advance(work.version(), "investigation work")?;
     let investigator = state
         .world
         .get_character(work.investigator())
@@ -1237,6 +1292,47 @@ fn validate_resolution_snapshot(
             expected: plan.expected_investigation_version,
             found: investigation.version(),
         });
+    }
+    let investigation_advances = match (work.kind(), plan.outcome) {
+        (InvestigationWorkKind::EvidenceReview, InvestigationWorkOutcome::Developed) => 2,
+        (InvestigationWorkKind::EvidenceReview, InvestigationWorkOutcome::Inconclusive)
+        | (InvestigationWorkKind::WitnessInterview, InvestigationWorkOutcome::Inconclusive) => 1,
+        (InvestigationWorkKind::WitnessInterview, InvestigationWorkOutcome::Connected) => 3,
+        (InvestigationWorkKind::EvidenceReview, InvestigationWorkOutcome::Connected)
+        | (InvestigationWorkKind::WitnessInterview, InvestigationWorkOutcome::Developed) => {
+            return Err(InvestigationWorkError::StaleResolutionContext { work: plan.work });
+        }
+    };
+    ensure_version_can_advance_by(
+        investigation.version(),
+        investigation_advances,
+        "investigation",
+    )?;
+    match work.focus().witness_id() {
+        Some(case_witness) => {
+            let witness = state
+                .legal
+                .get_case_witness(case_witness)
+                .ok_or(InvestigationWorkError::InvalidFocus)?;
+            if Some(witness.version()) != plan.expected_case_witness_version {
+                return Err(InvestigationWorkError::StaleResolutionContext { work: plan.work });
+            }
+            let witness_advances = if plan.outcome == InvestigationWorkOutcome::Connected {
+                2
+            } else {
+                1
+            };
+            ensure_version_can_advance_by(witness.version(), witness_advances, "case witness")?;
+            if witness.interview_attempts().checked_add(1).is_none() {
+                return Err(InvestigationWorkError::WitnessInterviewAttemptCapacity {
+                    witness: case_witness,
+                });
+            }
+        }
+        None if plan.expected_case_witness_version.is_some() => {
+            return Err(InvestigationWorkError::StaleResolutionContext { work: plan.work });
+        }
+        None => {}
     }
     if state.now() != plan.resolved_at {
         return Err(InvestigationWorkError::StaleResolutionTime {

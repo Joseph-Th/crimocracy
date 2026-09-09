@@ -102,7 +102,8 @@ fn make_test_knowledge_fixture() -> KnowledgeFixture {
         },
     )
     .expect("handler-contact relationship should validate")
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("relationship should commit");
     KnowledgeFixture {
         state,
         criminal,

@@ -474,7 +474,8 @@ mod tests {
             RelationshipDimensions::zero(),
         )
         .expect("relationship fixture should validate")
-        .commit(&mut fixture.state);
+        .commit(&mut fixture.state)
+        .expect("relationship should commit");
         let original_wire = social_state_wire(fixture.state.social());
         assert_eq!(
             bincode::serialize(&original_wire).expect("social wire should serialize"),

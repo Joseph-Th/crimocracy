@@ -8,6 +8,7 @@ use crate::core::id::{
     CharacterId, DecisionRequestId, OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::delegation::MandateAuthority;
 use crate::recruitment::{RecruitmentApproach, RecruitmentPolicySource};
 use serde::{Deserialize, Serialize};
@@ -407,10 +408,7 @@ impl DecisionState {
             .get_mut(&id)
             .expect("validated decision disappeared before resolution commit");
         record.lifecycle = DecisionLifecycle::Resolved(resolution);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("decision request version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     pub(crate) fn cancel(&mut self, id: DecisionRequestId, cancellation: DecisionCancellation) {
@@ -420,10 +418,7 @@ impl DecisionState {
             .get_mut(&id)
             .expect("validated decision disappeared before cancellation commit");
         record.lifecycle = DecisionLifecycle::Cancelled(cancellation);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("decision request version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     fn remove_pending_indexes(&mut self, id: DecisionRequestId) {

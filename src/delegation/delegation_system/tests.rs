@@ -82,6 +82,34 @@ fn resolves_authority_with_versioned_dependencies() {
 }
 
 #[test]
+fn identical_mandate_revision_is_rejected_without_invalidating_authority_snapshot() {
+    let (_registry, state, authority) = make_authority_fixture();
+    let before = bincode::serialize(&state).expect("fixture state should serialize");
+    let record = state
+        .delegation()
+        .get_mandate(authority.mandate)
+        .expect("mandate fixture should persist");
+
+    let error = validate_revise_mandate(
+        &state,
+        authority.mandate,
+        MandateRevisionDraft {
+            scopes: record.scopes().clone(),
+            standing_orders: record.standing_orders().clone(),
+            budget: record.budget(),
+        },
+    )
+    .expect_err("identical mandate revision must be rejected");
+    assert_eq!(error, DelegationError::MandateUnchanged(authority.mandate));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before,
+        "unchanged mandate revision must not advance authority freshness"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn revoked_mandate_remains_valid_after_former_manager_changes_organization() {
     let (registry, mut state, authority) = make_authority_fixture();
     validate_revoke_mandate(&state, authority.mandate)

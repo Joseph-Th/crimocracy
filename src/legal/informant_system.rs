@@ -6,6 +6,7 @@ use crate::core::id::{
     InvestigationId, OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
@@ -95,6 +96,8 @@ pub enum InformantError {
     },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -206,6 +209,7 @@ impl ValidatedInformantDisclosure {
                 found: investigation.version(),
             });
         }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         validate_disclosure_dependencies(state, self.draft)?;
 
         let informant = state
@@ -275,6 +279,7 @@ pub fn validate_record_informant_disclosure(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must exist");
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     Ok(ValidatedInformantDisclosure {
         draft,
         expected_investigation_version: investigation.version(),

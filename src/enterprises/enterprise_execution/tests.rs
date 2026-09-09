@@ -480,6 +480,72 @@ fn establish_protection(registry: &Registry, fixture: &mut EnterpriseFixture) ->
     .expect("enterprise fixture should commit")
 }
 
+#[test]
+fn held_establishment_rejects_clock_overflow_before_planned_account_or_enterprise_id_is_consumed() {
+    use crate::core::id::IdKind;
+    use crate::finance::finance_system::validate_open_accounts;
+
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let openings = validate_open_accounts(
+        &fixture.state,
+        vec![FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::Settlement,
+        }],
+    )
+    .expect("fresh settlement opening should validate read-only");
+    let fresh_settlement = openings
+        .account_id(0)
+        .expect("one-account opening should expose its predicted id");
+    let validated = validate_establish_enterprise_with_openings(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: fixture.organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fresh_settlement,
+        },
+        openings,
+    )
+    .expect("enterprise should validate before the clock moves");
+    let cycle = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .cycle();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(cycle.as_minutes()) + 1,
+    ));
+    let account_next = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let enterprise_next = fixture.state.ids.next_raw(IdKind::Enterprise);
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("held enterprise token must reject before unrepresentable cycle scheduling");
+    assert_eq!(error, EnterpriseError::SimulationTimeOverflow);
+    assert!(
+        fixture
+            .state
+            .finance()
+            .get_account(fresh_settlement)
+            .is_none(),
+        "planned settlement account must remain unopened"
+    );
+    assert_eq!(fixture.state.enterprises().enterprises().count(), 0);
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::FinancialAccount),
+        account_next
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::Enterprise),
+        enterprise_next
+    );
+}
+
 fn insert_support_business(
     registry: &Registry,
     fixture: &mut EnterpriseFixture,

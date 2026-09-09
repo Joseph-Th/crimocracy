@@ -246,7 +246,8 @@ fn make_fixture(institution_kind: OrganizationKind) -> ContactFixture {
     .expect("source should validate");
     validate_set_relationship(&state, handler, source, relationship(70, 45))
         .expect("contact relationship should validate")
-        .commit(&mut state);
+        .commit(&mut state)
+        .expect("relationship should commit");
     ContactFixture {
         registry,
         state,
@@ -507,7 +508,8 @@ fn establishment_token_rejects_relationship_change_without_partial_contact() {
         relationship(40, 80),
     )
     .expect("relationship revision should validate")
-    .commit(&mut fixture.state);
+    .commit(&mut fixture.state)
+    .expect("relationship should commit");
     let error = stale
         .commit(&mut fixture.state)
         .expect_err("relationship revision must stale establishment token");

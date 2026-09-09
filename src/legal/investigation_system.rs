@@ -7,6 +7,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::legal::{
     CaseWitnessRecord, EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity,
     EvidenceRecord, IncidentIntakeDraft, InvestigationDraft, InvestigationRecord,
@@ -87,6 +90,8 @@ pub enum InvestigationError {
     InactiveInvestigation,
     #[error("incident intake must contain at least one evidence record")]
     NoIncidentEvidence,
+    #[error("incident intake evidence set is too large to persist")]
+    IncidentEvidenceCountOverflow,
     #[error(
         "incident intake names character {character} as a case subject without actionable evidence"
     )]
@@ -133,6 +138,8 @@ pub enum InvestigationError {
     CaseKnowledge(#[from] crate::intelligence::intelligence_system::IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -166,6 +173,7 @@ impl ValidatedInvestigatorDetentionRelease {
         {
             return Err(InvestigationError::InactiveInvestigation);
         }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         Ok(())
     }
 
@@ -188,6 +196,7 @@ pub(crate) fn validate_release_investigator_for_detention(
     else {
         return Ok(None);
     };
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     Ok(Some(ValidatedInvestigatorDetentionRelease {
         investigation: investigation.id(),
         investigator,
@@ -313,6 +322,7 @@ impl ValidatedInvestigationTransition {
                 found: investigation.version(),
             });
         }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         validate_investigation_transition_dependencies(state, self.investigation, self.transition)?;
         let next_status = match self.transition {
             InvestigationTransition::Suspend => InvestigationStatus::Suspended,
@@ -354,6 +364,7 @@ pub fn validate_transition_investigation(
         .legal
         .get_investigation(investigation)
         .ok_or(InvestigationError::MissingInvestigation(investigation))?;
+    ensure_version_can_advance(record.version(), "investigation")?;
     validate_investigation_transition_dependencies(state, investigation, transition)?;
     Ok(ValidatedInvestigationTransition {
         investigation,
@@ -574,6 +585,7 @@ impl ValidatedInvestigatorAssignment {
                 found: investigation.version(),
             });
         }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         let investigator = state
             .world
             .get_character(self.investigator)
@@ -628,6 +640,7 @@ pub fn validate_assign_investigator(
         .legal
         .get_investigation(investigation)
         .expect("validated investigation must still exist");
+    ensure_version_can_advance(investigation_record.version(), "investigation")?;
     let investigator_record = state
         .world
         .get_character(investigator)
@@ -759,10 +772,23 @@ fn validate_investigator_assignment_dependencies(
 
 pub struct ValidatedEvidence {
     draft: EvidenceDraft,
+    expected_investigation_version: u32,
 }
 impl ValidatedEvidence {
     pub fn commit(self, state: &mut AppState) -> Result<EvidenceId, InvestigationError> {
         validate_evidence_draft(state, &self.draft)?;
+        let investigation = state
+            .legal
+            .get_investigation(self.draft.investigation)
+            .expect("validated evidence investigation must exist");
+        if investigation.version() != self.expected_investigation_version {
+            return Err(InvestigationError::StaleInvestigation {
+                investigation: self.draft.investigation,
+                expected: self.expected_investigation_version,
+                found: investigation.version(),
+            });
+        }
+        ensure_version_can_advance(investigation.version(), "investigation")?;
         let id = state.ids.next_evidence()?;
         let EvidenceDraft {
             investigation,
@@ -807,7 +833,15 @@ pub fn validate_add_evidence(
     draft: EvidenceDraft,
 ) -> Result<ValidatedEvidence, InvestigationError> {
     validate_evidence_draft(state, &draft)?;
-    Ok(ValidatedEvidence { draft })
+    let investigation = state
+        .legal
+        .get_investigation(draft.investigation)
+        .expect("validated evidence investigation must exist");
+    ensure_version_can_advance(investigation.version(), "investigation")?;
+    Ok(ValidatedEvidence {
+        draft,
+        expected_investigation_version: investigation.version(),
+    })
 }
 
 /// Work-derived evidence kinds and informant statements may only be created through their
@@ -889,8 +923,9 @@ pub struct ValidatedIncidentIntake {
 }
 
 impl ValidatedIncidentIntake {
-    pub(crate) fn evidence_count(&self) -> u32 {
-        u32::try_from(self.draft.evidence.len()).expect("incident evidence count must fit u32")
+    pub(crate) fn evidence_count(&self) -> Result<u32, InvestigationError> {
+        u32::try_from(self.draft.evidence.len())
+            .map_err(|_| InvestigationError::IncidentEvidenceCountOverflow)
     }
 
     pub(crate) fn has_witness(&self) -> bool {
@@ -915,6 +950,29 @@ impl ValidatedIncidentIntake {
         }
         if let Some((shelf, _)) = self.resuming {
             validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?;
+            let record = state
+                .legal
+                .get_investigation(shelf)
+                .expect("resumable incident shelf must still exist");
+            let adds_subjects = self
+                .draft
+                .subjects
+                .difference(record.subjects())
+                .next()
+                .is_some();
+            let advances = self
+                .evidence_count()?
+                .checked_add(u32::from(self.draft.witness.is_some()))
+                .and_then(|count| count.checked_add(u32::from(adds_subjects)))
+                .and_then(|count| count.checked_add(1))
+                .ok_or_else(|| VersionCapacityError::new("investigation"))?;
+            ensure_version_can_advance_by(record.version(), advances, "investigation")?;
+        } else {
+            let advances = self
+                .evidence_count()?
+                .checked_add(u32::from(self.draft.witness.is_some()))
+                .ok_or_else(|| VersionCapacityError::new("investigation"))?;
+            ensure_version_can_advance_by(1, advances, "investigation")?;
         }
         Ok(())
     }
@@ -928,7 +986,7 @@ impl ValidatedIncidentIntake {
         if self.resuming.is_none() {
             budget.push((IdKind::Investigation, 1));
         }
-        budget.push((IdKind::Evidence, self.evidence_count()));
+        budget.push((IdKind::Evidence, self.evidence_count()?));
         budget.push((IdKind::CaseWitness, u32::from(self.draft.witness.is_some())));
         state.ids.reserve_many(&budget)?;
         // The draft is consumed by this commit, so its subject set moves into the record
@@ -1037,7 +1095,9 @@ pub fn validate_incident_intake(
 ) -> Result<ValidatedIncidentIntake, InvestigationError> {
     validate_incident_intake_dependencies(state, &draft)?;
     let resuming = find_resumable_shelf(state, &draft);
-    Ok(ValidatedIncidentIntake { draft, resuming })
+    let validated = ValidatedIncidentIntake { draft, resuming };
+    validated.ensure_current(state)?;
+    Ok(validated)
 }
 
 /// Finds the owner's suspended originated shelf sharing subject matter with the draft, so a

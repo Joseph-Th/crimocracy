@@ -90,7 +90,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // then the day-boundary governance cluster: payroll, reputation (decay before current
     // consequences), recruitment, delegated expansion (which consumes current police fear), and
     // executive synthesis last so the due brief sees everything above.
-    let expired_opportunities = apply_opportunity_expiry(registry, state);
+    let expired_opportunities = apply_opportunity_expiry(registry, state)
+        .expect("valid state should expire every due opportunity atomically");
     let (started_operations, arrived_police_responses, decision_requests, resolved_operations) =
         run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)

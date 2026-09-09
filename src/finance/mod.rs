@@ -9,6 +9,7 @@ use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, LedgerTransactionId, MandateId, OrganizationId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::delegation::{MandateAuthority, ResponsibilityScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -356,10 +357,7 @@ impl FinanceState {
                 .get_mut(account)
                 .expect("validated account disappeared before ledger commit");
             account_record.balance = *balance;
-            account_record.version = account_record
-                .version
-                .checked_add(1)
-                .expect("financial account version counter exhausted");
+            account_record.version = advance_version_preflighted(account_record.version);
         }
         if let Some(usage) = record.budget_usage() {
             self.transactions_by_mandate

@@ -18,17 +18,24 @@ impl SimTime {
     pub const fn as_minutes(self) -> u64 {
         self.0
     }
+
+    /// Checked future scheduling. Canonical validators use this before persisting a due time so
+    /// an otherwise valid state near the finite clock horizon returns a typed domain error
+    /// instead of reaching the panicking `Add` convenience implementation.
+    pub const fn checked_add(self, duration: SimDuration) -> Option<Self> {
+        match self.0.checked_add(duration.0 as u64) {
+            Some(minutes) => Some(Self(minutes)),
+            None => None,
+        }
+    }
 }
 
 impl Add<SimDuration> for SimTime {
     type Output = Self;
 
     fn add(self, rhs: SimDuration) -> Self::Output {
-        Self(
-            self.0
-                .checked_add(u64::from(rhs.0))
-                .expect("simulation time overflowed u64 minutes"),
-        )
+        self.checked_add(rhs)
+            .expect("simulation time overflowed u64 minutes")
     }
 }
 
@@ -68,4 +75,21 @@ pub const DAY_MINUTES: u64 = 1_440;
 pub fn is_day_boundary(now: SimTime) -> bool {
     let minutes = now.as_minutes();
     minutes != 0 && minutes.is_multiple_of(DAY_MINUTES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_add_reports_simulation_clock_capacity() {
+        assert_eq!(
+            SimTime::from_minutes(u64::MAX - 4).checked_add(SimDuration::from_minutes(4)),
+            Some(SimTime::from_minutes(u64::MAX))
+        );
+        assert_eq!(
+            SimTime::from_minutes(u64::MAX - 4).checked_add(SimDuration::from_minutes(5)),
+            None
+        );
+    }
 }

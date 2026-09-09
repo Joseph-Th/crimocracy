@@ -308,3 +308,32 @@ fn patrol_deployment_survives_save_round_trip_with_active_index() {
     validate_state(&restored).expect("restored patrol state should validate");
     validate_invariants(&restored);
 }
+
+#[test]
+fn patrol_revision_rejects_normalized_unchanged_schedule_without_freshness_churn() {
+    let (_registry, mut state, police, neighborhood) = make_fixture();
+    let first = window(600, 120, 75);
+    let second = window(900, 60, 55);
+    let deployment = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![first, second],
+        },
+    )
+    .expect("patrol deployment should validate")
+    .commit(&mut state)
+    .expect("patrol deployment should commit");
+    let before = bincode::serialize(&state).expect("fixture state should serialize");
+
+    let error = validate_revise_patrol_deployment(&state, deployment, vec![second, first])
+        .expect_err("equivalent normalized schedule must be rejected as unchanged");
+    assert_eq!(error, PatrolError::ScheduleUnchanged(deployment));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before,
+        "unchanged patrol revision must not advance version or last-changed time"
+    );
+    validate_invariants(&state);
+}

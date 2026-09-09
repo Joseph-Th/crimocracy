@@ -5,6 +5,7 @@ use crate::core::id::{
     FinancialAccountId, IdExhaustionError, IdKind, LedgerTransactionId, MandateId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::delegation::delegation_system::{
     DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
 };
@@ -48,6 +49,8 @@ pub enum FinanceError {
     IdExhaustion(#[from] IdExhaustionError),
     #[error("ledger transaction would overflow account {0}")]
     BalanceOverflow(FinancialAccountId),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
     #[error("ledger transaction cannot occur in the future")]
     OccursInFuture,
     #[error(
@@ -268,6 +271,7 @@ impl ValidatedLedgerTransaction {
                     found: record.version(),
                 });
             }
+            ensure_version_can_advance(record.version(), "financial account")?;
         }
         if let Some(snapshot) = self.authority_snapshot {
             ensure_mandate_authority_current(state, snapshot)?;
@@ -371,6 +375,7 @@ fn validate_record_transaction_with_optional_openings(
             return Err(FinanceError::PostingSumOverflow);
         }
         if let Some(account) = state.finance.get_account(posting.account) {
+            ensure_version_can_advance(account.version(), "financial account")?;
             let next = account
                 .balance()
                 .checked_add(posting.amount)
@@ -592,6 +597,8 @@ pub enum LaunderingError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     BusinessEconomy(#[from] crate::economy::business_economy_system::BusinessEconomyError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub struct ValidatedLaundering {
@@ -636,6 +643,7 @@ impl ValidatedLaundering {
                 found: economy.version(),
             });
         }
+        ensure_version_can_advance(economy.version(), "business economy")?;
         let id = self.transaction.commit(state)?;
         // The transfer committed, so the front's plausibility budget shrinks by the same
         // volume. The version check above guarantees the budget window is unchanged, and the
@@ -720,6 +728,7 @@ pub fn validate_launder_funds(
     if economy.status() != crate::economy::BusinessOperatingStatus::Active {
         return Err(LaunderingError::MissingBusinessEconomy(draft.business));
     }
+    ensure_version_can_advance(economy.version(), "business economy")?;
     // Plausibility: the front can hide only the authored fraction of what it legitimately
     // earns per cycle, and the budget is cumulative — a front that already absorbed volume
     // this cycle has less plausible room left, so volume requires larger or additional fronts

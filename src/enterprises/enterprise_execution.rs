@@ -8,6 +8,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::delegation::delegation_system::{
     DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
 };
@@ -142,6 +145,8 @@ pub enum EnterpriseError {
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("enterprise economics overflowed while resolving cycle {0}")]
     ArithmeticOverflow(EnterpriseId),
+    #[error("enterprise scheduling exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
     #[error("enterprise economics overflowed while projecting {kind:?} at {location:?}")]
     ProjectionArithmeticOverflow {
         kind: EnterpriseKind,
@@ -199,6 +204,8 @@ pub enum EnterpriseError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub struct ValidatedEnterpriseEstablishment {
@@ -275,6 +282,10 @@ impl ValidatedEnterpriseEstablishment {
                 None,
             )?,
         }
+        let established_at = state.now();
+        let next_cycle_at = established_at
+            .checked_add(self.cycle_duration)
+            .ok_or(EnterpriseError::SimulationTimeOverflow)?;
         let id = match self.account_openings {
             Some(openings) => {
                 state.ids.reserve_many(&[
@@ -293,8 +304,6 @@ impl ValidatedEnterpriseEstablishment {
             }
             None => state.ids.next_enterprise()?,
         };
-        let established_at = state.now();
-        let next_cycle_at = established_at + self.cycle_duration;
         state.enterprises.insert(build_enterprise_record(
             id,
             self.draft,
@@ -378,6 +387,10 @@ fn validate_establish_enterprise_with_optional_openings(
         )?,
     }
     let cycle_duration = definition.economics().cycle();
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(EnterpriseError::SimulationTimeOverflow)?;
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, &draft.supporting_businesses)?;
     let host_business_version = match draft.location {
@@ -660,6 +673,10 @@ pub fn decide_enterprise_cycle(
         }
         EnterpriseLocation::Neighborhood(_) => None,
     };
+    let next_cycle_at = state
+        .now()
+        .checked_add(economics.cycle())
+        .ok_or(EnterpriseError::SimulationTimeOverflow)?;
     Ok(EnterpriseCyclePlan {
         snapshot: EnterpriseCycleSnapshot {
             enterprise,
@@ -669,7 +686,7 @@ pub fn decide_enterprise_cycle(
             // A detained manager leaves the enterprise overdue, but missed cycles are not
             // retroactively paid out in a burst after release. Re-anchor the next cycle to the
             // actual settlement instant so routine work resumes at its authored cadence.
-            next_cycle_at: state.now() + economics.cycle(),
+            next_cycle_at,
             suspends_after_settlement,
             supporting_business_versions,
             host_business_version,
@@ -868,7 +885,7 @@ impl ValidatedEnterpriseCycle {
                 IdKind::Investigation,
                 u32::from(incident.requires_new_investigation()),
             ));
-            budget.push((IdKind::Evidence, incident.evidence_count()));
+            budget.push((IdKind::Evidence, incident.evidence_count()?));
             budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
         }
         budget.push((IdKind::EnterpriseCycle, 1));
@@ -886,6 +903,11 @@ impl ValidatedEnterpriseCycle {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance_by(
+            record.version(),
+            1 + u32::from(self.plan.snapshot.suspends_after_settlement),
+            "enterprise",
+        )?;
         if record.status() != EnterpriseStatus::Active {
             return Err(EnterpriseError::EnterpriseNotActive(
                 self.plan.snapshot.enterprise,
@@ -1026,6 +1048,11 @@ pub fn validate_enterprise_cycle_plan(
             found: record.version(),
         });
     }
+    ensure_version_can_advance_by(
+        record.version(),
+        1 + u32::from(plan.snapshot.suspends_after_settlement),
+        "enterprise",
+    )?;
     if record.status() != EnterpriseStatus::Active {
         return Err(EnterpriseError::EnterpriseNotActive(
             plan.snapshot.enterprise,
@@ -1212,6 +1239,7 @@ impl ValidatedEnterpriseStatusChange {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "enterprise")?;
         if let Some(authority) = self.authority {
             ensure_mandate_authority_current(state, authority)?;
             validate_enterprise_environment(
@@ -1254,7 +1282,15 @@ impl ValidatedEnterpriseStatusChange {
             EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
             EnterpriseStatusChange::Retire => EnterpriseStatus::Retired,
         };
-        let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
+        let next_cycle_at = self
+            .cycle_duration
+            .map(|duration| {
+                state
+                    .now()
+                    .checked_add(duration)
+                    .ok_or(EnterpriseError::SimulationTimeOverflow)
+            })
+            .transpose()?;
         // Resuming restarts the chronic-loss grace window at the actual resume instant.
         let loss_streak_anchor =
             (self.change == EnterpriseStatusChange::Resume).then_some(state.now());
@@ -1283,6 +1319,7 @@ pub fn validate_suspend_enterprise(
             EnterpriseStatus::Retired => EnterpriseError::EnterpriseRetired(enterprise),
         });
     }
+    ensure_version_can_advance(record.version(), "enterprise")?;
     Ok(ValidatedEnterpriseStatusChange {
         enterprise,
         expected_version: record.version(),
@@ -1310,6 +1347,7 @@ pub fn validate_resume_enterprise(
         EnterpriseStatus::Suspended => {}
         EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
     }
+    ensure_version_can_advance(record.version(), "enterprise")?;
     let authority = resolve_mandate_authority(state, record.authority())?;
     validate_enterprise_environment(
         state,
@@ -1334,6 +1372,10 @@ pub fn validate_resume_enterprise(
         Some(record.id()),
     )?;
     let cycle_duration = definition.economics().cycle();
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(EnterpriseError::SimulationTimeOverflow)?;
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, record.supporting_businesses())?;
     let host_business_version = match record.location() {
@@ -1376,6 +1418,7 @@ pub fn validate_retire_enterprise(
         EnterpriseStatus::Suspended => {}
         EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
     }
+    ensure_version_can_advance(record.version(), "enterprise")?;
     Ok(ValidatedEnterpriseStatusChange {
         enterprise,
         expected_version: record.version(),

@@ -5,6 +5,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
 use crate::legal::{PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus};
 use crate::operations::OperationStatus;
@@ -71,6 +72,8 @@ pub enum PoliceResponseError {
     StaleInstitutionalContext,
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -260,6 +263,7 @@ impl ValidatedPoliceResponseArrival {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "police response")?;
         if state.now() != self.arrived_at {
             return Err(PoliceResponseError::StaleTime {
                 expected: self.arrived_at,
@@ -283,6 +287,7 @@ pub(crate) fn validate_police_response_arrival(
         .get_police_response(response)
         .ok_or(PoliceResponseError::MissingResponse(response))?;
     validate_arrival_dependencies(state, record)?;
+    ensure_version_can_advance(record.version(), "police response")?;
     Ok(ValidatedPoliceResponseArrival {
         response,
         expected_version: record.version(),

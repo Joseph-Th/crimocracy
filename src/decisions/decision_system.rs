@@ -7,6 +7,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{
+    VersionCapacityError, advance_version_preflighted, ensure_version_can_advance,
+};
 use crate::decisions::{
     DecisionCancellationReason, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
     DecisionRequestRecord, DecisionResponse, DecisionStatus, RecruitmentApprovalContext,
@@ -156,6 +159,8 @@ pub enum DecisionError {
     Operation(#[from] OperationError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -184,6 +189,7 @@ impl ValidatedOperationDecisionCancellation {
                 found: decision.version(),
             });
         }
+        ensure_version_can_advance(decision.version(), "decision request")?;
         if decision.status() != DecisionStatus::Pending {
             return Err(DecisionError::DecisionNotPending(self.decision));
         }
@@ -251,6 +257,7 @@ pub(crate) fn validate_cancel_operation_decision_for_detention(
             character,
         });
     }
+    ensure_version_can_advance(decision.version(), "decision request")?;
     Ok(Some(ValidatedOperationDecisionCancellation {
         decision: decision_id,
         operation,
@@ -312,6 +319,7 @@ impl ValidatedDecisionRequest {
                 operation: operation_id,
             });
         }
+        ensure_version_can_advance(operation.version(), "operation")?;
         if let Some(decision) = state.decisions.pending_for_operation(operation_id) {
             return Err(DecisionError::ExistingPendingDecision {
                 operation: operation_id,
@@ -394,6 +402,7 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
             operation: operation_id,
         });
     }
+    ensure_version_can_advance(operation.version(), "operation")?;
     if let Some(decision) = state.decisions.pending_for_operation(operation_id) {
         return Err(DecisionError::ExistingPendingDecision {
             operation: operation_id,
@@ -420,10 +429,8 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
             response: response_id,
         });
     }
-    let expected_version = response
-        .version()
-        .checked_add(1)
-        .expect("police response version counter exhausted");
+    ensure_version_can_advance(response.version(), "police response")?;
+    let expected_version = advance_version_preflighted(response.version());
     let draft = DecisionRequestDraft {
         requester: operation.leader(),
         context: DecisionContext::OperationPoliceArrival {
@@ -740,6 +747,7 @@ impl ValidatedDecisionResolution {
                 found: decision.version(),
             });
         }
+        ensure_version_can_advance(decision.version(), "decision request")?;
         if decision.status() != DecisionStatus::Pending {
             return Err(DecisionError::DecisionNotPending(self.decision));
         }
@@ -770,6 +778,7 @@ impl ValidatedDecisionResolution {
                         found: record.version(),
                     });
                 }
+                ensure_version_can_advance(record.version(), "operation")?;
                 if record.status() != OperationStatus::AwaitingDecision {
                     return Err(DecisionError::OperationNotAwaitingDecision { operation });
                 }
@@ -851,6 +860,7 @@ pub fn validate_resolve_decision(
     if record.status() != DecisionStatus::Pending {
         return Err(DecisionError::DecisionNotPending(decision));
     }
+    ensure_version_can_advance(record.version(), "decision request")?;
     if record.recipient() != resolver {
         return Err(DecisionError::InvalidResolver {
             decision,
@@ -871,6 +881,7 @@ pub fn validate_resolve_decision(
             if operation_record.status() != OperationStatus::AwaitingDecision {
                 return Err(DecisionError::OperationNotAwaitingDecision { operation });
             }
+            ensure_version_can_advance(operation_record.version(), "operation")?;
             // Arrival processing already applied any standing pre-entry abort before raising
             // the decision, so a Continue here always resumes and an Abort stands down.
             let next_status = match response {

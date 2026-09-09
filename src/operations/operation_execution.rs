@@ -7,6 +7,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::economy::business_economy_system::{
     BusinessEconomyError, ValidatedBusinessDisruption, validate_disrupt_business_economy,
 };
@@ -152,6 +153,8 @@ pub(crate) enum OperationResolutionError {
     BusinessEconomy(#[from] BusinessEconomyError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -515,6 +518,7 @@ impl ValidatedOperationResolution {
             .incident
             .as_ref()
             .map(ValidatedIncidentIntake::evidence_count)
+            .transpose()?
             .unwrap_or(0);
         let surveillance_information_count = u32::try_from(self.surveillance_information.len())
             .expect("surveillance information count must fit u32");
@@ -546,6 +550,11 @@ impl ValidatedOperationResolution {
         }
         state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan)?;
+        let operation = state
+            .operations
+            .get_operation(self.plan.snapshot.operation)
+            .expect("validated resolution operation must still exist");
+        ensure_version_can_advance(operation.version(), "operation")?;
         if let Some(snapshot) = self.incident_authority {
             validate_case_intake_authority_snapshot(state, snapshot).map_err(
                 |error| match error {
@@ -722,6 +731,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .operations
         .get_operation(plan.snapshot.operation)
         .expect("validated resolution operation must exist");
+    ensure_version_can_advance(record.version(), "operation")?;
     let expected_property_proceeds =
         resolve_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
     if plan.outcome.property_proceeds_plan != expected_property_proceeds {

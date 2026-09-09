@@ -5,6 +5,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, DecisionRequestId, IdKind, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::ensure_version_can_advance;
 use crate::history::history_system::{ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
@@ -133,6 +134,7 @@ impl ValidatedOperationAbort {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "operation")?;
         if record.status() != self.expected_status {
             return Err(OperationError::InvalidAbortCause {
                 operation: self.operation,
@@ -244,6 +246,7 @@ fn validate_operation_abort(
         .operations
         .get_operation(operation)
         .ok_or(OperationError::MissingOperation(operation))?;
+    ensure_version_can_advance(record.version(), "operation")?;
     let phase = match (record.status(), cause) {
         (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::BeforeStart

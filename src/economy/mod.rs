@@ -10,6 +10,7 @@ use crate::core::id::{
     BusinessCycleId, BusinessId, FinancialAccountId, InformationId, LedgerTransactionId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::finance::Money;
 use crate::world::BusinessOwner;
 use serde::{Deserialize, Serialize};
@@ -301,10 +302,7 @@ impl EconomyState {
         record.next_cycle_at = Some(next_cycle_at);
         // A new operating cycle starts a fresh laundering plausibility window.
         record.laundered_this_cycle = Money::ZERO;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("business economy version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
         self.active_by_next_cycle
             .entry(next_cycle_at)
             .or_default()
@@ -362,10 +360,7 @@ impl EconomyState {
         if let Some(anchor) = loss_streak_anchor {
             record.loss_streak_anchor = Some(anchor);
         }
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("business economy version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     /// Extends the sabotage damage horizon for a business economy. The horizon is monotone:
@@ -379,10 +374,7 @@ impl EconomyState {
             Some(current) if current > disrupted_through => current,
             _ => disrupted_through,
         });
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("business economy version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     /// Writes the laundered street-cash volume absorbed by this front in its current cycle.
@@ -395,10 +387,7 @@ impl EconomyState {
             .get_mut(&business)
             .expect("validated front business economy disappeared before laundering commit");
         record.laundered_this_cycle = total;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("business economy version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     fn remove_schedule_index(

@@ -7,6 +7,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::KnowledgeHolder;
 use crate::operations::{OperationKind, OperationStatus};
 use crate::opportunities::{
@@ -153,6 +154,8 @@ pub enum OpportunityError {
     Report(#[from] ReportError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub struct ValidatedOpportunityDiscovery {
@@ -337,6 +340,7 @@ impl ValidatedOpportunityDismissal {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "opportunity")?;
         validate_not_expired(state, record)?;
         state.opportunities.dismiss(self.opportunity, state.now());
         Ok(())
@@ -348,6 +352,7 @@ pub fn validate_dismiss_opportunity(
     opportunity: OpportunityId,
 ) -> Result<ValidatedOpportunityDismissal, OpportunityError> {
     let record = validate_open_opportunity(state, opportunity)?;
+    ensure_version_can_advance(record.version(), "opportunity")?;
     validate_not_expired(state, record)?;
     Ok(ValidatedOpportunityDismissal {
         opportunity,
@@ -372,6 +377,7 @@ impl ValidatedOpportunityConversion {
                 found: opportunity.version(),
             });
         }
+        ensure_version_can_advance(opportunity.version(), "opportunity")?;
         validate_not_expired(state, opportunity)?;
         let operation = state
             .operations
@@ -398,6 +404,7 @@ pub fn validate_convert_opportunity(
     operation: OperationId,
 ) -> Result<ValidatedOpportunityConversion, OpportunityError> {
     let opportunity_record = validate_open_opportunity(state, opportunity)?;
+    ensure_version_can_advance(opportunity_record.version(), "opportunity")?;
     validate_not_expired(state, opportunity_record)?;
     let operation_record = state
         .operations
@@ -562,6 +569,7 @@ impl ValidatedOpportunityExpiry {
                 found: opportunity.version(),
             });
         }
+        ensure_version_can_advance(opportunity.version(), "opportunity")?;
         let valid_until = validate_expiry_due(state, opportunity)?;
         debug_assert_eq!(valid_until, self.valid_until);
 
@@ -579,6 +587,7 @@ fn validate_expire_opportunity(
     opportunity: OpportunityId,
 ) -> Result<ValidatedOpportunityExpiry, OpportunityError> {
     let record = validate_open_opportunity(state, opportunity)?;
+    ensure_version_can_advance(record.version(), "opportunity")?;
     let valid_until = validate_expiry_due(state, record)?;
     let definition = registry.get_operation(record.context().operation_kind());
     let mut entities = record.context().targets().clone();
@@ -627,27 +636,28 @@ fn validate_expiry_due(
 pub(crate) fn apply_opportunity_expiry(
     registry: &Registry,
     state: &mut AppState,
-) -> Vec<OpportunityId> {
+) -> Result<Vec<OpportunityId>, OpportunityError> {
     let due = state.opportunities.find_due_expiring(state.now());
-    let mut expired = Vec::with_capacity(due.len());
-    let mut drifted = None;
+    let mut validated = Vec::with_capacity(due.len());
     for opportunity in due {
-        // Like autonomous recruitment and staffing, expiry is an autonomous pass: one
-        // drifted record must not abort due work everywhere else in the same minute.
-        let outcome = validate_expire_opportunity(registry, state, opportunity)
-            .and_then(|transaction| transaction.commit(state).map(|_| opportunity));
-        match outcome {
-            Ok(id) => expired.push(id),
-            // An overdue opportunity left Open would contradict the Open-opportunity
-            // invariant, so the drift surfaces here instead of hiding behind the lenient
-            // pass until a later structural check.
-            Err(error) => drifted = Some((opportunity, error)),
-        }
+        validated.push((
+            opportunity,
+            validate_expire_opportunity(registry, state, opportunity)?,
+        ));
     }
-    if let Some((opportunity, error)) = drifted {
-        panic!("overdue opportunity {opportunity:?} could not expire: {error}");
+    // Every due expiry writes one lifecycle report before the opportunity record changes.
+    // Reserve the entire batch before the first report is persisted so allocator exhaustion
+    // cannot expire only a prefix of the same-minute opportunity set.
+    let report_budget = vec![(IdKind::Report, 1); validated.len()];
+    state.ids.reserve_many(&report_budget)?;
+    let mut expired = Vec::with_capacity(validated.len());
+    for (opportunity, transaction) in validated {
+        transaction
+            .commit(state)
+            .expect("preflighted opportunity expiry must remain valid within one batch");
+        expired.push(opportunity);
     }
-    expired
+    Ok(expired)
 }
 
 #[cfg(test)]

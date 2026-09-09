@@ -2,6 +2,9 @@
 
 use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
+use crate::core::version::{
+    VersionCapacityError, advance_version_preflighted, ensure_version_can_advance,
+};
 use crate::legal::{JurisdictionDraft, JurisdictionRecord};
 use crate::world::OrganizationKind;
 use thiserror::Error;
@@ -14,6 +17,8 @@ pub enum JurisdictionError {
     InvalidAuthorityKind(OrganizationId),
     #[error("jurisdiction must contain at least one neighborhood")]
     EmptyJurisdiction,
+    #[error("jurisdiction for organization {0} already has the requested assignment")]
+    JurisdictionUnchanged(OrganizationId),
     #[error("neighborhood {0} does not exist or is not active")]
     MissingNeighborhood(NeighborhoodId),
     #[error(
@@ -32,6 +37,8 @@ pub enum JurisdictionError {
         expected: Option<u32>,
         found: Option<u32>,
     },
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -54,11 +61,9 @@ impl ValidatedJurisdiction {
             });
         }
         validate_jurisdiction_dependencies(state, &self.draft)?;
-        let version = self
-            .expected_version
-            .unwrap_or(0)
-            .checked_add(1)
-            .expect("jurisdiction version counter exhausted");
+        let previous_version = self.expected_version.unwrap_or(0);
+        ensure_version_can_advance(previous_version, "jurisdiction")?;
+        let version = advance_version_preflighted(previous_version);
         let organization = self.draft.organization;
         state.legal.set_jurisdiction(JurisdictionRecord {
             organization,
@@ -75,10 +80,15 @@ pub fn validate_set_jurisdiction(
     draft: JurisdictionDraft,
 ) -> Result<ValidatedJurisdiction, JurisdictionError> {
     validate_jurisdiction_dependencies(state, &draft)?;
-    let expected_version = state
-        .legal
-        .get_jurisdiction(draft.organization)
-        .map(JurisdictionRecord::version);
+    let current = state.legal.get_jurisdiction(draft.organization);
+    if current.is_some_and(|record| {
+        record.neighborhoods() == &draft.neighborhoods
+            && record.case_intake_priority() == draft.case_intake_priority
+    }) {
+        return Err(JurisdictionError::JurisdictionUnchanged(draft.organization));
+    }
+    let expected_version = current.map(JurisdictionRecord::version);
+    ensure_version_can_advance(expected_version.unwrap_or(0), "jurisdiction")?;
     Ok(ValidatedJurisdiction {
         draft,
         expected_version,

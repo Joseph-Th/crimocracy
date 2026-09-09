@@ -6,6 +6,9 @@ use crate::core::id::{
     WitnessStatementId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::legal::{
     Admissibility, CaseWitnessDraft, CaseWitnessRecord, EvidenceAssessment, EvidenceConnection,
     EvidenceIdentity, EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength,
@@ -66,6 +69,8 @@ pub enum WitnessError {
     },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -110,6 +115,7 @@ pub fn validate_register_case_witness(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must still exist");
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     let witness = state
         .world
         .get_character(draft.witness)
@@ -138,6 +144,7 @@ fn validate_registration_snapshot(
             found: investigation.version(),
         });
     }
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     let witness = state
         .world
         .get_character(draft.witness)
@@ -232,6 +239,8 @@ pub fn validate_set_witness_cooperation(
         .legal
         .get_investigation(witness.investigation())
         .expect("validated case witness investigation must exist");
+    ensure_version_can_advance(witness.version(), "case witness")?;
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     Ok(ValidatedWitnessCooperation {
         case_witness,
         cooperation,
@@ -254,10 +263,27 @@ pub struct ValidatedWitnessStatement {
 }
 
 impl ValidatedWitnessStatement {
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), WitnessError> {
+        let case_witness = validate_witness_mutation_snapshot(
+            state,
+            self.draft.case_witness,
+            self.expected_witness_version,
+            self.expected_investigation_version,
+        )?;
+        validate_statement_dependencies(state, case_witness, &self.draft)?;
+        let investigation = state
+            .legal
+            .get_investigation(case_witness.investigation())
+            .expect("validated witness investigation must exist");
+        ensure_version_can_advance_by(investigation.version(), 2, "investigation")
+            .map_err(Into::into)
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<WitnessStatementOutcome, WitnessError> {
         state
             .ids
             .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
+        self.ensure_current(state)?;
         let (investigation_id, witness_id, cooperation) = {
             let case_witness = validate_witness_mutation_snapshot(
                 state,
@@ -272,7 +298,6 @@ impl ValidatedWitnessStatement {
                 case_witness.cooperation(),
             )
         };
-
         let statement = state
             .ids
             .next_witness_statement()
@@ -339,6 +364,7 @@ pub fn validate_record_witness_statement(
         .legal
         .get_investigation(case_witness.investigation())
         .expect("validated witness investigation must exist");
+    ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
     Ok(ValidatedWitnessStatement {
         draft,
         expected_witness_version: case_witness.version(),
@@ -363,6 +389,7 @@ fn validate_witness_mutation_snapshot(
             found: case_witness.version(),
         });
     }
+    ensure_version_can_advance(case_witness.version(), "case witness")?;
     let investigation = state
         .legal
         .get_investigation(case_witness.investigation())
@@ -376,6 +403,7 @@ fn validate_witness_mutation_snapshot(
             found: investigation.version(),
         });
     }
+    ensure_version_can_advance(investigation.version(), "investigation")?;
     if investigation.status() != InvestigationStatus::Active {
         return Err(WitnessError::InactiveInvestigation(investigation.id()));
     }

@@ -6,6 +6,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{InformationId, OperationId, OpportunityId, OrganizationId, ReportId};
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::operations::OperationKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -329,10 +330,7 @@ impl OpportunityState {
             .get_mut(&id)
             .expect("validated opportunity disappeared before lifecycle mutation");
         record.resolution = Some(resolution);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("opportunity version overflowed u32");
+        record.version = advance_version_preflighted(record.version);
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {

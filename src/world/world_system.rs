@@ -6,6 +6,9 @@ use crate::core::id::{
     OperationId, OrganizationId, ProsecutionCaseId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{
+    VersionCapacityError, advance_version_preflighted, ensure_version_can_advance,
+};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
 use crate::registry::Registry;
@@ -148,6 +151,8 @@ pub enum WorldError {
     InvalidPlayerOrganization(OrganizationId),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub fn insert_organization(
@@ -253,6 +258,7 @@ impl ValidatedCharacterReassignment {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "character")?;
         validate_reassignment_preconditions(
             state,
             self.character,
@@ -282,6 +288,7 @@ pub fn validate_reassign_character(
         return Err(WorldError::CharacterReassignmentUnchanged { character });
     }
     validate_reassignment_preconditions(state, character, organization, supervisor)?;
+    ensure_version_can_advance(record.version(), "character")?;
 
     Ok(ValidatedCharacterReassignment {
         character,
@@ -500,14 +507,12 @@ impl ValidatedBusinessOwnershipTransfer {
         }
         validate_business_owner(state, self.new_owner)?;
         validate_business_support_ownership_change(state, self.business, self.new_owner)?;
+        ensure_version_can_advance(record.version(), "business")?;
         debug_assert_ne!(
             self.new_owner, self.previous_owner,
             "validation rejects unchanged ownership before a token exists"
         );
-        let resulting_business_version = self
-            .expected_version
-            .checked_add(1)
-            .expect("business version counter exhausted");
+        let resulting_business_version = advance_version_preflighted(self.expected_version);
         let id = state.ids.next_business_ownership_change()?;
         state
             .world
@@ -537,6 +542,7 @@ pub fn validate_transfer_business_ownership(
             owner: new_owner,
         });
     }
+    ensure_version_can_advance(record.version(), "business")?;
     Ok(ValidatedBusinessOwnershipTransfer {
         business,
         new_owner,

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum AttentionClass {
@@ -9,6 +10,12 @@ pub enum AttentionClass {
     Notable,
     Exception,
     Crisis,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum AttentionSettingsError {
+    #[error("auto-pause can only be configured for Exception or Crisis attention")]
+    UnsupportedAutoPauseClass,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

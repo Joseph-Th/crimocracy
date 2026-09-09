@@ -847,6 +847,92 @@ fn expiry_token_rejects_clock_staleness_without_partial_report_mutation() {
 }
 
 #[test]
+fn expiry_batch_report_exhaustion_leaves_every_due_opportunity_open() {
+    let mut fixture = make_fixture();
+    let first = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(2)),
+    )
+    .expect("first expiring opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("first expiring opportunity should commit");
+    let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
+    second_draft.operation_kind = OperationKind::Robbery;
+    second_draft.summary =
+        "Bellmore Jewelry may also be vulnerable to a direct robbery.".to_owned();
+    let second =
+        validate_discover_operation_opportunity(&fixture.registry, &fixture.state, second_draft)
+            .expect("second expiring opportunity should validate")
+            .commit(&mut fixture.state)
+            .expect("second expiring opportunity should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(2));
+    let report_count_before = fixture.state.reports().reports().count();
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let error = apply_opportunity_expiry(&fixture.registry, &mut fixture.state)
+        .expect_err("batch report exhaustion must reject before the first expiry");
+    assert!(matches!(
+        error,
+        OpportunityError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
+    ));
+    for opportunity in [first, second] {
+        let record = fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("rejected batch must preserve every opportunity");
+        assert_eq!(record.status(), OpportunityStatus::Open);
+        assert_eq!(record.version(), 1);
+    }
+    assert_eq!(
+        fixture.state.reports().reports().count(),
+        report_count_before
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::Report),
+        u32::MAX,
+        "failed batch preflight must not consume or wrap the exhausted allocator"
+    );
+}
+
+#[test]
+fn exhausted_opportunity_version_rejects_lifecycle_change_without_mutation() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("opportunity should commit");
+    fixture
+        .state
+        .opportunities
+        .records
+        .get_mut(&opportunity)
+        .expect("opportunity should persist")
+        .version = u32::MAX;
+
+    let error = match validate_dismiss_opportunity(&fixture.state, opportunity) {
+        Ok(_) => panic!("exhausted opportunity version must reject before creating a token"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, OpportunityError::VersionCapacity(_)));
+    let record = fixture
+        .state
+        .opportunities()
+        .get_opportunity(opportunity)
+        .expect("rejected dismissal must preserve opportunity");
+    assert_eq!(record.status(), OpportunityStatus::Open);
+    assert_eq!(record.version(), u32::MAX);
+}
+
+#[test]
 fn conversion_token_rejects_operation_lifecycle_change_without_mutating_opportunity() {
     let mut fixture = make_fixture();
     let opportunity = validate_discover_operation_opportunity(

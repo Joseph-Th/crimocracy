@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::attention::AttentionClass;
+use crate::core::attention::{AttentionClass, AttentionSettingsError};
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKind;
 use crate::core::invariants::{StateValidationError, validate_state};
@@ -70,6 +70,38 @@ use crate::world::{
 };
 use rand_core::RngCore;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[test]
+fn auto_pause_rejects_non_interrupting_attention_without_mutation() {
+    let mut state = AppState::new(0xA770_5E77);
+    assert!(
+        state
+            .attention_settings()
+            .is_auto_pause_enabled(AttentionClass::Exception)
+    );
+    assert!(
+        !state
+            .attention_settings()
+            .is_auto_pause_enabled(AttentionClass::Routine)
+    );
+
+    assert_eq!(
+        state.set_auto_pause(AttentionClass::Routine, true),
+        Err(AttentionSettingsError::UnsupportedAutoPauseClass)
+    );
+    assert!(
+        state
+            .attention_settings()
+            .is_auto_pause_enabled(AttentionClass::Exception),
+        "rejected setting must preserve existing preferences"
+    );
+    assert!(
+        !state
+            .attention_settings()
+            .is_auto_pause_enabled(AttentionClass::Routine),
+        "unsupported class must not enter persisted attention state"
+    );
+}
 
 struct TestScenario {
     state: AppState,
@@ -301,7 +333,8 @@ fn make_test_scenario() -> TestScenario {
         },
     )
     .expect("relationship fixture should validate")
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("relationship should commit");
     validate_set_relationship(
         &state,
         associate,
@@ -317,7 +350,8 @@ fn make_test_scenario() -> TestScenario {
         },
     )
     .expect("cross-organization relationship fixture should validate")
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("relationship should commit");
 
     let field_information = validate_record_information(
         &state,
@@ -1210,8 +1244,12 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
 
     // Toggle both interrupting classes off their defaults before saving so the round trip
     // proves changed preferences, not just restored defaults.
-    state.set_auto_pause(AttentionClass::Exception, false);
-    state.set_auto_pause(AttentionClass::Crisis, false);
+    state
+        .set_auto_pause(AttentionClass::Exception, false)
+        .expect("Exception auto-pause should be configurable");
+    state
+        .set_auto_pause(AttentionClass::Crisis, false)
+        .expect("Crisis auto-pause should be configurable");
 
     let envelope = build_save(&registry, &state).expect("valid pending state should save");
     let bytes = bincode::serialize(&envelope).expect("save envelope should serialize");

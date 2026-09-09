@@ -31,6 +31,30 @@ struct Fixture {
     evidence: EvidenceId,
 }
 
+#[test]
+fn custody_release_horizon_overflow_keeps_detainee_held_without_panicking() {
+    let mut fixture = fixture();
+    let maximum_detention = fixture.registry.legal().maximum_detention();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(maximum_detention.as_minutes()) + 1,
+    ));
+    let arrest = arrest_fixture(&mut fixture);
+
+    let released = apply_due_custody_releases(&mut fixture.state, maximum_detention)
+        .expect("unrepresentable release endpoint should simply remain outside the due set");
+    assert!(released.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(arrest)
+            .expect("arrest should remain persisted")
+            .status(),
+        ArrestStatus::Detained
+    );
+    validate_invariants(&fixture.state);
+}
+
 #[derive(Clone, Serialize)]
 struct EvidenceIdentityWire {
     id: EvidenceId,
@@ -478,6 +502,144 @@ fn custody_cancels_scheduled_investigation_work_with_arrest_provenance() {
     );
     validate_state(&fixture.state).expect("work-cancellation custody state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn custody_preflights_shared_case_version_budget_for_work_cancel_and_lead_release() {
+    use crate::legal::investigation_system::validate_assign_investigator;
+    use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+    use crate::legal::{InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind};
+    use crate::world::{CapabilityKind, Rating};
+
+    let mut fixture = fixture();
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Capacity Detective".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(85).expect("investigation capability should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective should validate");
+    let subject = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Capacity Case Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("case subject should validate");
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Capacity workload case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(subject)]),
+        },
+    )
+    .expect("work case should validate")
+    .commit(&mut fixture.state)
+    .expect("work case should commit");
+    let evidence = add_character_evidence(&mut fixture.state, fixture.police, case, subject);
+    validate_assign_investigator(&fixture.state, case, detective)
+        .expect("detective assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+    let work = validate_schedule_investigation_work(
+        &fixture.registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: case,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::Evidence(evidence),
+        },
+    )
+    .expect("detective work should validate")
+    .commit(&mut fixture.state)
+    .expect("detective work should commit");
+    let arrest_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Capacity detective custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detective)]),
+        },
+    )
+    .expect("detective custody case should validate")
+    .commit(&mut fixture.state)
+    .expect("detective custody case should commit");
+    let arrest_evidence =
+        add_character_evidence(&mut fixture.state, fixture.police, arrest_case, detective);
+
+    fixture
+        .state
+        .legal
+        .investigations
+        .get_mut(&case)
+        .expect("work case should persist")
+        .version = u32::MAX - 1;
+    let error = validate_arrest(
+        &fixture.state,
+        ArrestDraft {
+            character: detective,
+            investigation: arrest_case,
+            evidence: BTreeSet::from([arrest_evidence]),
+        },
+    )
+    .expect_err("custody must reject before two case-version advances exceed capacity");
+    match error {
+        ArrestError::VersionCapacity(error) => {
+            assert_eq!(error.record_kind(), "investigation");
+        }
+        other => panic!("unexpected custody capacity error: {other:?}"),
+    }
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(case)
+            .expect("rejected capacity preflight must preserve the case")
+            .version(),
+        u32::MAX - 1
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(work)
+            .is_some_and(
+                |record| record.status() == crate::legal::InvestigationWorkStatus::Scheduled
+            )
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(case)
+            .expect("rejected arrest must preserve work-case staffing")
+            .lead_investigator(),
+        Some(detective)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(detective)
+            .is_none()
+    );
 }
 
 fn fixture() -> Fixture {

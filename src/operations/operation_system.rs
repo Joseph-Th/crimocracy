@@ -6,6 +6,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::enterprises::EnterpriseStatus;
 use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
@@ -14,7 +15,7 @@ use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::operation_objective::{
     has_active_foreign_witness_case, has_pressureable_witness_case,
 };
-use crate::operations::operation_state::{pause_duration_minutes, shift_past_pause};
+use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::police_response_integration::{
     OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
     decide_operation_police_response_start,
@@ -240,6 +241,8 @@ pub enum OperationError {
     History(#[from] HistoryError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Debug)]
@@ -756,7 +759,12 @@ fn projected_authorized_operation_window(
     constraints: &[crate::operations::OperationConstraint],
 ) -> (SimTime, SimTime) {
     let start = earliest_operation_start_from_authorization(authorized_at, scheduled_for);
-    let mut end = start + registry.get_operation(kind).execution().duration();
+    // Authorization rejects an unrepresentable authored window before this projection is used
+    // for a new plan. Existing-state overlap checks are read-only, so clamp an impossible
+    // historical/malformed end to the finite horizon rather than letting a query panic.
+    let mut end = start
+        .checked_add(registry.get_operation(kind).execution().duration())
+        .unwrap_or(SimTime::from_minutes(u64::MAX));
     for constraint in constraints {
         let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
             continue;
@@ -795,7 +803,10 @@ fn validate_extraction_custody_window(
         draft.scheduled_for,
         &draft.constraints,
     );
-    let custody_ends_at = arrest.arrested_at() + registry.legal().maximum_detention();
+    let custody_ends_at = arrest
+        .arrested_at()
+        .checked_add(registry.legal().maximum_detention())
+        .ok_or(OperationError::SimulationTimeOverflow)?;
     if planned_end > custody_ends_at {
         return Err(OperationError::ExtractionOutlivesCustody {
             character: target,
@@ -909,7 +920,14 @@ pub(crate) fn validate_operation_resume_participants(
         .resolution_due_at()
         .expect("decision-blocked operation must retain its resolution due time");
     let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
-    let shifted_due_at = shift_past_pause(due_at, paused_minutes, "resolution time");
+    let shifted_due_at = checked_shift_past_pause(due_at, paused_minutes)
+        .ok_or(OperationError::SimulationTimeOverflow)?;
+    if let Some(entry_at) = record.entry_at()
+        && entry_at > paused_at
+        && checked_shift_past_pause(entry_at, paused_minutes).is_none()
+    {
+        return Err(OperationError::SimulationTimeOverflow);
+    }
     let window_start = record.started_at().unwrap_or(record.scheduled_for());
     for participant in record.participants() {
         let conflict = state
@@ -954,11 +972,11 @@ fn projected_operation_window(
     if existing.status() == OperationStatus::AwaitingDecision
         && let Some(paused_at) = existing.awaiting_decision_since()
     {
-        end = shift_past_pause(
-            end,
-            pause_duration_minutes(paused_at, now),
-            "projected resolution time",
-        );
+        // If this already-paused operation would extend past the representable clock horizon,
+        // it cannot safely resume. For booking purposes it occupies the crew through the end
+        // of representable time; the actual resume path rejects with SimulationTimeOverflow.
+        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, now))
+            .unwrap_or(SimTime::from_minutes(u64::MAX));
     }
     Some((start, end))
 }
@@ -1478,6 +1496,7 @@ impl ValidatedOperationStart {
                 found: record.version(),
             });
         }
+        ensure_version_can_advance(record.version(), "operation")?;
         if record.status() != OperationStatus::Authorized {
             return Err(OperationError::InvalidTransition {
                 status: record.status(),
@@ -1510,6 +1529,9 @@ fn map_police_start_planning_error(error: PoliceResponseIntegrationError) -> Ope
         PoliceResponseIntegrationError::MissingOperation(operation) => {
             OperationError::MissingOperation(operation)
         }
+        PoliceResponseIntegrationError::SimulationTimeOverflow => {
+            OperationError::SimulationTimeOverflow
+        }
         PoliceResponseIntegrationError::PoliceResponse(dispatch) => dispatch.into(),
         PoliceResponseIntegrationError::Decision(_)
         | PoliceResponseIntegrationError::Intelligence(_)
@@ -1536,6 +1558,7 @@ pub(crate) fn validate_begin_operation(
             transition: OperationTransition::Begin,
         });
     }
+    ensure_version_can_advance(record.version(), "operation")?;
     let earliest_start = resolve_operation_earliest_start(record);
     if state.now() < earliest_start {
         return Err(OperationError::StartBeforeEarliestStart {
@@ -1566,7 +1589,10 @@ pub(crate) fn validate_begin_operation(
     // A binding deadline compresses the modeled window: the operation resolves on the deadline
     // minute under time pressure (`resolve_time_pressure`), and only a deadline that passes
     // without resolution — a decision-paused operation — is hard-aborted afterwards.
-    let mut resolution_due_at = state.now() + duration;
+    let mut resolution_due_at = state
+        .now()
+        .checked_add(duration)
+        .ok_or(OperationError::SimulationTimeOverflow)?;
     for constraint in record.constraints() {
         let crate::operations::OperationConstraint::CompleteBefore(deadline) = constraint else {
             continue;

@@ -10,6 +10,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_contact_information_derivation,
 };
@@ -119,6 +120,8 @@ pub enum ContactError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +267,7 @@ impl ValidatedContactTermination {
         if record.status() != ContactStatus::Active {
             return Err(ContactError::ContactNotActive(self.contact));
         }
+        ensure_version_can_advance(record.version(), "institutional contact")?;
         if let Some(representation) = state
             .legal
             .active_representations_for_contact(self.contact)
@@ -292,6 +296,7 @@ pub fn validate_terminate_contact(
     if record.status() != ContactStatus::Active {
         return Err(ContactError::ContactNotActive(contact));
     }
+    ensure_version_can_advance(record.version(), "institutional contact")?;
     if let Some(representation) = state
         .legal
         .active_representations_for_contact(contact)

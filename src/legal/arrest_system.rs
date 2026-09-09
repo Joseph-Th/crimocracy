@@ -8,6 +8,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::decisions::decision_system::{
     DecisionError, ValidatedOperationDecisionCancellation,
     validate_cancel_operation_decision_for_detention,
@@ -134,6 +137,8 @@ pub enum ArrestError {
     LegalRepresentation(#[from] LegalRepresentationError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 struct ValidatedCustodyOperationPreemption {
@@ -236,6 +241,11 @@ impl ValidatedArrest {
         if let Some(release) = &self.lead_release {
             release.ensure_current(state)?;
         }
+        ensure_custody_investigation_version_budget(
+            state,
+            self.work_cancellation.as_ref(),
+            self.lead_release.as_ref(),
+        )?;
         self.prosecution_release.ensure_current(state)?;
         self.counsel_representation_ends.ensure_current(state)?;
         for preemption in &self.operation_preemptions {
@@ -301,6 +311,11 @@ pub fn validate_arrest(
     let work_cancellation =
         validate_cancel_investigation_work_for_detention(state, draft.character)?;
     let lead_release = validate_release_investigator_for_detention(state, draft.character)?;
+    ensure_custody_investigation_version_budget(
+        state,
+        work_cancellation.as_ref(),
+        lead_release.as_ref(),
+    )?;
     let prosecution_release =
         validate_release_prosecution_cases_for_detention(state, draft.character)?;
     let counsel_representation_ends =
@@ -328,6 +343,33 @@ pub fn validate_arrest(
         counsel_representation_ends,
         operation_preemptions,
     })
+}
+
+/// Custody can cancel a detective's scheduled work and release the same case's lead seat in one
+/// transaction. Both effects advance that investigation, so their shared finite version budget
+/// must be checked as a composite rather than as two individually valid one-step mutations.
+fn ensure_custody_investigation_version_budget(
+    state: &AppState,
+    work_cancellation: Option<&ValidatedInvestigationWorkCancellation>,
+    lead_release: Option<&ValidatedInvestigatorDetentionRelease>,
+) -> Result<(), ArrestError> {
+    let (Some(work_cancellation), Some(lead_release)) = (work_cancellation, lead_release) else {
+        return Ok(());
+    };
+    let work = state
+        .legal
+        .get_investigation_work(work_cancellation.work())
+        .ok_or(InvestigationWorkError::MissingWork(
+            work_cancellation.work(),
+        ))?;
+    if work.investigation() != lead_release.investigation() {
+        return Ok(());
+    }
+    let investigation = state.legal.get_investigation(work.investigation()).ok_or(
+        InvestigationError::MissingInvestigation(work.investigation()),
+    )?;
+    ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
+    Ok(())
 }
 
 fn validate_arrest_dependencies(
@@ -482,6 +524,7 @@ impl ValidatedRelease {
         if record.status() != ArrestStatus::Detained {
             return Err(ArrestError::NotDetained(self.arrest));
         }
+        ensure_version_can_advance(record.version(), "arrest")?;
         Ok(())
     }
 
@@ -503,6 +546,7 @@ pub fn validate_release_arrest(
     if record.status() != ArrestStatus::Detained {
         return Err(ArrestError::NotDetained(arrest));
     }
+    ensure_version_can_advance(record.version(), "arrest")?;
     Ok(ValidatedRelease {
         arrest,
         expected_version: record.version(),
@@ -520,7 +564,12 @@ pub(crate) fn apply_due_custody_releases(
     let due: Vec<ArrestId> = state
         .legal
         .detained_arrests()
-        .filter(|arrest| state.now() >= arrest.arrested_at() + maximum_detention)
+        .filter(|arrest| {
+            arrest
+                .arrested_at()
+                .checked_add(maximum_detention)
+                .is_some_and(|release_at| state.now() >= release_at)
+        })
         .map(|arrest| arrest.id())
         .collect();
     for arrest in &due {

@@ -15,6 +15,7 @@ use crate::core::id::{
     ProsecutionCaseId, ProsecutionReferralId, ReportId, WitnessStatementId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::records::{
     ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord,
@@ -995,10 +996,7 @@ impl LegalState {
             if added.is_empty() {
                 return;
             }
-            investigation.version = investigation
-                .version
-                .checked_add(1)
-                .expect("investigation version counter exhausted");
+            investigation.version = advance_version_preflighted(investigation.version);
         }
         for subject in added {
             self.indexes
@@ -1132,10 +1130,7 @@ impl LegalState {
                 .insert(record.investigation());
         }
         investigation.evidence.insert(record.id());
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         for source in record.derived_from() {
             self.indexes
                 .evidence
@@ -1186,10 +1181,7 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before witness registration");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         let previous = self.case_witnesses.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -1211,20 +1203,14 @@ impl LegalState {
                 .get_mut(&case_witness)
                 .expect("validated case witness disappeared before cooperation commit");
             record.cooperation = cooperation;
-            record.version = record
-                .version
-                .checked_add(1)
-                .expect("case witness version counter exhausted");
+            record.version = advance_version_preflighted(record.version);
             record.investigation()
         };
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before witness cooperation commit");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         self.set_investigation_activity(investigation_id, activity_at);
     }
     pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
@@ -1237,18 +1223,12 @@ impl LegalState {
             .expect("validated case witness disappeared before statement commit");
         let investigation_id = witness.investigation();
         witness.statements.insert(id);
-        witness.version = witness
-            .version
-            .checked_add(1)
-            .expect("case witness version counter exhausted");
+        witness.version = advance_version_preflighted(witness.version);
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before statement commit");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         let previous_evidence = self
             .indexes
             .witnesses
@@ -1309,10 +1289,7 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before work insertion");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         self.set_investigation_activity(investigation_id, scheduled_at);
     }
     pub(crate) fn set_investigation_work_resolution(
@@ -1355,30 +1332,20 @@ impl LegalState {
                 witness.interview_attempts = witness
                     .interview_attempts
                     .checked_add(1)
-                    .expect("witness interview attempt counter exhausted");
-                witness.version = witness
-                    .version
-                    .checked_add(1)
-                    .expect("case witness version counter exhausted");
+                    .expect("interview attempt capacity must be preflighted before completion");
+                witness.version = advance_version_preflighted(witness.version);
             }
             record.runtime.status = InvestigationWorkStatus::Completed;
             record.runtime.resolution = Some(resolution);
             record.runtime.cancellation = None;
-            record.runtime.version = record
-                .runtime
-                .version
-                .checked_add(1)
-                .expect("investigation work version counter exhausted");
+            record.runtime.version = advance_version_preflighted(record.runtime.version);
             record.investigation()
         };
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before work completion");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         self.set_investigation_activity(investigation_id, resolved_at);
     }
 
@@ -1413,21 +1380,14 @@ impl LegalState {
             record.runtime.status = InvestigationWorkStatus::Cancelled;
             record.runtime.resolution = None;
             record.runtime.cancellation = Some(cancellation);
-            record.runtime.version = record
-                .runtime
-                .version
-                .checked_add(1)
-                .expect("investigation work version counter exhausted");
+            record.runtime.version = advance_version_preflighted(record.runtime.version);
             record.investigation()
         };
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before work cancellation");
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         self.set_investigation_activity(investigation_id, cancelled_at);
     }
     pub(crate) fn set_investigation_status(
@@ -1446,10 +1406,7 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before lifecycle commit");
         investigation.status = status;
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         // Shelving or closing a case releases its lead: a case nobody works holds no
         // institutional attention, so its detective is free for other casework and a resumed
         // case re-enters the unstaffed index and is staffed again from available detectives.
@@ -1546,10 +1503,7 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before staffing commit");
         investigation.lead_investigator = Some(investigator);
-        investigation.version = investigation
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        investigation.version = advance_version_preflighted(investigation.version);
         self.indexes
             .investigations
             .active_without_lead
@@ -1578,10 +1532,7 @@ impl LegalState {
         assert_eq!(record.status, InvestigationStatus::Active);
         assert_eq!(record.lead_investigator, Some(investigator));
         record.lead_investigator = None;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("investigation version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
         if let Some(cases) = self
             .indexes
             .investigations
@@ -1681,10 +1632,7 @@ impl LegalState {
             .expect("validated patrol deployment disappeared before revision commit");
         record.windows = windows;
         record.last_changed_at = changed_at;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("patrol deployment version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
     pub(crate) fn set_patrol_deployment_status(
         &mut self,
@@ -1760,10 +1708,7 @@ impl LegalState {
             .expect("validated patrol deployment disappeared before lifecycle commit");
         record.status = status;
         record.last_changed_at = changed_at;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("patrol deployment version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
     pub(crate) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
         let id = record.id();
@@ -1814,11 +1759,7 @@ impl LegalState {
             .expect("validated police response disappeared before arrival commit");
         record.state.status = PoliceResponseStatus::Arrived;
         record.timing.arrived_at = Some(at);
-        record.state.version = record
-            .state
-            .version
-            .checked_add(1)
-            .expect("police response version counter exhausted");
+        record.state.version = advance_version_preflighted(record.state.version);
     }
     pub(crate) fn insert_arrest(&mut self, record: ArrestRecord) {
         let id = record.id();
@@ -1872,10 +1813,7 @@ impl LegalState {
             .expect("validated arrest disappeared before release commit");
         record.status = ArrestStatus::Released;
         record.released_at = Some(released_at);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("arrest version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
     pub(crate) fn insert_legal_representation(&mut self, record: LegalRepresentationRecord) {
         let id = record.id();
@@ -1966,10 +1904,7 @@ impl LegalState {
         record.lifecycle.end_reason = Some(reason);
         record.artifacts.ended_information = Some(information);
         record.artifacts.ended_report = Some(report);
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("legal representation version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
     pub(crate) fn insert_prosecution_case(
         &mut self,
@@ -2025,10 +1960,7 @@ impl LegalState {
             debug_assert!(inserted, "supplemental referral must add new evidence");
         }
         case.referrals.referrals.insert(referral_id);
-        case.version = case
-            .version
-            .checked_add(1)
-            .expect("prosecution case version counter exhausted");
+        case.version = advance_version_preflighted(case.version);
         self.indexes
             .prosecutions
             .referrals_by_case
@@ -2105,10 +2037,7 @@ impl LegalState {
         case.resolution_artifacts.resolution_information = Some(information);
         case.resolution_artifacts.resolution_report = Some(report);
         case.resolution_artifacts.resolution_prosecutor = Some(prosecutor);
-        case.version = case
-            .version
-            .checked_add(1)
-            .expect("prosecution case version counter exhausted");
+        case.version = advance_version_preflighted(case.version);
     }
 
     pub(crate) fn set_prosecution_case_prosecutor(
@@ -2123,10 +2052,7 @@ impl LegalState {
         debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
         debug_assert!(case.assigned_prosecutor().is_none());
         case.context.assigned_prosecutor = Some(prosecutor);
-        case.version = case
-            .version
-            .checked_add(1)
-            .expect("prosecution case version counter exhausted");
+        case.version = advance_version_preflighted(case.version);
         let removed = self
             .indexes
             .prosecutions
@@ -2153,10 +2079,7 @@ impl LegalState {
         debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
         debug_assert_eq!(case.assigned_prosecutor(), Some(prosecutor));
         case.context.assigned_prosecutor = None;
-        case.version = case
-            .version
-            .checked_add(1)
-            .expect("prosecution case version counter exhausted");
+        case.version = advance_version_preflighted(case.version);
         if let Some(cases) = self
             .indexes
             .prosecutions

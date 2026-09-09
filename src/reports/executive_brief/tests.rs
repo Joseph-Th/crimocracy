@@ -99,7 +99,8 @@ fn make_test_brief_fixture() -> BriefFixture {
         },
     )
     .expect("recruitment relationship fixture should validate")
-    .commit(&mut state);
+    .commit(&mut state)
+    .expect("relationship should commit");
     let mandate = validate_assign_mandate(
         &state,
         MandateDraft {

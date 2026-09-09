@@ -313,7 +313,7 @@ pub fn build_scenario(
             debt: level(0),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
 
     validate_set_relationship(
         &state,
@@ -329,7 +329,7 @@ pub fn build_scenario(
             debt: level(20),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
 
     // The burglar also carries an older personal bond to the boss himself: Carlo vouched for
     // him, but Marrow is the one who pulled him out of trouble years ago. Act-1 rival poaching
@@ -350,7 +350,7 @@ pub fn build_scenario(
             debt: level(20),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
 
     // Danny's pitch leverages a long-standing personal debt to Marrow, so the relationship edges
     // run from the candidate to the recruiter and the executive recruitment path stays canonical.
@@ -369,7 +369,7 @@ pub fn build_scenario(
             debt: level(40),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
 
     // The boss keeps an old friendship with the precinct's lead detective: the organization's
     // standing Police-channel institutional contact. It is world state every branch can use;
@@ -388,7 +388,7 @@ pub fn build_scenario(
             debt: level(10),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
 
     validate_assign_mandate(
         &state,

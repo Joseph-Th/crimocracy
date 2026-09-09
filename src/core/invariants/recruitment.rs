@@ -577,7 +577,9 @@ pub(super) fn validate_recruitment_against_registry(
 
         let pair = (attempt.candidate(), attempt.target_organization());
         if let Some(previous_time) = previous_attempt_by_pair.insert(pair, attempt.occurred_at())
-            && attempt.occurred_at() < previous_time + definition.cooldown()
+            && previous_time
+                .checked_add(definition.cooldown())
+                .is_none_or(|next_eligible| attempt.occurred_at() < next_eligible)
         {
             return Err(StateValidationError::InvalidRecruitmentAttempt {
                 attempt: attempt.id(),

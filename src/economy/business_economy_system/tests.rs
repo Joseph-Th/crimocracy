@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::validate_invariants;
+use crate::core::invariants::{validate_invariants, validate_state_against_registry};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::economy::BusinessEconomyDraft;
@@ -475,6 +475,39 @@ fn establish_business_economy(registry: &Registry, fixture: &mut BusinessEconomy
     .expect("business economy fixture should validate")
     .commit(&mut fixture.state)
     .expect("business economy fixture should commit");
+}
+
+#[test]
+fn establishment_rejects_cycle_schedule_beyond_clock_horizon_without_mutation() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let cycle = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(cycle.as_minutes()) + 1,
+    ));
+    let before = bincode::serialize(&fixture.state).expect("boundary fixture should serialize");
+
+    let error = match validate_establish_business_economy(
+        &registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business: fixture.business,
+            operating_account: fixture.operating,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("unrepresentable business cycle schedule must reject during validation"),
+        Err(error) => error,
+    };
+    assert_eq!(error, BusinessEconomyError::SimulationTimeOverflow);
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected boundary state should serialize"),
+        before,
+        "failed schedule capacity must not establish or otherwise mutate the economy"
+    );
 }
 
 #[test]
@@ -1292,6 +1325,62 @@ fn repeated_sabotage_extends_but_never_shortens_the_disruption_horizon() {
             .disrupted_through(),
         Some(second_horizon),
         "a later hit must extend the horizon"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn same_minute_repeated_sabotage_keeps_success_without_redundant_economy_version_bump() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("first same-minute disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("first same-minute disruption should commit");
+    let after_first = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("disrupted economy should persist");
+    let first_version = after_first.version();
+    let first_horizon = after_first.disrupted_through();
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("a second successful sabotage at the same instant remains a valid consequence")
+        .commit(&mut fixture.state)
+        .expect("redundant horizon application should succeed without mutating the economy");
+    let after_second = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("business economy should persist");
+    assert_eq!(after_second.disrupted_through(), first_horizon);
+    assert_eq!(
+        after_second.version(),
+        first_version,
+        "an equal sabotage horizon must not invalidate unrelated economy snapshots"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn old_disruption_remains_registry_valid_when_current_clock_nears_horizon() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("ordinary disruption should validate")
+        .commit(&mut fixture.state)
+        .expect("ordinary disruption should commit");
+    let duration = registry.business_disruption().duration();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+
+    validate_state_against_registry(&registry, &fixture.state).expect(
+        "an old representable disruption must stay valid after the clock moves near its horizon",
     );
     validate_invariants(&fixture.state);
 }

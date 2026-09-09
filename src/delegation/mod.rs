@@ -7,6 +7,7 @@ use crate::core::id::{
     BusinessId, CharacterId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::time::SimTime;
+use crate::core::version::advance_version_preflighted;
 use crate::finance::Money;
 use crate::world::{PolicyKind, PolicySetting};
 use serde::{Deserialize, Serialize};
@@ -293,10 +294,7 @@ impl DelegationState {
         record.scopes = scopes;
         record.standing_orders = standing_orders;
         record.budget = budget;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("mandate version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
         for scope in record.scopes() {
             self.active_by_scope.entry(*scope).or_default().insert(id);
         }
@@ -329,10 +327,7 @@ impl DelegationState {
             .get_mut(&id)
             .expect("validated mandate disappeared before revocation commit");
         record.status = MandateStatus::Revoked;
-        record.version = record
-            .version
-            .checked_add(1)
-            .expect("mandate version counter exhausted");
+        record.version = advance_version_preflighted(record.version);
     }
 
     fn remove_scope_index(

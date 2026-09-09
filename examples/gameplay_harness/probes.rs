@@ -510,7 +510,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
             debt: level(10),
         },
     )?
-    .commit(&mut state);
+    .commit(&mut state)?;
     let contact = validate_establish_contact(
         &state,
         InstitutionalContactDraft {

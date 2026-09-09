@@ -270,11 +270,14 @@ fn apply_organization_payroll(
     {
         state.ids.reserve(IdKind::Report, 1)?;
     }
+    if let Some(consequences) = &consequences {
+        consequences.ensure_current(state)?;
+    }
     if let Some(transaction) = transaction {
         outcome.transaction = Some(transaction.commit(state)?);
     }
     if let Some(consequences) = consequences {
-        consequences.commit(state);
+        consequences.commit_preflighted(state);
     }
     Ok(Some(outcome))
 }
@@ -392,9 +395,16 @@ struct ValidatedPayrollShortfallConsequences {
 }
 
 impl ValidatedPayrollShortfallConsequences {
-    fn commit(self, state: &mut AppState) {
+    fn ensure_current(&self, state: &AppState) -> Result<(), RelationshipError> {
+        for relationship in &self.relationships {
+            relationship.ensure_current(state)?;
+        }
+        Ok(())
+    }
+
+    fn commit_preflighted(self, state: &mut AppState) {
         for relationship in self.relationships {
-            relationship.commit(state);
+            relationship.commit_preflighted(state);
         }
         if let Some(report) = self.report {
             report
@@ -424,12 +434,16 @@ fn validate_shortfall_consequences(
         };
         let increment =
             resolve_shortfall_resentment_increment(maximum_increment, per_member, *paid);
-        let mut dimensions = state
+        let current_dimensions = state
             .social()
             .get_relationship(*member, *supervisor)
             .map(|record| record.dimensions())
             .unwrap_or_else(RelationshipDimensions::zero);
+        let mut dimensions = current_dimensions;
         dimensions.resentment = dimensions.resentment.saturating_add(increment);
+        if dimensions == current_dimensions {
+            continue;
+        }
         relationships.push(validate_set_relationship(
             state,
             *member,

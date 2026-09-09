@@ -5,6 +5,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId, IdExhaustionError, IdKind};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::economy::{
     BusinessCycleRecord, BusinessEconomyDraft, BusinessOperatingStatus,
     build_business_economy_record,
@@ -63,6 +66,8 @@ pub enum BusinessEconomyError {
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("business economics overflowed while resolving business {0}")]
     ArithmeticOverflow(BusinessId),
+    #[error("business economy scheduling exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
     #[error(
         "business {business} economy changed after validation; expected version {expected}, found {found}"
     )]
@@ -97,6 +102,8 @@ pub enum BusinessEconomyError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub struct ValidatedBusinessEconomyEstablishment {
@@ -125,7 +132,9 @@ impl ValidatedBusinessEconomyEstablishment {
         )?;
         let business = self.draft.business;
         let established_at = state.now();
-        let next_cycle_at = established_at + self.cycle_duration;
+        let next_cycle_at = established_at
+            .checked_add(self.cycle_duration)
+            .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
         state.economy.insert(build_business_economy_record(
             self.draft,
             established_at,
@@ -154,6 +163,10 @@ pub fn validate_establish_business_economy(
         None,
     )?;
     let cycle_duration = registry.get_business(business.kind()).economics().cycle();
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
     Ok(ValidatedBusinessEconomyEstablishment {
         draft,
         cycle_duration,
@@ -197,7 +210,9 @@ impl ValidatedComposedBusinessEconomyEstablishment {
         );
         let business = self.draft.business;
         let established_at = state.now();
-        let next_cycle_at = established_at + self.cycle_duration;
+        let next_cycle_at = established_at
+            .checked_add(self.cycle_duration)
+            .expect("composed business-economy schedule was preflighted before mutation");
         state.economy.insert(build_business_economy_record(
             self.draft,
             established_at,
@@ -238,6 +253,10 @@ pub(crate) fn validate_composed_business_economy_establishment(
             draft.settlement_account,
         ));
     }
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
     Ok(ValidatedComposedBusinessEconomyEstablishment {
         draft,
         cycle_duration,
@@ -365,6 +384,10 @@ pub fn decide_business_cycle(
     // identical loss. Resume stays a manual canonical decision.
     let suspends_after_settlement = net_cash < Money::ZERO
         && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
+    let next_cycle_at = state
+        .now()
+        .checked_add(economics.cycle())
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
     Ok(BusinessCyclePlan {
         snapshot: BusinessCycleSnapshot {
             business,
@@ -376,7 +399,7 @@ pub fn decide_business_cycle(
             // business settles late (e.g. after a multi-minute advance), the next cycle starts
             // from now rather than from the stale due time, so missed cycles do not resolve as a
             // rapid one-per-minute backlog when work resumes.
-            next_cycle_at: state.now() + economics.cycle(),
+            next_cycle_at,
             suspends_after_settlement,
         },
         economics: BusinessCycleEconomics {
@@ -456,6 +479,11 @@ impl ValidatedBusinessCycle {
                 found: economy.version(),
             });
         }
+        ensure_version_can_advance_by(
+            economy.version(),
+            1 + u32::from(self.plan.snapshot.suspends_after_settlement),
+            "business economy",
+        )?;
         if economy.status() != BusinessOperatingStatus::Active {
             return Err(BusinessEconomyError::EconomyNotActive(
                 self.plan.snapshot.business,
@@ -550,6 +578,11 @@ pub fn validate_business_cycle_plan(
             found: economy.version(),
         });
     }
+    ensure_version_can_advance_by(
+        economy.version(),
+        1 + u32::from(plan.snapshot.suspends_after_settlement),
+        "business economy",
+    )?;
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(
             plan.snapshot.business,
@@ -672,6 +705,7 @@ impl ValidatedBusinessEconomyStatusChange {
                 found: economy.version(),
             });
         }
+        ensure_version_can_advance(economy.version(), "business economy")?;
         if self.change == BusinessEconomyStatusChange::Resume {
             validate_business(state, self.business)?;
             validate_accounts(
@@ -686,7 +720,15 @@ impl ValidatedBusinessEconomyStatusChange {
             BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
             BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
         };
-        let next_cycle_at = self.cycle_duration.map(|duration| state.now() + duration);
+        let next_cycle_at = self
+            .cycle_duration
+            .map(|duration| {
+                state
+                    .now()
+                    .checked_add(duration)
+                    .ok_or(BusinessEconomyError::SimulationTimeOverflow)
+            })
+            .transpose()?;
         // Resuming restarts the chronic-loss grace window at the actual resume instant.
         let loss_streak_anchor =
             (self.change == BusinessEconomyStatusChange::Resume).then_some(state.now());
@@ -711,6 +753,7 @@ pub fn validate_suspend_business_economy(
             return Err(BusinessEconomyError::EconomyNotActive(business));
         }
     }
+    ensure_version_can_advance(economy.version(), "business economy")?;
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
         expected_version: economy.version(),
@@ -766,6 +809,11 @@ fn validate_resume_with_cycle_duration(
         economy.settlement_account(),
         Some(business),
     )?;
+    ensure_version_can_advance(economy.version(), "business economy")?;
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
         expected_version: economy.version(),
@@ -1005,6 +1053,10 @@ pub struct ValidatedBusinessDisruption {
     business: BusinessId,
     expected_economy_version: u32,
     disrupted_through: SimTime,
+    /// A second successful sabotage at the same instant is still a real operation outcome, but
+    /// it does not change the already-equal damage horizon. Keep the token successful without
+    /// manufacturing freshness churn in the economy owner.
+    changes_horizon: bool,
     /// The instant the horizon was measured from. Commit rejects a token held across a
     /// clock advance, mirroring the cycle path's time-staleness convention.
     expected_now: SimTime,
@@ -1030,14 +1082,19 @@ impl ValidatedBusinessDisruption {
                 found: economy.version(),
             });
         }
+        if self.changes_horizon {
+            ensure_version_can_advance(economy.version(), "business economy")?;
+        }
         Ok(())
     }
 
     pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
         self.ensure_current(state)?;
-        state
-            .economy
-            .apply_disruption(self.business, self.disrupted_through);
+        if self.changes_horizon {
+            state
+                .economy
+                .apply_disruption(self.business, self.disrupted_through);
+        }
         Ok(())
     }
 }
@@ -1054,11 +1111,21 @@ pub fn validate_disrupt_business_economy(
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(business));
     }
-    let disrupted_through = state.now() + registry.business_disruption().duration();
+    let disrupted_through = state
+        .now()
+        .checked_add(registry.business_disruption().duration())
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    let changes_horizon = economy
+        .disrupted_through()
+        .is_none_or(|current| disrupted_through > current);
+    if changes_horizon {
+        ensure_version_can_advance(economy.version(), "business economy")?;
+    }
     Ok(ValidatedBusinessDisruption {
         business,
         expected_economy_version: economy.version(),
         disrupted_through,
+        changes_horizon,
         expected_now: state.now(),
     })
 }

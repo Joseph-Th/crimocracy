@@ -8,6 +8,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::finance::finance_system::{
     FinanceError, ValidatedLedgerTransaction, validate_record_transaction,
 };
@@ -124,6 +125,8 @@ pub enum PropertyDispositionError {
     Report(#[from] ReportError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
 }
 
 pub struct ValidatedPropertyDisposition {
@@ -161,6 +164,7 @@ impl ValidatedPropertyDisposition {
                 found: operation.version(),
             });
         }
+        ensure_version_can_advance(operation.version(), "operation")?;
         resolve_disposable_property(operation)?;
         let organization = operation.responsible_organization();
         let venue = state
@@ -229,6 +233,7 @@ pub fn validate_dispose_property(
         .operations
         .get_operation(draft.operation)
         .ok_or(PropertyDispositionError::MissingOperation(draft.operation))?;
+    ensure_version_can_advance(operation.version(), "operation")?;
     let proceeds = resolve_disposable_property(operation)?;
     let organization = operation.responsible_organization();
     let venue = state
@@ -533,6 +538,7 @@ pub fn validate_deposit_operation_cash(
         .operations
         .get_operation(draft.operation)
         .ok_or(PropertyDispositionError::MissingOperation(draft.operation))?;
+    ensure_version_can_advance(operation.version(), "operation")?;
     let proceeds = resolve_disposable_cash(operation)?;
     let organization = operation.responsible_organization();
     validate_accounts(
@@ -637,6 +643,7 @@ impl ValidatedCashDisposition {
                 found: operation.version(),
             });
         }
+        ensure_version_can_advance(operation.version(), "operation")?;
         resolve_disposable_cash(operation)?;
         let organization = operation.responsible_organization();
         validate_accounts(

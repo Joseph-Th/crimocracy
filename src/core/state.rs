@@ -189,19 +189,23 @@ impl AppState {
     /// Canonical mutation path for the persistent auto-pause preference. Only interrupting
     /// classes are settable: decisions carry `Exception` or `Crisis` attention exclusively,
     /// so a stored preference for any other class could never be observed.
-    pub fn set_auto_pause(&mut self, attention: AttentionClass, enabled: bool) {
-        assert!(
-            matches!(
-                attention,
-                AttentionClass::Exception | AttentionClass::Crisis
-            ),
-            "auto-pause preferences apply only to interrupting attention classes"
-        );
+    pub fn set_auto_pause(
+        &mut self,
+        attention: AttentionClass,
+        enabled: bool,
+    ) -> Result<(), crate::core::attention::AttentionSettingsError> {
+        if !matches!(
+            attention,
+            AttentionClass::Exception | AttentionClass::Crisis
+        ) {
+            return Err(crate::core::attention::AttentionSettingsError::UnsupportedAutoPauseClass);
+        }
         if enabled {
             self.campaign.attention.auto_pause.insert(attention);
         } else {
             self.campaign.attention.auto_pause.remove(&attention);
         }
+        Ok(())
     }
 
     pub(crate) fn state_schema_version(&self) -> u16 {
@@ -237,6 +241,11 @@ impl AppState {
 
     pub(crate) fn advance_clock(&mut self, duration: SimDuration) {
         self.simulation.now = self.simulation.now + duration;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_now_for_test(&mut self, now: SimTime) {
+        self.simulation.now = now;
     }
 
     pub(crate) fn operation_rng_mut(&mut self) -> &mut ChaCha8Rng {
