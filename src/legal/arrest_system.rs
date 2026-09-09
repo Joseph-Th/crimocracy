@@ -463,6 +463,10 @@ pub struct ValidatedRelease {
 }
 
 impl ValidatedRelease {
+    pub(crate) fn arrest(&self) -> ArrestId {
+        self.arrest
+    }
+
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), ArrestError> {
         let record = state
             .legal

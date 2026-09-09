@@ -5,9 +5,8 @@
 
 use crate::legal::legal_state::LegalState;
 use crate::legal::records::{
-    ArrestStatus, InformantStatus, InvestigationStatus, InvestigationWorkStatus,
-    LegalRepresentationOrigin, LegalRepresentationStatus, PatrolDeploymentStatus,
-    PoliceResponseStatus, ProsecutionCaseStatus,
+    ArrestStatus, InvestigationStatus, InvestigationWorkStatus, LegalRepresentationOrigin,
+    LegalRepresentationStatus, PatrolDeploymentStatus, PoliceResponseStatus, ProsecutionCaseStatus,
 };
 
 impl LegalState {
@@ -323,32 +322,21 @@ impl LegalState {
     fn has_consistent_informant_indexes(&self) -> bool {
         for informant in self.informants.values() {
             let id = informant.id();
-            if informant.status() != InformantStatus::Active {
-                return false;
-            }
-            let active_index = self
+            let pair_index = self
                 .indexes
                 .informants
-                .active_by_character_handler
+                .by_character_handler
                 .get(&(informant.character(), informant.handler()));
-            if active_index != Some(&id) || !self.indexes.informants.active.contains(&id) {
+            if pair_index != Some(&id) {
                 return false;
             }
         }
-        for id in &self.indexes.informants.active {
+        for (key, id) in &self.indexes.informants.by_character_handler {
             if !self
                 .informants
                 .get(id)
-                .is_some_and(|record| record.status() == InformantStatus::Active)
+                .is_some_and(|record| (record.character(), record.handler()) == *key)
             {
-                return false;
-            }
-        }
-        for (key, id) in &self.indexes.informants.active_by_character_handler {
-            if !self.informants.get(id).is_some_and(|record| {
-                record.status() == InformantStatus::Active
-                    && (record.character(), record.handler()) == *key
-            }) {
                 return false;
             }
         }

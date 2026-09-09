@@ -383,7 +383,7 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::ActiveInvestigationAssignment { .. }
         | WorldError::ActiveArrestAssignment { .. }
         | WorldError::ActiveProsecutionAssignment { .. }
-        | WorldError::ActiveInformantHandlerAssignment { .. }
+        | WorldError::InformantHandlerConflict { .. }
         | WorldError::ActiveInstitutionalContactHandler { .. }
         | WorldError::ActiveInstitutionalContactAssignment { .. }
         | WorldError::DirectReportAssignment { .. } => true,

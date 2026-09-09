@@ -10,8 +10,7 @@ use crate::core::time::SimTime;
 use crate::intelligence::KnowledgeHolder;
 use crate::operations::{OperationKind, OperationStatus};
 use crate::opportunities::{
-    OperationOpportunityContext, OperationOpportunityDraft, OpportunityContext, OpportunityRecord,
-    OpportunityStatus,
+    OperationOpportunityContext, OperationOpportunityDraft, OpportunityRecord, OpportunityStatus,
 };
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
@@ -185,10 +184,10 @@ impl ValidatedOpportunityDiscovery {
         state.opportunities.insert(OpportunityRecord {
             id,
             organization: self.draft.organization,
-            context: OpportunityContext::Operation(OperationOpportunityContext {
+            context: OperationOpportunityContext {
                 operation_kind: self.draft.operation_kind,
                 targets: self.draft.targets,
-            }),
+            },
             discovered_at: self.discovered_at,
             valid_until: self.draft.valid_until,
             source_information: self.draft.source_information,
@@ -478,7 +477,7 @@ fn validate_conversion_match(
             opportunity_organization: opportunity.organization(),
         });
     }
-    let context = opportunity.context().operation();
+    let context = opportunity.context();
     if operation.kind() != context.operation_kind() {
         return Err(OpportunityError::OperationKindMismatch {
             operation: operation.id(),
@@ -581,8 +580,8 @@ fn validate_expire_opportunity(
 ) -> Result<ValidatedOpportunityExpiry, OpportunityError> {
     let record = validate_open_opportunity(state, opportunity)?;
     let valid_until = validate_expiry_due(state, record)?;
-    let definition = registry.get_operation(record.context().operation().operation_kind());
-    let mut entities = record.context().operation().targets().clone();
+    let definition = registry.get_operation(record.context().operation_kind());
+    let mut entities = record.context().targets().clone();
     entities.insert(EntityRef::Organization(record.organization()));
     let report = validate_record_report(
         state,

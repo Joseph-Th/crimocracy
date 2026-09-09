@@ -14,11 +14,12 @@ use crate::core::state::AppState;
 use crate::core::time::SimDuration;
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::operations::{
-    OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
+    OperationKind, OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
 };
 use crate::registry::Registry;
-/// A successful take from the same business inside this window finds only partially replaced
-/// stock, so repeat scores on one target decay instead of yielding an identical haul forever.
+/// A successful same-kind take from the same business inside this window finds only partially
+/// replenished value in that operation channel, so repeat scores decay without unrelated kinds
+/// suppressing each other.
 pub(crate) const RECENT_HIT_WINDOW: SimDuration = SimDuration::from_minutes(3 * 24 * 60);
 /// Each recent prior successful take leaves this share of the remaining loot value.
 pub(crate) const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
@@ -26,7 +27,7 @@ pub(crate) const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PropertyProceedsPlan {
     pub(crate) proceeds: Option<OperationPropertyProceedsRecord>,
-    /// True when a recent successful take on the same target reduced this haul.
+    /// True when a recent successful same-kind take on the same target reduced this haul.
     pub(crate) depleted_by_recent_take: bool,
 }
 
@@ -88,9 +89,9 @@ pub(crate) fn resolve_property_proceeds(
     })
 }
 
-/// Recent successful takes against the same target at this operation's own resolution instant —
-/// a committed operation must keep validating against exactly the take history it saw when it
-/// resolved.
+/// Recent successful same-kind takes against the same target at this operation's own resolution
+/// instant. A committed operation must keep validating against exactly the take history it saw
+/// when it resolved.
 pub(crate) fn recent_take_hits(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
@@ -103,6 +104,7 @@ pub(crate) fn recent_take_hits(
     // Served from the depletion index maintained at completion commit time.
     state.operations.recent_successful_takes(
         business,
+        operation.kind(),
         reference_at,
         RECENT_HIT_WINDOW,
         operation.id(),
@@ -110,7 +112,7 @@ pub(crate) fn recent_take_hits(
 }
 
 /// Shared take economics: authored basis points of the target's gross potential, scaled down on a
-/// partial outcome and again by each recent successful hit against the same target.
+/// partial outcome and again by each recent successful same-kind hit against the same target.
 pub(crate) fn resolve_take_cents(
     operation: crate::core::id::OperationId,
     gross_cents: i64,
@@ -233,9 +235,32 @@ pub(crate) fn held_cash_clause(cents: i64) -> String {
     )
 }
 
-/// After-action phrasing when the same target was successfully hit recently: the haul came in
-/// light because the target had not fully replaced what an earlier score already took.
-pub(crate) const DEPLETED_TAKE_CLAUSE: &str = "The take came in lighter than usual; this target has not fully replaced stock from a recent score.";
+/// After-action phrasing for same-kind recency depletion. Different proceeds models represent
+/// different practical bottlenecks, so the explanation must not describe gambling receipts or
+/// delivery payment as unreplaced physical stock.
+pub(crate) fn depleted_take_clause(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Burglary | OperationKind::Hijacking | OperationKind::DocumentTheft => {
+            "The take came in lighter than usual; this target has not fully replaced stock from a recent score."
+        }
+        OperationKind::Robbery | OperationKind::Intimidation => {
+            "The take came in lighter than usual; available cash at this target has not fully recovered from a recent collection."
+        }
+        OperationKind::Smuggling => {
+            "The run paid less than usual; this destination is still absorbing a recent delivery."
+        }
+        OperationKind::GamblingEvent => {
+            "The event took in less than usual; betting volume at this venue has not fully recovered from a recent event."
+        }
+        OperationKind::Surveillance
+        | OperationKind::WitnessPressure
+        | OperationKind::Extraction
+        | OperationKind::Sabotage
+        | OperationKind::Arson => {
+            unreachable!("operation kind has no authored take proceeds")
+        }
+    }
+}
 
 /// After-action phrasing for successful sabotage: the target's earning power is degraded for
 /// the authored disruption horizon.

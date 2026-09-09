@@ -15,11 +15,14 @@ use crate::intelligence::{
     InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
-use crate::operations::operation_economics::resolve_property_proceeds;
+use crate::operations::operation_economics::{resolve_cash_proceeds, resolve_property_proceeds};
 use crate::operations::operation_execution::write_legal_activity_summary;
 use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
+};
+use crate::operations::operation_objective::{
+    blocker_matches_objective, effective_objective_outcome,
 };
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
@@ -33,7 +36,8 @@ use crate::operations::surveillance_integration::{
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
-    OperationKind, OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
+    OperationKind, OperationObjective, OperationObjectiveBlocker, OperationObjectiveOutcome,
+    OperationRecord, OperationStatus,
 };
 use crate::registry::{OperationDefinition, OperationExecutionDefinition, Registry};
 use crate::reports::ReportKind;
@@ -183,7 +187,23 @@ fn validate_authored_operation_resolution(
 ) -> Result<bool, StateValidationError> {
     let factors = resolution.factors();
     let expected_margin = resolve_execution_margin(execution, factors);
-    let expected_outcome = resolve_objective_outcome(execution, expected_margin);
+    let base_expected_outcome = resolve_objective_outcome(execution, expected_margin);
+    validate_resolution_objective_context(state, operation, resolution, base_expected_outcome)?;
+    let expected_outcome =
+        effective_objective_outcome(base_expected_outcome, resolution.objective_blocker());
+    if matches!(
+        operation.objective(),
+        OperationObjective::FreeDetainee { .. }
+    ) && expected_outcome != OperationObjectiveOutcome::Failed
+    {
+        let released_at = resolution
+            .extraction_arrest()
+            .and_then(|arrest| state.legal.get_arrest(arrest))
+            .and_then(|arrest| arrest.released_at());
+        if released_at != Some(resolution.resolved_at()) {
+            return Err(invalid_operation_definition(operation));
+        }
+    }
     let (
         expected_intelligence_quality,
         expected_intelligence_adjustment,
@@ -195,6 +215,12 @@ fn validate_authored_operation_resolution(
     let expected_property_proceeds =
         resolve_property_proceeds(registry, state, operation, resolution.objective_outcome())
             .map_err(|_| invalid_operation_definition(operation))?;
+    let expected_cash_proceeds =
+        resolve_cash_proceeds(registry, state, operation, resolution.objective_outcome()).map_err(
+            |_| StateValidationError::InvalidOperationCashProceeds {
+                operation: operation.id(),
+            },
+        )?;
     if factors.variance().unsigned_abs() > execution.variance_limit()
         || factors.time_pressure() > crate::operations::operation_execution::MAX_TIME_PRESSURE
         || factors.approach_adjustment()
@@ -213,7 +239,152 @@ fn validate_authored_operation_resolution(
     {
         return Err(invalid_operation_definition(operation));
     }
+    if resolution.cash_proceeds() != expected_cash_proceeds.proceeds {
+        return Err(StateValidationError::InvalidOperationCashProceeds {
+            operation: operation.id(),
+        });
+    }
     Ok(expected_police_response_arrived)
+}
+
+fn validate_resolution_objective_context(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    base_expected_outcome: OperationObjectiveOutcome,
+) -> Result<(), StateValidationError> {
+    let invalid = || invalid_operation_definition(operation);
+    // Business ownership has append-only history, but different domains share minute-level
+    // timestamps. An ownership transfer and an operation resolution with the same `SimTime` have
+    // no persisted cross-domain ordering, so distinguish ownership that was possible at some
+    // point during that timestamp from ownership that was true for every possible placement of
+    // the resolution among the same-minute transfers.
+    let sponsor_ownership_evidence = match operation.objective() {
+        OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        }
+        | OperationObjective::ObtainCash {
+            target: EntityRef::Business(business),
+        }
+        | OperationObjective::DisruptBusiness {
+            target: EntityRef::Business(business),
+        } => Some(resolve_sponsor_ownership_evidence(
+            state,
+            *business,
+            operation.responsible_organization(),
+            resolution.resolved_at(),
+        )),
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::FreeDetainee { .. }
+        | OperationObjective::DisruptBusiness { .. } => None,
+    };
+    if base_expected_outcome != OperationObjectiveOutcome::Failed
+        && sponsor_ownership_evidence.is_some_and(|(_, definitely_owned)| definitely_owned)
+        && resolution.objective_blocker()
+            != Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+    {
+        return Err(invalid());
+    }
+    if let Some(blocker) = resolution.objective_blocker() {
+        if base_expected_outcome == OperationObjectiveOutcome::Failed
+            || !blocker_matches_objective(operation, blocker)
+        {
+            return Err(invalid());
+        }
+        match blocker {
+            OperationObjectiveBlocker::SponsorOwnsTargetBusiness => {
+                if !sponsor_ownership_evidence.is_some_and(|(could_be_owned, _)| could_be_owned) {
+                    return Err(invalid());
+                }
+            }
+            OperationObjectiveBlocker::ExtractionCustodyEnded => {
+                let OperationObjective::FreeDetainee { target } = operation.objective() else {
+                    return Err(invalid());
+                };
+                let arrest = operation
+                    .extraction_arrest()
+                    .and_then(|id| state.legal.get_arrest(id))
+                    .ok_or_else(invalid)?;
+                if arrest.character() != *target
+                    || resolution.extraction_arrest().is_some()
+                    || arrest
+                        .released_at()
+                        .is_none_or(|released_at| released_at > resolution.resolved_at())
+                {
+                    return Err(invalid());
+                }
+            }
+            // Business operating status and witness cooperation/case activity are mutable domains
+            // without complete historical timelines. Their blocker is the persisted validated
+            // resolution snapshot; objective compatibility above is the release-safe proof.
+            OperationObjectiveBlocker::TargetEconomyInactive
+            | OperationObjectiveBlocker::NoPressureableWitnessCase => {}
+        }
+    }
+
+    match operation.objective() {
+        OperationObjective::FreeDetainee { target } => {
+            if let Some(arrest_id) = resolution.extraction_arrest() {
+                if operation.extraction_arrest() != Some(arrest_id) {
+                    return Err(invalid());
+                }
+                let arrest = state.legal.get_arrest(arrest_id).ok_or_else(invalid)?;
+                if arrest.character() != *target
+                    || arrest.arrested_at() > resolution.resolved_at()
+                    || arrest
+                        .released_at()
+                        .is_some_and(|released_at| released_at < resolution.resolved_at())
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::DisruptBusiness { .. } => {
+            if resolution.extraction_arrest().is_some() {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the sponsor could have owned, and definitely owned, `business` at a resolution
+/// timestamp. Ownership changes are ordered among themselves by business version, but the model
+/// intentionally does not invent an ordering between those changes and an operation resolution
+/// carrying the same minute. The possible owners are therefore the owner immediately before that
+/// timestamp plus every owner produced by a change at the timestamp.
+fn resolve_sponsor_ownership_evidence(
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+    sponsor: crate::core::id::OrganizationId,
+    resolved_at: SimTime,
+) -> (bool, bool) {
+    let sponsor = crate::world::BusinessOwner::Organization(sponsor);
+    let mut owner_before = None;
+    let mut same_time_owners = Vec::new();
+    for change in state.world.business_ownership_history(business) {
+        if change.changed_at() < resolved_at {
+            owner_before = Some(change.new_owner());
+        } else if change.changed_at() == resolved_at {
+            same_time_owners.push(change.new_owner());
+        } else {
+            break;
+        }
+    }
+    let could_be_owned = owner_before == Some(sponsor) || same_time_owners.contains(&sponsor);
+    let definitely_owned = if let Some(owner_before) = owner_before {
+        owner_before == sponsor && same_time_owners.iter().all(|owner| *owner == sponsor)
+    } else {
+        !same_time_owners.is_empty() && same_time_owners.iter().all(|owner| *owner == sponsor)
+    };
+    (could_be_owned, definitely_owned)
 }
 
 fn validate_authored_property_disposition(
@@ -478,6 +649,34 @@ fn validate_operation_objective(
         return Err(StateValidationError::InvalidOperationDefinition {
             operation: operation.id(),
         });
+    }
+    match operation.objective() {
+        OperationObjective::FreeDetainee { target } => {
+            let arrest_id = operation
+                .extraction_arrest()
+                .ok_or_else(|| invalid_operation_definition(operation))?;
+            let arrest = state
+                .legal
+                .get_arrest(arrest_id)
+                .ok_or_else(|| invalid_operation_definition(operation))?;
+            if arrest.character() != *target
+                || arrest.arrested_at() > operation.authorized_at()
+                || arrest
+                    .released_at()
+                    .is_some_and(|released_at| released_at < operation.authorized_at())
+            {
+                return Err(invalid_operation_definition(operation));
+            }
+        }
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::DisruptBusiness { .. } => {
+            if operation.extraction_arrest().is_some() {
+                return Err(invalid_operation_definition(operation));
+            }
+        }
     }
     Ok(())
 }

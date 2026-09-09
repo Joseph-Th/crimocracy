@@ -3,7 +3,7 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, IdExhaustionError, IdKind, NeighborhoodId, OperationId, PoliceResponseId,
+    ArrestId, CharacterId, IdExhaustionError, IdKind, NeighborhoodId, OperationId, PoliceResponseId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -35,8 +35,12 @@ use crate::legal::{
     IncidentIntakeDraft, IncidentWitnessDraft, WitnessCooperation,
 };
 use crate::operations::operation_economics::{
-    CashProceedsPlan, DEPLETED_TAKE_CLAUSE, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE,
+    CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, depleted_take_clause,
     held_cash_clause, held_property_clause, resolve_cash_proceeds, resolve_property_proceeds,
+};
+use crate::operations::operation_objective::{
+    blocker_clause, effective_objective_outcome, pressureable_witness_targets,
+    resolve_objective_blocker,
 };
 use crate::operations::surveillance_integration::{
     SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
@@ -45,8 +49,8 @@ use crate::operations::surveillance_integration::{
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
-    OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
-    OperationResolutionRecord, OperationStatus,
+    OperationObjective, OperationObjectiveBlocker, OperationObjectiveOutcome, OperationRecord,
+    OperationResolutionFactors, OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
@@ -78,15 +82,14 @@ pub(crate) enum OperationResolutionError {
     CashProceedsOverflow { operation: OperationId },
     #[error("operation {operation} cash-proceeds context changed after resolution planning")]
     StaleCashProceedsContext { operation: OperationId },
-    #[error("sabotage target economy for operation {operation} changed after resolution planning")]
-    StaleSabotageContext { operation: OperationId },
     #[error(
-        "extraction operation {operation} targets character {character}, who is not in custody"
+        "practical objective context for operation {operation} changed after resolution planning"
     )]
-    MissingDetaineeArrest {
-        operation: OperationId,
-        character: CharacterId,
-    },
+    StaleObjectiveContext { operation: OperationId },
+    #[error(
+        "extraction custody context for operation {operation} changed after resolution planning"
+    )]
+    StaleExtractionContext { operation: OperationId },
     #[error("extraction operation {operation} cannot release character {character}: {error}")]
     DetaineeRelease {
         operation: OperationId,
@@ -231,15 +234,22 @@ struct OperationResolutionSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OperationResolutionOutcomePlan {
     objective_outcome: OperationObjectiveOutcome,
+    objective_blocker: Option<OperationObjectiveBlocker>,
+    /// Exact case-witness registrations a tactically viable witness-pressure objective could
+    /// still affect when resolution was decided. Freezing the whole set prevents a validated
+    /// resolution from silently omitting a newly registered case or applying to a different
+    /// cooperation state if legal context changes before commit.
+    witness_pressure_targets: Vec<(crate::core::id::CaseWitnessId, WitnessCooperation)>,
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposurePlan,
     property_proceeds_plan: PropertyProceedsPlan,
     cash_proceeds_plan: CashProceedsPlan,
+    /// Active custody relationship observed at resolution planning. `None` on an extraction is
+    /// meaningful: the target left custody before the crew reached the objective, which forces
+    /// the objective to fail instead of making the simulation tick uncommittable.
+    extraction_arrest: Option<ArrestId>,
     surveillance: Option<SurveillanceIntelligencePlan>,
-    /// Whether a sabotage objective faces an operating economy to damage. Decided once here
-    /// so the after-action narrative and the validated disruption effect cannot disagree.
-    targets_operating_economy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,28 +353,26 @@ pub(crate) fn decide_operation_resolution(
         variance: randomness.execution_variance(),
     };
     let execution_margin = resolve_execution_margin(execution, factors);
-    let objective_outcome = resolve_objective_outcome(execution, execution_margin);
-    // The sabotage narrative must describe only disruption that will actually be committed:
-    // a target whose economy went suspended between authorization and now has nothing
-    // operating to damage, so both the summary clause and the validated effect key off this
-    // one decision.
-    let sabotage_target = match (record.kind(), record.objective()) {
-        (
-            OperationKind::Sabotage | OperationKind::Arson,
-            OperationObjective::DisruptBusiness {
-                target: EntityRef::Business(business),
+    let base_objective_outcome = resolve_objective_outcome(execution, execution_margin);
+    let extraction_arrest = resolve_extraction_arrest_snapshot(state, record);
+    let witness_pressure_targets = if base_objective_outcome != OperationObjectiveOutcome::Failed
+        && let (
+            OperationKind::WitnessPressure,
+            OperationObjective::Frighten {
+                target: EntityRef::Character(character),
             },
-        ) => Some(*business),
-        _ => None,
+        ) = (record.kind(), record.objective())
+    {
+        pressureable_witness_targets(state, record.responsible_organization(), *character)
+    } else {
+        Vec::new()
     };
-    let targets_operating_economy = sabotage_target.is_some_and(|business| {
-        state
-            .economy
-            .get_business_economy(business)
-            .is_some_and(|economy| {
-                economy.status() == crate::economy::BusinessOperatingStatus::Active
-            })
-    });
+    let objective_blocker = if base_objective_outcome == OperationObjectiveOutcome::Failed {
+        None
+    } else {
+        resolve_objective_blocker(state, record)
+    };
+    let objective_outcome = effective_objective_outcome(base_objective_outcome, objective_blocker);
     let exposure = resolve_exposure_plan(
         registry,
         state,
@@ -383,6 +391,7 @@ pub(crate) fn decide_operation_resolution(
     let mut summary = format!("{}: ", record.title());
     summary.push_str(&build_after_action_summary(
         objective_outcome,
+        base_objective_outcome,
         factors,
         exposure.level(),
     ));
@@ -395,7 +404,7 @@ pub(crate) fn decide_operation_resolution(
     }
     if property_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
         summary.push(' ');
-        summary.push_str(DEPLETED_TAKE_CLAUSE);
+        summary.push_str(depleted_take_clause(record.kind()));
         depleted_clause_written = true;
     }
     if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
@@ -404,15 +413,18 @@ pub(crate) fn decide_operation_resolution(
     }
     if cash_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
         summary.push(' ');
-        summary.push_str(DEPLETED_TAKE_CLAUSE);
+        summary.push_str(depleted_take_clause(record.kind()));
     }
     if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
     {
         summary.push(' ');
         summary.push_str(&clause);
     }
+    if let Some(blocker) = objective_blocker {
+        summary.push(' ');
+        summary.push_str(blocker_clause(blocker));
+    }
     if objective_outcome != OperationObjectiveOutcome::Failed
-        && targets_operating_economy
         && matches!(
             (record.kind(), record.objective()),
             (
@@ -455,13 +467,15 @@ pub(crate) fn decide_operation_resolution(
         },
         outcome: OperationResolutionOutcomePlan {
             objective_outcome,
+            objective_blocker,
+            witness_pressure_targets,
             execution_margin,
             factors,
             exposure,
             property_proceeds_plan,
             cash_proceeds_plan,
+            extraction_arrest,
             surveillance,
-            targets_operating_economy,
         },
         narrative: OperationResolutionNarrative {
             summary,
@@ -645,16 +659,19 @@ impl ValidatedOperationResolution {
             .report
             .commit(state)
             .expect("resolution report ID was preflighted before mutation");
+        let extraction_arrest = self.plan.outcome.extraction_arrest;
         state.operations.complete(
             self.plan.snapshot.operation,
             OperationResolutionRecord {
                 resolved_at: self.plan.snapshot.resolved_at,
                 objective_outcome: self.plan.outcome.objective_outcome,
+                objective_blocker: self.plan.outcome.objective_blocker,
                 execution_margin: self.plan.outcome.execution_margin,
                 factors: self.plan.outcome.factors,
                 exposure,
                 property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
                 cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
+                extraction_arrest,
                 discovered_information,
                 surveillance_signatures,
                 legal_activity_information,
@@ -719,28 +736,28 @@ pub(crate) fn validate_operation_resolution_plan(
             operation: plan.snapshot.operation,
         });
     }
-    // Extraction success frees the target through the canonical arrest-release path; the
-    // release is validated here so commit re-checks only staleness. The nested match keeps
-    // every objective and outcome variant explicit, so a new objective can never silently
-    // skip the extraction-release effect.
+    // Extraction success frees the exact arrest observed in the resolution snapshot. If custody
+    // already ended, resolution remains valid but the effective objective outcome is Failed and
+    // there is no release effect. This turns a mutable legal dependency into an explicit causal
+    // outcome instead of a due-tick panic.
     let detainee_release = match record.objective() {
         crate::operations::OperationObjective::FreeDetainee { target } => {
             match plan.outcome.objective_outcome {
                 OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial => {
-                    let arrest = state.legal.active_arrest_for_character(*target).ok_or(
-                        OperationResolutionError::MissingDetaineeArrest {
+                    let arrest = plan.outcome.extraction_arrest.ok_or(
+                        OperationResolutionError::StaleExtractionContext {
                             operation: plan.snapshot.operation,
-                            character: *target,
                         },
                     )?;
-                    Some(
-                        crate::legal::arrest_system::validate_release_arrest(state, arrest.id())
+                    let release =
+                        crate::legal::arrest_system::validate_release_arrest(state, arrest)
                             .map_err(|error| OperationResolutionError::DetaineeRelease {
                                 operation: plan.snapshot.operation,
                                 character: *target,
                                 error,
-                            })?,
-                    )
+                            })?;
+                    debug_assert_eq!(release.arrest(), arrest);
+                    Some(release)
                 }
                 OperationObjectiveOutcome::Failed => None,
             }
@@ -843,42 +860,25 @@ pub(crate) fn validate_operation_resolution_plan(
             }],
         },
     )?;
-    // Witness pressure degrades the target's cooperation on every active case where they
-    // are the named witness and the case is run by another authority — the same contract
-    // authorization enforces. Each degradation is validated here so commit re-checks only
-    // staleness.
+    // Witness pressure degrades every registration that can still influence future testimony.
+    // Statemented or already-hostile witnesses have no remaining modeled cooperation effect and
+    // are therefore objective blockers rather than fake successful intimidation.
     let mut witness_intimidation = Vec::new();
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
         && let (
             crate::operations::OperationKind::WitnessPressure,
             crate::operations::OperationObjective::Frighten {
-                target: EntityRef::Character(character),
+                target: EntityRef::Character(_),
             },
         ) = (record.kind(), record.objective())
     {
-        let responsible_organization = record.responsible_organization();
-        // The by-character witness index scopes this to the target's own registrations;
-        // scanning every witness ever registered would grow with campaign length.
-        let targets: Vec<_> = state
-            .legal
-            .case_witnesses_for_character(*character)
-            .filter(|witness| witness.witness() == *character)
-            .filter(|witness| {
-                state
-                    .legal
-                    .get_investigation(witness.investigation())
-                    .is_some_and(|investigation| {
-                        investigation.status() == crate::legal::InvestigationStatus::Active
-                            && investigation.owner() != responsible_organization
-                    })
-            })
-            .map(|witness| (witness.id(), witness.cooperation()))
-            .collect();
-        for (case_witness, cooperation) in targets {
+        for &(case_witness, cooperation) in &plan.outcome.witness_pressure_targets {
             let degraded = match cooperation {
                 WitnessCooperation::Cooperative => WitnessCooperation::Reluctant,
                 WitnessCooperation::Reluctant => WitnessCooperation::Hostile,
-                WitnessCooperation::Hostile => continue,
+                WitnessCooperation::Hostile => {
+                    unreachable!("pressureable witness targets exclude hostile cooperation")
+                }
             };
             witness_intimidation.push(
                 crate::legal::witness_system::validate_set_witness_cooperation(
@@ -889,13 +889,9 @@ pub(crate) fn validate_operation_resolution_plan(
             );
         }
     }
-    // Sabotage damage lands through the canonical economy disruption path; the disruption is
-    // validated here so commit re-checks only staleness. A target whose economy went
-    // suspended (or disappeared) between authorization and resolution has nothing operating
-    // to disrupt: the resolution proceeds without a damage effect rather than failing the
-    // whole validated settlement — a modeled degenerate outcome, never an aborted tick. The
-    // plan's own decision is re-derived so the after-action narrative can never claim
-    // disruption the committed state will not carry.
+    // Sabotage damage lands through the canonical economy disruption path. A suspended target is
+    // converted to a practical objective failure during planning, so every non-failed sabotage
+    // reaching this point must have a real disruption effect to commit.
     let mut business_disruption = None;
     if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
         && let (
@@ -905,22 +901,9 @@ pub(crate) fn validate_operation_resolution_plan(
             },
         ) = (record.kind(), record.objective())
     {
-        let economy_active = state
-            .economy
-            .get_business_economy(*business)
-            .is_some_and(|economy| {
-                economy.status() == crate::economy::BusinessOperatingStatus::Active
-            });
-        if economy_active != plan.outcome.targets_operating_economy {
-            return Err(OperationResolutionError::StaleSabotageContext {
-                operation: plan.snapshot.operation,
-            });
-        }
-        if economy_active {
-            business_disruption = Some(validate_disrupt_business_economy(
-                registry, state, *business,
-            )?);
-        }
+        business_disruption = Some(validate_disrupt_business_economy(
+            registry, state, *business,
+        )?);
     }
     // Personal after-action knowledge for each participant: the crew knows what went down
     // even though the organization's own record is the org-held after-action. Validating
@@ -1177,6 +1160,25 @@ fn validate_plan_snapshot(
             operation: plan.snapshot.operation,
         });
     }
+    let practical_context_matters = plan.outcome.objective_blocker.is_some()
+        || plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed;
+    let current_witness_pressure_targets = if practical_context_matters
+        && let (
+            OperationKind::WitnessPressure,
+            OperationObjective::Frighten {
+                target: EntityRef::Character(character),
+            },
+        ) = (record.kind(), record.objective())
+    {
+        pressureable_witness_targets(state, record.responsible_organization(), *character)
+    } else {
+        Vec::new()
+    };
+    if current_witness_pressure_targets != plan.outcome.witness_pressure_targets {
+        return Err(OperationResolutionError::StaleObjectiveContext {
+            operation: plan.snapshot.operation,
+        });
+    }
     let current_police_response = record.police_response().map(|response_id| {
         let response = state
             .legal
@@ -1196,10 +1198,50 @@ fn validate_plan_snapshot(
             operation: plan.snapshot.operation,
         });
     }
+    if resolve_extraction_arrest_snapshot(state, record) != plan.outcome.extraction_arrest {
+        return Err(OperationResolutionError::StaleExtractionContext {
+            operation: plan.snapshot.operation,
+        });
+    }
+    // Tactical failures do not depend on practical availability because no objective effect is
+    // committed. For every tactically viable plan, the blocker is part of the validated snapshot
+    // and must remain exactly the same through commit.
+    if (plan.outcome.objective_blocker.is_some()
+        || plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed)
+        && resolve_objective_blocker(state, record) != plan.outcome.objective_blocker
+    {
+        return Err(OperationResolutionError::StaleObjectiveContext {
+            operation: plan.snapshot.operation,
+        });
+    }
     if let Some(surveillance) = &plan.outcome.surveillance {
         validate_surveillance_plan_snapshot(state, surveillance)?;
     }
     Ok(())
+}
+
+fn resolve_extraction_arrest_snapshot(
+    state: &AppState,
+    record: &OperationRecord,
+) -> Option<ArrestId> {
+    match record.objective() {
+        OperationObjective::FreeDetainee { target } => {
+            let arrest_id = record.extraction_arrest()?;
+            state
+                .legal
+                .get_arrest(arrest_id)
+                .filter(|arrest| {
+                    arrest.character() == *target
+                        && arrest.status() == crate::legal::ArrestStatus::Detained
+                })
+                .map(|_| arrest_id)
+        }
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::DisruptBusiness { .. } => None,
+    }
 }
 
 fn resolve_role_capability_average(
@@ -1246,14 +1288,14 @@ fn resolve_target_police_snapshot(
 
 /// Venue entities for police-presence and exposure attribution. Extraction is the one
 /// objective whose referenced character stands for a place the crew acts while that person
-/// is elsewhere: custody. The venue proxies to the detaining authority's footprint instead
-/// of the detainee's organization assets, so an organization's own legitimate businesses
-/// never raise its own extraction difficulty or host its exposure incident.
+/// is elsewhere: custody. The venue stays pinned to the authority behind the exact arrest the
+/// plan targeted; later release or re-arrest must not move an in-flight job to another custody
+/// event or fall back to the detainee's organization assets.
 fn resolve_operation_venue_entities(state: &AppState, record: &OperationRecord) -> Vec<EntityRef> {
     match record.objective() {
-        OperationObjective::FreeDetainee { target } => state
-            .legal
-            .active_arrest_for_character(*target)
+        OperationObjective::FreeDetainee { target } => record
+            .extraction_arrest()
+            .and_then(|arrest| state.legal.get_arrest(arrest))
             .and_then(|arrest| state.legal.get_investigation(arrest.investigation()))
             .map(|investigation| vec![EntityRef::Organization(investigation.owner())])
             .unwrap_or_else(|| vec![EntityRef::Character(*target)]),
@@ -1764,18 +1806,21 @@ pub(crate) fn resolve_objective_outcome(
 /// outcome and the factors that actually moved it. Neutral lines (normal execution window, no
 /// exposure, negligible police presence) and strong-but-expected crew quality on a clean job are
 /// omitted rather than recited, so attention goes to what deviates from a routine job: weak
-/// capability bands, non-achieved outcomes that deserve explanation, adverse pressure, and thin
-/// planning intelligence. Luck commentary is kept only when it explains a degraded result; on an
-/// achieved job the variance already shows in the outcome, so reciting it would be noise.
+/// capability bands, tactically degraded outcomes that deserve explanation, adverse pressure, and
+/// thin planning intelligence. Practical blockers may make the effective objective fail even after
+/// tactical success, so execution commentary follows the tactical outcome while the headline keeps
+/// the effective objective result. Luck commentary is kept only when it explains tactical loss.
 fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
+    tactical_outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
 ) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
-    // Crew quality is worth a sentence only when it explains the result: a weak band is a risk
-    // factor, and a partial or failed job should say what the crew brought to it.
-    if outcome != OperationObjectiveOutcome::Achieved
+    // Practical blockers can turn a tactically successful execution into an objective failure.
+    // Crew-quality and luck commentary therefore keys off the tactical result rather than
+    // falsely implying that strong execution caused a target-availability failure.
+    if tactical_outcome != OperationObjectiveOutcome::Achieved
         || matches!(
             factors.role_capability_average().qualitative_band(),
             QualitativeBand::Poor | QualitativeBand::Competent
@@ -1788,7 +1833,7 @@ fn build_after_action_summary(
     }
     match factors.leader_capability() {
         Some(rating)
-            if outcome != OperationObjectiveOutcome::Achieved
+            if tactical_outcome != OperationObjectiveOutcome::Achieved
                 || matches!(
                     rating.qualitative_band(),
                     QualitativeBand::Poor | QualitativeBand::Competent
@@ -1854,9 +1899,9 @@ fn build_after_action_summary(
     if factors.time_pressure() > 0 {
         parts.push("The completion deadline compressed the execution window.".to_owned());
     }
-    if outcome != OperationObjectiveOutcome::Achieved {
+    if tactical_outcome != OperationObjectiveOutcome::Achieved {
         match factors.variance() {
-            value if value < 0 => parts.push(match outcome {
+            value if value < 0 => parts.push(match tactical_outcome {
                 OperationObjectiveOutcome::Partial => {
                     "Adverse unplanned circumstances reduced the result.".to_owned()
                 }

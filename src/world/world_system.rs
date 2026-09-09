@@ -112,9 +112,9 @@ pub enum WorldError {
         arrest: ArrestId,
     },
     #[error(
-        "character {character} is active informant {informant} for target handler organization {handler}"
+        "character {character} is informant {informant} for target handler organization {handler}"
     )]
-    ActiveInformantHandlerAssignment {
+    InformantHandlerConflict {
         character: CharacterId,
         handler: OrganizationId,
         informant: InformantId,
@@ -384,9 +384,9 @@ fn validate_organization_change_release(
         });
     }
     if let Some(handler) = organization
-        && let Some(informant) = state.legal.active_informant_for(character, handler)
+        && let Some(informant) = state.legal.informant_for(character, handler)
     {
-        return Err(WorldError::ActiveInformantHandlerAssignment {
+        return Err(WorldError::InformantHandlerConflict {
             character,
             handler,
             informant: informant.id(),

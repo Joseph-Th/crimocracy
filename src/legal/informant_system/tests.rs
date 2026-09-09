@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
@@ -21,7 +21,6 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, CharacterDraft, DriveKind, OrganizationDraft, OrganizationKind, Rating,
 };
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -30,103 +29,6 @@ struct Fixture {
     criminal: OrganizationId,
     member: CharacterId,
     investigation: InvestigationId,
-}
-
-#[derive(Clone, Serialize)]
-struct InformantRecordWire {
-    id: InformantId,
-    character: CharacterId,
-    handler: OrganizationId,
-    status: InformantStatus,
-    established_at: SimTime,
-    version: u32,
-}
-
-fn informant_wire(record: &InformantRecord) -> InformantRecordWire {
-    InformantRecordWire {
-        id: record.id(),
-        character: record.character(),
-        handler: record.handler(),
-        status: record.status(),
-        established_at: record.established_at(),
-        version: record.version(),
-    }
-}
-
-fn replace_serialized_informant(
-    envelope: SaveEnvelope,
-    original: &InformantRecord,
-    replacement: &InformantRecordWire,
-) -> SaveEnvelope {
-    let original_bytes = bincode::serialize(original).expect("informant should serialize");
-    let mirror = informant_wire(original);
-    assert_eq!(
-        bincode::serialize(&mirror).expect("informant mirror should serialize"),
-        original_bytes,
-        "wire mirror must match the production persistence layout exactly"
-    );
-    let replacement_bytes =
-        bincode::serialize(replacement).expect("replacement informant should serialize");
-    assert_eq!(replacement_bytes.len(), original_bytes.len());
-    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
-    let matches: Vec<_> = envelope_bytes
-        .windows(original_bytes.len())
-        .enumerate()
-        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "serialized informant must occur exactly once"
-    );
-    let start = matches[0];
-    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
-    bincode::deserialize(&envelope_bytes)
-        .expect("same-layout informant corruption must remain decodable")
-}
-
-#[test]
-fn restore_rejects_informant_version_without_a_relationship_mutation() {
-    let registry = build_registry();
-    let mut fixture = fixture();
-    let informant = validate_establish_informant(
-        &fixture.state,
-        InformantDraft {
-            character: fixture.member,
-            handler: fixture.police,
-        },
-    )
-    .expect("informant establishment should validate")
-    .commit(&mut fixture.state)
-    .expect("informant establishment should commit");
-    let record = fixture
-        .state
-        .legal()
-        .get_informant(informant)
-        .expect("informant should persist")
-        .clone();
-    assert_eq!(record.version(), 1);
-    let mut corrupted = informant_wire(&record);
-    corrupted.version = 2;
-
-    let error = restore_save(
-        &registry,
-        replace_serialized_informant(
-            build_save(&registry, &fixture.state)
-                .expect("valid informant should save before version corruption"),
-            &record,
-            &corrupted,
-        ),
-    )
-    .expect_err("informants have no mutation path that can advance version beyond 1");
-    assert!(matches!(
-        error,
-        crate::core::persistence::LoadError::InvalidState(
-            crate::core::invariants::StateValidationError::InvalidInformant {
-                informant: invalid
-            }
-        ) if invalid == informant
-    ));
 }
 
 fn fixture() -> Fixture {
@@ -219,8 +121,8 @@ fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
     .expect("informant establishment should commit");
     assert_eq!(
         validate_reassign_character(&fixture.state, fixture.member, Some(fixture.police), None,)
-            .expect_err("an active source must be terminated before joining its handler"),
-        WorldError::ActiveInformantHandlerAssignment {
+            .expect_err("an informant cannot join the organization handling that relationship"),
+        WorldError::InformantHandlerConflict {
             character: fixture.member,
             handler: fixture.police,
             informant,
@@ -588,7 +490,7 @@ fn disclosure_token_rejects_case_change_without_partial_mutation() {
 }
 
 #[test]
-fn informant_relationship_is_versioned_and_save_round_trip_preserves_history() {
+fn informant_relationship_is_exclusive_and_save_round_trip_preserves_history() {
     let registry = build_registry();
     let mut fixture = fixture();
     let informant = validate_establish_informant(
@@ -614,8 +516,7 @@ fn informant_relationship_is_versioned_and_save_round_trip_preserves_history() {
     .commit(&mut fixture.state)
     .expect("disclosure should commit");
 
-    // The active relationship is exclusive: a second establishment for the same pair is
-    // rejected while the first one lives.
+    // The relationship is exclusive: a second establishment for the same pair is rejected.
     assert!(matches!(
         validate_establish_informant(
             &fixture.state,
@@ -624,16 +525,16 @@ fn informant_relationship_is_versioned_and_save_round_trip_preserves_history() {
                 handler: fixture.police,
             },
         ),
-        Err(InformantError::AlreadyActive { .. })
+        Err(InformantError::AlreadyInformant { .. })
     ));
     assert_eq!(
         fixture
             .state
             .legal()
             .get_informant(informant)
-            .expect("active relationship should persist")
-            .status(),
-        InformantStatus::Active
+            .expect("relationship should persist")
+            .id(),
+        informant
     );
 
     let envelope = build_save(&registry, &fixture.state).expect("informant state should save");
@@ -646,8 +547,8 @@ fn informant_relationship_is_versioned_and_save_round_trip_preserves_history() {
             .legal()
             .get_informant(informant)
             .expect("relationship should survive save")
-            .status(),
-        InformantStatus::Active
+            .id(),
+        informant
     );
     assert_eq!(
         restored
@@ -726,15 +627,7 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     let recruited = apply_detainee_informant_recruitment(&build_registry(), &mut fixture.state)
         .expect("recruitment pass should resolve without aborting the tick");
     assert!(recruited.is_empty());
-    assert_eq!(
-        fixture
-            .state
-            .legal()
-            .informants()
-            .filter(|informant| informant.status() == InformantStatus::Active)
-            .count(),
-        1
-    );
+    assert_eq!(fixture.state.legal().informants().count(), 1);
     validate_state(&fixture.state).expect("post-pass state should validate");
     validate_invariants(&fixture.state);
 }
@@ -893,7 +786,7 @@ fn per_tick_scan_indexes_track_lifecycle_transitions() {
         vec![arrest]
     );
 
-    // An established informant enters the active-informant scan surface.
+    // An established informant enters the disclosure scan surface.
     let informant = validate_establish_informant(
         &fixture.state,
         InformantDraft {
@@ -908,7 +801,7 @@ fn per_tick_scan_indexes_track_lifecycle_transitions() {
         fixture
             .state
             .legal()
-            .active_informants()
+            .informants()
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![informant]
@@ -945,13 +838,13 @@ fn per_tick_scan_indexes_track_lifecycle_transitions() {
         .expect("release should commit");
     assert!(fixture.state.legal().detained_arrests().next().is_none());
 
-    // The informant relationship outlives the custody that produced it: an active source
-    // stays on the scan surface until a modeled handler decision ends it.
+    // The informant relationship outlives the custody that produced it and remains on the
+    // disclosure scan surface.
     assert_eq!(
         fixture
             .state
             .legal()
-            .active_informants()
+            .informants()
             .map(|record| record.id())
             .collect::<Vec<_>>(),
         vec![informant]

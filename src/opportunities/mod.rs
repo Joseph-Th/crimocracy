@@ -26,19 +26,6 @@ impl OperationOpportunityContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OpportunityContext {
-    Operation(OperationOpportunityContext),
-}
-
-impl OpportunityContext {
-    pub fn operation(&self) -> &OperationOpportunityContext {
-        match self {
-            Self::Operation(context) => context,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OpportunityStatus {
     Open,
@@ -80,7 +67,7 @@ impl OpportunityResolution {
 pub struct OpportunityRecord {
     id: OpportunityId,
     organization: OrganizationId,
-    context: OpportunityContext,
+    context: OperationOpportunityContext,
     discovered_at: SimTime,
     valid_until: Option<SimTime>,
     source_information: BTreeSet<InformationId>,
@@ -99,7 +86,7 @@ impl OpportunityRecord {
         self.organization
     }
 
-    pub fn context(&self) -> &OpportunityContext {
+    pub fn context(&self) -> &OperationOpportunityContext {
         &self.context
     }
 
@@ -150,7 +137,7 @@ struct OperationOpportunityKey {
 
 impl OperationOpportunityKey {
     fn from_record(record: &OpportunityRecord) -> Self {
-        let context = record.context.operation();
+        let context = &record.context;
         Self {
             organization: record.organization,
             operation_kind: context.operation_kind,

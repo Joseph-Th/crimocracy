@@ -11,6 +11,9 @@ use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
+use crate::operations::operation_objective::{
+    has_active_foreign_witness_case, has_pressureable_witness_case,
+};
 use crate::operations::operation_state::{pause_duration_minutes, shift_past_pause};
 use crate::operations::police_response_integration::{
     OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
@@ -112,8 +115,26 @@ pub enum OperationError {
         character: crate::core::id::CharacterId,
         operation: OperationId,
     },
+    #[error(
+        "extraction custody for character {character} changed after authorization validation; expected arrest {expected}, found {found:?}"
+    )]
+    StaleExtractionCustody {
+        character: CharacterId,
+        expected: ArrestId,
+        found: Option<ArrestId>,
+    },
+    #[error(
+        "extraction for detainee {character} would finish at {planned_end:?}, after current custody ends at {custody_ends_at:?}"
+    )]
+    ExtractionOutlivesCustody {
+        character: CharacterId,
+        planned_end: SimTime,
+        custody_ends_at: SimTime,
+    },
     #[error("character {0} is not a named witness on any active case")]
     TargetNotCaseWitness(crate::core::id::CharacterId),
+    #[error("character {0} has no active witness cooperation left for intimidation to reduce")]
+    TargetNotPressureableWitness(crate::core::id::CharacterId),
     #[error("objective {objective:?} cannot target administrative entity {target:?}")]
     InvalidObjectiveTarget {
         objective: OperationObjectiveKind,
@@ -225,6 +246,7 @@ pub enum OperationError {
 pub struct ValidatedOperation<'registry> {
     draft: OperationDraft,
     expected_participant_versions: BTreeMap<CharacterId, u32>,
+    extraction_arrest: Option<ArrestId>,
     registry: &'registry Registry,
 }
 
@@ -301,11 +323,19 @@ impl<'registry> ValidatedOperation<'registry> {
         // and the authored operation definition is static. Entity existence needs no separate
         // re-check: entity records are append-only, so anything validated at authorization still
         // exists at commit.
+        validate_extraction_custody_current(state, &self.draft.objective, self.extraction_arrest)?;
         validate_operation_objective(
             state,
             self.draft.kind,
             self.draft.responsible_organization,
             &self.draft.objective,
+        )?;
+        validate_extraction_custody_window(
+            self.registry,
+            state,
+            &self.draft,
+            self.extraction_arrest,
+            state.now(),
         )?;
         for information in &self.draft.intelligence {
             let record = state
@@ -342,6 +372,7 @@ impl<'registry> ValidatedOperation<'registry> {
                 responsible_organization,
                 leader,
                 objective,
+                extraction_arrest: self.extraction_arrest,
                 approach,
                 roles,
                 intelligence,
@@ -419,6 +450,7 @@ pub fn validate_authorize_operation<'registry>(
         draft.responsible_organization,
         &draft.objective,
     )?;
+    let extraction_arrest = resolve_current_extraction_arrest(state, &draft.objective)?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -461,12 +493,14 @@ pub fn validate_authorize_operation<'registry>(
         draft.scheduled_for,
         &draft.constraints,
     )?;
+    validate_extraction_custody_window(registry, state, &draft, extraction_arrest, state.now())?;
     validate_authorization_constraints(state, &draft)?;
     validate_authorization_contingencies(definition, &draft)?;
 
     Ok(ValidatedOperation {
         draft,
         expected_participant_versions,
+        extraction_arrest,
         registry,
     })
 }
@@ -734,6 +768,88 @@ fn projected_authorized_operation_window(
     (start, end)
 }
 
+/// Reject an extraction that cannot finish before the target's currently modeled custody ends.
+/// This is a planning gate only: later release, delay, or re-arrest remains mutable simulation
+/// state and is handled again by resolution-time custody snapshots.
+fn validate_extraction_custody_window(
+    registry: &Registry,
+    state: &AppState,
+    draft: &OperationDraft,
+    extraction_arrest: Option<ArrestId>,
+    authorized_at: SimTime,
+) -> Result<(), OperationError> {
+    let OperationObjective::FreeDetainee { target } = draft.objective else {
+        debug_assert!(extraction_arrest.is_none());
+        return Ok(());
+    };
+    let arrest_id = extraction_arrest.expect("validated extraction must retain its custody link");
+    let arrest = state
+        .legal
+        .get_arrest(arrest_id)
+        .expect("validated extraction custody must remain persisted");
+    debug_assert_eq!(arrest.character(), target);
+    let (_, planned_end) = projected_authorized_operation_window(
+        registry,
+        authorized_at,
+        draft.kind,
+        draft.scheduled_for,
+        &draft.constraints,
+    );
+    let custody_ends_at = arrest.arrested_at() + registry.legal().maximum_detention();
+    if planned_end > custody_ends_at {
+        return Err(OperationError::ExtractionOutlivesCustody {
+            character: target,
+            planned_end,
+            custody_ends_at,
+        });
+    }
+    Ok(())
+}
+
+/// The custody relationship an extraction is being planned against. The ID, not merely the
+/// detainee, is part of the plan because release followed by re-arrest creates a different legal
+/// situation that an already-authorized operation must not silently adopt.
+fn resolve_current_extraction_arrest(
+    state: &AppState,
+    objective: &OperationObjective,
+) -> Result<Option<ArrestId>, OperationError> {
+    let OperationObjective::FreeDetainee { target } = objective else {
+        return Ok(None);
+    };
+    state
+        .legal
+        .active_arrest_for_character(*target)
+        .map(|arrest| Some(arrest.id()))
+        .ok_or(OperationError::TargetNotDetained(*target))
+}
+
+/// Authorization tokens pin an extraction to one custody event. Commit must reject if that
+/// detainee was released or re-arrested between validation and commit rather than retargeting the
+/// operation to whatever arrest happens to be active later.
+fn validate_extraction_custody_current(
+    state: &AppState,
+    objective: &OperationObjective,
+    expected: Option<ArrestId>,
+) -> Result<(), OperationError> {
+    let OperationObjective::FreeDetainee { target } = objective else {
+        debug_assert!(expected.is_none());
+        return Ok(());
+    };
+    let expected = expected.expect("validated extraction must retain its custody link");
+    let found = state
+        .legal
+        .active_arrest_for_character(*target)
+        .map(|arrest| arrest.id());
+    if found != Some(expected) {
+        return Err(OperationError::StaleExtractionCustody {
+            character: *target,
+            expected,
+            found,
+        });
+    }
+    Ok(())
+}
+
 fn earliest_operation_start_from_authorization(
     authorized_at: SimTime,
     scheduled_for: SimTime,
@@ -979,25 +1095,11 @@ fn validate_active_field_objective_targets(
                     target: *target,
                 });
             };
-            // The by-character witness index scopes this probe to the target's own
-            // registrations instead of the full ever-growing witness history.
-            let is_case_witness =
-                state
-                    .legal
-                    .case_witnesses_for_character(character)
-                    .any(|witness| {
-                        witness.witness() == character
-                            && state
-                                .legal
-                                .get_investigation(witness.investigation())
-                                .is_some_and(|investigation| {
-                                    investigation.status()
-                                        == crate::legal::InvestigationStatus::Active
-                                        && investigation.owner() != responsible_organization
-                                })
-                    });
-            if !is_case_witness {
+            if !has_active_foreign_witness_case(state, responsible_organization, character) {
                 return Err(OperationError::TargetNotCaseWitness(character));
+            }
+            if !has_pressureable_witness_case(state, responsible_organization, character) {
+                return Err(OperationError::TargetNotPressureableWitness(character));
             }
             Ok(())
         }

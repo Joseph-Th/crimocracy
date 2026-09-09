@@ -3,6 +3,7 @@
 pub(crate) mod operation_abort;
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
+pub(crate) mod operation_objective;
 pub(crate) mod operation_state;
 pub mod operation_system;
 pub(crate) mod police_response_integration;
@@ -13,9 +14,9 @@ pub use operation_state::OperationState;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId, HistoryEventId,
-    InformationId, InvestigationId, LedgerTransactionId, NeighborhoodId, OperationId,
-    OrganizationId, PoliceResponseId, ReportId,
+    ArrestId, BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId,
+    HistoryEventId, InformationId, InvestigationId, LedgerTransactionId, NeighborhoodId,
+    OperationId, OrganizationId, PoliceResponseId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
@@ -165,7 +166,7 @@ impl OperationObjective {
     }
 
     /// The business whose stock or ready cash this objective takes value out of, if any.
-    /// Property and cash takes share the recency-depletion window: both need time to replace.
+    /// The economics owner decides replenishment independently per operation kind.
     pub(crate) fn taken_business(&self) -> Option<BusinessId> {
         let target = match self {
             Self::AcquireProperty { target } | Self::ObtainCash { target } => target,
@@ -306,6 +307,18 @@ pub enum OperationObjectiveOutcome {
     Achieved,
     Partial,
     Failed,
+}
+
+/// A practical condition that made a tactically viable objective impossible at the instant the
+/// operation resolved. These are persisted causal facts because several source domains retain
+/// only current state, so later restore validation cannot safely reconstruct the historical
+/// reason from whatever the target looks like now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationObjectiveBlocker {
+    SponsorOwnsTargetBusiness,
+    TargetEconomyInactive,
+    NoPressureableWitnessCase,
+    ExtractionCustodyEnded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,11 +609,16 @@ impl OperationResolutionFactors {
 pub struct OperationResolutionRecord {
     resolved_at: SimTime,
     objective_outcome: OperationObjectiveOutcome,
+    objective_blocker: Option<OperationObjectiveBlocker>,
     execution_margin: i16,
     factors: OperationResolutionFactors,
     exposure: OperationExposureRecord,
     property_proceeds: Option<OperationPropertyProceedsRecord>,
     cash_proceeds: Option<OperationCashProceedsRecord>,
+    /// Custody relationship observed when an extraction resolved. This snapshot is persisted
+    /// because custody may end in the same minute or later, so later validation cannot infer
+    /// whether the target was actually detained when the crew reached the objective.
+    extraction_arrest: Option<ArrestId>,
     discovered_information: BTreeSet<InformationId>,
     /// Topic/subject/semantic triples actually produced by a surveillance resolution. Persisted
     /// because sightline conditions and the exact typed facts observed at that minute are not
@@ -621,6 +639,10 @@ impl OperationResolutionRecord {
         self.objective_outcome
     }
 
+    pub fn objective_blocker(&self) -> Option<OperationObjectiveBlocker> {
+        self.objective_blocker
+    }
+
     pub fn execution_margin(&self) -> i16 {
         self.execution_margin
     }
@@ -639,6 +661,10 @@ impl OperationResolutionRecord {
 
     pub fn cash_proceeds(&self) -> Option<OperationCashProceedsRecord> {
         self.cash_proceeds
+    }
+
+    pub fn extraction_arrest(&self) -> Option<ArrestId> {
+        self.extraction_arrest
     }
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
@@ -680,6 +706,9 @@ struct OperationCommand {
     responsible_organization: OrganizationId,
     leader: CharacterId,
     objective: OperationObjective,
+    /// Exact custody relationship an extraction was authorized against. A later re-arrest is a
+    /// different legal event and must not silently become the target of an already-planned job.
+    extraction_arrest: Option<ArrestId>,
     approach: OperationApproach,
     roles: BTreeMap<RoleKind, CharacterId>,
     intelligence: BTreeSet<InformationId>,
@@ -734,6 +763,10 @@ impl OperationRecord {
 
     pub fn objective(&self) -> &OperationObjective {
         &self.command.objective
+    }
+
+    pub fn extraction_arrest(&self) -> Option<ArrestId> {
+        self.command.extraction_arrest
     }
 
     pub fn approach(&self) -> OperationApproach {

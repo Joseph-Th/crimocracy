@@ -10,8 +10,7 @@ use crate::legal::informant_system::{
     informant_reliability, informant_strength, information_is_relevant_to_investigation,
 };
 use crate::legal::{
-    Admissibility, ArrestStatus, EvidenceKind, InformantStatus, InvestigationStatus,
-    InvestigationWorkStatus,
+    Admissibility, ArrestStatus, EvidenceKind, InvestigationStatus, InvestigationWorkStatus,
 };
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
@@ -121,19 +120,12 @@ pub(super) fn validate_informants(state: &AppState) -> Result<(), StateValidatio
             handler.kind(),
             OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
         ) || informant.established_at() > state.now()
-            // Informants currently have no mutable lifecycle: establishment creates the sole
-            // Active state at version 1 and disclosures mutate the case, not the relationship.
-            // Pin restore to that exact constructor-reachable shape so forged versions cannot
-            // invalidate disclosure freshness snapshots without a canonical relationship change.
-            || informant.version() != 1
         {
             return Err(StateValidationError::InvalidInformant {
                 informant: informant.id(),
             });
         }
-        if informant.status() != InformantStatus::Active
-            || character.organization() == Some(informant.handler())
-        {
+        if character.organization() == Some(informant.handler()) {
             return Err(StateValidationError::InvalidInformant {
                 informant: informant.id(),
             });

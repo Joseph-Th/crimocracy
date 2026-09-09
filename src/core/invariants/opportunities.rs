@@ -40,7 +40,7 @@ fn validate_opportunity_definition(
         .world
         .get_organization(opportunity.organization())
         .ok_or_else(|| invalid_opportunity(opportunity))?;
-    let context = opportunity.context().operation();
+    let context = opportunity.context();
     if organization.kind() != OrganizationKind::Criminal
         || context.targets().is_empty()
         || opportunity.source_information().is_empty()
@@ -60,7 +60,7 @@ fn validate_opportunity_targets(
     state: &AppState,
     opportunity: &OpportunityRecord,
 ) -> Result<(), StateValidationError> {
-    for target in opportunity.context().operation().targets() {
+    for target in opportunity.context().targets() {
         if !is_entity_present(state, *target) {
             return Err(invalid_opportunity(opportunity));
         }
@@ -73,7 +73,7 @@ fn validate_opportunity_sources(
     opportunity: &OpportunityRecord,
     covered_targets: &mut BTreeSet<EntityRef>,
 ) -> Result<(), StateValidationError> {
-    let context = opportunity.context().operation();
+    let context = opportunity.context();
     covered_targets.clear();
     for source in opportunity.source_information() {
         let information = state
@@ -117,7 +117,7 @@ fn opportunity_report_entry_matches(
     report: &ReportRecord,
     expected_summary: &str,
 ) -> bool {
-    let context = opportunity.context().operation();
+    let context = opportunity.context();
     let expected_sources = opportunity.source_information();
     report.entries().len() == 1
         && report.entries().first().is_some_and(|entry| {
@@ -235,7 +235,7 @@ fn validate_converted_opportunity(
         .ok_or_else(|| invalid_opportunity(opportunity))?;
     operation_targets.clear();
     operation_targets.extend(operation.objective().referenced_entities());
-    let context = opportunity.context().operation();
+    let context = opportunity.context();
     if opportunity.version() != 2
         || at < opportunity.discovered_at()
         || at > state.now()

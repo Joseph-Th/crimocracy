@@ -859,19 +859,12 @@ pub struct WitnessStatementDraft {
     pub summary: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InformantStatus {
-    Active,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InformantRecord {
     pub(super) id: InformantId,
     pub(super) character: CharacterId,
     pub(super) handler: OrganizationId,
-    pub(super) status: InformantStatus,
     pub(super) established_at: SimTime,
-    pub(super) version: u32,
 }
 
 impl InformantRecord {
@@ -887,16 +880,8 @@ impl InformantRecord {
         self.handler
     }
 
-    pub fn status(&self) -> InformantStatus {
-        self.status
-    }
-
     pub fn established_at(&self) -> SimTime {
         self.established_at
-    }
-
-    pub fn version(&self) -> u32 {
-        self.version
     }
 }
 
@@ -1395,10 +1380,7 @@ pub(super) struct WitnessIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct InformantIndexes {
-    pub(super) active_by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
-    /// Every active informant relationship by id, so the disclosure pass iterates working
-    /// informants instead of scanning the full history.
-    pub(super) active: BTreeSet<InformantId>,
+    pub(super) by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
     pub(super) disclosure_by_case_information:
         BTreeMap<(InvestigationId, InformationId), InformantDisclosureId>,
 }

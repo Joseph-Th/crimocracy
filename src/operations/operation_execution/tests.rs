@@ -26,25 +26,28 @@ use crate::legal::patrol_system::{
     validate_establish_patrol_deployment, validate_revise_patrol_deployment,
 };
 use crate::legal::{
-    Admissibility, ArrestDraft, DayMinute, EvidenceDraft, EvidenceKind, EvidenceReliability,
-    EvidenceStrength, InvestigationDraft, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
-    PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus,
+    Admissibility, ArrestDraft, CaseWitnessDraft, DayMinute, EvidenceDraft, EvidenceKind,
+    EvidenceReliability, EvidenceStrength, InvestigationDraft, JurisdictionDraft,
+    PatrolDeploymentDraft, PatrolWindow, PoliceResponsePatrolSnapshot, PoliceResponseRecord,
+    PoliceResponseStatus, WitnessCooperation, WitnessStatementDraft,
 };
 use crate::operations::operation_economics::RECENT_HIT_WINDOW;
-use crate::operations::operation_system::{OperationError, validate_authorize_operation};
+use crate::operations::operation_system::{
+    OperationError, OperationTransition, apply_transition, validate_authorize_operation,
+};
 use crate::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, PropertyDispositionError,
     validate_deposit_operation_cash, validate_dispose_property,
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationApproach, OperationConstraint,
-    OperationContingency, OperationDraft, OperationKind, OperationObjective, OperationStatus,
-    RoleKind,
+    OperationContingency, OperationDraft, OperationKind, OperationObjective,
+    OperationObjectiveBlocker, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
-    insert_organization, validate_reassign_character,
+    insert_organization, validate_reassign_character, validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
@@ -59,6 +62,54 @@ struct PoliceResponseRoutingWire {
     authority: OrganizationId,
     neighborhood: NeighborhoodId,
     source_operation: OperationId,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct OperationCashProceedsRecordWire {
+    target: EntityRef,
+    amount: Money,
+}
+
+fn cash_proceeds_wire(
+    record: crate::operations::OperationCashProceedsRecord,
+) -> OperationCashProceedsRecordWire {
+    OperationCashProceedsRecordWire {
+        target: record.target(),
+        amount: record.amount(),
+    }
+}
+
+fn replace_serialized_cash_proceeds(
+    envelope: SaveEnvelope,
+    original: crate::operations::OperationCashProceedsRecord,
+    replacement: &OperationCashProceedsRecordWire,
+) -> SaveEnvelope {
+    let original_bytes =
+        bincode::serialize(&original).expect("operation cash proceeds should serialize");
+    assert_eq!(
+        bincode::serialize(&cash_proceeds_wire(original))
+            .expect("operation cash proceeds mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement cash proceeds should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized operation cash proceeds must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout cash-proceeds corruption must remain decodable")
 }
 
 #[derive(Clone, Serialize)]
@@ -181,6 +232,54 @@ fn insert_property_disposition_fixture(
     )
     .expect("liquidation settlement account should validate");
     (resale_venue, cash_account, settlement_account)
+}
+
+#[test]
+fn restore_rejects_cash_proceeds_not_derived_from_operation_economics() {
+    let (registry, mut state, _organization, operation) = make_operation_fixture();
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        if outcome.resolved_operations.contains(&operation) {
+            break;
+        }
+        assert!(
+            state.now().as_minutes() < 100,
+            "cash-take fixture should resolve well before this guard"
+        );
+    }
+    let proceeds = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .and_then(|resolution| resolution.cash_proceeds())
+        .expect("completed intimidation fixture must retain held cash proceeds");
+    let mut corrupted = cash_proceeds_wire(proceeds);
+    corrupted.amount = Money::from_cents(
+        proceeds
+            .amount()
+            .cents()
+            .checked_add(1)
+            .expect("fixture cash amount must leave room for one-cent corruption"),
+    );
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_cash_proceeds(
+            build_save(&registry, &state)
+                .expect("valid held-cash operation should save before corruption"),
+            proceeds,
+            &corrupted,
+        ),
+    )
+    .expect_err("cash proceeds must be exactly derivable from authored operation economics");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationCashProceeds {
+                operation: invalid
+            }
+        ) if invalid == operation
+    ));
 }
 
 #[test]
@@ -767,7 +866,7 @@ fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() 
 }
 
 #[test]
-fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
+fn sabotage_of_a_suspended_target_records_practical_objective_failure() {
     // Regression: a target whose economy went suspended between authorization and resolution
     // has nothing operating to disrupt, yet the after-action narrative unconditionally
     // claimed disruption. The summary and the committed effect must agree.
@@ -805,6 +904,15 @@ fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
     let resolution = record
         .resolution()
         .expect("completed operation should persist its resolution");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed,
+        "a crew cannot achieve a disruption objective against a business that is not operating"
+    );
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::TargetEconomyInactive)
+    );
     let summary = state
         .reports()
         .get_report(resolution.after_action_report())
@@ -816,6 +924,7 @@ fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
         !summary.contains(crate::operations::operation_economics::SABOTAGE_DISRUPTION_CLAUSE),
         "a suspended target cannot be disrupted, so the after-action must not claim it: {summary}"
     );
+    assert!(summary.contains("no active business to disrupt"));
     let economy = state
         .economy()
         .get_business_economy(business)
@@ -825,6 +934,639 @@ fn sabotage_of_a_suspended_target_resolves_without_claiming_disruption() {
         "no disruption may be committed against a suspended economy"
     );
     validate_state(&state).expect("suspended-target sabotage state should validate");
+    validate_invariants(&state);
+}
+
+#[test]
+fn operation_does_not_take_from_business_acquired_by_its_sponsor_mid_execution() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Burglary, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let (organization, business, due_at) = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started burglary should persist");
+        let OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("burglary fixture must target a business")
+        };
+        (
+            record.responsible_organization(),
+            *business,
+            record
+                .resolution_due_at()
+                .expect("started burglary must have a resolution deadline"),
+        )
+    };
+
+    validate_transfer_business_ownership(
+        &state,
+        business,
+        BusinessOwner::Organization(organization),
+    )
+    .expect("independent target should be transferable to the sponsoring organization")
+    .commit(&mut state)
+    .expect("target ownership transfer should commit");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture duration must fit SimDuration"),
+    ));
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::Burglary)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due burglary should decide even after target ownership changes");
+    assert_eq!(
+        plan.outcome.objective_blocker,
+        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+    );
+    assert_eq!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(plan.outcome.property_proceeds_plan.proceeds, None);
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("self-owned-target practical failure should validate")
+        .commit(&mut state)
+        .expect("self-owned-target practical failure should commit");
+
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("blocked burglary should persist its resolution");
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+    );
+    assert!(resolution.property_proceeds().is_none());
+    let after_action = state
+        .intelligence()
+        .get_information(resolution.after_action_information())
+        .expect("blocked burglary should persist after-action information");
+    assert!(after_action.summary().contains("hitting its own assets"));
+
+    // Cross-domain records share minute timestamps. Selling the business again after the
+    // operation resolves in the same minute must not make restore pretend the blocker was
+    // impossible merely because the later ownership change sorts last within world history.
+    validate_transfer_business_ownership(&state, business, BusinessOwner::Independent)
+        .expect("the sponsor should be able to sell the blocked target after resolution")
+        .commit(&mut state)
+        .expect("same-minute post-resolution sale should commit");
+    validate_state_against_registry(&registry, &state)
+        .expect("same-minute ownership churn must preserve the earlier blocker snapshot");
+    validate_invariants(&state);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("ownership-blocked operation should save"),
+    )
+    .expect("ownership-blocked operation should restore");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .and_then(|resolution| resolution.objective_blocker()),
+        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
+fn same_minute_post_resolution_acquisition_does_not_rewrite_prior_operation_success() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Burglary, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let (organization, business, due_at) = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started burglary should persist");
+        let OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("burglary fixture must target a business")
+        };
+        (
+            record.responsible_organization(),
+            *business,
+            record
+                .resolution_due_at()
+                .expect("started burglary must have a resolution deadline"),
+        )
+    };
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture duration must fit SimDuration"),
+    ));
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::Burglary)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due burglary should decide");
+    assert_eq!(plan.outcome.objective_blocker, None);
+    assert_ne!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed,
+        "maximal favorable variance must exercise a successful take"
+    );
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("fresh successful burglary should validate")
+        .commit(&mut state)
+        .expect("fresh successful burglary should commit");
+
+    // The organization acquires the target only after the operation has already resolved, but
+    // within the same simulation minute. Minute-level persistence cannot order these cross-domain
+    // facts, so the validated resolution snapshot remains authoritative for that ambiguity.
+    validate_transfer_business_ownership(
+        &state,
+        business,
+        BusinessOwner::Organization(organization),
+    )
+    .expect("independent target should remain transferable after the operation")
+    .commit(&mut state)
+    .expect("same-minute post-resolution acquisition should commit");
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("successful burglary should retain its resolution");
+    assert_eq!(resolution.objective_blocker(), None);
+    assert_ne!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("later same-minute acquisition must not rewrite prior operation success");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("same-minute acquisition state should save"),
+    )
+    .expect("same-minute acquisition state should restore");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .and_then(|resolution| resolution.objective_blocker()),
+        None
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
+fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_testimony() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x517A_7E11);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Pressure Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal organization should validate");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Witness Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("law-enforcement organization should validate");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Pressure Leader".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Management,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+                (
+                    CapabilityKind::Intimidation,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("pressure leader should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Case Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness should validate");
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Pressure target case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(leader)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation,
+            witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("statementless witness should be registerable")
+    .commit(&mut state)
+    .expect("witness registration should commit");
+    let pressure_draft = || OperationDraft {
+        title: "Pressure the witness".to_owned(),
+        kind: OperationKind::WitnessPressure,
+        responsible_organization: crew,
+        leader,
+        objective: OperationObjective::Frighten {
+            target: EntityRef::Character(witness),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::from_minutes(1),
+    };
+    let pressure = validate_authorize_operation(&registry, &state, pressure_draft())
+        .expect("statementless witness should be a meaningful pressure target")
+        .commit(&mut state)
+        .expect("pressure operation should commit");
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![pressure]);
+
+    let statement = crate::legal::witness_system::validate_record_witness_statement(
+        &state,
+        WitnessStatementDraft {
+            case_witness,
+            subject: EntityRef::Character(leader),
+            origin: None,
+            confidence: Rating::try_new(80).expect("fixture confidence should validate"),
+            summary: "The witness has already given the case a usable account.".to_owned(),
+        },
+    )
+    .expect("statement should validate while the pressure operation is in flight")
+    .commit(&mut state)
+    .expect("statement should commit before pressure resolves");
+    let statement_record = state
+        .legal()
+        .get_witness_statement(statement.statement)
+        .expect("statement should persist");
+    assert_eq!(
+        statement_record.cooperation(),
+        WitnessCooperation::Reluctant
+    );
+
+    let redundant_error = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            ..pressure_draft()
+        },
+    )
+    .expect_err("completed testimony leaves no modeled cooperation effect for a new pressure job");
+    assert_eq!(
+        redundant_error,
+        OperationError::TargetNotPressureableWitness(witness)
+    );
+
+    let due_at = state
+        .operations()
+        .get_operation(pressure)
+        .and_then(|record| record.resolution_due_at())
+        .expect("in-progress pressure should retain its resolution deadline");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture duration must fit SimDuration"),
+    ));
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::WitnessPressure)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        pressure,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due pressure operation should still resolve canonically");
+    assert_eq!(
+        plan.outcome.objective_blocker,
+        Some(OperationObjectiveBlocker::NoPressureableWitnessCase)
+    );
+    assert_eq!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed
+    );
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("statemented-witness practical failure should validate")
+        .commit(&mut state)
+        .expect("statemented-witness practical failure should commit");
+
+    let witness_record = state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("witness should persist");
+    assert_eq!(
+        witness_record.cooperation(),
+        WitnessCooperation::Reluctant,
+        "later pressure must not rewrite the cooperation snapshot behind completed testimony"
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_witness_statement(statement.statement)
+            .expect("statement should persist")
+            .cooperation(),
+        WitnessCooperation::Reluctant
+    );
+    let resolution = state
+        .operations()
+        .get_operation(pressure)
+        .and_then(|record| record.resolution())
+        .expect("blocked pressure should persist its resolution");
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::NoPressureableWitnessCase)
+    );
+    let after_action = state
+        .intelligence()
+        .get_information(resolution.after_action_information())
+        .expect("blocked pressure should persist after-action information");
+    assert!(
+        after_action
+            .summary()
+            .contains("no active case still depended")
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("statemented-witness pressure state should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x517A_7E12);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Snapshot Pressure Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal organization should validate");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Snapshot Witness Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("law-enforcement organization should validate");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Snapshot Pressure Leader".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Management,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+                (
+                    CapabilityKind::Intimidation,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("pressure leader should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Snapshot Case Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness should validate");
+    let first_investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "First pressureable case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(leader)]),
+        },
+    )
+    .expect("first investigation should validate")
+    .commit(&mut state)
+    .expect("first investigation should commit");
+    let first_case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation: first_investigation,
+            witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("first witness registration should validate")
+    .commit(&mut state)
+    .expect("first witness registration should commit");
+    let pressure = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Freeze witness targets".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(witness),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .expect("pressure operation should validate")
+    .commit(&mut state)
+    .expect("pressure operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(&registry, &mut state, pressure, OperationTransition::Begin)
+        .expect("pressure operation should begin");
+    let duration = registry
+        .get_operation(OperationKind::WitnessPressure)
+        .execution()
+        .duration();
+    state.advance_clock(duration);
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::WitnessPressure)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        pressure,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due pressure operation should decide");
+    assert_eq!(
+        plan.outcome.witness_pressure_targets,
+        vec![(first_case_witness, WitnessCooperation::Reluctant)],
+        "resolution planning must freeze the exact cooperation targets it intends to mutate"
+    );
+    assert_ne!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed,
+        "maximal favorable variance must exercise the pressure tail"
+    );
+    let validated = validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("fresh pressure resolution should validate");
+
+    // Add a second live case for the same witness after validation. The old resolution token
+    // must not silently intimidate only the case it happened to observe earlier.
+    let second_investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Late pressureable case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(leader)]),
+        },
+    )
+    .expect("second investigation should validate")
+    .commit(&mut state)
+    .expect("second investigation should commit");
+    let second_case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation: second_investigation,
+            witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("late witness registration should validate")
+    .commit(&mut state)
+    .expect("late witness registration should commit");
+    let id_counters_before = (
+        state.ids.next_raw(IdKind::Information),
+        state.ids.next_raw(IdKind::HistoryEvent),
+        state.ids.next_raw(IdKind::Report),
+    );
+    let error = validated
+        .commit(&mut state)
+        .expect_err("changed witness-target set must stale the whole operation resolution");
+    assert_eq!(
+        error,
+        OperationResolutionError::StaleObjectiveContext {
+            operation: pressure,
+        }
+    );
+    assert_eq!(
+        (
+            state.ids.next_raw(IdKind::Information),
+            state.ids.next_raw(IdKind::HistoryEvent),
+            state.ids.next_raw(IdKind::Report),
+        ),
+        id_counters_before,
+        "stale witness-target rejection must not consume resolution artifact IDs"
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(pressure)
+            .expect("rejected resolution must leave the operation present")
+            .status(),
+        OperationStatus::InProgress
+    );
+    assert!(
+        state
+            .operations()
+            .get_operation(pressure)
+            .expect("rejected resolution must leave the operation present")
+            .resolution()
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_case_witness(first_case_witness)
+            .expect("first witness registration should persist")
+            .cooperation(),
+        WitnessCooperation::Reluctant
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_case_witness(second_case_witness)
+            .expect("second witness registration should persist")
+            .cooperation(),
+        WitnessCooperation::Cooperative
+    );
     validate_invariants(&state);
 }
 
@@ -876,8 +1618,9 @@ fn stale_sabotage_tail_rejects_before_resolution_mutates_any_operation_artifact(
     let validated = validate_operation_resolution_plan(&registry, &state, plan)
         .expect("fresh sabotage resolution should validate");
 
-    // The economy can change independently after resolution validation. This deliberately
-    // stales only the tail token; the operation itself remains the exact version validated.
+    // The economy can change independently after resolution validation. Practical objective
+    // context is part of the resolution snapshot, so this must stale before any artifact or tail
+    // mutation rather than carrying a now-impossible success into commit.
     crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
         .expect("target economy should suspend")
         .commit(&mut state)
@@ -892,13 +1635,10 @@ fn stale_sabotage_tail_rejects_before_resolution_mutates_any_operation_artifact(
     let error = validated
         .commit(&mut state)
         .expect_err("stale disruption must reject before resolution mutation");
-    assert!(matches!(
+    assert_eq!(
         error,
-        OperationResolutionError::BusinessEconomy(BusinessEconomyError::StaleEconomy {
-            business: found,
-            ..
-        }) if found == business
-    ));
+        OperationResolutionError::StaleObjectiveContext { operation }
+    );
     let record = state
         .operations()
         .get_operation(operation)
@@ -1006,6 +1746,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
     // commentary would be noise in the executive brief.
     let achieved = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
         factors,
         OperationExposureLevel::None,
     );
@@ -1014,6 +1755,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
 
     let partial = build_after_action_summary(
         OperationObjectiveOutcome::Partial,
+        OperationObjectiveOutcome::Partial,
         factors,
         OperationExposureLevel::None,
     );
@@ -1021,10 +1763,43 @@ fn after_action_summary_contextualizes_adverse_variance() {
 
     let failed = build_after_action_summary(
         OperationObjectiveOutcome::Failed,
+        OperationObjectiveOutcome::Failed,
         factors,
         OperationExposureLevel::None,
     );
     assert!(failed.contains("contributed to the failure"));
+}
+
+#[test]
+fn practical_objective_failure_does_not_misattribute_tactical_success() {
+    let factors = OperationResolutionFactors {
+        role_capability_average: Rating::try_new(90).expect("fixture rating should be valid"),
+        leader_capability: Some(Rating::try_new(90).expect("fixture rating should be valid")),
+        intelligence_quality: Rating::try_new(0).expect("fixture rating should be valid"),
+        intelligence_adjustment: 0,
+        intelligence_topics_covered: 0,
+        intelligence_topics_relevant: 1,
+        target_police_presence: Some(
+            Rating::try_new(20).expect("fixture police presence should be valid"),
+        ),
+        police_response_arrived: false,
+        approach_adjustment: 0,
+        time_pressure: 0,
+        variance: -12,
+    };
+
+    let summary = build_after_action_summary(
+        OperationObjectiveOutcome::Failed,
+        OperationObjectiveOutcome::Achieved,
+        factors,
+        OperationExposureLevel::None,
+    );
+    assert!(summary.starts_with("Objective failed."));
+    assert!(!summary.contains("Assigned-role competence"));
+    assert!(!summary.contains("Leadership coordination"));
+    assert!(!summary.contains("contributed to the failure"));
+    assert!(!summary.contains("reduced the result"));
+    assert!(!summary.contains("Favorable unplanned circumstances"));
 }
 
 #[test]
@@ -1047,6 +1822,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     // context; strong-but-expected crew quality is not recited as a sentence.
     let routine = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
         neutral,
         OperationExposureLevel::None,
     );
@@ -1068,6 +1844,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     };
     let thin_crew = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
         thin,
         OperationExposureLevel::None,
     );
@@ -1080,6 +1857,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         ..neutral
     };
     let planned = build_after_action_summary(
+        OperationObjectiveOutcome::Achieved,
         OperationObjectiveOutcome::Achieved,
         informed,
         OperationExposureLevel::None,
@@ -1095,6 +1873,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     };
     let gapped_plan = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
         gapped,
         OperationExposureLevel::None,
     );
@@ -1107,12 +1886,14 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     };
     let rushed = build_after_action_summary(
         OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
         pressured,
         OperationExposureLevel::None,
     );
     assert!(rushed.contains("compressed the execution window"));
 
     let witnessed = build_after_action_summary(
+        OperationObjectiveOutcome::Partial,
         OperationObjectiveOutcome::Partial,
         neutral,
         OperationExposureLevel::Witnessed,
@@ -2251,6 +3032,46 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
       OperationError::TargetNotDetained(character) if character == leader
     ));
 
+    // A plan that cannot finish before the current custody window ends is knowingly obsolete
+    // before it starts and must be rejected rather than waiting for a due-tick failure.
+    let maximum_detention = registry.legal().maximum_detention();
+    let extraction_duration = registry
+        .get_operation(OperationKind::Extraction)
+        .execution()
+        .duration();
+    let impossible_start = SimTime::from_minutes(
+        state.now().as_minutes()
+            + u64::from(maximum_detention.as_minutes() - extraction_duration.as_minutes() + 1),
+    );
+    let impossible_error = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Too-late extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: impossible_start,
+        },
+    )
+    .expect_err("an extraction cannot be planned beyond the target's current custody");
+    assert!(matches!(
+        impossible_error,
+        OperationError::ExtractionOutlivesCustody {
+            character,
+            planned_end,
+            custody_ends_at,
+        } if character == detainee
+            && planned_end == impossible_start + extraction_duration
+            && custody_ends_at == state.now() + maximum_detention
+    ));
+
     let extraction = validate_authorize_operation(
         &registry,
         &state,
@@ -2318,6 +3139,13 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         Some(OperationObjectiveOutcome::Failed),
         "a fully capable crew must not fail the extraction"
     );
+    assert_eq!(
+        record
+            .resolution()
+            .and_then(|resolution| resolution.extraction_arrest()),
+        Some(arrest),
+        "successful extraction history must identify the custody relationship it broke"
+    );
     let released = state
         .legal()
         .get_arrest(arrest)
@@ -2334,6 +3162,170 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         "the rejected duplicate extraction must not create a record"
     );
     validate_state(&state).expect("post-extraction state should remain valid");
+    validate_invariants(&state);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("successful extraction state should save"),
+    )
+    .expect("successful extraction state should restore");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(extraction)
+            .and_then(|record| record.resolution())
+            .and_then(|resolution| resolution.extraction_arrest()),
+        Some(arrest)
+    );
+    validate_invariants(&restored);
+
+    // Custody can still end after a valid authorization. If it ends after execution starts, the
+    // due resolution must become a practical objective failure, not panic because the release
+    // transaction no longer has an arrest to consume.
+    let rearrest = crate::legal::arrest_system::validate_arrest(
+        &state,
+        ArrestDraft {
+            character: detainee,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("explicit re-arrest should validate")
+    .commit(&mut state)
+    .expect("explicit re-arrest should commit");
+    let stale_authorization = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Stale custody authorization".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::from_minutes(1),
+        },
+    )
+    .expect("fresh custody should produce an extraction authorization token");
+    crate::legal::arrest_system::validate_release_arrest(&state, rearrest)
+        .expect("first re-arrest should be releasable before authorization commit")
+        .commit(&mut state)
+        .expect("first re-arrest release should commit");
+    let replacement_arrest = crate::legal::arrest_system::validate_arrest(
+        &state,
+        ArrestDraft {
+            character: detainee,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("replacement custody should validate")
+    .commit(&mut state)
+    .expect("replacement custody should commit");
+    let stale_error = stale_authorization
+        .commit(&mut state)
+        .expect_err("authorization must not retarget itself to replacement custody");
+    assert_eq!(
+        stale_error,
+        OperationError::StaleExtractionCustody {
+            character: detainee,
+            expected: rearrest,
+            found: Some(replacement_arrest),
+        }
+    );
+
+    let stale_target_extraction = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Custody-ended extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::from_minutes(1),
+        },
+    )
+    .expect("replacement custody should support a fresh extraction")
+    .commit(&mut state)
+    .expect("fresh extraction should commit");
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(stale_target_extraction)
+            .and_then(|record| record.extraction_arrest()),
+        Some(replacement_arrest),
+        "the operation command must freeze the exact custody relationship it targets"
+    );
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(
+        &registry,
+        &mut state,
+        stale_target_extraction,
+        OperationTransition::Begin,
+    )
+    .expect("extraction should begin while custody is current");
+    crate::legal::arrest_system::validate_release_arrest(&state, replacement_arrest)
+        .expect("custody should still be releasable after operation start")
+        .commit(&mut state)
+        .expect("external custody release should commit");
+    let later_arrest = crate::legal::arrest_system::validate_arrest(
+        &state,
+        ArrestDraft {
+            character: detainee,
+            investigation,
+            evidence: BTreeSet::from([evidence]),
+        },
+    )
+    .expect("a later re-arrest is a distinct legal event")
+    .commit(&mut state)
+    .expect("later re-arrest should commit without retargeting the active operation");
+    state.advance_clock(SimDuration::from_minutes(
+        extraction_duration.as_minutes() - 1,
+    ));
+    let outcome = run_tick(&registry, &mut state);
+    assert_eq!(
+        outcome.resolved_operations,
+        vec![stale_target_extraction],
+        "custody expiry must remain a resolvable canonical tick outcome"
+    );
+    let stale_resolution = state
+        .operations()
+        .get_operation(stale_target_extraction)
+        .and_then(|record| record.resolution())
+        .expect("custody-ended extraction should still persist a resolution");
+    assert_eq!(
+        stale_resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(stale_resolution.extraction_arrest(), None);
+    assert_eq!(
+        stale_resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::ExtractionCustodyEnded)
+    );
+    assert_eq!(
+        state
+            .legal()
+            .active_arrest_for_character(detainee)
+            .map(|arrest| arrest.id()),
+        Some(later_arrest),
+        "the old extraction must not release a newer custody event it was never authorized against"
+    );
+    let after_action = state
+        .intelligence()
+        .get_information(stale_resolution.after_action_information())
+        .expect("failed extraction should persist an after-action record");
+    assert!(after_action.summary().contains("no longer detained"));
+    validate_state(&state).expect("custody-ended extraction state should remain valid");
     validate_invariants(&state);
 }
 
@@ -2577,10 +3569,7 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
         + u64::from(registry.legal().informant_decision_delay().as_minutes());
     loop {
         let outcome = run_tick(&registry, &mut state);
-        let flipped = state
-            .legal()
-            .active_informant_for(suspect, police)
-            .is_some();
+        let flipped = state.legal().informant_for(suspect, police).is_some();
         let disclosed = state
             .legal()
             .get_investigation(investigation)

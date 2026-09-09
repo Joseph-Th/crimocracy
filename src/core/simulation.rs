@@ -121,7 +121,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
             .expect("valid state should staff available prosecutors onto open reviews");
     // Detainee informant recruitment runs right after custody conversion: a member arrested
     // exactly one cadence window ago faces their single recruitment decision this minute, and
-    // active informants disclose personally-held knowledge into their handler's cases.
+    // informants disclose personally-held knowledge into their handler's cases.
     let informant_recruitments =
         crate::legal::informant_system::apply_detainee_informant_recruitment(registry, state)
             .expect("valid state should resolve detainee informant recruitment decisions");

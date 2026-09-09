@@ -41,7 +41,7 @@ struct OpportunityFixture {
 struct OpportunityRecordWire {
     id: OpportunityId,
     organization: OrganizationId,
-    context: OpportunityContext,
+    context: OperationOpportunityContext,
     discovered_at: SimTime,
     valid_until: Option<SimTime>,
     source_information: BTreeSet<InformationId>,

@@ -6,7 +6,7 @@ use crate::core::id::{
 };
 use crate::core::time::{SimDuration, SimTime};
 use crate::operations::{
-    OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord,
+    OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord, OperationKind,
     OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
     OperationResolutionRecord, OperationStatus,
 };
@@ -49,11 +49,13 @@ pub struct OperationState {
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
     #[serde(skip)]
     in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
-    /// Successful property/cash takes per target business as (resolved_at, operation_id).
-    /// Feeds recency-depletion economics without scanning the full completed bucket, which
-    /// grows for the life of the campaign.
+    /// Successful property/cash takes per target business and operation kind as
+    /// (resolved_at, operation_id). Different kinds represent different replenishment
+    /// channels, so a burglary cannot deplete a later smuggling payment merely because both
+    /// happened at the same venue.
     #[serde(skip)]
-    successful_takes_by_business: BTreeMap<BusinessId, BTreeSet<(SimTime, OperationId)>>,
+    successful_takes_by_business_kind:
+        BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
 }
 
 impl OperationState {
@@ -68,7 +70,7 @@ impl OperationState {
         self.by_discovered_information.clear();
         self.authorized_by_start.clear();
         self.in_progress_by_resolution_due.clear();
-        self.successful_takes_by_business.clear();
+        self.successful_takes_by_business_kind.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_organization
@@ -115,8 +117,8 @@ impl OperationState {
                     )
                     && let Some(business) = record.objective().taken_business()
                 {
-                    self.successful_takes_by_business
-                        .entry(business)
+                    self.successful_takes_by_business_kind
+                        .entry((business, record.kind()))
                         .or_default()
                         .insert((resolution.resolved_at(), id));
                 }
@@ -457,8 +459,9 @@ impl OperationState {
             record.runtime.resolution = Some(resolution);
             record.runtime.awaiting_decision_since = None;
         }
-        // A successful take against a business enters the recency-depletion index at its own
-        // resolution instant, so later takes price the target without a full-history scan.
+        // A successful take against a business enters its operation-kind depletion channel at
+        // the resolution instant, so later same-kind takes price the target without a
+        // full-history scan or cross-depleting unrelated revenue models.
         let record = self
             .records
             .get(&id)
@@ -475,22 +478,24 @@ impl OperationState {
             // historical settlement's take economics against that settlement's own
             // recency window, so even entries older than the live window remain
             // load-bearing - same trade as the append-only ledger itself.
-            self.successful_takes_by_business
-                .entry(business)
+            self.successful_takes_by_business_kind
+                .entry((business, record.kind()))
                 .or_default()
                 .insert((resolution.resolved_at(), id));
         }
         self.set_status(id, OperationStatus::Completed);
     }
 
-    /// Successful takes against `business` resolved inside the recency window before the
-    /// current operation's `(resolved_at, id)` ordering position. The lower time boundary is
-    /// open: a target is fully restocked exactly when the authored window elapses. Ordering by
-    /// operation ID within one simulation minute mirrors the canonical due-operation pass and
-    /// keeps historical re-derivation stable when several takes resolve at the same `SimTime`.
+    /// Successful same-kind takes against `business` resolved inside the recency window before
+    /// the current operation's `(resolved_at, id)` ordering position. The lower time boundary
+    /// is open: that operation channel is fully replenished exactly when the authored window
+    /// elapses. Ordering by operation ID within one simulation minute mirrors the canonical
+    /// due-operation pass and keeps historical re-derivation stable when several takes resolve
+    /// at the same `SimTime`.
     pub(crate) fn recent_successful_takes(
         &self,
         business: BusinessId,
+        kind: OperationKind,
         at: SimTime,
         window: SimDuration,
         current_operation: OperationId,
@@ -512,8 +517,8 @@ impl OperationState {
         // same-minute IDs that had not yet committed when this operation was resolved by the
         // canonical ascending-ID pass.
         let upper_key = (at, current_operation);
-        self.successful_takes_by_business
-            .get(&business)
+        self.successful_takes_by_business_kind
+            .get(&(business, kind))
             .map(|takes| {
                 takes
                     .range((lower_range_bound, std::ops::Bound::Excluded(&upper_key)))
@@ -730,7 +735,10 @@ impl OperationState {
                         OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
                     );
                 let indexed = taken_business
-                    .and_then(|business| self.successful_takes_by_business.get(&business))
+                    .and_then(|business| {
+                        self.successful_takes_by_business_kind
+                            .get(&(business, record.kind()))
+                    })
                     .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
                 if indexed != should_index {
                     return false;
@@ -757,7 +765,7 @@ impl OperationState {
             return false;
         }
         let indexed_takes: usize = self
-            .successful_takes_by_business
+            .successful_takes_by_business_kind
             .values()
             .map(BTreeSet::len)
             .sum();
@@ -792,8 +800,8 @@ mod tests {
         let lower = SimTime::from_minutes(680);
         let current = OperationId::from_raw(20);
         let mut state = OperationState::new();
-        state.successful_takes_by_business.insert(
-            business,
+        state.successful_takes_by_business_kind.insert(
+            (business, OperationKind::Burglary),
             BTreeSet::from([
                 (lower, OperationId::from_raw(1)),
                 (SimTime::from_minutes(681), OperationId::from_raw(2)),
@@ -804,22 +812,33 @@ mod tests {
         );
 
         assert_eq!(
-            state.recent_successful_takes(business, at, window, current),
+            state.recent_successful_takes(business, OperationKind::Burglary, at, window, current,),
             2,
             "only interior-window takes that precede the current operation may deplete it"
+        );
+        assert_eq!(
+            state.recent_successful_takes(business, OperationKind::Smuggling, at, window, current,),
+            0,
+            "a different operation kind at the same business must not share depletion"
         );
 
         let early = SimTime::from_minutes(100);
         let mut early_state = OperationState::new();
-        early_state.successful_takes_by_business.insert(
-            business,
+        early_state.successful_takes_by_business_kind.insert(
+            (business, OperationKind::Burglary),
             BTreeSet::from([
                 (SimTime::from_minutes(0), OperationId::from_raw(1)),
                 (early, OperationId::from_raw(2)),
             ]),
         );
         assert_eq!(
-            early_state.recent_successful_takes(business, early, window, OperationId::from_raw(2),),
+            early_state.recent_successful_takes(
+                business,
+                OperationKind::Burglary,
+                early,
+                window,
+                OperationId::from_raw(2),
+            ),
             1,
             "before a full window has elapsed, campaign-start takes are still recent"
         );

@@ -18,14 +18,13 @@ use crate::core::time::SimTime;
 use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::records::{
     ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord,
-    InformantRecord, InformantStatus, InvestigationRecord, InvestigationStatus,
-    InvestigationWorkCancellation, InvestigationWorkFocus, InvestigationWorkKind,
-    InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkStatus,
-    JurisdictionRecord, LegalIndexes, LegalRepresentationEndReason, LegalRepresentationOrigin,
-    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentRecord,
-    PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord, PoliceResponseStatus,
-    ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
-    ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
+    InformantRecord, InvestigationRecord, InvestigationStatus, InvestigationWorkCancellation,
+    InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
+    InvestigationWorkResolution, InvestigationWorkStatus, JurisdictionRecord, LegalIndexes,
+    LegalRepresentationEndReason, LegalRepresentationOrigin, LegalRepresentationRecord,
+    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
+    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
+    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,13 +129,10 @@ impl LegalState {
                 .insert(statement.evidence(), statement.id());
         }
         for informant in self.informants.values() {
-            if informant.status() == InformantStatus::Active {
-                self.indexes
-                    .informants
-                    .active_by_character_handler
-                    .insert((informant.character(), informant.handler()), informant.id());
-                self.indexes.informants.active.insert(informant.id());
-            }
+            self.indexes
+                .informants
+                .by_character_handler
+                .insert((informant.character(), informant.handler()), informant.id());
         }
         for disclosure in self.informant_disclosures.values() {
             self.indexes
@@ -305,19 +301,19 @@ impl LegalState {
     ) -> Option<&InformantDisclosureRecord> {
         self.informant_disclosures.get(&id)
     }
-    pub fn active_informant_for(
+    pub fn informant_for(
         &self,
         character: CharacterId,
         handler: OrganizationId,
     ) -> Option<&InformantRecord> {
         self.indexes
             .informants
-            .active_by_character_handler
+            .by_character_handler
             .get(&(character, handler))
             .map(|id| {
                 self.informants
                     .get(id)
-                    .expect("active informant index must reference an informant")
+                    .expect("informant pair index must reference an informant")
             })
     }
     pub(crate) fn informant_disclosure_for_case_information(
@@ -829,20 +825,11 @@ impl LegalState {
     pub(crate) fn informants(&self) -> impl Iterator<Item = &InformantRecord> {
         self.informants.values()
     }
-    /// Every active informant in id order; the disclosure pass scans this instead of the
-    /// full terminated-and-active informant history.
-    pub(crate) fn active_informants(&self) -> impl Iterator<Item = &InformantRecord> {
-        self.indexes.informants.active.iter().map(|id| {
-            self.informants
-                .get(id)
-                .expect("active-informant index must reference an informant")
-        })
-    }
-    /// O(1) emptiness probe over the active-informant index, so per-tick passes that build
+    /// O(1) emptiness probe over the authoritative informant map, so per-tick passes that build
     /// cross-referenced views (handler-to-case maps) can skip that work entirely on quiet
     /// ticks without changing what they would have produced.
-    pub(crate) fn has_active_informants(&self) -> bool {
-        !self.indexes.informants.active.is_empty()
+    pub(crate) fn has_informants(&self) -> bool {
+        !self.informants.is_empty()
     }
     pub(crate) fn informant_disclosures(&self) -> impl Iterator<Item = &InformantDisclosureRecord> {
         self.informant_disclosures.values()
@@ -1079,21 +1066,11 @@ impl LegalState {
     pub(crate) fn insert_informant(&mut self, record: InformantRecord) {
         let id = record.id();
         let key = (record.character(), record.handler());
-        debug_assert_eq!(
-            record.status(),
-            InformantStatus::Active,
-            "Lifecycle Validity: new informant relationships must be active"
-        );
-        let previous_active = self
-            .indexes
-            .informants
-            .active_by_character_handler
-            .insert(key, id);
+        let previous_pair = self.indexes.informants.by_character_handler.insert(key, id);
         debug_assert!(
-            previous_active.is_none(),
-            "Ownership Exclusivity: duplicate active informant relationship inserted"
+            previous_pair.is_none(),
+            "Ownership Exclusivity: duplicate informant relationship inserted"
         );
-        self.indexes.informants.active.insert(id);
         let previous = self.informants.insert(id, record);
         debug_assert!(
             previous.is_none(),

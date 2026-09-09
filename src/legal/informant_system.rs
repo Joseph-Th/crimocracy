@@ -10,8 +10,7 @@ use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
-    InformantDisclosureRecord, InformantDraft, InformantRecord, InformantStatus,
-    InvestigationStatus,
+    InformantDisclosureRecord, InformantDraft, InformantRecord, InvestigationStatus,
 };
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -34,17 +33,15 @@ pub enum InformantError {
         handler: OrganizationId,
     },
     #[error(
-        "character {character} already has active informant relationship {informant} with handler {handler}"
+        "character {character} already has informant relationship {informant} with handler {handler}"
     )]
-    AlreadyActive {
+    AlreadyInformant {
         character: CharacterId,
         handler: OrganizationId,
         informant: InformantId,
     },
     #[error("informant relationship {0} does not exist")]
     MissingInformant(InformantId),
-    #[error("informant relationship {0} is not active")]
-    InactiveInformant(InformantId),
     #[error("investigation {0} does not exist")]
     MissingInvestigation(InvestigationId),
     #[error("investigation {0} is not active")]
@@ -89,14 +86,6 @@ pub enum InformantError {
         found: u32,
     },
     #[error(
-        "informant {informant} changed after validation; expected version {expected}, found {found}"
-    )]
-    StaleInformant {
-        informant: InformantId,
-        expected: u32,
-        found: u32,
-    },
-    #[error(
         "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
     )]
     StaleInvestigation {
@@ -133,9 +122,7 @@ impl ValidatedInformantEstablishment {
             id,
             character: self.draft.character,
             handler: self.draft.handler,
-            status: InformantStatus::Active,
             established_at: state.now(),
-            version: 1,
         });
         Ok(id)
     }
@@ -171,11 +158,8 @@ fn validate_establishment_dependencies(
             handler: draft.handler,
         });
     }
-    if let Some(existing) = state
-        .legal
-        .active_informant_for(draft.character, draft.handler)
-    {
-        return Err(InformantError::AlreadyActive {
+    if let Some(existing) = state.legal.informant_for(draft.character, draft.handler) {
+        return Err(InformantError::AlreadyInformant {
             character: draft.character,
             handler: draft.handler,
             informant: existing.id(),
@@ -201,7 +185,6 @@ fn validate_handler(state: &AppState, handler: OrganizationId) -> Result<(), Inf
 #[derive(Debug)]
 pub struct ValidatedInformantDisclosure {
     draft: InformantDisclosureDraft,
-    expected_informant_version: u32,
     expected_investigation_version: u32,
 }
 
@@ -210,17 +193,6 @@ impl ValidatedInformantDisclosure {
         state
             .ids
             .reserve_many(&[(IdKind::Evidence, 1), (IdKind::InformantDisclosure, 1)])?;
-        let informant = state
-            .legal
-            .get_informant(self.draft.informant)
-            .ok_or(InformantError::MissingInformant(self.draft.informant))?;
-        if informant.version() != self.expected_informant_version {
-            return Err(InformantError::StaleInformant {
-                informant: self.draft.informant,
-                expected: self.expected_informant_version,
-                found: informant.version(),
-            });
-        }
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)
@@ -299,17 +271,12 @@ pub fn validate_record_informant_disclosure(
     draft: InformantDisclosureDraft,
 ) -> Result<ValidatedInformantDisclosure, InformantError> {
     validate_disclosure_dependencies(state, draft)?;
-    let informant = state
-        .legal
-        .get_informant(draft.informant)
-        .expect("validated informant must exist");
     let investigation = state
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must exist");
     Ok(ValidatedInformantDisclosure {
         draft,
-        expected_informant_version: informant.version(),
         expected_investigation_version: investigation.version(),
     })
 }
@@ -322,9 +289,6 @@ fn validate_disclosure_dependencies(
         .legal
         .get_informant(draft.informant)
         .ok_or(InformantError::MissingInformant(draft.informant))?;
-    if informant.status() != InformantStatus::Active {
-        return Err(InformantError::InactiveInformant(draft.informant));
-    }
     let _ = state
         .world
         .get_character(informant.character())
@@ -470,11 +434,7 @@ pub(crate) fn apply_detainee_informant_recruitment(
         }
         // An informant already working this handler keeps that arrangement; a second
         // establishment would be rejected as a duplicate, so no new decision is drawn.
-        if state
-            .legal
-            .active_informant_for(character, handler)
-            .is_some()
-        {
+        if state.legal.informant_for(character, handler).is_some() {
             continue;
         }
         candidates.push((character, handler));
@@ -508,17 +468,17 @@ pub(crate) fn apply_detainee_informant_recruitment(
     Ok(recruited)
 }
 
-/// Active informants disclose personally held information relevant to their handler's active
+/// Informants disclose personally held information relevant to their handler's active
 /// cases. Relevance uses the same subject/origin predicate as the canonical disclosure validator,
 /// so institution-authored cases and enterprise-origin vice inquiries are not arbitrarily excluded.
 /// Each case-information pair is disclosed at most once by the disclosure index.
 pub(crate) fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
-    // Disclosures need a live informant relationship on one side and an active case on the
-    // other. With no active informant the handler-to-case view could never be consulted,
+    // Disclosures need an informant relationship on one side and an active case on the
+    // other. With no informant the handler-to-case view could never be consulted,
     // so quiet custody ticks skip building it entirely.
-    if !state.legal.has_active_informants() {
+    if !state.legal.has_informants() {
         return Ok(Vec::new());
     }
     // Active cases owned by each handler, keyed by entities that make information relevant to
@@ -546,7 +506,7 @@ pub(crate) fn apply_informant_disclosures(
 
     let candidates: Vec<(InformantId, InformationId, InvestigationId)> = state
         .legal
-        .active_informants()
+        .informants()
         .flat_map(|informant| {
             let handler = informant.handler();
             let character = informant.character();
@@ -577,7 +537,7 @@ pub(crate) fn apply_informant_disclosures(
 
     let mut disclosures = Vec::new();
     for (informant, information, investigation) in candidates {
-        // Every candidate was derived from current active indexes in this pass. A validation or
+        // Every candidate was derived from current indexes in this pass. A validation or
         // commit failure therefore signals state/allocator drift and must surface rather than
         // silently losing evidence that the handler was due to receive.
         let disclosure = validate_record_informant_disclosure(

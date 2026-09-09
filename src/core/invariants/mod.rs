@@ -637,7 +637,7 @@ fn validate_opportunities_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for opportunity in state.opportunities.opportunities() {
-        let context = opportunity.context().operation();
+        let context = opportunity.context();
         let definition = registry.get_operation(context.operation_kind());
         let report = state.reports.get_report(opportunity.report()).ok_or(
             StateValidationError::InvalidOpportunity {
