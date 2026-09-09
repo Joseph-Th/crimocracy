@@ -1,4 +1,12 @@
-//! Business operating lifecycle, deterministic cycle planning, and atomic ledger settlement.
+//! Business economy establishment, deterministic cycle planning, and atomic ledger settlement.
+
+mod lifecycle;
+
+pub(crate) use lifecycle::validate_acquisition_resume;
+pub use lifecycle::{
+    ValidatedBusinessEconomyStatusChange, validate_resume_business_economy,
+    validate_suspend_business_economy,
+};
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -270,7 +278,10 @@ struct BusinessCycleSnapshot {
     owner: BusinessOwner,
     expected_economy_version: u32,
     occurred_at: SimTime,
-    next_cycle_at: SimTime,
+    /// `None` means this cycle settled successfully but its next authored recurrence lies beyond
+    /// the finite simulation clock. The economy remains operational; there is simply no further
+    /// representable settlement instant to schedule.
+    next_cycle_at: Option<SimTime>,
     /// Set when this losing settlement reaches the authored consecutive-loss threshold:
     /// commit suspends the economy instead of leaving the next cycle scheduled.
     suspends_after_settlement: bool,
@@ -313,9 +324,9 @@ pub fn decide_business_cycle(
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(business));
     }
-    let due_at = economy
-        .next_cycle_at()
-        .expect("active business economy must carry a scheduled next cycle");
+    let Some(due_at) = economy.next_cycle_at() else {
+        return Err(BusinessEconomyError::SimulationTimeOverflow);
+    };
     if state.now() < due_at {
         return Err(BusinessEconomyError::CycleNotDue { business, due_at });
     }
@@ -363,10 +374,10 @@ pub fn decide_business_cycle(
     // identical loss. Resume stays a manual canonical decision.
     let suspends_after_settlement = net_cash < Money::ZERO
         && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
-    let next_cycle_at = state
-        .now()
-        .checked_add(economics.cycle())
-        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    // Settling work that is due now must not fail only because its *next* recurrence lies past
+    // the finite clock. `None` is persisted as an exhausted recurrence and registry-aware
+    // validation proves that the authored cadence really does overflow from this settlement.
+    let next_cycle_at = state.now().checked_add(economics.cycle());
     Ok(BusinessCyclePlan {
         snapshot: BusinessCycleSnapshot {
             business,
@@ -650,152 +661,6 @@ pub fn validate_business_cycle_plan(
         plan,
         ledger,
         information,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BusinessEconomyStatusChange {
-    Suspend,
-    Resume,
-}
-
-pub struct ValidatedBusinessEconomyStatusChange {
-    business: BusinessId,
-    expected_version: u32,
-    change: BusinessEconomyStatusChange,
-    cycle_duration: Option<SimDuration>,
-}
-
-impl ValidatedBusinessEconomyStatusChange {
-    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
-        if state.world.get_business(self.business).is_none() {
-            return Err(BusinessEconomyError::MissingBusiness(self.business));
-        }
-        let economy = state
-            .economy
-            .get_business_economy(self.business)
-            .ok_or(BusinessEconomyError::MissingBusinessEconomy(self.business))?;
-        if economy.version() != self.expected_version {
-            return Err(BusinessEconomyError::StaleEconomy {
-                business: self.business,
-                expected: self.expected_version,
-                found: economy.version(),
-            });
-        }
-        ensure_version_can_advance(economy.version(), "business economy")?;
-        if self.change == BusinessEconomyStatusChange::Resume {
-            validate_business(state, self.business)?;
-            validate_accounts(
-                state,
-                self.business,
-                economy.operating_account(),
-                economy.settlement_account(),
-                Some(self.business),
-            )?;
-        }
-        let status = match self.change {
-            BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
-            BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
-        };
-        let next_cycle_at = self
-            .cycle_duration
-            .map(|duration| {
-                state
-                    .now()
-                    .checked_add(duration)
-                    .ok_or(BusinessEconomyError::SimulationTimeOverflow)
-            })
-            .transpose()?;
-        // Resuming restarts the chronic-loss grace window at the actual resume instant.
-        let loss_streak_anchor =
-            (self.change == BusinessEconomyStatusChange::Resume).then_some(state.now());
-        state
-            .economy
-            .set_status(self.business, status, next_cycle_at, loss_streak_anchor);
-        Ok(())
-    }
-}
-
-pub fn validate_suspend_business_economy(
-    state: &AppState,
-    business: BusinessId,
-) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    let economy = state
-        .economy
-        .get_business_economy(business)
-        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
-    match economy.status() {
-        BusinessOperatingStatus::Active => {}
-        BusinessOperatingStatus::Suspended => {
-            return Err(BusinessEconomyError::EconomyNotActive(business));
-        }
-    }
-    ensure_version_can_advance(economy.version(), "business economy")?;
-    Ok(ValidatedBusinessEconomyStatusChange {
-        business,
-        expected_version: economy.version(),
-        change: BusinessEconomyStatusChange::Suspend,
-        cycle_duration: None,
-    })
-}
-
-pub fn validate_resume_business_economy(
-    registry: &Registry,
-    state: &AppState,
-    business: BusinessId,
-) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    let business_record = validate_business(state, business)?;
-    let cycle_duration = registry
-        .get_business(business_record.kind())
-        .economics()
-        .cycle();
-    validate_resume_with_cycle_duration(state, business, cycle_duration)
-}
-
-/// Acquisition composition hook: validates a suspended economy before the acquisition mutates
-/// ownership or money. The returned canonical status token can then commit after those controlled
-/// mutations without introducing a new validation path.
-pub(crate) fn validate_acquisition_resume(
-    state: &AppState,
-    business: BusinessId,
-    cycle_duration: SimDuration,
-) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    validate_resume_with_cycle_duration(state, business, cycle_duration)
-}
-
-fn validate_resume_with_cycle_duration(
-    state: &AppState,
-    business: BusinessId,
-    cycle_duration: SimDuration,
-) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    let _business_record = validate_business(state, business)?;
-    let economy = state
-        .economy
-        .get_business_economy(business)
-        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
-    match economy.status() {
-        BusinessOperatingStatus::Active => {
-            return Err(BusinessEconomyError::EconomyNotSuspended(business));
-        }
-        BusinessOperatingStatus::Suspended => {}
-    }
-    validate_accounts(
-        state,
-        business,
-        economy.operating_account(),
-        economy.settlement_account(),
-        Some(business),
-    )?;
-    ensure_version_can_advance(economy.version(), "business economy")?;
-    state
-        .now()
-        .checked_add(cycle_duration)
-        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
-    Ok(ValidatedBusinessEconomyStatusChange {
-        business,
-        expected_version: economy.version(),
-        change: BusinessEconomyStatusChange::Resume,
-        cycle_duration: Some(cycle_duration),
     })
 }
 
@@ -1088,10 +953,14 @@ pub fn validate_disrupt_business_economy(
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(business));
     }
+    // A disruption whose authored duration extends beyond the finite simulation clock remains
+    // meaningful through the last representable minute. Clamp the effect horizon rather than
+    // rejecting an otherwise successful sabotage because part of its duration lies outside the
+    // simulation's representable future.
     let disrupted_through = state
         .now()
         .checked_add(registry.business_disruption().duration())
-        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+        .unwrap_or(SimTime::from_minutes(u64::MAX));
     let changes_horizon = economy
         .disrupted_through()
         .is_none_or(|current| disrupted_through > current);

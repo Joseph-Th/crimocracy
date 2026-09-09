@@ -4,6 +4,7 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::MandateId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::finance::{BudgetUsageRecord, FinancialAccountRecord, LedgerTransactionRecord, Money};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,6 +211,7 @@ fn validate_budget_usage(
                 && usage.amount() <= budget.limit
                 && usage.period_start() == window.start()
                 && usage.period_end() == window.end()
+                && window.contains(transaction.occurred_at())
         })
     } else {
         true
@@ -222,8 +224,11 @@ fn validate_budget_usage(
             && !mandate.scopes().contains(&usage.scope()))
         || !current_budget_matches
         || usage.period_start() >= usage.period_end()
-        || transaction.occurred_at() < usage.period_start()
-        || transaction.occurred_at() >= usage.period_end()
+        || !persisted_budget_window_contains(
+            usage.period_start(),
+            usage.period_end(),
+            transaction.occurred_at(),
+        )
         || !matching_posting
     {
         return Err(StateValidationError::InvalidBudgetUsage {
@@ -238,6 +243,19 @@ fn validate_budget_usage(
         },
     )?;
     Ok(())
+}
+
+/// Historical mandate revisions can replace the current period definition, so old budget usage
+/// must validate its persisted bounds without consulting today's mandate configuration. Normal
+/// windows are half-open; an end at `u64::MAX` denotes the clamped final partial period and
+/// therefore includes the last representable instant.
+fn persisted_budget_window_contains(start: SimTime, end: SimTime, at: SimTime) -> bool {
+    at >= start
+        && if end.as_minutes() == u64::MAX {
+            at <= end
+        } else {
+            at < end
+        }
 }
 
 fn validate_finance_aggregates(

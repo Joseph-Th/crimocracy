@@ -805,10 +805,10 @@ fn validate_extraction_custody_window(
         draft.scheduled_for,
         &draft.constraints,
     );
-    let custody_ends_at = arrest
-        .arrested_at()
-        .checked_add(registry.legal().maximum_detention())
-        .ok_or(OperationError::SimulationTimeOverflow)?;
+    let custody_ends_at = crate::legal::arrest_system::custody_release_at(
+        arrest.arrested_at(),
+        registry.legal().maximum_detention(),
+    );
     if planned_end >= custody_ends_at {
         return Err(OperationError::ExtractionMissesCustodyWindow {
             character: target,
@@ -1287,6 +1287,14 @@ pub(crate) fn validate_begin_operation(
     // the approach window, and an entry milestone at or after resolution would resolve the
     // operation before its modeled approach begins.
     let participants = record.participants();
+    for character in &participants {
+        if let Some(arrest) = state.legal.active_arrest_for_character(*character) {
+            return Err(OperationError::DetainedParticipant {
+                character: *character,
+                arrest: arrest.id(),
+            });
+        }
+    }
     if let Some((character, conflicting_operation)) = find_busy_participant_in_window(
         registry,
         state,

@@ -85,16 +85,19 @@ impl BudgetPeriod {
         }
     }
 
+    /// Resolves the authored budget period containing `time`.
+    ///
+    /// Normal windows are half-open `[start, end)`. The finite simulation clock can cut off the
+    /// final authored period before its conceptual end; that one window clamps `end` to
+    /// `SimTime(u64::MAX)` and includes that terminal instant. This preserves valid budget
+    /// authority through every representable campaign minute without inventing time beyond the
+    /// simulation horizon.
     pub fn window(self, time: SimTime) -> BudgetWindow {
         let duration = self.duration_minutes();
         let start_minutes = (time.as_minutes() / duration) * duration;
         BudgetWindow {
             start: SimTime::from_minutes(start_minutes),
-            end: SimTime::from_minutes(
-                start_minutes
-                    .checked_add(duration)
-                    .expect("budget period end overflowed simulation time"),
-            ),
+            end: SimTime::from_minutes(start_minutes.saturating_add(duration)),
         }
     }
 }
@@ -112,6 +115,18 @@ impl BudgetWindow {
 
     pub fn end(self) -> SimTime {
         self.end
+    }
+
+    /// Membership for the persisted window representation. `end == u64::MAX` is unambiguously
+    /// the clamped terminal period because daily and weekly authored boundaries are exact
+    /// multiples of their duration and `u64::MAX` is not such a boundary.
+    pub fn contains(self, time: SimTime) -> bool {
+        time >= self.start
+            && if self.end.as_minutes() == u64::MAX {
+                time <= self.end
+            } else {
+                time < self.end
+            }
     }
 }
 

@@ -100,16 +100,19 @@ fn validate_business_economy_schedule(
         return Err(invalid());
     }
     match economy.status() {
-        BusinessOperatingStatus::Active => {
-            let next_cycle_at = economy.next_cycle_at().ok_or_else(invalid)?;
-            if next_cycle_at <= economy.established_at()
-                || economy
-                    .last_cycle_at()
-                    .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
-            {
-                return Err(invalid());
+        BusinessOperatingStatus::Active => match economy.next_cycle_at() {
+            Some(next_cycle_at) => {
+                if next_cycle_at <= economy.established_at()
+                    || economy
+                        .last_cycle_at()
+                        .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
+                {
+                    return Err(invalid());
+                }
             }
-        }
+            None if economy.last_cycle_at().is_some() => {}
+            None => return Err(invalid()),
+        },
         BusinessOperatingStatus::Suspended if economy.next_cycle_at().is_some() => {
             return Err(invalid());
         }
@@ -247,15 +250,37 @@ pub(super) fn validate_business_economies_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {
+        if economy.status() == BusinessOperatingStatus::Active {
+            let business = state
+                .world
+                .get_business(economy.business())
+                .ok_or_else(|| invalid_economy(economy))?;
+            let cycle = registry.get_business(business.kind()).economics().cycle();
+            let schedule_base = [
+                Some(economy.established_at()),
+                economy.last_cycle_at(),
+                economy.loss_streak_anchor(),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .expect("established business economy always has a schedule base");
+            let expected_next = schedule_base.checked_add(cycle);
+            if economy.next_cycle_at() != expected_next {
+                return Err(StateValidationError::InvalidBusinessEconomySchedule {
+                    business: economy.business(),
+                });
+            }
+        }
         if let Some(disrupted_through) = economy.disrupted_through() {
             let duration = u64::from(registry.business_disruption().duration().as_minutes());
+            // The earliest canonical disruption is one applied at establishment. Its authored
+            // duration follows the same finite-horizon rule as the mutation path: if the effect
+            // would extend beyond representable time, the stored horizon is the last minute.
             let min_horizon = economy
                 .established_at()
                 .as_minutes()
-                .checked_add(duration)
-                .ok_or(StateValidationError::InvalidBusinessEconomySchedule {
-                    business: economy.business(),
-                })?;
+                .saturating_add(duration);
             // This is an upper-bound proof for an already-persisted horizon, not a request to
             // schedule new simulation work. Once `now + duration` exceeds the finite clock,
             // every representable stored horizon is below that conceptual bound, so clamp the

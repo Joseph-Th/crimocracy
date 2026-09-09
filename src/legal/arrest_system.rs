@@ -7,7 +7,7 @@ use crate::core::id::{
     OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::core::version::{
     VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
 };
@@ -141,6 +141,15 @@ pub enum ArrestError {
     VersionCapacity(#[from] VersionCapacityError),
 }
 
+/// The latest instant custody may remain active. The simulation clock is finite, so an authored
+/// detention window extending beyond it ends at the last representable minute rather than
+/// becoming an immortal detention because `SimTime + duration` overflowed.
+pub(crate) fn custody_release_at(arrested_at: SimTime, maximum_detention: SimDuration) -> SimTime {
+    arrested_at
+        .checked_add(maximum_detention)
+        .unwrap_or(SimTime::from_minutes(u64::MAX))
+}
+
 struct ValidatedCustodyOperationPreemption {
     abort: ValidatedOperationAbort,
     decision_cancellation: Option<ValidatedOperationDecisionCancellation>,
@@ -220,7 +229,7 @@ impl ValidatedArrest {
             .as_ref()
             .map(ValidatedInvestigatorDetentionRelease::investigation);
         let current_operations =
-            active_operation_bookings_for_character(state, self.draft.character);
+            preemptible_operation_bookings_for_character(state, self.draft.character);
         let expected_operations: Vec<OperationId> = self
             .operation_preemptions
             .iter()
@@ -321,7 +330,7 @@ pub fn validate_arrest(
     let counsel_representation_ends =
         validate_end_representations_for_counsel_detention(state, draft.character)?;
     let mut operation_preemptions = Vec::new();
-    for operation in active_operation_bookings_for_character(state, draft.character) {
+    for operation in preemptible_operation_bookings_for_character(state, draft.character) {
         let decision_cancellation =
             validate_cancel_operation_decision_for_detention(state, operation, draft.character)?;
         let abort =
@@ -477,13 +486,21 @@ pub(crate) fn evidence_qualifies_for_custody(evidence: &crate::legal::EvidenceRe
         && has_minimum_custody_quality(evidence.strength(), evidence.reliability())
 }
 
-fn active_operation_bookings_for_character(
+fn preemptible_operation_bookings_for_character(
     state: &AppState,
     character: CharacterId,
 ) -> Vec<OperationId> {
     state
         .operations
-        .active_operation_bookings(character)
+        .active_operations_for_participant(character)
+        .filter(|operation| {
+            matches!(
+                operation.status(),
+                crate::operations::OperationStatus::InProgress
+                    | crate::operations::OperationStatus::AwaitingDecision
+            )
+        })
+        .map(|operation| operation.id())
         .collect()
 }
 
@@ -560,17 +577,12 @@ pub fn validate_release_arrest(
 /// detainee informant decision to occur first.
 pub(crate) fn apply_due_custody_releases(
     state: &mut AppState,
-    maximum_detention: crate::core::time::SimDuration,
+    maximum_detention: SimDuration,
 ) -> Result<Vec<ArrestId>, ArrestError> {
     let due: Vec<ArrestId> = state
         .legal
         .detained_arrests()
-        .filter(|arrest| {
-            arrest
-                .arrested_at()
-                .checked_add(maximum_detention)
-                .is_some_and(|release_at| state.now() >= release_at)
-        })
+        .filter(|arrest| state.now() >= custody_release_at(arrest.arrested_at(), maximum_detention))
         .map(|arrest| arrest.id())
         .collect();
     for arrest in &due {

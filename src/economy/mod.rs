@@ -285,7 +285,11 @@ impl EconomyState {
         );
     }
 
-    pub(crate) fn apply_cycle(&mut self, cycle: BusinessCycleRecord, next_cycle_at: SimTime) {
+    pub(crate) fn apply_cycle(
+        &mut self,
+        cycle: BusinessCycleRecord,
+        next_cycle_at: Option<SimTime>,
+    ) {
         let business = cycle.business();
         let old_next_cycle_at = self
             .businesses
@@ -299,14 +303,16 @@ impl EconomyState {
             .get_mut(&business)
             .expect("validated business economy disappeared before cycle commit");
         record.last_cycle_at = Some(cycle.occurred_at());
-        record.next_cycle_at = Some(next_cycle_at);
+        record.next_cycle_at = next_cycle_at;
         // A new operating cycle starts a fresh laundering plausibility window.
         record.laundered_this_cycle = Money::ZERO;
         record.version = advance_version_preflighted(record.version);
-        self.active_by_next_cycle
-            .entry(next_cycle_at)
-            .or_default()
-            .insert(business);
+        if let Some(next_cycle_at) = next_cycle_at {
+            self.active_by_next_cycle
+                .entry(next_cycle_at)
+                .or_default()
+                .insert(business);
+        }
         self.cycles_by_business
             .entry(business)
             .or_default()
@@ -338,16 +344,16 @@ impl EconomyState {
             )
         };
         let will_be_active = status == BusinessOperatingStatus::Active;
-        if was_active {
+        if was_active && let Some(old_next_cycle_at) = old_next_cycle_at {
             Self::remove_schedule_index(
                 &mut self.active_by_next_cycle,
-                old_next_cycle_at.expect("active business economy must be scheduled"),
+                old_next_cycle_at,
                 business,
             );
         }
-        if will_be_active {
+        if will_be_active && let Some(next_cycle_at) = next_cycle_at {
             self.active_by_next_cycle
-                .entry(next_cycle_at.expect("active business economy must be rescheduled"))
+                .entry(next_cycle_at)
                 .or_default()
                 .insert(business);
         }
@@ -418,7 +424,10 @@ impl EconomyState {
                     .get(&time)
                     .is_some_and(|businesses| businesses.contains(&record.business()))
             });
-            if scheduled != (record.status() == BusinessOperatingStatus::Active) {
+            if scheduled
+                != (record.status() == BusinessOperatingStatus::Active
+                    && record.next_cycle_at().is_some())
+            {
                 return false;
             }
         }

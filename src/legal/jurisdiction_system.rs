@@ -2,10 +2,8 @@
 
 use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
-use crate::core::version::{
-    VersionCapacityError, advance_version_preflighted, ensure_version_can_advance,
-};
-use crate::legal::{JurisdictionDraft, JurisdictionRecord};
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::legal::{JurisdictionDraft, JurisdictionRecord, JurisdictionRevision};
 use crate::world::OrganizationKind;
 use thiserror::Error;
 
@@ -63,14 +61,13 @@ impl ValidatedJurisdiction {
         validate_jurisdiction_dependencies(state, &self.draft)?;
         let previous_version = self.expected_version.unwrap_or(0);
         ensure_version_can_advance(previous_version, "jurisdiction")?;
-        let version = advance_version_preflighted(previous_version);
         let organization = self.draft.organization;
-        state.legal.set_jurisdiction(JurisdictionRecord {
+        state.legal.set_jurisdiction(
             organization,
-            neighborhoods: self.draft.neighborhoods,
-            case_intake_priority: self.draft.case_intake_priority,
-            version,
-        });
+            self.draft.neighborhoods,
+            self.draft.case_intake_priority,
+            state.now(),
+        );
         Ok(organization)
     }
 }
@@ -220,6 +217,88 @@ pub fn resolve_police_response_authority(
     neighborhood: NeighborhoodId,
 ) -> Option<OrganizationId> {
     resolve_jurisdiction_priority(state, neighborhood, &[OrganizationKind::LawEnforcement])
+}
+
+/// Whether a persisted police-response jurisdiction snapshot could have been the winning
+/// law-enforcement route at `at`. Jurisdiction revisions within one organization are ordered,
+/// but cross-organization mutation order inside one `SimTime` is not persisted. The response is
+/// therefore valid when its exact revision is reachable at that minute and every competing
+/// authority has at least one same-minute-reachable state that does not outrank it.
+pub(crate) fn police_response_jurisdiction_snapshot_is_possible(
+    state: &AppState,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    at: crate::core::time::SimTime,
+    version: u32,
+) -> bool {
+    let Some(record) = state.legal.get_jurisdiction(organization) else {
+        return false;
+    };
+    let Some(target) = record.revision_by_version(version) else {
+        return false;
+    };
+    if !jurisdiction_revision_is_possible_at(record, target, at)
+        || !target.neighborhoods().contains(&neighborhood)
+    {
+        return false;
+    }
+    let target_priority = target.case_intake_priority();
+
+    state.legal.jurisdictions().all(|other| {
+        if other.organization() == organization
+            || !state
+                .world
+                .get_organization(other.organization())
+                .is_some_and(|authority| authority.kind() == OrganizationKind::LawEnforcement)
+        {
+            return true;
+        }
+        reachable_jurisdiction_revisions_at(other, at).any(|candidate| {
+            candidate.is_none_or(|candidate| {
+                !candidate.neighborhoods().contains(&neighborhood)
+                    || candidate.case_intake_priority().value() < target_priority.value()
+                    || (candidate.case_intake_priority() == target_priority
+                        && other.organization() > organization)
+            })
+        })
+    })
+}
+
+fn jurisdiction_revision_is_possible_at(
+    record: &JurisdictionRecord,
+    revision: &JurisdictionRevision,
+    at: crate::core::time::SimTime,
+) -> bool {
+    revision.changed_at() <= at
+        && record
+            .revisions()
+            .iter()
+            .filter(|later| later.version() > revision.version())
+            .all(|later| later.changed_at() >= at)
+}
+
+fn reachable_jurisdiction_revisions_at(
+    record: &JurisdictionRecord,
+    at: crate::core::time::SimTime,
+) -> impl Iterator<Item = Option<&JurisdictionRevision>> {
+    let absent = record
+        .revisions()
+        .first()
+        .is_some_and(|first| first.changed_at() >= at)
+        .then_some(None);
+    let before = record
+        .revisions()
+        .iter()
+        .rev()
+        .find(|revision| revision.changed_at() < at)
+        .map(Some);
+    absent.into_iter().chain(before).chain(
+        record
+            .revisions()
+            .iter()
+            .filter(move |revision| revision.changed_at() == at)
+            .map(Some),
+    )
 }
 
 fn validate_jurisdiction_dependencies(

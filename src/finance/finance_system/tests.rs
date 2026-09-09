@@ -1135,6 +1135,72 @@ fn restore_rejects_current_budget_usage_with_forged_period_window() {
 }
 
 #[test]
+fn final_partial_budget_window_remains_spendable_and_restore_safe() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let horizon = SimTime::from_minutes(u64::MAX);
+    state.set_now_for_test(horizon);
+    let summary = resolve_budget_usage(&state, mandate, horizon)
+        .expect("standing budget authority should cover the final representable partial period");
+    assert_eq!(summary.period_end, horizon);
+    assert!(summary.period_start < horizon);
+    assert_eq!(summary.used, Money::ZERO);
+
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: horizon,
+            memo: "Budget horizon allocation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("a manager may spend inside the final partial budget period")
+    .commit(&mut state)
+    .expect("final-period delegated spend should commit atomically");
+
+    let record = state
+        .finance()
+        .get_transaction(transaction)
+        .expect("final-period budget transaction should persist");
+    let usage = record
+        .budget_usage()
+        .expect("delegated spend should persist its budget usage window");
+    assert_eq!(usage.period_start(), summary.period_start);
+    assert_eq!(usage.period_end(), horizon);
+    assert_eq!(usage.amount(), Money::from_cents(500));
+    assert_eq!(
+        resolve_budget_usage(&state, mandate, horizon)
+            .expect("final budget aggregate should remain queryable")
+            .used,
+        Money::from_cents(500)
+    );
+
+    let registry = build_registry();
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state)
+            .expect("valid final-period delegated spend should remain saveable"),
+    )
+    .expect("final-period budget usage should restore with its aggregate index intact");
+    assert_eq!(
+        resolve_budget_usage(&restored, mandate, horizon)
+            .expect("restored final-period budget should remain queryable")
+            .used,
+        Money::from_cents(500)
+    );
+}
+
+#[test]
 fn delegated_spend_rejects_manager_who_does_not_own_mandate() {
     let (mut state, authorization, funding, destination) = make_test_budget();
     let mandate = authorization.mandate;

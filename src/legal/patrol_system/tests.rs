@@ -11,7 +11,76 @@ use crate::world::{
     NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
     NeighborhoodProfile, OrganizationDraft,
 };
+use serde::Serialize;
 use std::collections::BTreeSet;
+
+#[derive(Clone, Serialize)]
+struct PatrolDeploymentRevisionWire {
+    changed_at: SimTime,
+    windows: Vec<PatrolWindow>,
+    status: PatrolDeploymentStatus,
+    version: u32,
+}
+
+#[derive(Clone, Serialize)]
+struct PatrolDeploymentRecordWire {
+    id: PatrolDeploymentId,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    established_at: SimTime,
+    revisions: Vec<PatrolDeploymentRevisionWire>,
+}
+
+fn patrol_deployment_wire(record: &PatrolDeploymentRecord) -> PatrolDeploymentRecordWire {
+    PatrolDeploymentRecordWire {
+        id: record.id(),
+        organization: record.organization(),
+        neighborhood: record.neighborhood(),
+        established_at: record.established_at(),
+        revisions: record
+            .revisions()
+            .iter()
+            .map(|revision| PatrolDeploymentRevisionWire {
+                changed_at: revision.changed_at(),
+                windows: revision.windows().to_vec(),
+                status: revision.status(),
+                version: revision.version(),
+            })
+            .collect(),
+    }
+}
+
+fn replace_serialized_patrol_deployment(
+    envelope: SaveEnvelope,
+    original: &PatrolDeploymentRecord,
+    replacement: &PatrolDeploymentRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("patrol deployment should serialize");
+    let mirror = patrol_deployment_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("patrol deployment mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement patrol deployment should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized patrol deployment must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout patrol corruption must remain decodable")
+}
 
 fn make_fixture() -> (crate::Registry, AppState, OrganizationId, NeighborhoodId) {
     let registry = build_registry();
@@ -84,6 +153,142 @@ fn interval_presence_stays_exact_across_the_full_clock_range() {
         "interval averaging must not distort presence when u64 accumulation would overflow"
     );
     validate_invariants(&state);
+}
+
+#[test]
+fn patrol_queries_and_restore_preserve_revision_chronology() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    let deployment = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, DAY_MINUTES_U16, 70)],
+        },
+    )
+    .expect("historical patrol deployment should validate")
+    .commit(&mut state)
+    .expect("historical patrol deployment should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+    validate_revise_patrol_deployment(&state, deployment, vec![window(600, 120, 80)])
+        .expect("historical patrol revision should validate")
+        .commit(&mut state)
+        .expect("historical patrol revision should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+    validate_patrol_transition(&state, deployment, PatrolDeploymentTransition::Suspend)
+        .expect("historical patrol suspension should validate")
+        .commit(&mut state)
+        .expect("historical patrol suspension should commit");
+
+    assert_eq!(
+        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(5)).map(Rating::value),
+        Some(70)
+    );
+    assert_eq!(
+        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(15)).map(Rating::value),
+        Some(0)
+    );
+    assert_eq!(
+        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(20)),
+        None,
+        "suspended deployments no longer replace ambient presence with an explicit patrol schedule"
+    );
+    let interval = resolve_patrol_presence_interval_snapshot(
+        &state,
+        neighborhood,
+        SimTime::ZERO,
+        SimTime::from_minutes(30),
+    );
+    assert_eq!(
+        interval.presence().map(Rating::value),
+        Some(43),
+        "10 minutes at 70, 10 minutes in an explicit gap, then 10 minutes of ambient 60 must average to 43"
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("patrol history should save"),
+    )
+    .expect("patrol history should restore");
+    assert_eq!(
+        resolve_patrol_presence(&restored, neighborhood, SimTime::from_minutes(5))
+            .map(Rating::value),
+        Some(70)
+    );
+    assert_eq!(
+        resolve_patrol_presence(&restored, neighborhood, SimTime::from_minutes(15))
+            .map(Rating::value),
+        Some(0)
+    );
+    assert_eq!(
+        restored
+            .legal()
+            .get_patrol_deployment(deployment)
+            .expect("restored deployment should persist")
+            .version(),
+        3
+    );
+    validate_state(&restored).expect("restored patrol revision history should remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn restore_rejects_historically_overlapping_patrols_for_one_authority() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    let first = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, DAY_MINUTES_U16, 70)],
+        },
+    )
+    .expect("first patrol should validate")
+    .commit(&mut state)
+    .expect("first patrol should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+    validate_patrol_transition(&state, first, PatrolDeploymentTransition::Suspend)
+        .expect("first patrol should suspend")
+        .commit(&mut state)
+        .expect("first patrol suspension should commit");
+    let second = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, DAY_MINUTES_U16, 60)],
+        },
+    )
+    .expect("replacement patrol should validate after suspension")
+    .commit(&mut state)
+    .expect("replacement patrol should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(10));
+
+    let original = state
+        .legal()
+        .get_patrol_deployment(second)
+        .expect("replacement patrol should persist");
+    let mut corrupted = patrol_deployment_wire(original);
+    corrupted.established_at = SimTime::from_minutes(5);
+    corrupted.revisions[0].changed_at = SimTime::from_minutes(5);
+    let error = restore_save(
+        &registry,
+        replace_serialized_patrol_deployment(
+            build_save(&registry, &state)
+                .expect("valid non-overlapping patrol history should save before corruption"),
+            original,
+            &corrupted,
+        ),
+    )
+    .expect_err("one authority cannot have two historically active deployments in one district");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidPatrolDeployment {
+                deployment: invalid
+            }
+        ) if invalid == second
+    ));
 }
 
 fn window(start: u16, duration: u16, presence: u8) -> PatrolWindow {

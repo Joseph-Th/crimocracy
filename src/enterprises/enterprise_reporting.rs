@@ -82,7 +82,11 @@ fn resolve_summary<'a>(
     let mut totals = EnterpriseFinancialTotals::default();
     let mut by_kind = BTreeMap::new();
     for enterprise in enterprises {
-        if enterprise.established_at() > period_end {
+        if enterprise.established_at() > period_end
+            || enterprise
+                .retired_at()
+                .is_some_and(|retired_at| retired_at <= period_start)
+        {
             continue;
         }
         increment_enterprise_count(&mut totals)?;
@@ -168,7 +172,9 @@ mod tests {
     use crate::core::time::SimDuration;
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
-    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+    use crate::enterprises::enterprise_execution::{
+        validate_establish_enterprise, validate_retire_enterprise, validate_suspend_enterprise,
+    };
     use crate::enterprises::{EnterpriseDraft, EnterpriseLocation};
     use crate::finance::finance_system::insert_account;
     use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
@@ -185,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_summary_excludes_enterprise_established_after_window() {
+    fn historical_summary_respects_enterprise_lifecycle_window() {
         let registry = build_registry();
         let mut state = AppState::new(0xE173_1933);
         let organization = insert_organization(
@@ -258,7 +264,7 @@ mod tests {
         )
         .expect("settlement account fixture should validate");
         state.advance_clock(SimDuration::from_minutes(10));
-        validate_establish_enterprise(
+        let enterprise = validate_establish_enterprise(
             &registry,
             &state,
             EnterpriseDraft {
@@ -289,5 +295,43 @@ mod tests {
         assert_eq!(summary.totals.enterprise_count, 0);
         assert_eq!(summary.totals.cycle_count, 0);
         assert!(summary.by_kind.is_empty());
+
+        validate_suspend_enterprise(&state, enterprise)
+            .expect("enterprise should suspend before retirement")
+            .commit(&mut state)
+            .expect("enterprise suspension should commit");
+        validate_retire_enterprise(&state, enterprise)
+            .expect("suspended enterprise should retire")
+            .commit(&mut state)
+            .expect("enterprise retirement should commit");
+        assert_eq!(
+            state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("retired enterprise should persist")
+                .retired_at(),
+            Some(SimTime::from_minutes(10))
+        );
+
+        let historical = resolve_organization_enterprise_financial_summary(
+            &state,
+            organization,
+            SimTime::ZERO,
+            SimTime::from_minutes(10),
+        )
+        .expect("period containing the enterprise lifetime should include it");
+        assert_eq!(historical.totals.enterprise_count, 1);
+
+        state.advance_clock(SimDuration::from_minutes(10));
+        let after_retirement = resolve_organization_enterprise_financial_summary(
+            &state,
+            organization,
+            SimTime::from_minutes(11),
+            state.now(),
+        )
+        .expect("post-retirement period should resolve");
+        assert_eq!(after_retirement.totals.enterprise_count, 0);
+        assert_eq!(after_retirement.totals.cycle_count, 0);
+        assert!(after_retirement.by_kind.is_empty());
     }
 }

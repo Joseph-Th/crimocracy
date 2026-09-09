@@ -5,7 +5,7 @@ use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::legal::arrest_system::evidence_qualifies_for_custody;
+use crate::legal::arrest_system::{custody_release_at, evidence_qualifies_for_custody};
 use crate::legal::informant_system::{
     informant_reliability, informant_strength, information_is_relevant_to_investigation,
 };
@@ -60,10 +60,16 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
         }
         match arrest.status() {
             ArrestStatus::Detained => {
-                let active_operation = state
+                let active_execution = state
                     .operations
-                    .find_active_operation_booking(arrest.character())
-                    .is_some();
+                    .active_operations_for_participant(arrest.character())
+                    .any(|operation| {
+                        matches!(
+                            operation.status(),
+                            crate::operations::OperationStatus::InProgress
+                                | crate::operations::OperationStatus::AwaitingDecision
+                        )
+                    });
                 if arrest.released_at().is_some()
                     || arrest.version() != 1
                     || !matches!(
@@ -80,7 +86,7 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                         .legal
                         .work_for_investigator(arrest.character())
                         .any(|work| work.status() == InvestigationWorkStatus::Scheduled)
-                    || active_operation
+                    || active_execution
                 {
                     return Err(StateValidationError::InvalidArrest {
                         arrest: arrest.id(),
@@ -101,6 +107,43 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
         }
     }
 
+    Ok(())
+}
+
+/// Registry-owned custody timing cannot be proven by release-safe structural validation because
+/// the maximum detention duration is authored content. Canonical minute-by-minute simulation
+/// releases a detainee at this boundary before any later same-minute work, so persisted custody
+/// may never extend beyond it. Early manual release remains valid.
+pub(in crate::core::invariants) fn validate_arrests_against_registry(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let maximum_detention = registry.legal().maximum_detention();
+    for arrest in state.legal.arrests() {
+        let release_boundary = custody_release_at(arrest.arrested_at(), maximum_detention);
+        let invalid = || StateValidationError::InvalidArrest {
+            arrest: arrest.id(),
+        };
+        match arrest.status() {
+            ArrestStatus::Detained => {
+                // At the absolute clock endpoint an arrest can be authored at the same instant as
+                // its clamped release boundary. That ordering is still a valid terminal event.
+                // Every older detention whose release boundary has arrived would already have
+                // been released by the canonical first phase of that minute.
+                if arrest.arrested_at() < release_boundary && state.now() >= release_boundary {
+                    return Err(invalid());
+                }
+            }
+            ArrestStatus::Released => {
+                if arrest
+                    .released_at()
+                    .is_none_or(|released_at| released_at > release_boundary)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
     Ok(())
 }
 

@@ -737,7 +737,10 @@ impl LegalState {
 
     fn has_consistent_jurisdiction_indexes(&self) -> bool {
         for jurisdiction in self.jurisdictions.values() {
-            for neighborhood in jurisdiction.neighborhoods() {
+            let Some(current) = jurisdiction.revisions().last() else {
+                return false;
+            };
+            for neighborhood in current.neighborhoods() {
                 if !self
                     .indexes
                     .jurisdictions
@@ -758,7 +761,8 @@ impl LegalState {
                 if !self
                     .jurisdictions
                     .get(organization)
-                    .is_some_and(|record| record.neighborhoods().contains(neighborhood))
+                    .and_then(|record| record.revisions().last())
+                    .is_some_and(|revision| revision.neighborhoods().contains(neighborhood))
                 {
                     return false;
                 }
@@ -769,7 +773,19 @@ impl LegalState {
 
     fn has_consistent_patrol_indexes(&self) -> bool {
         for deployment in self.patrol_deployments.values() {
+            let Some(current) = deployment.revisions().last() else {
+                return false;
+            };
             let id = deployment.id();
+            if !self
+                .indexes
+                .patrols
+                .by_neighborhood
+                .get(&deployment.neighborhood())
+                .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
             let active_pair = self
                 .indexes
                 .patrols
@@ -781,7 +797,7 @@ impl LegalState {
                 .active_by_neighborhood
                 .get(&deployment.neighborhood())
                 .is_some_and(|ids| ids.contains(&id));
-            match deployment.status() {
+            match current.status() {
                 PatrolDeploymentStatus::Active
                     if active_pair != Some(&id) || !active_neighborhood =>
                 {
@@ -797,9 +813,23 @@ impl LegalState {
                 | PatrolDeploymentStatus::Retired => {}
             }
         }
+        for (neighborhood, ids) in &self.indexes.patrols.by_neighborhood {
+            for id in ids {
+                if !self
+                    .patrol_deployments
+                    .get(id)
+                    .is_some_and(|record| record.neighborhood() == *neighborhood)
+                {
+                    return false;
+                }
+            }
+        }
         for (key, id) in &self.indexes.patrols.active_by_organization_neighborhood {
             if !self.patrol_deployments.get(id).is_some_and(|record| {
-                record.status() == PatrolDeploymentStatus::Active
+                record
+                    .revisions()
+                    .last()
+                    .is_some_and(|revision| revision.status() == PatrolDeploymentStatus::Active)
                     && (record.organization(), record.neighborhood()) == *key
             }) {
                 return false;
@@ -808,7 +838,10 @@ impl LegalState {
         for (neighborhood, ids) in &self.indexes.patrols.active_by_neighborhood {
             for id in ids {
                 if !self.patrol_deployments.get(id).is_some_and(|record| {
-                    record.status() == PatrolDeploymentStatus::Active
+                    record
+                        .revisions()
+                        .last()
+                        .is_some_and(|revision| revision.status() == PatrolDeploymentStatus::Active)
                         && record.neighborhood() == *neighborhood
                 }) {
                     return false;
@@ -831,5 +864,56 @@ impl LegalState {
             && self.has_consistent_jurisdiction_indexes()
             && self.has_consistent_patrol_indexes()
             && self.has_consistent_police_response_indexes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::id::{NeighborhoodId, OrganizationId, PatrolDeploymentId};
+    use crate::core::time::SimTime;
+    use crate::legal::{JurisdictionRecord, PatrolDeploymentRecord};
+
+    #[test]
+    fn empty_jurisdiction_revision_history_rebuilds_without_panicking_and_fails_validation() {
+        let organization = OrganizationId::from_raw(1);
+        let mut legal = LegalState::new();
+        legal.jurisdictions.insert(
+            organization,
+            JurisdictionRecord {
+                organization,
+                revisions: Vec::new(),
+            },
+        );
+
+        legal.rebuild_derived_indexes();
+        assert!(
+            !legal.has_consistent_indexes(),
+            "malformed jurisdiction history must survive index rebuild only long enough to be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_patrol_revision_history_rebuilds_without_panicking_and_fails_validation() {
+        let organization = OrganizationId::from_raw(1);
+        let neighborhood = NeighborhoodId::from_raw(1);
+        let deployment = PatrolDeploymentId::from_raw(1);
+        let mut legal = LegalState::new();
+        legal.patrol_deployments.insert(
+            deployment,
+            PatrolDeploymentRecord {
+                id: deployment,
+                organization,
+                neighborhood,
+                established_at: SimTime::ZERO,
+                revisions: Vec::new(),
+            },
+        );
+
+        legal.rebuild_derived_indexes();
+        assert!(
+            !legal.has_consistent_indexes(),
+            "malformed patrol history must survive index rebuild only long enough to be rejected"
+        );
     }
 }

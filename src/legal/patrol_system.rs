@@ -5,7 +5,8 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
-    DayMinute, PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
+    DayMinute, PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentRevision,
+    PatrolDeploymentStatus, PatrolWindow, PoliceResponsePatrolSnapshot,
 };
 use crate::world::{OrganizationKind, Rating};
 use std::collections::BTreeMap;
@@ -125,11 +126,13 @@ impl ValidatedPatrolDeployment {
                 id,
                 organization: self.draft.organization,
                 neighborhood: self.draft.neighborhood,
-                windows: self.draft.windows,
-                status: PatrolDeploymentStatus::Active,
                 established_at: self.validated_at,
-                last_changed_at: self.validated_at,
-                version: 1,
+                revisions: vec![PatrolDeploymentRevision {
+                    changed_at: self.validated_at,
+                    windows: self.draft.windows,
+                    status: PatrolDeploymentStatus::Active,
+                    version: 1,
+                }],
             });
         Ok(id)
     }
@@ -362,10 +365,16 @@ pub(crate) fn resolve_patrol_presence_snapshot(
     let mut presence: Option<Rating> = None;
     for deployment in state
         .legal
-        .active_patrol_deployments_for_neighborhood(neighborhood)
+        .patrol_deployments_for_neighborhood(neighborhood)
     {
-        deployment_versions.insert(deployment.id(), deployment.version());
-        let deployment_presence = deployment
+        let Some(revision) = deployment
+            .revision_at(at)
+            .filter(|revision| revision.status() == PatrolDeploymentStatus::Active)
+        else {
+            continue;
+        };
+        deployment_versions.insert(deployment.id(), revision.version());
+        let deployment_presence = revision
             .windows()
             .iter()
             .copied()
@@ -394,49 +403,75 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
         return resolve_patrol_presence_snapshot(state, neighborhood, end);
     }
 
-    let mut deployment_versions = BTreeMap::new();
-    let mut daily_presence = [0_u8; DAY_MINUTES_U16 as usize];
-    let mut has_deployment = false;
-    for deployment in state
+    let deployments: Vec<_> = state
         .legal
-        .active_patrol_deployments_for_neighborhood(neighborhood)
-    {
-        has_deployment = true;
-        deployment_versions.insert(deployment.id(), deployment.version());
-        for window in deployment.windows() {
-            let start_minute = usize::from(window.start().value());
-            let presence = window.presence().value();
-            for offset in 0..usize::from(window.duration_minutes()) {
-                let minute = (start_minute + offset) % usize::from(DAY_MINUTES_U16);
-                daily_presence[minute] = daily_presence[minute].max(presence);
+        .patrol_deployments_for_neighborhood(neighborhood)
+        .collect();
+    let mut boundaries = vec![start, end];
+    for deployment in &deployments {
+        boundaries.extend(
+            deployment
+                .revisions()
+                .iter()
+                .map(PatrolDeploymentRevision::changed_at)
+                .filter(|changed_at| *changed_at > start && *changed_at < end),
+        );
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let ambient_presence = state
+        .world
+        .get_neighborhood(neighborhood)
+        .map(|record| record.profile().institutions.police_presence.value())
+        .unwrap_or(0);
+    let mut deployment_versions = BTreeMap::new();
+    let mut has_modeled_patrol = false;
+    let mut total_presence = 0_u128;
+    for segment in boundaries.windows(2) {
+        let segment_start = segment[0];
+        let segment_end = segment[1];
+        let mut daily_presence = [0_u8; DAY_MINUTES_U16 as usize];
+        let mut segment_has_patrol = false;
+        for deployment in &deployments {
+            let Some(revision) = deployment
+                .revision_at(segment_start)
+                .filter(|revision| revision.status() == PatrolDeploymentStatus::Active)
+            else {
+                continue;
+            };
+            segment_has_patrol = true;
+            has_modeled_patrol = true;
+            deployment_versions.insert(deployment.id(), revision.version());
+            for window in revision.windows() {
+                let start_minute = usize::from(window.start().value());
+                let presence = window.presence().value();
+                for offset in 0..usize::from(window.duration_minutes()) {
+                    let minute = (start_minute + offset) % usize::from(DAY_MINUTES_U16);
+                    daily_presence[minute] = daily_presence[minute].max(presence);
+                }
             }
         }
+        let segment_duration = segment_end
+            .as_minutes()
+            .checked_sub(segment_start.as_minutes())
+            .expect("ordered patrol segment must have positive duration");
+        total_presence += if segment_has_patrol {
+            scheduled_presence_sum(&daily_presence, segment_start, segment_duration)
+        } else {
+            u128::from(ambient_presence) * u128::from(segment_duration)
+        };
     }
-    if !has_deployment {
+    if !has_modeled_patrol {
         return PatrolPresenceSnapshot {
             deployment_versions,
             presence: None,
         };
     }
-
     let duration = end
         .as_minutes()
         .checked_sub(start.as_minutes())
         .expect("ordered patrol interval must have a positive duration");
-    let day_minutes = u64::from(DAY_MINUTES_U16);
-    // Presence is bounded by 100 for every simulated minute, so a u128 accumulator can represent
-    // the exact sum across the entire u64 clock range. Saturating u64 arithmetic would silently
-    // flatten sufficiently long intervals and produce a materially wrong average.
-    let daily_total: u128 = daily_presence.iter().map(|value| u128::from(*value)).sum();
-    let full_days = duration / day_minutes;
-    let remainder = duration % day_minutes;
-    let mut total_presence = daily_total * u128::from(full_days);
-    let start_minute = start.as_minutes() % day_minutes;
-    for offset in 0..remainder {
-        let minute = usize::try_from((start_minute + offset) % day_minutes)
-            .expect("minute-of-day remainder must fit usize");
-        total_presence += u128::from(daily_presence[minute]);
-    }
     let average = (total_presence + u128::from(duration / 2)) / u128::from(duration);
     let average = u8::try_from(average).expect("average patrol presence must fit u8");
     PatrolPresenceSnapshot {
@@ -460,7 +495,18 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
         .profile()
         .institutions
         .police_presence;
-    let Some(deployment) = state.legal.active_patrol_for(organization, neighborhood) else {
+    let Some((deployment, revision)) = state
+        .legal
+        .patrol_deployments_for_neighborhood(neighborhood)
+        .filter(|deployment| deployment.organization() == organization)
+        .filter_map(|deployment| {
+            deployment
+                .revision_at(at)
+                .filter(|revision| revision.status() == PatrolDeploymentStatus::Active)
+                .map(|revision| (deployment, revision))
+        })
+        .max_by_key(|(deployment, revision)| (revision.changed_at(), deployment.id()))
+    else {
         return AuthorityPatrolPresenceSnapshot {
             deployment: None,
             presence: fallback,
@@ -471,7 +517,7 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
     // Same authoritative-schedule contract as `resolve_patrol_presence_snapshot`: an off-window
     // minute inside a modeled deployment is a real coverage gap (zero presence, slowest allowed
     // response), not a reason to fall back to the ambient estimate.
-    let presence = deployment
+    let presence = revision
         .windows()
         .iter()
         .copied()
@@ -480,9 +526,117 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
         .max_by_key(|rating| rating.value())
         .unwrap_or_else(zero_rating);
     AuthorityPatrolPresenceSnapshot {
-        deployment: Some((deployment.id(), deployment.version())),
+        deployment: Some((deployment.id(), revision.version())),
         presence,
     }
+}
+
+/// Proves that a persisted police-response patrol snapshot could have been observed at `at`.
+///
+/// Several patrol revisions may share one simulation minute. Cross-domain ordering within that
+/// minute is intentionally not persisted, so a response dispatched at that timestamp may validly
+/// precede or follow any same-minute patrol revision while preserving each deployment's revision
+/// order. Validation therefore accepts the active revision immediately before `at` and every
+/// active revision authored exactly at `at`; it does not collapse history to the final revision of
+/// that minute. An ambient (`None`) snapshot is possible only when no deployment was active just
+/// before the minute, or when that active deployment has a same-minute suspension/retirement that
+/// could have happened before dispatch.
+pub(crate) fn police_response_patrol_snapshot_is_possible(
+    state: &AppState,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    at: SimTime,
+    snapshot: Option<PoliceResponsePatrolSnapshot>,
+    presence: Rating,
+) -> bool {
+    let fallback = match state.world.get_neighborhood(neighborhood) {
+        Some(record) => record.profile().institutions.police_presence,
+        None => return false,
+    };
+    let deployments: Vec<_> = state
+        .legal
+        .patrol_deployments_for_neighborhood(neighborhood)
+        .filter(|deployment| deployment.organization() == organization)
+        .collect();
+
+    if let Some(snapshot) = snapshot {
+        return deployments.iter().any(|deployment| {
+            if deployment.id() != snapshot.deployment() {
+                return false;
+            }
+            let candidate = deployment.revisions().iter().find(|revision| {
+                revision.version() == snapshot.version()
+                    && revision.status() == PatrolDeploymentStatus::Active
+                    && (revision.changed_at() == at
+                        || revision.changed_at() < at
+                            && deployment
+                                .revisions()
+                                .iter()
+                                .filter(|later| later.version() > revision.version())
+                                .all(|later| later.changed_at() >= at))
+            });
+            candidate.is_some_and(|revision| patrol_revision_presence(revision, at) == presence)
+        });
+    }
+
+    if presence != fallback {
+        return false;
+    }
+    let active_before = deployments.iter().find_map(|deployment| {
+        deployment
+            .revisions()
+            .iter()
+            .rev()
+            .find(|revision| revision.changed_at() < at)
+            .filter(|revision| revision.status() == PatrolDeploymentStatus::Active)
+            .map(|revision| (deployment, revision))
+    });
+    let Some((deployment, active_before)) = active_before else {
+        return true;
+    };
+    deployment.revisions().iter().any(|revision| {
+        revision.version() > active_before.version()
+            && revision.changed_at() == at
+            && matches!(
+                revision.status(),
+                PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired
+            )
+    })
+}
+
+fn patrol_revision_presence(revision: &PatrolDeploymentRevision, at: SimTime) -> Rating {
+    let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
+        .expect("minute-of-day remainder must fit u16");
+    revision
+        .windows()
+        .iter()
+        .copied()
+        .filter(|window| is_minute_within_patrol_window(*window, minute))
+        .map(PatrolWindow::presence)
+        .max_by_key(|rating| rating.value())
+        .unwrap_or_else(zero_rating)
+}
+
+fn scheduled_presence_sum(
+    daily_presence: &[u8; DAY_MINUTES_U16 as usize],
+    start: SimTime,
+    duration: u64,
+) -> u128 {
+    let day_minutes = u64::from(DAY_MINUTES_U16);
+    // Presence is bounded by 100 for every simulated minute, so a u128 accumulator can represent
+    // the exact sum across the entire u64 clock range. Saturating u64 arithmetic would silently
+    // flatten sufficiently long intervals and produce a materially wrong average.
+    let daily_total: u128 = daily_presence.iter().map(|value| u128::from(*value)).sum();
+    let full_days = duration / day_minutes;
+    let remainder = duration % day_minutes;
+    let mut total_presence = daily_total * u128::from(full_days);
+    let start_minute = start.as_minutes() % day_minutes;
+    for offset in 0..remainder {
+        let minute = usize::try_from((start_minute + offset) % day_minutes)
+            .expect("minute-of-day remainder must fit usize");
+        total_presence += u128::from(daily_presence[minute]);
+    }
+    total_presence
 }
 
 pub(crate) fn is_canonical_patrol_schedule(windows: &[PatrolWindow]) -> bool {

@@ -30,6 +30,55 @@ struct BusinessEconomyFixture {
     settlement: FinancialAccountId,
 }
 
+#[test]
+fn restore_rejects_active_business_schedule_drift_from_authored_cadence() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+            .expect("routine business cycle should decide"),
+    )
+    .expect("routine business cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("routine business cycle should commit");
+
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("active economy should persist after settlement");
+    let valid_next = record
+        .next_cycle_at()
+        .expect("ordinary post-settlement economy should remain scheduled");
+    let mut corrupted = business_economy_wire(record);
+    corrupted.next_cycle_at = Some(valid_next + SimDuration::ONE_MINUTE);
+    let error = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state)
+                .expect("valid scheduled economy should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err(
+        "restore must reject a plausible-looking schedule that canonical cadence cannot produce",
+    );
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessEconomySchedule {
+                business
+            }
+        ) if business == fixture.business
+    ));
+}
+
 #[derive(Clone, Serialize)]
 struct LedgerTransactionRecordWire {
     id: crate::core::id::LedgerTransactionId,
@@ -37,6 +86,90 @@ struct LedgerTransactionRecordWire {
     memo: String,
     postings: Vec<crate::finance::LedgerPosting>,
     budget_usage: Option<crate::finance::BudgetUsageRecord>,
+}
+
+#[test]
+fn due_business_cycle_near_clock_horizon_settles_then_exhausts_future_recurrence() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let cycle_duration = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    let settled_at = SimTime::from_minutes(u64::MAX - u64::from(cycle_duration.as_minutes()) + 1);
+    fixture.state.set_now_for_test(settled_at);
+
+    let cycle = validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).expect(
+            "already-due business work should settle even when only its next recurrence overflows",
+        ),
+    )
+    .expect("horizon business cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("horizon business cycle should commit");
+    let cycle_record = fixture
+        .state
+        .economy()
+        .get_cycle(cycle)
+        .expect("horizon cycle should persist");
+    assert_eq!(cycle_record.occurred_at(), settled_at);
+    let economy = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("business economy should remain live");
+    assert_eq!(economy.status(), BusinessOperatingStatus::Active);
+    assert_eq!(economy.last_cycle_at(), Some(settled_at));
+    assert_eq!(economy.next_cycle_at(), None);
+    assert!(
+        find_due_businesses(&fixture.state).is_empty(),
+        "an exhausted recurrence must leave no same-minute schedule behind"
+    );
+    assert_eq!(
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+            .expect_err("no second settlement is representable after recurrence exhaustion"),
+        BusinessEconomyError::SimulationTimeOverflow
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("active economy with an authored-overflow recurrence should be registry-valid");
+    validate_invariants(&fixture.state);
+
+    let mut suspended = fixture.state.clone();
+    validate_suspend_business_economy(&suspended, fixture.business)
+        .expect("recurrence exhaustion must not prevent an explicit lifecycle suspension")
+        .commit(&mut suspended)
+        .expect(
+            "unscheduled active economy should suspend without requiring a stale schedule index",
+        );
+    let suspended_record = suspended
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("suspended horizon economy should persist");
+    assert_eq!(
+        suspended_record.status(),
+        BusinessOperatingStatus::Suspended
+    );
+    assert_eq!(suspended_record.next_cycle_at(), None);
+    validate_state_against_registry(&registry, &suspended)
+        .expect("suspended recurrence-exhausted economy should remain registry-valid");
+    validate_invariants(&suspended);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("recurrence-exhausted economy should remain saveable"),
+    )
+    .expect("recurrence exhaustion must survive restore");
+    assert_eq!(
+        restored
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("restored business economy should persist")
+            .next_cycle_at(),
+        None
+    );
 }
 
 fn ledger_transaction_wire(
@@ -1388,6 +1521,82 @@ fn old_disruption_remains_registry_valid_when_current_clock_nears_horizon() {
         "an old representable disruption must stay valid after the clock moves near its horizon",
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn disruption_near_clock_horizon_clamps_instead_of_rejecting_success() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let duration = registry.business_disruption().duration();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect(
+            "successful sabotage should remain representable through the final simulation minute",
+        )
+        .commit(&mut fixture.state)
+        .expect("clamped disruption should commit");
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("disrupted business economy should persist")
+            .disrupted_through(),
+        Some(SimTime::from_minutes(u64::MAX))
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("clamped disruption horizon should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn newly_established_business_near_horizon_can_persist_clamped_disruption() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let cycle = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    let established_at = SimTime::from_minutes(u64::MAX - u64::from(cycle.as_minutes()));
+    fixture.state.set_now_for_test(established_at);
+    establish_business_economy(&registry, &mut fixture);
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("near-horizon economy should establish")
+            .next_cycle_at(),
+        Some(SimTime::from_minutes(u64::MAX))
+    );
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("a newly established near-horizon business should still be disruptable")
+        .commit(&mut fixture.state)
+        .expect("clamped disruption should commit on the newly established economy");
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("disrupted near-horizon economy should persist")
+            .disrupted_through(),
+        Some(SimTime::from_minutes(u64::MAX))
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("registry validation must use the same clamped earliest disruption horizon");
+    validate_invariants(&fixture.state);
+
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("new near-horizon disruption should remain saveable"),
+    )
+    .expect("new near-horizon disruption should survive restore");
 }
 
 #[test]

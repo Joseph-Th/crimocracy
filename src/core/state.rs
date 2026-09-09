@@ -30,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 77;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 80;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {

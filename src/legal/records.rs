@@ -1056,28 +1056,70 @@ impl EvidenceRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct JurisdictionRecord {
-    pub(super) organization: OrganizationId,
+pub(crate) struct JurisdictionRevision {
+    pub(super) changed_at: SimTime,
     pub(super) neighborhoods: BTreeSet<NeighborhoodId>,
     pub(super) case_intake_priority: Rating,
     pub(super) version: u32,
 }
 
+impl JurisdictionRevision {
+    pub(crate) fn changed_at(&self) -> SimTime {
+        self.changed_at
+    }
+
+    pub(crate) fn neighborhoods(&self) -> &BTreeSet<NeighborhoodId> {
+        &self.neighborhoods
+    }
+
+    pub(crate) fn case_intake_priority(&self) -> Rating {
+        self.case_intake_priority
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JurisdictionRecord {
+    pub(super) organization: OrganizationId,
+    pub(super) revisions: Vec<JurisdictionRevision>,
+}
+
 impl JurisdictionRecord {
+    fn current_revision(&self) -> &JurisdictionRevision {
+        self.revisions
+            .last()
+            .expect("persisted jurisdiction must contain an establishment revision")
+    }
+
     pub fn organization(&self) -> OrganizationId {
         self.organization
     }
 
     pub fn neighborhoods(&self) -> &BTreeSet<NeighborhoodId> {
-        &self.neighborhoods
+        self.current_revision().neighborhoods()
     }
 
     pub fn case_intake_priority(&self) -> Rating {
-        self.case_intake_priority
+        self.current_revision().case_intake_priority()
     }
 
     pub fn version(&self) -> u32 {
-        self.version
+        self.current_revision().version()
+    }
+
+    pub(crate) fn revisions(&self) -> &[JurisdictionRevision] {
+        &self.revisions
+    }
+
+    pub(crate) fn revision_by_version(&self, version: u32) -> Option<&JurisdictionRevision> {
+        version
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.revisions.get(index))
+            .filter(|revision| revision.version() == version)
     }
 }
 
@@ -1191,18 +1233,47 @@ pub enum PatrolDeploymentStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct PatrolDeploymentRevision {
+    pub(super) changed_at: SimTime,
+    pub(super) windows: Vec<PatrolWindow>,
+    pub(super) status: PatrolDeploymentStatus,
+    pub(super) version: u32,
+}
+
+impl PatrolDeploymentRevision {
+    pub(crate) fn changed_at(&self) -> SimTime {
+        self.changed_at
+    }
+
+    pub(crate) fn windows(&self) -> &[PatrolWindow] {
+        &self.windows
+    }
+
+    pub(crate) fn status(&self) -> PatrolDeploymentStatus {
+        self.status
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PatrolDeploymentRecord {
     pub(super) id: PatrolDeploymentId,
     pub(super) organization: OrganizationId,
     pub(super) neighborhood: NeighborhoodId,
-    pub(super) windows: Vec<PatrolWindow>,
-    pub(super) status: PatrolDeploymentStatus,
     pub(super) established_at: SimTime,
-    pub(super) last_changed_at: SimTime,
-    pub(super) version: u32,
+    pub(super) revisions: Vec<PatrolDeploymentRevision>,
 }
 
 impl PatrolDeploymentRecord {
+    fn current_revision(&self) -> &PatrolDeploymentRevision {
+        self.revisions
+            .last()
+            .expect("persisted patrol deployment must contain an establishment revision")
+    }
+
     pub fn id(&self) -> PatrolDeploymentId {
         self.id
     }
@@ -1216,23 +1287,30 @@ impl PatrolDeploymentRecord {
     }
 
     pub fn windows(&self) -> &[PatrolWindow] {
-        &self.windows
+        self.current_revision().windows()
     }
 
     pub fn status(&self) -> PatrolDeploymentStatus {
-        self.status
+        self.current_revision().status()
     }
 
     pub fn established_at(&self) -> SimTime {
         self.established_at
     }
 
-    pub fn last_changed_at(&self) -> SimTime {
-        self.last_changed_at
+    pub fn version(&self) -> u32 {
+        self.current_revision().version()
     }
 
-    pub fn version(&self) -> u32 {
-        self.version
+    pub(crate) fn revisions(&self) -> &[PatrolDeploymentRevision] {
+        &self.revisions
+    }
+
+    pub(crate) fn revision_at(&self, at: SimTime) -> Option<&PatrolDeploymentRevision> {
+        self.revisions
+            .iter()
+            .rev()
+            .find(|revision| revision.changed_at() <= at)
     }
 }
 
@@ -1407,6 +1485,7 @@ pub(super) struct JurisdictionIndexes {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct PatrolIndexes {
+    pub(super) by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,
     pub(super) active_by_organization_neighborhood:
         BTreeMap<(OrganizationId, NeighborhoodId), PatrolDeploymentId>,
     pub(super) active_by_neighborhood: BTreeMap<NeighborhoodId, BTreeSet<PatrolDeploymentId>>,

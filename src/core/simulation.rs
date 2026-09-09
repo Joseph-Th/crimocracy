@@ -234,7 +234,10 @@ fn run_operations_phase(
                 // operation remains paused longer than projected at authorization time. The due
                 // operation stays Authorized and retries on later ticks. Deadline infeasibility
                 // is handled by the shared pre-check above and therefore never defers silently.
-                Err(OperationError::ParticipantBusy { .. }) => {}
+                Err(
+                    OperationError::ParticipantBusy { .. }
+                    | OperationError::DetainedParticipant { .. },
+                ) => {}
                 Err(error) => {
                     panic!(
                         "due authorized operation could not begin through its canonical path: {error}"

@@ -47,8 +47,8 @@ pub(super) use records::{
     InvestigationWorkRuntime,
 };
 pub(crate) use records::{
-    LegalRepresentationArtifacts, LegalRepresentationLifecycle, LegalRepresentationParties,
-    LegalRepresentationPayment, PoliceResponseRouting, PoliceResponseState, PoliceResponseTiming,
-    ProsecutionCaseContext, ProsecutionCaseLifecycle, ProsecutionCaseReferrals,
-    ProsecutionCaseResolutionArtifacts,
+    JurisdictionRevision, LegalRepresentationArtifacts, LegalRepresentationLifecycle,
+    LegalRepresentationParties, LegalRepresentationPayment, PatrolDeploymentRevision,
+    PoliceResponseRouting, PoliceResponseState, PoliceResponseTiming, ProsecutionCaseContext,
+    ProsecutionCaseLifecycle, ProsecutionCaseReferrals, ProsecutionCaseResolutionArtifacts,
 };

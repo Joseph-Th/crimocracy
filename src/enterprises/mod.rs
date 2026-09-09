@@ -73,6 +73,10 @@ struct EnterpriseAssignment {
 struct EnterpriseRuntime {
     status: EnterpriseStatus,
     established_at: SimTime,
+    /// Terminal lifecycle boundary. Retired enterprises remain durable history, but reporting
+    /// and other historical projections need the exact instant at which they stopped existing
+    /// as live rackets rather than inferring chronology from their current terminal status.
+    retired_at: Option<SimTime>,
     next_cycle_at: Option<SimTime>,
     last_cycle_at: Option<SimTime>,
     /// Trailing-loss counting starts at this instant. Set when the racket resumes after any
@@ -132,6 +136,10 @@ impl EnterpriseRecord {
 
     pub fn established_at(&self) -> SimTime {
         self.runtime.established_at
+    }
+
+    pub fn retired_at(&self) -> Option<SimTime> {
+        self.runtime.retired_at
     }
 
     pub fn next_cycle_at(&self) -> Option<SimTime> {
@@ -508,7 +516,11 @@ impl EnterpriseState {
         );
     }
 
-    pub(crate) fn apply_cycle(&mut self, cycle: EnterpriseCycleRecord, next_cycle_at: SimTime) {
+    pub(crate) fn apply_cycle(
+        &mut self,
+        cycle: EnterpriseCycleRecord,
+        next_cycle_at: Option<SimTime>,
+    ) {
         let enterprise_id = cycle.enterprise();
         let old_next_cycle_at = self
             .records
@@ -526,12 +538,14 @@ impl EnterpriseState {
             .get_mut(&enterprise_id)
             .expect("validated enterprise disappeared before cycle commit");
         enterprise.runtime.last_cycle_at = Some(cycle.occurred_at());
-        enterprise.runtime.next_cycle_at = Some(next_cycle_at);
+        enterprise.runtime.next_cycle_at = next_cycle_at;
         enterprise.runtime.version = advance_version_preflighted(enterprise.runtime.version);
-        self.active_by_next_cycle
-            .entry(next_cycle_at)
-            .or_default()
-            .insert(enterprise_id);
+        if let Some(next_cycle_at) = next_cycle_at {
+            self.active_by_next_cycle
+                .entry(next_cycle_at)
+                .or_default()
+                .insert(enterprise_id);
+        }
         self.cycles_by_enterprise
             .entry(enterprise_id)
             .or_default()
@@ -551,6 +565,7 @@ impl EnterpriseState {
         // Installed only when the enterprise returns to Active: restarts the chronic-loss
         // grace window so pre-suspension losses cannot instantly re-suspend a resumed racket.
         loss_streak_anchor: Option<SimTime>,
+        changed_at: SimTime,
     ) {
         let (was_active, mandate, old_next_cycle_at) = {
             let record = self
@@ -564,9 +579,7 @@ impl EnterpriseState {
             )
         };
         let will_be_active = status == EnterpriseStatus::Active;
-        if was_active {
-            let old_next_cycle_at = old_next_cycle_at
-                .expect("active enterprise must have a scheduled cycle before status change");
+        if was_active && let Some(old_next_cycle_at) = old_next_cycle_at {
             Self::remove_schedule_index(&mut self.active_by_next_cycle, old_next_cycle_at, id);
         }
         if was_active && !will_be_active {
@@ -577,9 +590,7 @@ impl EnterpriseState {
                 .or_default()
                 .insert(id);
         }
-        if will_be_active {
-            let scheduled = next_cycle_at
-                .expect("active enterprise status change must include next cycle time");
+        if will_be_active && let Some(scheduled) = next_cycle_at {
             self.active_by_next_cycle
                 .entry(scheduled)
                 .or_default()
@@ -591,6 +602,7 @@ impl EnterpriseState {
             .expect("validated enterprise disappeared before status commit");
         record.runtime.status = status;
         record.runtime.next_cycle_at = next_cycle_at;
+        record.runtime.retired_at = (status == EnterpriseStatus::Retired).then_some(changed_at);
         if let Some(anchor) = loss_streak_anchor {
             record.runtime.loss_streak_anchor = Some(anchor);
         }
@@ -659,7 +671,9 @@ impl EnterpriseState {
                     .get(&time)
                     .is_some_and(|ids| ids.contains(&record.id()))
             });
-            if is_schedule_indexed != (record.status() == EnterpriseStatus::Active) {
+            if is_schedule_indexed
+                != (record.status() == EnterpriseStatus::Active && record.next_cycle_at().is_some())
+            {
                 return false;
             }
         }
@@ -791,6 +805,7 @@ pub(crate) fn build_enterprise_record(
         runtime: EnterpriseRuntime {
             status: EnterpriseStatus::Active,
             established_at,
+            retired_at: None,
             next_cycle_at: Some(next_cycle_at),
             last_cycle_at: None,
             loss_streak_anchor: None,

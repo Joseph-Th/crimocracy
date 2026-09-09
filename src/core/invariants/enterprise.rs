@@ -194,6 +194,16 @@ fn validate_enterprise_schedule(
         || enterprise
             .loss_streak_anchor()
             .is_some_and(|anchor| anchor < enterprise.established_at() || anchor > state.now())
+        || enterprise.retired_at().is_some_and(|retired_at| {
+            retired_at < enterprise.established_at()
+                || retired_at > state.now()
+                || enterprise
+                    .last_cycle_at()
+                    .is_some_and(|last_cycle| last_cycle > retired_at)
+                || enterprise
+                    .loss_streak_anchor()
+                    .is_some_and(|anchor| anchor > retired_at)
+        })
         || state
             .enterprises
             .latest_cycle(enterprise.id())
@@ -211,8 +221,33 @@ fn validate_enterprise_status(
     refs: &EnterpriseAuthorityRefs<'_>,
 ) -> Result<(), StateValidationError> {
     match enterprise.status() {
-        EnterpriseStatus::Active => validate_active_enterprise(state, enterprise, refs),
-        EnterpriseStatus::Suspended | EnterpriseStatus::Retired => {
+        EnterpriseStatus::Active => {
+            if enterprise.retired_at().is_some() {
+                return Err(StateValidationError::InvalidEnterpriseRuntime {
+                    enterprise: enterprise.id(),
+                });
+            }
+            validate_active_enterprise(state, enterprise, refs)
+        }
+        EnterpriseStatus::Suspended => {
+            if enterprise.retired_at().is_some() {
+                return Err(StateValidationError::InvalidEnterpriseRuntime {
+                    enterprise: enterprise.id(),
+                });
+            }
+            if enterprise.next_cycle_at().is_some() {
+                return Err(StateValidationError::InvalidEnterpriseSchedule {
+                    enterprise: enterprise.id(),
+                });
+            }
+            Ok(())
+        }
+        EnterpriseStatus::Retired => {
+            if enterprise.retired_at().is_none() {
+                return Err(StateValidationError::InvalidEnterpriseRuntime {
+                    enterprise: enterprise.id(),
+                });
+            }
             if enterprise.next_cycle_at().is_some() {
                 return Err(StateValidationError::InvalidEnterpriseSchedule {
                     enterprise: enterprise.id(),
@@ -265,20 +300,24 @@ fn validate_active_enterprise(
             enterprise: enterprise.id(),
         });
     }
-    let next_cycle_at =
-        enterprise
-            .next_cycle_at()
-            .ok_or(StateValidationError::InvalidEnterpriseSchedule {
+    match enterprise.next_cycle_at() {
+        Some(next_cycle_at) => {
+            if next_cycle_at <= enterprise.established_at()
+                || enterprise
+                    .last_cycle_at()
+                    .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
+            {
+                return Err(StateValidationError::InvalidEnterpriseSchedule {
+                    enterprise: enterprise.id(),
+                });
+            }
+        }
+        None if enterprise.last_cycle_at().is_some() => {}
+        None => {
+            return Err(StateValidationError::InvalidEnterpriseSchedule {
                 enterprise: enterprise.id(),
-            })?;
-    if next_cycle_at <= enterprise.established_at()
-        || enterprise
-            .last_cycle_at()
-            .is_some_and(|last_cycle| next_cycle_at <= last_cycle)
-    {
-        return Err(StateValidationError::InvalidEnterpriseSchedule {
-            enterprise: enterprise.id(),
-        });
+            });
+        }
     }
     Ok(())
 }
@@ -490,6 +529,23 @@ fn validate_enterprise_definition(
     enterprise: &EnterpriseRecord,
 ) -> Result<(), StateValidationError> {
     let definition = registry.get_enterprise(enterprise.kind());
+    if enterprise.status() == EnterpriseStatus::Active {
+        let schedule_base = [
+            Some(enterprise.established_at()),
+            enterprise.last_cycle_at(),
+            enterprise.loss_streak_anchor(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .expect("established enterprise always has a schedule base");
+        let expected_next = schedule_base.checked_add(definition.economics().cycle());
+        if enterprise.next_cycle_at() != expected_next {
+            return Err(StateValidationError::InvalidEnterpriseSchedule {
+                enterprise: enterprise.id(),
+            });
+        }
+    }
     let mut network_functions = BTreeSet::new();
     if let EnterpriseLocation::Business(business_id) = enterprise.location() {
         let business = state.world.get_business(business_id).ok_or(

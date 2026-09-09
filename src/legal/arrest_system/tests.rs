@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::invariants::{
+    validate_invariants, validate_state, validate_state_against_registry,
+};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
@@ -32,7 +34,53 @@ struct Fixture {
 }
 
 #[test]
-fn custody_release_horizon_overflow_keeps_detainee_held_without_panicking() {
+fn registry_validation_rejects_detention_persisted_past_maximum_custody() {
+    let mut fixture = fixture();
+    let arrest = arrest_fixture(&mut fixture);
+    let maximum_detention = fixture.registry.legal().maximum_detention();
+    fixture
+        .state
+        .set_now_for_test(fixture.state.now() + maximum_detention + SimDuration::ONE_MINUTE);
+
+    validate_state(&fixture.state)
+        .expect("release-safe structure alone cannot know the authored custody duration");
+    assert!(matches!(
+        validate_state_against_registry(&fixture.registry, &fixture.state),
+        Err(crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid })
+            if invalid == arrest
+    ));
+    assert!(matches!(
+        build_save(&fixture.registry, &fixture.state),
+        Err(crate::core::persistence::SaveError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid }
+        )) if invalid == arrest
+    ));
+}
+
+#[test]
+fn registry_validation_rejects_release_recorded_after_maximum_custody() {
+    let mut fixture = fixture();
+    let arrest = arrest_fixture(&mut fixture);
+    let maximum_detention = fixture.registry.legal().maximum_detention();
+    fixture
+        .state
+        .set_now_for_test(fixture.state.now() + maximum_detention + SimDuration::ONE_MINUTE);
+    validate_release_arrest(&fixture.state, arrest)
+        .expect("structural release validation permits an explicit release at the current instant")
+        .commit(&mut fixture.state)
+        .expect("late fixture release should commit before registry-aware validation");
+
+    validate_state(&fixture.state)
+        .expect("late released custody is structurally coherent without authored timing");
+    assert!(matches!(
+        validate_state_against_registry(&fixture.registry, &fixture.state),
+        Err(crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid })
+            if invalid == arrest
+    ));
+}
+
+#[test]
+fn custody_release_horizon_overflow_clamps_to_last_representable_minute() {
     let mut fixture = fixture();
     let maximum_detention = fixture.registry.legal().maximum_detention();
     fixture.state.set_now_for_test(SimTime::from_minutes(
@@ -41,17 +89,24 @@ fn custody_release_horizon_overflow_keeps_detainee_held_without_panicking() {
     let arrest = arrest_fixture(&mut fixture);
 
     let released = apply_due_custody_releases(&mut fixture.state, maximum_detention)
-        .expect("unrepresentable release endpoint should simply remain outside the due set");
+        .expect("custody before the clamped horizon should remain active");
     assert!(released.is_empty());
+
+    fixture
+        .state
+        .set_now_for_test(SimTime::from_minutes(u64::MAX));
     assert_eq!(
-        fixture
-            .state
-            .legal()
-            .get_arrest(arrest)
-            .expect("arrest should remain persisted")
-            .status(),
-        ArrestStatus::Detained
+        apply_due_custody_releases(&mut fixture.state, maximum_detention)
+            .expect("last representable minute must release clamped custody"),
+        vec![arrest]
     );
+    let record = fixture
+        .state
+        .legal()
+        .get_arrest(arrest)
+        .expect("released arrest should remain persisted");
+    assert_eq!(record.status(), ArrestStatus::Released);
+    assert_eq!(record.released_at(), Some(SimTime::from_minutes(u64::MAX)));
     validate_invariants(&fixture.state);
 }
 
@@ -1168,7 +1223,7 @@ fn detention_preserves_formal_supervision_but_blocks_new_supervisory_work() {
 }
 
 #[test]
-fn custody_preempts_authorized_operation_responsibility() {
+fn custody_defers_authorized_operation_until_participant_release() {
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
     use crate::world::world_system::{insert_business, insert_neighborhood};
@@ -1247,9 +1302,9 @@ fn custody_preempts_authorized_operation_responsibility() {
             evidence: BTreeSet::from([fixture.evidence]),
         },
     )
-    .expect("custody should validate despite the internal operation booking")
+    .expect("custody should validate despite the future operation booking")
     .commit(&mut fixture.state)
-    .expect("custody should preempt the operation atomically");
+    .expect("custody should preserve an operation that has not started");
     assert!(
         fixture
             .state
@@ -1258,22 +1313,48 @@ fn custody_preempts_authorized_operation_responsibility() {
             .is_some_and(|record| record.id() == arrest),
         "arrest should become the authoritative live commitment"
     );
-    let operation = fixture
+    let operation_record = fixture
         .state
         .operations()
         .get_operation(operation)
-        .expect("operation should persist as history");
+        .expect("authorized operation should persist");
     assert_eq!(
-        operation.status(),
-        crate::operations::OperationStatus::Aborted
+        operation_record.status(),
+        crate::operations::OperationStatus::Authorized
     );
+    validate_state(&fixture.state)
+        .expect("detention may coexist with an authorized operation that has not started");
+
+    let blocked_tick = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
+    assert!(blocked_tick.started_operations.is_empty());
     assert_eq!(
-        operation.abort_record().map(|abort| abort.cause()),
-        Some(crate::operations::OperationAbortCause::ParticipantDetained(
-            fixture.suspect
-        ))
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("deferred operation should persist")
+            .status(),
+        crate::operations::OperationStatus::Authorized,
+        "detention is temporary unavailability, not a before-start operation failure"
     );
-    validate_state(&fixture.state).expect("custody preemption state should validate");
+
+    let maximum_detention = fixture.registry.legal().maximum_detention();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        maximum_detention.as_minutes() - 2,
+    ));
+    let released_tick = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(released_tick.custody_releases, vec![arrest]);
+    assert_eq!(released_tick.started_operations, vec![operation]);
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("released operation should persist")
+            .status(),
+        crate::operations::OperationStatus::InProgress
+    );
+    validate_state(&fixture.state).expect("deferred custody operation state should validate");
     validate_invariants(&fixture.state);
 }
 

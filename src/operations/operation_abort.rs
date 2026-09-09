@@ -263,11 +263,6 @@ fn validate_operation_abort(
         (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::InProgress
         }
-        (OperationStatus::Authorized, OperationAbortCause::ParticipantDetained(character))
-            if record.participants().contains(&character) =>
-        {
-            OperationAbortPhase::BeforeStart
-        }
         (OperationStatus::InProgress, OperationAbortCause::ParticipantDetained(character))
             if record.participants().contains(&character) =>
         {
@@ -300,8 +295,10 @@ fn validate_operation_abort(
         (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder) => {
             (None, None, None, None)
         }
+        (OperationAbortPhase::BeforeStart, OperationAbortCause::ParticipantDetained(_)) => {
+            unreachable!("detention no longer aborts operations before they begin")
+        }
         (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed)
-        | (OperationAbortPhase::BeforeStart, OperationAbortCause::ParticipantDetained(_))
         | (OperationAbortPhase::InProgress, _)
         | (OperationAbortPhase::AwaitingDecision, _) => {
             let summary = build_abort_summary(state, record, cause)?;

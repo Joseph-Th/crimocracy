@@ -80,20 +80,11 @@ fn validate_before_start_abort(
             }
             validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
         }
-        (OperationAbortCause::ParticipantDetained(character), Some(artifacts)) => {
-            if operation.started_at().is_some()
-                || operation.resolution_due_at().is_some()
-                || !detention_abort_matches_arrest(state, operation, abort.aborted_at(), character)
-            {
-                return Err(invalid_abort(operation));
-            }
-            validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
-        }
         (OperationAbortCause::AuthorityOrder, Some(_))
         | (OperationAbortCause::DeadlineMissed, None)
         | (OperationAbortCause::Decision(_), _)
         | (OperationAbortCause::PoliceArrival(_), _)
-        | (OperationAbortCause::ParticipantDetained(_), None) => Err(invalid_abort(operation)),
+        | (OperationAbortCause::ParticipantDetained(_), _) => Err(invalid_abort(operation)),
     }
 }
 

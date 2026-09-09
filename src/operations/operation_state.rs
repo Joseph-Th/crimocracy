@@ -165,17 +165,6 @@ impl OperationState {
             })
     }
 
-    pub(crate) fn active_operation_bookings(
-        &self,
-        character: CharacterId,
-    ) -> impl Iterator<Item = OperationId> + '_ {
-        self.active_by_participant
-            .get(&character)
-            .into_iter()
-            .flatten()
-            .copied()
-    }
-
     /// Finds the smallest non-terminal operation holding the character as leader or role
     /// participant in O(log participants) lookup time.
     pub(crate) fn find_active_operation_booking(

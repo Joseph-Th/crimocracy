@@ -172,7 +172,10 @@ impl LegalState {
             }
         }
         for jurisdiction in self.jurisdictions.values() {
-            for neighborhood in jurisdiction.neighborhoods() {
+            let Some(current) = jurisdiction.revisions().last() else {
+                continue;
+            };
+            for neighborhood in current.neighborhoods() {
                 self.indexes
                     .jurisdictions
                     .jurisdictions_by_neighborhood
@@ -182,7 +185,16 @@ impl LegalState {
             }
         }
         for patrol in self.patrol_deployments.values() {
-            if patrol.status() == PatrolDeploymentStatus::Active {
+            let Some(current) = patrol.revisions().last() else {
+                continue;
+            };
+            self.indexes
+                .patrols
+                .by_neighborhood
+                .entry(patrol.neighborhood())
+                .or_default()
+                .insert(patrol.id());
+            if current.status() == PatrolDeploymentStatus::Active {
                 self.indexes
                     .patrols
                     .active_by_organization_neighborhood
@@ -308,6 +320,22 @@ impl LegalState {
                 self.informants
                     .get(id)
                     .expect("informant pair index must reference an informant")
+            })
+    }
+    pub(crate) fn patrol_deployments_for_neighborhood(
+        &self,
+        neighborhood: NeighborhoodId,
+    ) -> impl Iterator<Item = &PatrolDeploymentRecord> {
+        self.indexes
+            .patrols
+            .by_neighborhood
+            .get(&neighborhood)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.patrol_deployments
+                    .get(id)
+                    .expect("patrol-neighborhood index must reference a deployment")
             })
     }
     pub(crate) fn informant_disclosure_for_case_information(
@@ -1488,8 +1516,13 @@ impl LegalState {
             .insert(investigation_id);
         self.set_investigation_activity(investigation_id, at);
     }
-    pub(crate) fn set_jurisdiction(&mut self, record: JurisdictionRecord) {
-        let organization = record.organization();
+    pub(crate) fn set_jurisdiction(
+        &mut self,
+        organization: OrganizationId,
+        neighborhoods: BTreeSet<NeighborhoodId>,
+        case_intake_priority: crate::world::Rating,
+        changed_at: SimTime,
+    ) {
         let previous_neighborhoods = self
             .jurisdictions
             .get(&organization)
@@ -1511,7 +1544,7 @@ impl LegalState {
                 }
             }
         }
-        for neighborhood in record.neighborhoods() {
+        for neighborhood in &neighborhoods {
             self.indexes
                 .jurisdictions
                 .jurisdictions_by_neighborhood
@@ -1519,7 +1552,28 @@ impl LegalState {
                 .or_default()
                 .insert(organization);
         }
-        self.jurisdictions.insert(organization, record);
+        if let Some(record) = self.jurisdictions.get_mut(&organization) {
+            let version = advance_version_preflighted(record.version());
+            record.revisions.push(crate::legal::JurisdictionRevision {
+                changed_at,
+                neighborhoods,
+                case_intake_priority,
+                version,
+            });
+        } else {
+            self.jurisdictions.insert(
+                organization,
+                JurisdictionRecord {
+                    organization,
+                    revisions: vec![crate::legal::JurisdictionRevision {
+                        changed_at,
+                        neighborhoods,
+                        case_intake_priority,
+                        version: 1,
+                    }],
+                },
+            );
+        }
     }
     pub(crate) fn insert_patrol_deployment(&mut self, record: PatrolDeploymentRecord) {
         let id = record.id();
@@ -1530,6 +1584,12 @@ impl LegalState {
             PatrolDeploymentStatus::Active,
             "Lifecycle Validity: new patrol deployments must be active"
         );
+        self.indexes
+            .patrols
+            .by_neighborhood
+            .entry(neighborhood)
+            .or_default()
+            .insert(id);
         let previous_active = self
             .indexes
             .patrols
@@ -1561,9 +1621,16 @@ impl LegalState {
             .patrol_deployments
             .get_mut(&id)
             .expect("validated patrol deployment disappeared before revision commit");
-        record.windows = windows;
-        record.last_changed_at = changed_at;
-        record.version = advance_version_preflighted(record.version);
+        let status = record.status();
+        let version = advance_version_preflighted(record.version());
+        record
+            .revisions
+            .push(crate::legal::PatrolDeploymentRevision {
+                changed_at,
+                windows,
+                status,
+                version,
+            });
     }
     pub(crate) fn set_patrol_deployment_status(
         &mut self,
@@ -1637,9 +1704,16 @@ impl LegalState {
             .patrol_deployments
             .get_mut(&id)
             .expect("validated patrol deployment disappeared before lifecycle commit");
-        record.status = status;
-        record.last_changed_at = changed_at;
-        record.version = advance_version_preflighted(record.version);
+        let windows = record.windows().to_vec();
+        let version = advance_version_preflighted(record.version());
+        record
+            .revisions
+            .push(crate::legal::PatrolDeploymentRevision {
+                changed_at,
+                windows,
+                status,
+                version,
+            });
     }
     pub(crate) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
         let id = record.id();
