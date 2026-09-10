@@ -295,6 +295,12 @@ fn validate_active_field_objective_target(
                 .world
                 .get_character(id)
                 .ok_or(OperationError::MissingEntity(target))?;
+            // Ordinary field objectives assume the target is physically available in the
+            // world. Extraction deliberately bypasses this helper because custody is the
+            // precondition for that objective rather than an availability failure.
+            if state.legal.active_arrest_for_character(id).is_some() {
+                return Err(OperationError::InactiveObjectiveTarget(target));
+            }
         }
         EntityRef::Neighborhood(id) => {
             state

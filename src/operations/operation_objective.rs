@@ -101,7 +101,7 @@ pub(crate) fn blocker_clause(
             "The target was no longer operating when the crew reached the objective, so there was no active business to disrupt."
         }
         OperationObjectiveBlocker::NoPressureableWitnessCase => {
-            "By the time the crew reached the witness, no active case still depended on cooperation that intimidation could reduce."
+            "By the time the crew reached the witness, there was no witness cooperation the crew could still affect."
         }
         OperationObjectiveBlocker::ExtractionCustodyEnded => {
             "The target was no longer detained when the crew reached the objective, so there was no custody left to break."
@@ -130,14 +130,22 @@ pub(crate) fn has_pressureable_witness_case(
     !pressureable_witness_targets(state, responsible_organization, character).is_empty()
 }
 
-/// Exact witness registrations whose future cooperation can still be reduced. Existing testimony
-/// stores the cooperation snapshot used when it was recorded, so intimidating a statemented
-/// witness cannot retroactively weaken that evidence and has no remaining modeled effect.
+/// Exact witness registrations whose future cooperation can still be reduced by a field
+/// intimidation. Existing testimony stores the cooperation snapshot used when it was recorded,
+/// and police custody makes the character physically unavailable, so neither state has a
+/// remaining modeled pressure effect.
 pub(crate) fn pressureable_witness_targets(
     state: &AppState,
     responsible_organization: OrganizationId,
     character: CharacterId,
 ) -> Vec<(CaseWitnessId, WitnessCooperation)> {
+    // A detained witness is not physically available to a field intimidation operation.
+    // If custody begins after authorization, this same predicate feeds the existing
+    // NoPressureableWitnessCase execution blocker, so the operation fails practically rather
+    // than mutating cooperation through police custody.
+    if state.legal.active_arrest_for_character(character).is_some() {
+        return Vec::new();
+    }
     state
         .legal
         .case_witnesses_for_character(character)

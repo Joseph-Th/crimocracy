@@ -1031,6 +1031,286 @@ fn same_minute_post_resolution_acquisition_does_not_rewrite_prior_operation_succ
     validate_invariants(&restored);
 }
 
+fn detain_pressure_test_character(
+    registry: &Registry,
+    state: &mut AppState,
+    police: OrganizationId,
+    character: CharacterId,
+    title: &str,
+) -> ArrestId {
+    let investigation = validate_open_investigation(
+        state,
+        InvestigationDraft {
+            owner: police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .expect("custody investigation should validate")
+    .commit(state)
+    .expect("custody investigation should commit");
+    let strong = validate_add_evidence(
+        state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("strong custody evidence should validate")
+    .commit(state)
+    .expect("strong custody evidence should commit");
+    let corroborating = validate_add_evidence(
+        state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating custody evidence should validate")
+    .commit(state)
+    .expect("corroborating custody evidence should commit");
+    crate::legal::arrest_system::validate_arrest(
+        registry,
+        state,
+        ArrestDraft {
+            character,
+            investigation,
+            evidence: BTreeSet::from([strong, corroborating]),
+        },
+    )
+    .expect("custody evidence should meet the authored arrest bar")
+    .commit(state)
+    .expect("custody should commit")
+}
+
+#[test]
+fn detained_witness_cannot_be_pressured_and_in_flight_detention_blocks_the_effect() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x517A_7E10);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Custody Pressure Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal organization should validate");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Custody Witness Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("law-enforcement organization should validate");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Custody Pressure Leader".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Management,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+                (
+                    CapabilityKind::Intimidation,
+                    Rating::try_new(99).expect("fixture rating should validate"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("pressure leader should validate");
+    let already_detained = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Already Detained Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("first witness should validate");
+    let later_detained = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Later Detained Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second witness should validate");
+    for (witness, title) in [
+        (already_detained, "Already-detained witness case"),
+        (later_detained, "Later-detained witness case"),
+    ] {
+        let investigation = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: title.to_owned(),
+                subjects: BTreeSet::from([EntityRef::Character(leader)]),
+            },
+        )
+        .expect("pressure-target investigation should validate")
+        .commit(&mut state)
+        .expect("pressure-target investigation should commit");
+        crate::legal::witness_system::validate_register_case_witness(
+            &state,
+            CaseWitnessDraft {
+                investigation,
+                witness,
+                cooperation: WitnessCooperation::Reluctant,
+            },
+        )
+        .expect("pressure target should register as a witness")
+        .commit(&mut state)
+        .expect("witness registration should commit");
+    }
+
+    detain_pressure_test_character(
+        &registry,
+        &mut state,
+        police,
+        already_detained,
+        "Custody of first pressure target",
+    );
+    let pressure_draft = |target, scheduled_for| OperationDraft {
+        title: "Pressure custody-sensitive witness".to_owned(),
+        kind: OperationKind::WitnessPressure,
+        responsible_organization: crew,
+        leader,
+        objective: OperationObjective::Frighten {
+            target: EntityRef::Character(target),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for,
+    };
+    let error = validate_authorize_operation(
+        &registry,
+        &state,
+        pressure_draft(already_detained, SimTime::from_minutes(1)),
+    )
+    .expect_err("a detained witness is not an available field-intimidation target");
+    assert_eq!(
+        error,
+        OperationError::InactiveObjectiveTarget(EntityRef::Character(already_detained))
+    );
+
+    let pressure = validate_authorize_operation(
+        &registry,
+        &state,
+        pressure_draft(later_detained, SimTime::from_minutes(1)),
+    )
+    .expect("a free statementless witness should remain pressureable")
+    .commit(&mut state)
+    .expect("pressure operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(&registry, &mut state, pressure, OperationTransition::Begin)
+        .expect("pressure operation should begin while its target is free");
+    detain_pressure_test_character(
+        &registry,
+        &mut state,
+        police,
+        later_detained,
+        "Custody during witness pressure",
+    );
+    let case_witness = state
+        .legal()
+        .case_witnesses_for_character(later_detained)
+        .find(|witness| {
+            state
+                .legal()
+                .get_investigation(witness.investigation())
+                .is_some_and(|investigation| {
+                    investigation
+                        .subjects()
+                        .contains(&EntityRef::Character(leader))
+                })
+        })
+        .expect("pressure-target witness registration should persist")
+        .id();
+    let cooperation_before = state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("pressure-target witness should persist")
+        .cooperation();
+    let duration = registry
+        .get_operation(OperationKind::WitnessPressure)
+        .execution()
+        .duration();
+    state.advance_clock(duration);
+    let variance_limit = i8::try_from(
+        registry
+            .get_operation(OperationKind::WitnessPressure)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance limit must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        pressure,
+        OperationResolutionRandomness::new(variance_limit, 0),
+    )
+    .expect("due pressure operation should still resolve");
+    assert_eq!(
+        plan.outcome.objective_blocker,
+        Some(OperationObjectiveBlocker::NoPressureableWitnessCase)
+    );
+    assert_eq!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed
+    );
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("custody-blocked pressure result should validate")
+        .commit(&mut state)
+        .expect("custody-blocked pressure result should commit");
+    assert_eq!(
+        state
+            .legal()
+            .get_case_witness(case_witness)
+            .expect("witness should persist after blocked pressure")
+            .cooperation(),
+        cooperation_before,
+        "a field operation must not mutate witness cooperation through police custody"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("custody-blocked witness pressure should remain registry-valid");
+    validate_invariants(&state);
+}
+
 #[test]
 fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_testimony() {
     let registry = build_registry();
@@ -1238,7 +1518,7 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
     assert!(
         after_action
             .summary()
-            .contains("no active case still depended")
+            .contains("no witness cooperation the crew could still affect")
     );
     validate_state_against_registry(&registry, &state)
         .expect("statemented-witness pressure state should remain registry-valid");
