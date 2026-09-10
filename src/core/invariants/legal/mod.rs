@@ -7,14 +7,11 @@ mod enforcement;
 mod prosecution;
 mod references;
 mod representation;
-
-pub(crate) use casework::validate_developed_review_evidence;
-pub(super) use casework::validate_witness_statements_against_registry;
-pub(super) use custody::validate_arrests_against_registry;
+mod work;
 
 use crate::core::invariants::StateValidationError;
-
 use crate::core::state::AppState;
+use crate::registry::Registry;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Full legal-subsystem record validation, ordered like the custody cluster it guards:
@@ -52,4 +49,13 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
     references::validate_report_holders(state)?;
     references::validate_history_event_references(state)?;
     Ok(())
+}
+
+pub(super) fn validate_legal_subsystems_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    custody::validate_arrests_against_registry(registry, state)?;
+    casework::validate_witness_statements_against_registry(registry, state)?;
+    work::validate_investigation_work_against_registry(registry, state)
 }

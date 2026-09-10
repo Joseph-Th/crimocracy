@@ -164,7 +164,7 @@ fn apply_organization_payroll(
                 .get_account(*account)
                 .expect("payroll funding came from the finance owner index")
         })
-        .map(|record| record.balance().cents().max(0))
+        .map(|record| record.spendable_balance().cents())
         .fold(0_i128, |total, cents| {
             (total + i128::from(cents)).min(owed_cents)
         });
@@ -184,15 +184,15 @@ fn apply_organization_payroll(
             if remaining.cents() == 0 {
                 break;
             }
-            let balance = state
+            let spendable = state
                 .finance()
                 .get_account(*account)
                 .expect("payroll funding came from the finance owner index")
-                .balance();
-            if balance.cents() <= 0 {
+                .spendable_balance();
+            if spendable == Money::ZERO {
                 continue;
             }
-            let debit = balance.min(remaining);
+            let debit = spendable.min(remaining);
             postings.push(LedgerPosting {
                 account: *account,
                 amount: debit.checked_neg().expect("positive balance negates"),
@@ -382,8 +382,10 @@ fn find_funding_accounts(
     let mut accounts: Vec<_> = state
         .finance()
         .accounts_for(owner)
-        .filter(|account| account.kind().is_liquid())
-        .map(|account| (account.balance(), account.id()))
+        .filter_map(|account| {
+            let spendable = account.spendable_balance();
+            (spendable > Money::ZERO).then_some((spendable, account.id()))
+        })
         .collect();
     accounts.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
     accounts.into_iter().map(|(_, id)| id).collect()

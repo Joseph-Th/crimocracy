@@ -334,6 +334,15 @@ impl OpportunityState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.records_have_consistent_indexes()
+            && self.report_index_is_consistent()
+            && self.open_context_index_is_consistent()
+            && self.expiry_index_is_consistent()
+            && self.operation_index_is_consistent()
+    }
+
+    /// Every opportunity must occupy exactly the projections implied by its lifecycle state.
+    fn records_have_consistent_indexes(&self) -> bool {
         for (stored_id, record) in &self.records {
             let id = record.id();
             if *stored_id != id {
@@ -392,6 +401,11 @@ impl OpportunityState {
                 }
             }
         }
+        true
+    }
+
+    /// Every report reverse lookup must be either the opportunity's discovery or expiry report.
+    fn report_index_is_consistent(&self) -> bool {
         for (report, id) in &self.by_report {
             let Some(record) = self.records.get(id) else {
                 return false;
@@ -410,6 +424,11 @@ impl OpportunityState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Context deduplication contains open opportunities only and preserves the exact key.
+    fn open_context_index_is_consistent(&self) -> bool {
         for (key, id) in &self.open_by_context {
             if self.records.get(id).is_none_or(|record| {
                 record.status() != OpportunityStatus::Open
@@ -418,6 +437,11 @@ impl OpportunityState {
                 return false;
             }
         }
+        true
+    }
+
+    /// The expiry schedule contains only open opportunities with that exact expiry instant.
+    fn expiry_index_is_consistent(&self) -> bool {
         for (at, ids) in &self.open_by_expiry {
             if ids.iter().any(|id| {
                 self.records.get(id).is_none_or(|record| {
@@ -427,6 +451,11 @@ impl OpportunityState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Converted-operation lookups must point back to the opportunity that created them.
+    fn operation_index_is_consistent(&self) -> bool {
         for (operation, id) in &self.by_operation {
             if self.records.get(id).is_none_or(|record| {
                 record

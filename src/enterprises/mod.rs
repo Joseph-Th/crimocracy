@@ -682,6 +682,18 @@ impl EnterpriseState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.records_have_consistent_forward_indexes()
+            && self.organization_index_is_consistent()
+            && self.location_index_is_consistent()
+            && self.supporting_business_index_is_consistent()
+            && self.settlement_account_index_is_consistent()
+            && self.cycle_indexes_are_consistent()
+            && self.active_mandate_index_is_consistent()
+            && self.active_schedule_index_is_consistent()
+    }
+
+    /// Every authoritative enterprise must appear in each index implied by its current record.
+    fn records_have_consistent_forward_indexes(&self) -> bool {
         for (stored_id, record) in &self.records {
             if *stored_id != record.id() {
                 return false;
@@ -723,6 +735,11 @@ impl EnterpriseState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse organization entries must resolve to enterprises owned by that organization.
+    fn organization_index_is_consistent(&self) -> bool {
         for (organization, ids) in &self.by_organization {
             for id in ids {
                 if !self
@@ -734,6 +751,11 @@ impl EnterpriseState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse location entries must resolve to enterprises at that exact location.
+    fn location_index_is_consistent(&self) -> bool {
         for (location, ids) in &self.by_location {
             for id in ids {
                 if !self
@@ -745,6 +767,11 @@ impl EnterpriseState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse support-business entries must agree with each enterprise's support set.
+    fn supporting_business_index_is_consistent(&self) -> bool {
         for (business, ids) in &self.by_supporting_business {
             for id in ids {
                 if !self
@@ -756,6 +783,11 @@ impl EnterpriseState {
                 }
             }
         }
+        true
+    }
+
+    /// Settlement accounts have a one-to-one reverse lookup into authoritative enterprises.
+    fn settlement_account_index_is_consistent(&self) -> bool {
         for (account, id) in &self.by_settlement_account {
             if !self
                 .records
@@ -765,6 +797,11 @@ impl EnterpriseState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Cycle identity, enterprise membership, and chronological lookup are all bidirectional.
+    fn cycle_indexes_are_consistent(&self) -> bool {
         for (stored_id, cycle) in &self.cycles {
             if *stored_id != cycle.id() {
                 return false;
@@ -808,6 +845,11 @@ impl EnterpriseState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Only active enterprises may occupy a mandate's current responsibility index.
+    fn active_mandate_index_is_consistent(&self) -> bool {
         for (mandate, ids) in &self.active_by_mandate {
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
@@ -818,6 +860,11 @@ impl EnterpriseState {
                 }
             }
         }
+        true
+    }
+
+    /// Only active enterprises with that exact due time may occupy the schedule index.
+    fn active_schedule_index_is_consistent(&self) -> bool {
         for (time, ids) in &self.active_by_next_cycle {
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {

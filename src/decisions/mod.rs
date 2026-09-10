@@ -451,6 +451,14 @@ impl DecisionState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.records_have_consistent_indexes()
+            && self.operation_index_is_consistent()
+            && self.pending_recipient_index_is_consistent()
+            && self.pending_context_index_is_consistent()
+    }
+
+    /// Every decision must occupy the operation and pending projections implied by its record.
+    fn records_have_consistent_indexes(&self) -> bool {
         for (stored_id, record) in &self.records {
             if *stored_id != record.id() {
                 return false;
@@ -491,7 +499,11 @@ impl DecisionState {
                 }
             }
         }
+        true
+    }
 
+    /// Reverse operation entries must point only to decisions about that operation.
+    fn operation_index_is_consistent(&self) -> bool {
         for (operation, ids) in &self.by_operation {
             for id in ids {
                 if !self
@@ -503,6 +515,11 @@ impl DecisionState {
                 }
             }
         }
+        true
+    }
+
+    /// Pending recipient entries contain pending decisions for that recipient only.
+    fn pending_recipient_index_is_consistent(&self) -> bool {
         for (recipient, ids) in &self.pending_by_recipient {
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
@@ -512,6 +529,11 @@ impl DecisionState {
                 }
             }
         }
+        true
+    }
+
+    /// The pending-context key is exclusive and must resolve to the exact pending decision.
+    fn pending_context_index_is_consistent(&self) -> bool {
         for (pending_key, id) in &self.pending_by_context {
             if !self.records.get(id).is_some_and(|record| {
                 record.context().pending_key() == *pending_key

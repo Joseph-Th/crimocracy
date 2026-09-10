@@ -560,7 +560,7 @@ fn validate_retainer_payment(
                 sponsor: draft.sponsor,
             });
         }
-        available_cents = (available_cents + i128::from(payer.balance().cents().max(0)))
+        available_cents = (available_cents + i128::from(payer.spendable_balance().cents()))
             .min(i128::from(draft.fee.cents()));
     }
     if available_cents < i128::from(draft.fee.cents()) {
@@ -588,15 +588,15 @@ fn validate_retainer_payment(
         if remaining == Money::ZERO {
             break;
         }
-        let balance = state
+        let spendable = state
             .finance
             .get_account(*account_id)
             .expect("validated payer account must still exist")
-            .balance();
-        if balance <= Money::ZERO {
+            .spendable_balance();
+        if spendable == Money::ZERO {
             continue;
         }
-        let debit = balance.min(remaining);
+        let debit = spendable.min(remaining);
         postings.push(LedgerPosting {
             account: *account_id,
             amount: debit
@@ -1170,7 +1170,7 @@ fn resolve_automatic_support_payer_accounts(
             .finance
             .get_account(budget.funding_account)
             .expect("validated mandate budget account must persist");
-        if usage.remaining < fee || funding.balance() < fee {
+        if usage.remaining < fee || funding.spendable_balance() < fee {
             return Ok(None);
         }
         BTreeSet::from([budget.funding_account])
@@ -1178,7 +1178,7 @@ fn resolve_automatic_support_payer_accounts(
         state
             .finance
             .accounts_for(FinancialOwner::Organization(candidate.sponsor))
-            .filter(|account| account.kind().is_liquid() && account.balance() > Money::ZERO)
+            .filter(|account| account.spendable_balance() > Money::ZERO)
             .map(|account| account.id())
             .collect()
     };
@@ -1189,9 +1189,8 @@ fn resolve_automatic_support_payer_accounts(
                 .finance
                 .get_account(*account)
                 .expect("funding account came from finance owner index")
-                .balance()
+                .spendable_balance()
                 .cents()
-                .max(0)
         })
         .fold(0_i128, |total, cents| {
             (total + i128::from(cents)).min(i128::from(fee.cents()))

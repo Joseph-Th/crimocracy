@@ -360,6 +360,14 @@ impl DelegationState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.records_have_consistent_indexes()
+            && self.active_manager_index_is_consistent()
+            && self.active_scope_index_is_consistent()
+            && self.active_set_is_consistent()
+    }
+
+    /// Every mandate must occupy only the active projections implied by its lifecycle state.
+    fn records_have_consistent_indexes(&self) -> bool {
         for (stored_id, record) in &self.records {
             if *stored_id != record.id() {
                 return false;
@@ -399,7 +407,11 @@ impl DelegationState {
                 }
             }
         }
+        true
+    }
 
+    /// A manager's active-mandate slot must resolve to that manager's active mandate.
+    fn active_manager_index_is_consistent(&self) -> bool {
         for (manager, id) in &self.active_by_manager {
             if !self.records.get(id).is_some_and(|record| {
                 record.manager() == *manager && record.status() == MandateStatus::Active
@@ -407,6 +419,11 @@ impl DelegationState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse scope entries must resolve to active mandates that actually contain the scope.
+    fn active_scope_index_is_consistent(&self) -> bool {
         for (scope, ids) in &self.active_by_scope {
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
@@ -416,6 +433,11 @@ impl DelegationState {
                 }
             }
         }
+        true
+    }
+
+    /// The compact active set contains active mandates only.
+    fn active_set_is_consistent(&self) -> bool {
         for id in &self.active {
             if !self
                 .records

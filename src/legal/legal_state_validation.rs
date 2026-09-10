@@ -458,6 +458,16 @@ impl LegalState {
     }
 
     fn has_consistent_investigation_indexes(&self) -> bool {
+        self.investigation_forward_indexes_are_consistent()
+            && self.active_investigation_indexes_are_consistent()
+            && self.investigation_activity_index_is_consistent()
+            && self.investigation_owner_index_is_consistent()
+            && self.investigation_subject_index_is_consistent()
+            && self.investigator_index_is_consistent()
+    }
+
+    /// Every investigation must appear in each projection implied by its authoritative record.
+    fn investigation_forward_indexes_are_consistent(&self) -> bool {
         for investigation in self.investigations.values() {
             if !self
                 .indexes
@@ -519,6 +529,11 @@ impl LegalState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Active-case membership and the empty-lead subset must resolve back to matching records.
+    fn active_investigation_indexes_are_consistent(&self) -> bool {
         for investigation in &self.indexes.investigations.active_without_lead {
             if !self
                 .investigations
@@ -540,6 +555,11 @@ impl LegalState {
                 return false;
             }
         }
+        true
+    }
+
+    /// The activity schedule is bidirectional and contains active investigations only.
+    fn investigation_activity_index_is_consistent(&self) -> bool {
         for (at, ids) in &self.indexes.investigations.cases_by_last_activity {
             for id in ids {
                 if !self.investigations.get(id).is_some_and(|record| {
@@ -564,6 +584,11 @@ impl LegalState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse owner entries must resolve to investigations owned by that institution.
+    fn investigation_owner_index_is_consistent(&self) -> bool {
         for (owner, ids) in &self.indexes.investigations.by_owner {
             for id in ids {
                 if !self
@@ -575,6 +600,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse subject entries must agree with each investigation's effective subject set.
+    fn investigation_subject_index_is_consistent(&self) -> bool {
         for (subject, ids) in &self.indexes.investigations.investigations_by_subject {
             for id in ids {
                 if !self
@@ -586,6 +616,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse investigator entries must agree with current lead assignments.
+    fn investigator_index_is_consistent(&self) -> bool {
         for (investigator, ids) in &self.indexes.investigations.investigations_by_investigator {
             for id in ids {
                 if !self
@@ -636,6 +671,16 @@ impl LegalState {
     }
 
     fn has_consistent_investigation_work_indexes(&self) -> bool {
+        self.investigation_work_forward_indexes_are_consistent()
+            && self.work_by_investigation_index_is_consistent()
+            && self.work_by_investigator_index_is_consistent()
+            && self.scheduled_work_due_index_is_consistent()
+            && self.scheduled_work_focus_index_is_consistent()
+    }
+
+    /// Every work record must agree with its owner/investigator projections and lifecycle-only
+    /// schedule indexes.
+    fn investigation_work_forward_indexes_are_consistent(&self) -> bool {
         for work in self.investigation_work.values() {
             if !self
                 .indexes
@@ -693,6 +738,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse case-work entries must resolve to work owned by that investigation.
+    fn work_by_investigation_index_is_consistent(&self) -> bool {
         for (investigation, ids) in &self.indexes.work.work_by_investigation {
             for id in ids {
                 if !self
@@ -704,6 +754,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// Reverse investigator-work entries must resolve to work assigned to that investigator.
+    fn work_by_investigator_index_is_consistent(&self) -> bool {
         for (investigator, ids) in &self.indexes.work.work_by_investigator {
             for id in ids {
                 if !self
@@ -715,6 +770,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// Only scheduled work may occupy the due-time index, at its exact authored due time.
+    fn scheduled_work_due_index_is_consistent(&self) -> bool {
         for (time, ids) in &self.indexes.work.scheduled_work_by_due_at {
             for id in ids {
                 if !self.investigation_work.get(id).is_some_and(|work| {
@@ -724,6 +784,11 @@ impl LegalState {
                 }
             }
         }
+        true
+    }
+
+    /// The scheduled focus index is exclusive and must point to the exact active work tuple.
+    fn scheduled_work_focus_index_is_consistent(&self) -> bool {
         for (key, id) in &self.indexes.work.scheduled_work_by_focus {
             if !self.investigation_work.get(id).is_some_and(|work| {
                 work.status() == InvestigationWorkStatus::Scheduled

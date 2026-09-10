@@ -8,6 +8,7 @@ use crate::core::state::AppState;
 use crate::economy::{BusinessCycleRecord, BusinessEconomyRecord, BusinessOperatingStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
+use crate::registry::Registry;
 use crate::world::BusinessOwner;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -245,8 +246,53 @@ fn invalid_cycle(cycle: &BusinessCycleRecord) -> StateValidationError {
     StateValidationError::InvalidBusinessCycle { cycle: cycle.id() }
 }
 
-pub(super) fn validate_business_economies_against_registry(
-    registry: &crate::registry::Registry,
+pub(super) fn validate_businesses_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    validate_business_cycles_against_registry(registry, state)?;
+    validate_business_economies_against_registry(registry, state)
+}
+
+fn validate_business_cycles_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for cycle in state.economy.cycles() {
+        let business = state
+            .world
+            .get_business(cycle.business())
+            .ok_or(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        let economics = registry.get_business(business.kind()).economics();
+        let (expected_gross, expected_cost, expected_net) =
+            crate::economy::business_economy_system::resolve_historical_business_cycle_financials(
+                registry, state, cycle,
+            )
+            .map_err(|_| StateValidationError::InvalidBusinessCycle { cycle: cycle.id() })?;
+        if cycle.gross_revenue() != expected_gross
+            || cycle.operating_cost() != expected_cost
+            || cycle.net_cash() != expected_net
+        {
+            return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+        }
+        let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
+        let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
+            || cycle.net_cash() < Money::ZERO
+            || cycle.disrupted()
+        {
+            AttentionClass::Notable
+        } else {
+            AttentionClass::Routine
+        };
+        if cycle.attention() != expected_attention {
+            return Err(StateValidationError::InvalidBusinessCycle { cycle: cycle.id() });
+        }
+    }
+    Ok(())
+}
+
+fn validate_business_economies_against_registry(
+    registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {

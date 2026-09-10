@@ -287,15 +287,15 @@ fn acquisition_payment_draft(
         if remaining == Money::ZERO {
             break;
         }
-        let balance = state
+        let spendable = state
             .finance
             .get_account(*account)
             .expect("validated acquisition funding account must exist")
-            .balance();
-        if balance <= Money::ZERO {
+            .spendable_balance();
+        if spendable == Money::ZERO {
             continue;
         }
-        let debit = balance.min(remaining);
+        let debit = spendable.min(remaining);
         postings.push(LedgerPosting {
             account: *account,
             amount: debit
@@ -345,7 +345,7 @@ fn validate_funding_accounts(
                 *account,
             ));
         }
-        available_cents = (available_cents + i128::from(funding.balance().cents().max(0)))
+        available_cents = (available_cents + i128::from(funding.spendable_balance().cents()))
             .min(i128::from(price.cents()));
     }
     if available_cents < i128::from(price.cents()) {

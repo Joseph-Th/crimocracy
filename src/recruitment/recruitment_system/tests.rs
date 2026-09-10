@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::build_registry;
+use crate::core::attention::AttentionClass;
+use crate::core::entity::EntityRef;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
@@ -18,8 +20,12 @@ use crate::delegation::delegation_system::{
     set_policy, validate_assign_mandate, validate_revoke_mandate,
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+use crate::history::HistoryEventKind;
 use crate::intelligence::intelligence_system::validate_record_information;
-use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crate::recruitment::autonomous_recruitment::{
     AutonomousRecruitmentError, apply_due_autonomous_recruitment,
 };

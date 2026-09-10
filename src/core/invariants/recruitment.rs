@@ -10,12 +10,12 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
-use crate::recruitment::recruitment_system::{
-    RecruitmentFactorContext, recruitment_defection_history_summary,
-    recruitment_join_history_summary, recruitment_member_report_entities,
-    recruitment_member_report_summary, recruitment_member_report_title,
-    recruitment_outcome_summary,
+use crate::recruitment::artifacts::{
+    recruitment_defection_history_summary, recruitment_join_history_summary,
+    recruitment_member_report_entities, recruitment_member_report_summary,
+    recruitment_member_report_title, recruitment_outcome_summary,
 };
+use crate::recruitment::recruitment_system::RecruitmentFactorContext;
 use crate::recruitment::scoring::{
     resolve_perceived_legal_pressure_at, resolve_recruitment_factors_from_context,
     resolve_recruitment_margin, resolve_recruitment_outcome,

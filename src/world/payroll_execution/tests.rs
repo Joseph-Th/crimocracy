@@ -93,7 +93,7 @@ fn credit_account(
     validate_record_transaction(
         state,
         LedgerTransactionDraft {
-            occurred_at: SimTime::ZERO,
+            occurred_at: state.now(),
             memo: "test seed capital".to_owned(),
             postings: vec![
                 LedgerPosting {

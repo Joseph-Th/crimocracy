@@ -5,7 +5,7 @@ use crate::build_registry;
 use crate::core::id::CharacterId;
 use crate::core::invariants::validate_invariants;
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::delegation::delegation_system::{
     DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
 };
@@ -37,6 +37,190 @@ struct BudgetUsageRecordWire {
     period_start: SimTime,
     period_end: SimTime,
     amount: Money,
+}
+
+#[test]
+fn transaction_validation_rejects_backdated_ledger_mutation() {
+    let (mut state, _, funding, destination) = make_test_budget();
+    state.advance_clock(SimDuration::from_minutes(1));
+    let occurred_at = SimTime::from_minutes(0);
+
+    let error = match validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at,
+            memo: "Backdated transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    ) {
+        Ok(_) => panic!("backdated ledger mutation must reject during validation"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        FinanceError::NonCurrentTransactionTime {
+            occurred_at,
+            now: state.now(),
+        }
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn validated_transaction_cannot_commit_after_simulation_time_advances() {
+    let (mut state, _, funding, destination) = make_test_budget();
+    let occurred_at = state.now();
+    let validated = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at,
+            memo: "Time-sensitive transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("current transaction should validate");
+    let transaction_count = state.finance().transactions().count();
+    let funding_balance = state
+        .finance()
+        .get_account(funding)
+        .expect("funding account must exist")
+        .balance();
+    let destination_balance = state
+        .finance()
+        .get_account(destination)
+        .expect("destination account must exist")
+        .balance();
+
+    state.advance_clock(SimDuration::from_minutes(1));
+    let error = validated
+        .commit(&mut state)
+        .expect_err("validated ledger mutation must stale when simulation time advances");
+
+    assert_eq!(
+        error,
+        FinanceError::NonCurrentTransactionTime {
+            occurred_at,
+            now: state.now(),
+        }
+    );
+    assert_eq!(state.finance().transactions().count(), transaction_count);
+    assert_eq!(
+        state
+            .finance()
+            .get_account(funding)
+            .expect("rejected commit must preserve funding account")
+            .balance(),
+        funding_balance
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(destination)
+            .expect("rejected commit must preserve destination account")
+            .balance(),
+        destination_balance
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn restore_rejects_ledger_transaction_time_regression() {
+    let registry = build_registry();
+    let (mut state, _, funding, destination) = make_test_budget();
+    state.advance_clock(SimDuration::from_minutes(1));
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "First chronological transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("first chronological transfer should validate")
+    .commit(&mut state)
+    .expect("first chronological transfer should commit");
+    state.advance_clock(SimDuration::from_minutes(1));
+    let second = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Second chronological transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("second chronological transfer should validate")
+    .commit(&mut state)
+    .expect("second chronological transfer should commit");
+    let original = state
+        .finance()
+        .get_transaction(second)
+        .expect("second transaction must persist");
+    let mut corrupted = transaction_wire(original);
+    corrupted.occurred_at = SimTime::from_minutes(0);
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_transaction(
+            build_save(&registry, &state).expect("valid chronological ledger should save"),
+            original,
+            &corrupted,
+        ),
+    )
+    .expect_err("ledger chronology regression must fail restore");
+
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidLedgerTransactionChronology {
+                transaction,
+                previous_at,
+                occurred_at,
+            }
+        ) if transaction == second
+            && previous_at == SimTime::from_minutes(1)
+            && occurred_at == SimTime::from_minutes(0)
+    ));
 }
 
 #[derive(Clone, Serialize)]
@@ -408,6 +592,100 @@ fn balanced_transaction_commits_all_account_balances_atomically() {
             .expect("safe account should exist")
             .balance(),
         Money::from_cents(2_500)
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn spendable_balance_excludes_deficits_and_settlement_counterparties() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x5A3E_DA81);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Spendable Balance Test".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let street = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("street cash fixture should validate");
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("operating account fixture should validate");
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("settlement account fixture should validate");
+
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Establish mixed account positions".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: street,
+                    amount: Money::from_cents(500),
+                },
+                LedgerPosting {
+                    account: operating,
+                    amount: Money::from_cents(-700),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(200),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("mixed account position should validate")
+    .commit(&mut state)
+    .expect("mixed account position should commit");
+
+    assert_eq!(
+        state
+            .finance()
+            .get_account(street)
+            .expect("street account should persist")
+            .spendable_balance(),
+        Money::from_cents(500)
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(operating)
+            .expect("operating account should persist")
+            .spendable_balance(),
+        Money::ZERO,
+        "an operating deficit is an obligation, not financing"
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(settlement)
+            .expect("settlement account should persist")
+            .spendable_balance(),
+        Money::ZERO,
+        "a positive clearing balance is not spendable liquidity"
     );
     validate_invariants(&state);
 }

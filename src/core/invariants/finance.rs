@@ -21,6 +21,7 @@ struct FinanceValidationScratch {
     expected_mandate_entries: usize,
     derived_budget_totals: BTreeMap<BudgetPeriodKey, i64>,
     seen_posting_accounts: BTreeSet<crate::core::id::FinancialAccountId>,
+    last_transaction_time: Option<SimTime>,
 }
 
 /// Finance ownership, ledger, and balance coherence in ONE pass over the append-only
@@ -95,6 +96,7 @@ fn initialize_ledger_scratch(state: &AppState) -> FinanceValidationScratch {
         // Reused for every transaction to avoid allocating a new ordered set in the
         // campaign-length ledger loop.
         seen_posting_accounts: BTreeSet::new(),
+        last_transaction_time: None,
     };
     for account in state.finance.accounts() {
         let raw = account.id().raw() as usize;
@@ -119,6 +121,15 @@ fn validate_transaction(
             context: "ledger transaction",
         });
     }
+    if let Some(previous_at) = scratch.last_transaction_time
+        && transaction.occurred_at() < previous_at
+    {
+        return Err(StateValidationError::InvalidLedgerTransactionChronology {
+            transaction: transaction.id(),
+            previous_at,
+            occurred_at: transaction.occurred_at(),
+        });
+    }
     let net_cents = validate_postings(transaction, scratch)?;
     if net_cents != 0 {
         return Err(StateValidationError::UnbalancedLedgerTransaction {
@@ -129,6 +140,7 @@ fn validate_transaction(
     if let Some(usage) = transaction.budget_usage() {
         validate_budget_usage(state, transaction, usage, scratch)?;
     }
+    scratch.last_transaction_time = Some(transaction.occurred_at());
     Ok(())
 }
 

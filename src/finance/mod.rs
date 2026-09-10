@@ -111,6 +111,16 @@ impl FinancialAccountRecord {
     pub fn balance(&self) -> Money {
         self.balance
     }
+    /// Funds this account can contribute to an ordinary payment. Positive balances in liquid
+    /// account kinds are available; deficits are obligations and settlement accounts are
+    /// clearing counterparties, so neither provides spending power.
+    pub(crate) fn spendable_balance(&self) -> Money {
+        if self.kind.is_liquid() && self.balance > Money::ZERO {
+            self.balance
+        } else {
+            Money::ZERO
+        }
+    }
     pub fn version(&self) -> u32 {
         self.version
     }

@@ -5,6 +5,7 @@ use crate::core::id::{
     FinancialAccountId, IdExhaustionError, IdKind, LedgerTransactionId, MandateId,
 };
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::delegation::delegation_system::{
     DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
@@ -51,8 +52,10 @@ pub enum FinanceError {
     BalanceOverflow(FinancialAccountId),
     #[error(transparent)]
     VersionCapacity(#[from] VersionCapacityError),
-    #[error("ledger transaction cannot occur in the future")]
-    OccursInFuture,
+    #[error(
+        "ledger transaction occurrence time {occurred_at:?} must match current simulation time {now:?}"
+    )]
+    NonCurrentTransactionTime { occurred_at: SimTime, now: SimTime },
     #[error(
         "financial account {account} changed after validation; expected version {expected}, found {found}"
     )]
@@ -273,6 +276,12 @@ pub struct ValidatedLedgerTransaction {
 
 impl ValidatedLedgerTransaction {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, FinanceError> {
+        if self.draft.occurred_at != state.now() {
+            return Err(FinanceError::NonCurrentTransactionTime {
+                occurred_at: self.draft.occurred_at,
+                now: state.now(),
+            });
+        }
         if let Some(openings) = &self.openings {
             openings.ensure_current(state)?;
         }
@@ -370,8 +379,11 @@ fn validate_record_transaction_with_optional_openings(
     if draft.postings.len() < 2 {
         return Err(FinanceError::TooFewPostings);
     }
-    if draft.occurred_at > state.now() {
-        return Err(FinanceError::OccursInFuture);
+    if draft.occurred_at != state.now() {
+        return Err(FinanceError::NonCurrentTransactionTime {
+            occurred_at: draft.occurred_at,
+            now: state.now(),
+        });
     }
 
     let mut seen = BTreeSet::new();
@@ -549,7 +561,7 @@ fn resolve_transaction_budget(
         .finance
         .get_account(budget.funding_account)
         .ok_or(FinanceError::MissingAccount(budget.funding_account))?;
-    let available_cents = funding.balance().cents().max(0);
+    let available_cents = funding.spendable_balance().cents();
     if available_cents < requested_cents {
         return Err(FinanceError::InsufficientBudgetFunds {
             mandate,

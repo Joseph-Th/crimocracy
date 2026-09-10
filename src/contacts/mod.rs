@@ -401,6 +401,18 @@ impl ContactState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.contact_records_have_consistent_indexes()
+            && self.disclosure_records_have_consistent_indexes()
+            && self.sponsor_index_is_consistent()
+            && self.active_pair_index_is_consistent()
+            && self.active_handler_index_is_consistent()
+            && self.active_contact_index_is_consistent()
+            && self.disclosure_information_index_is_consistent()
+            && self.disclosure_source_index_is_consistent()
+    }
+
+    /// Every contact must occupy exactly the active projections implied by its lifecycle state.
+    fn contact_records_have_consistent_indexes(&self) -> bool {
         for (stored_id, record) in &self.contacts {
             let id = record.id();
             if *stored_id != id {
@@ -442,6 +454,11 @@ impl ContactState {
                 ContactStatus::Active | ContactStatus::Terminated => {}
             }
         }
+        true
+    }
+
+    /// Every disclosure must point to a live contact and occupy both reverse lookup indexes.
+    fn disclosure_records_have_consistent_indexes(&self) -> bool {
         for (stored_id, disclosure) in &self.disclosures {
             if *stored_id != disclosure.id() {
                 return false;
@@ -461,6 +478,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse sponsor entries must resolve to contacts sponsored by that organization.
+    fn sponsor_index_is_consistent(&self) -> bool {
         for (sponsor, ids) in &self.indexes.by_sponsor {
             if ids.iter().any(|id| {
                 !self
@@ -471,6 +493,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Active sponsor/contact pairs are exclusive and must point to the exact active contact.
+    fn active_pair_index_is_consistent(&self) -> bool {
         for (key, id) in &self.indexes.active_by_sponsor_contact {
             if !self.contacts.get(id).is_some_and(|record| {
                 record.status() == ContactStatus::Active
@@ -479,6 +506,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse handler entries contain active contacts handled by that character only.
+    fn active_handler_index_is_consistent(&self) -> bool {
         for (handler, ids) in &self.indexes.active_by_handler {
             if ids.iter().any(|id| {
                 !self.contacts.get(id).is_some_and(|record| {
@@ -488,6 +520,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Reverse contact-person entries contain active contacts mediated by that character only.
+    fn active_contact_index_is_consistent(&self) -> bool {
         for (contact, ids) in &self.indexes.active_by_contact {
             if ids.iter().any(|id| {
                 !self.contacts.get(id).is_some_and(|record| {
@@ -497,6 +534,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Each disclosed information record maps back to the disclosure that produced it.
+    fn disclosure_information_index_is_consistent(&self) -> bool {
         for (information, disclosure) in &self.indexes.disclosure_by_information {
             if !self
                 .disclosures
@@ -506,6 +548,11 @@ impl ContactState {
                 return false;
             }
         }
+        true
+    }
+
+    /// Each contact/source-information pair maps back to the matching disclosure.
+    fn disclosure_source_index_is_consistent(&self) -> bool {
         for (key, disclosure) in &self.indexes.disclosure_by_source {
             if !self
                 .disclosures

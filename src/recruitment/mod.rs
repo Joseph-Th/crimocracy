@@ -1,6 +1,7 @@
 //! Relational recruitment records and indexes; `recruitment_system` owns canonical recruitment
 //! transactions and `autonomous_recruitment` owns the daily delegated decision pass.
 
+pub(crate) mod artifacts;
 pub(crate) mod autonomous_recruitment;
 pub mod recruitment_system;
 pub mod scoring;

@@ -9,6 +9,7 @@ use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::OperationExposureLevel;
 use crate::operations::operation_system::is_valid_operation_objective;
 use crate::opportunities::{OpportunityRecord, OpportunityResolution};
+use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
@@ -17,6 +18,88 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
     let mut covered_targets = BTreeSet::<EntityRef>::new();
     for opportunity in state.opportunities.opportunities() {
         validate_opportunity(state, opportunity, &mut covered_targets)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_opportunities_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for opportunity in state.opportunities.opportunities() {
+        let context = opportunity.context();
+        let kind = context.operation_kind();
+        let definition = registry.get_operation(kind);
+        let has_authored_target = context.targets().iter().any(|target| {
+            let Some(objective) = kind.objective_for_target(*target) else {
+                return false;
+            };
+            if !is_valid_operation_objective(kind, &objective) {
+                return false;
+            }
+            let Some(ownership) = kind.business_target_ownership() else {
+                return true;
+            };
+            let EntityRef::Business(business) = target else {
+                return false;
+            };
+            let Some(record) = state.world.get_business(*business) else {
+                return false;
+            };
+            let Some(requirement) = definition.execution().business_target() else {
+                return false;
+            };
+            if !requirement
+                .required_functions()
+                .iter()
+                .all(|function| record.has_function(*function))
+            {
+                return false;
+            }
+            let (could_be_sponsor_owned, definitely_sponsor_owned) =
+                state.world.business_owner_evidence_at(
+                    *business,
+                    crate::world::BusinessOwner::Organization(opportunity.organization()),
+                    opportunity.discovered_at(),
+                );
+            match ownership {
+                crate::operations::OperationBusinessTargetOwnership::Foreign => {
+                    !definitely_sponsor_owned
+                }
+                crate::operations::OperationBusinessTargetOwnership::SponsorOwned => {
+                    could_be_sponsor_owned
+                }
+            }
+        });
+        let report = state
+            .reports
+            .get_report(opportunity.report())
+            .ok_or_else(|| invalid_opportunity(opportunity))?;
+        if !has_authored_target
+            || report.title()
+                != crate::opportunities::opportunity_system::discovery_report_title(
+                    definition.display_name(),
+                )
+        {
+            return Err(invalid_opportunity(opportunity));
+        }
+        if let Some(OpportunityResolution::Expired {
+            report: expiry_report,
+            ..
+        }) = opportunity.resolution()
+        {
+            let report = state
+                .reports
+                .get_report(expiry_report)
+                .ok_or_else(|| invalid_opportunity(opportunity))?;
+            if report.title()
+                != crate::opportunities::opportunity_system::expiry_report_title(
+                    definition.display_name(),
+                )
+            {
+                return Err(invalid_opportunity(opportunity));
+            }
+        }
     }
     Ok(())
 }

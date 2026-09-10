@@ -72,6 +72,6 @@ mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 43.
 
-The current in-memory state schema version is 85.
+The current in-memory state schema version is 86.
 
 The compiled operation vocabulary contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes, and the policy vocabulary contains only settings with a consuming system. Unsupported tactical or governance axes are not represented as inert plan fields.

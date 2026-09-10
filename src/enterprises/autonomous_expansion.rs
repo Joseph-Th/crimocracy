@@ -910,11 +910,11 @@ fn available_working_capital(
         .get(&account.id())
         .copied()
         .unwrap_or(Money::ZERO);
-    if account.balance() <= reserved {
+    let spendable = account.spendable_balance();
+    if spendable <= reserved {
         return Money::ZERO;
     }
-    account
-        .balance()
+    spendable
         .checked_sub(reserved)
         .expect("positive balance above a nonnegative reservation must subtract safely")
 }
