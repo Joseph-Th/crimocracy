@@ -80,6 +80,98 @@ fn typed_signal_rejects_incompatible_topic_without_mutation() {
 }
 
 #[test]
+fn concurrent_duplicate_internal_transfer_is_rejected_without_mutation() {
+    let (registry, mut state, organization, character) = make_transfer_fixture();
+    let source = record_character_information(&mut state, character, organization);
+    let first = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Organization(organization),
+        },
+    )
+    .expect("first internal transfer should validate");
+    let concurrent = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Organization(organization),
+        },
+    )
+    .expect("concurrent token may validate against the same pre-transfer snapshot");
+
+    let transferred = first
+        .commit(&mut state)
+        .expect("first internal transfer should commit");
+    let before = bincode::serialize(&state).expect("post-transfer state should serialize");
+    assert_eq!(
+        concurrent
+            .commit(&mut state)
+            .expect_err("the same source must not be transferred twice to one recipient"),
+        IntelligenceError::DuplicateTransfer {
+            source_information: source,
+            recipient: KnowledgeHolder::Organization(organization),
+            existing: transferred,
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected duplicate state should serialize"),
+        before,
+        "duplicate transfer rejection must not allocate an ID or mutate knowledge"
+    );
+    let duplicate = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Organization(organization),
+        },
+    )
+    .err()
+    .expect("later duplicate validation should fail immediately");
+    assert_eq!(
+        duplicate,
+        IntelligenceError::DuplicateTransfer {
+            source_information: source,
+            recipient: KnowledgeHolder::Organization(organization),
+            existing: transferred,
+        }
+    );
+    assert_eq!(
+        state
+            .intelligence()
+            .information_derived_from(source)
+            .count(),
+        1
+    );
+    validate_state(&state).expect("one-shot transfer state should remain valid");
+    validate_invariants(&state);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("one-shot transfer state should save"),
+    )
+    .expect("one-shot transfer state should restore with derived indexes rebuilt");
+    assert_eq!(
+        validate_information_transfer(
+            &restored,
+            InformationTransferDraft {
+                source,
+                recipient: KnowledgeHolder::Organization(organization),
+            },
+        )
+        .err()
+        .expect("duplicate transfer must remain blocked after restore"),
+        IntelligenceError::DuplicateTransfer {
+            source_information: source,
+            recipient: KnowledgeHolder::Organization(organization),
+            existing: transferred,
+        }
+    );
+    validate_state(&restored).expect("restored transfer index should validate");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn typed_signal_survives_internal_transfer_with_lineage() {
     let (_registry, mut state, organization, character) = make_transfer_fixture();
     let signal = InformationSignal::CaseActivity(CaseActivitySignal::Active);

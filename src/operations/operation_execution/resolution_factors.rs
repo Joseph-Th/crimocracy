@@ -275,21 +275,44 @@ pub(super) fn resolve_target_neighborhoods(
 }
 
 /// Neighborhoods an investigation targets, derived from its subjects and, for
-/// operation-originated cases, the originating operation's objective entities. Read-only
+/// originated cases, the place where the originating event actually happened. Read-only
 /// derivation used by district-scoped consumers such as enterprise heat surcharges.
+///
+/// Origin geography takes precedence over live subject ownership. An old burglary case must not
+/// begin taxing a district merely because the investigated crew later buys a business there; the
+/// case belongs to the incident scene, not to every asset the organization may acquire in the
+/// future. Generic control-plane surveillance still uses `resolve_target_neighborhoods` and may
+/// intentionally proxy an organization or case to its current operating footprint.
 pub(crate) fn resolve_investigation_target_neighborhoods(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
 ) -> BTreeSet<NeighborhoodId> {
-    let mut entities: Vec<EntityRef> = investigation.subjects().iter().copied().collect();
-    // Operation-originated cases also target their objective's entities. Enterprise-originated
-    // cases already carry the racket as a subject, whose location maps to a neighborhood below.
-    if let Some(EntityRef::Operation(origin)) = investigation.origin()
-        && let Some(operation) = state.operations.get_operation(origin)
-    {
-        entities.extend(operation.objective().referenced_entities());
+    match investigation.origin() {
+        Some(EntityRef::Operation(origin)) => {
+            let Some(operation) = state.operations.get_operation(origin) else {
+                return BTreeSet::new();
+            };
+            if let Some(neighborhood) = operation
+                .resolution()
+                .and_then(|resolution| resolution.exposure().neighborhood())
+            {
+                return BTreeSet::from([neighborhood]);
+            }
+            // A manually-created or still-unresolved operation-origin case has no persisted
+            // exposure scene yet. Its objective is the narrowest stable geographic proxy; using
+            // the responsible organization's footprint here would make future acquisitions
+            // retroactively broaden the case.
+            resolve_target_neighborhoods(state, operation.objective().referenced_entities())
+        }
+        Some(EntityRef::Enterprise(origin)) => {
+            // Vice attention belongs to the racket's own location. Do not let organization or
+            // manager subjects make one enterprise inquiry tax unrelated districts.
+            resolve_target_neighborhoods(state, vec![EntityRef::Enterprise(origin)])
+        }
+        _ => {
+            resolve_target_neighborhoods(state, investigation.subjects().iter().copied().collect())
+        }
     }
-    resolve_target_neighborhoods(state, entities)
 }
 
 pub(super) fn resolve_exposure_plan(

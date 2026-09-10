@@ -551,7 +551,9 @@ fn validate_disclosure_source(
 
 /// The contact-channel "ask what he knows" surface: the information records the contact
 /// personally holds, inside the channel's institutional domain, that this sponsor has not
-/// already been told. Returning identities and nothing more keeps content behind the canonical
+/// already been told. Freshest information comes first so an "ask what they know now" surface
+/// cannot present an older status as current while a newer contradictory status is already held
+/// by the same source. Returning identities and nothing more keeps content behind the canonical
 /// disclosure path; the caller chooses which topics to actually hear about.
 pub fn find_pending_disclosure_sources(
     state: &crate::core::state::AppState,
@@ -579,7 +581,20 @@ pub fn find_pending_disclosure_sources(
             }
         }
     }
-    sources.sort_unstable();
+    sources.sort_unstable_by(|left, right| {
+        let left_record = state
+            .intelligence()
+            .get_information(*left)
+            .expect("pending disclosure source must remain indexed as information");
+        let right_record = state
+            .intelligence()
+            .get_information(*right)
+            .expect("pending disclosure source must remain indexed as information");
+        right_record
+            .recorded_at()
+            .cmp(&left_record.recorded_at())
+            .then_with(|| right.cmp(left))
+    });
     sources.dedup();
     sources
 }

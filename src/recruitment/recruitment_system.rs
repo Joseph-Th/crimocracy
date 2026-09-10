@@ -601,7 +601,7 @@ pub fn validate_delegated_recruitment_attempt(
         });
     }
     // One exclusive route per (organization, candidate): while an approval request sits
-    // pending, the delegated channel must not race it â€” an attempt landing first would
+    // pending, the delegated channel must not race it; an attempt landing first would
     // strand the request against a candidate who is already a member, permanently blocking
     // the pair's executive channel too.
     if let Some(pending) = state

@@ -828,9 +828,27 @@ pub fn run_strategy_batch(
     let mut artifacts_written = 0_u64;
     for offset in 0..samples {
         let sample_seed = seed.wrapping_add(offset + 1);
-        let rush = play_session(registry, Strategy::Rush, profile, sample_seed, false, true)?;
-        let press = play_session(registry, Strategy::Press, profile, sample_seed, false, true)?;
-        let recon = play_session(registry, Strategy::Recon, profile, sample_seed, false, true)?;
+        let rush = play_session(
+            registry,
+            Strategy::Rush,
+            profile,
+            sample_seed,
+            SessionRunMode::Batch,
+        )?;
+        let press = play_session(
+            registry,
+            Strategy::Press,
+            profile,
+            sample_seed,
+            SessionRunMode::Batch,
+        )?;
+        let recon = play_session(
+            registry,
+            Strategy::Recon,
+            profile,
+            sample_seed,
+            SessionRunMode::Batch,
+        )?;
         validate_run_metrics(&rush, true)?;
         validate_run_metrics(&press, true)?;
         validate_run_metrics(&recon, true)?;
@@ -870,6 +888,7 @@ pub fn run_strategy_batch(
             .into());
         }
     }
+    validate_batch_strategy_coverage(profile, samples, &rush_aggregate)?;
     Ok((rush_aggregate, press_aggregate, recon_aggregate))
 }
 
@@ -982,12 +1001,14 @@ pub fn persist_run_artifact(
             .unwrap_or_else(|| "unknown".to_owned())
     );
     let path = dir.join(filename);
-    let payload = serde_json::json!({
+    let identity = serde_json::json!({
         "seed": format!("{seed:#x}"),
         "seed_dec": seed,
         "profile": profile.label(),
         "strategy": metrics.strategy.map(|s| s.label()),
         "variation": metrics.variation.map(|v| v.label()),
+    });
+    let operation = serde_json::json!({
         "burglary": metrics.burglary.map(|id| format!("{id:?}")),
         "outcome": metrics.outcome.map(|o| format!("{o:?}")),
         "aborted": metrics.aborted,
@@ -996,33 +1017,110 @@ pub fn persist_run_artifact(
         "police_dispatched": metrics.police_dispatched,
         "police_arrived": metrics.police_arrived,
         "decision_requests": metrics.decision_requests,
-        "exposure_score": metrics.exposure_score,
-        "evidence_count": metrics.evidence_count,
+        "exposure_level": metrics.exposure_level.map(|level| format!("{level:?}")),
         "burglary_terminal_minute": metrics.burglary_terminal_minute,
+        "property_acquired_value_cents": metrics.property_acquired_value_cents,
+        "property_realized_cash_cents": metrics.property_realized_cash_cents,
+        "liquidation_minute": metrics.liquidation_minute,
+    });
+    let information_and_legal = serde_json::json!({
+        "planning_information_count": metrics.planning_information_count,
+        "planning_information_topics": metrics.planning_information_topics.iter().map(|topic| format!("{topic:?}")).collect::<Vec<_>>(),
+        "player_police_activity_information": metrics.player_police_activity_information,
+        "player_legal_activity_information": metrics.player_legal_activity_information,
+        "counterintelligence_outcome": metrics.counterintelligence_outcome.map(|outcome| format!("{outcome:?}")),
+        "counterintelligence_information": metrics.counterintelligence_information,
+        "followup_case_active": metrics.followup_case_active,
+        "cold_case_confirmed": metrics.cold_case_confirmed,
+        "case_open_minute": metrics.case_open_minute,
+        "contact_reads": metrics.contact_reads,
+    });
+    let personnel = serde_json::json!({
+        "player_poach_warnings": metrics.player_poach_warnings,
+        "player_personnel_departures": metrics.player_personnel_departures,
+        "replacement_recruited": metrics.replacement_recruited,
+        "defector_trail_confirmed": metrics.defector_trail_confirmed,
+        "win_back_attempted": metrics.win_back_attempted,
+        "win_back_accepted": metrics.win_back_accepted,
+    });
+    let counterplay_and_custody = serde_json::json!({
+        "witness_pressure_attempted": metrics.witness_pressure_attempted,
+        "witness_pressure_outcome": metrics.witness_pressure_outcome.map(|outcome| format!("{outcome:?}")),
+        "witness_pressure_aborted": metrics.witness_pressure_aborted,
+        "player_member_arrests": metrics.player_member_arrests,
+    });
+    let economy = serde_json::json!({
         "legitimate_net_cents": metrics.legitimate_net_cents,
         "enterprise_net_cents": metrics.enterprise_net_cents,
         "matched_financial_boundary_minute": metrics.matched_financial_boundary_minute,
         "matched_legitimate_net_cents": metrics.matched_legitimate_net_cents,
         "matched_enterprise_net_cents": metrics.matched_enterprise_net_cents,
+        "expansion_established": metrics.expansion_established,
+        "expansion_net_cents": metrics.expansion_net_cents,
+        "expansion_heat_cents": metrics.expansion_heat_cents,
+        "front_acquired": metrics.front_acquired,
+        "acquisition_price_cents": metrics.acquisition_price_cents,
+        "acquisition_rejections": metrics.acquisition_rejections,
+        "laundered_gross_cents": metrics.laundered_gross_cents,
+        "launder_fee_cents": metrics.launder_fee_cents,
+        "laundering_capacity_rejections": metrics.laundering_capacity_rejections,
+        "accounted_balance_cents": metrics.accounted_balance_cents,
+        "payroll_paid_cents": metrics.payroll_paid_cents,
+        "payroll_short_cents": metrics.payroll_short_cents,
+    });
+    let second_act = serde_json::json!({
+        "second_opportunity_discovered": metrics.second_opportunity_discovered,
+        "second_opportunity_expired": metrics.second_opportunity_expired,
+        "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),
+        "second_burglary_outcome": metrics.second_burglary_outcome.map(|outcome| format!("{outcome:?}")),
+        "second_burglary_terminal_minute": metrics.second_burglary_terminal_minute,
+        "second_act_recon_information": metrics.second_act_recon_information,
+        "second_act_property_acquired_value_cents": metrics.second_act_property_acquired_value_cents,
+        "second_act_property_realized_cash_cents": metrics.second_act_property_realized_cash_cents,
+        "second_act_planning_topics": metrics.second_act_planning_topics.iter().map(|topic| format!("{topic:?}")).collect::<Vec<_>>(),
+        "self_heat_case_opened": metrics.self_heat_case_opened,
+        "self_heat_case_active": metrics.self_heat_case_active,
+    });
+    let feedback = serde_json::json!({
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
-        "rival_home_enterprises": metrics.rival_home_enterprises,
-        "player_poach_warnings": metrics.player_poach_warnings,
-        "session_case_staffed": metrics.session_case_staffed,
-        "case_witness_registered": metrics.case_witness_registered,
-        "witness_interviews_scheduled": metrics.witness_interviews_scheduled,
-        "witness_testimony_produced": metrics.witness_testimony_produced,
-        "witness_pressure_attempted": metrics.witness_pressure_attempted,
-        "witness_pressure_aborted": metrics.witness_pressure_aborted,
-        "witness_cooperation_degraded": metrics.witness_cooperation_degraded,
-        "player_member_arrests": metrics.player_member_arrests,
-        "raw": {
-            "second_opportunity_discovered": metrics.second_opportunity_discovered,
-            "second_burglary": metrics.second_burglary.map(|id| format!("{id:?}")),
-            "self_heat_case_opened": metrics.self_heat_case_opened,
-            "self_heat_case_active": metrics.self_heat_case_active,
-            "defector_trail_confirmed": metrics.defector_trail_confirmed,
+        "vice_inquiries_drawn": metrics.vice_inquiries_drawn,
+    });
+    let diagnostic = serde_json::json!({
+        "case": {
+            "investigation_created": metrics.investigation_created,
+            "session_case_staffed": metrics.session_case_staffed,
+            "case_cold_minute": metrics.case_cold_minute,
+            "evidence_count": metrics.evidence_count,
+            "exposure_score": metrics.exposure_score,
+            "burglary_information_quality": metrics.burglary_information_quality,
+            "investigation_work_scheduled": metrics.investigation_work_scheduled,
+            "investigation_work_resolved": metrics.investigation_work_resolved,
+            "case_witness_registered": metrics.case_witness_registered,
+            "witness_interviews_scheduled": metrics.witness_interviews_scheduled,
+            "witness_testimony_produced": metrics.witness_testimony_produced,
+            "witness_cooperation_degraded": metrics.witness_cooperation_degraded,
+        },
+        "world": {
+            "autonomous_recruitment_attempts": metrics.autonomous_recruitment_attempts,
+            "rival_home_enterprises": metrics.rival_home_enterprises,
+            "win_back_margin": metrics.win_back_margin,
+            "win_back_refusal_leaked_to_rival": metrics.win_back_refusal_leaked_to_rival,
         }
+    });
+    let player_visible = serde_json::json!({
+        "operation": operation,
+        "information_and_legal": information_and_legal,
+        "personnel": personnel,
+        "counterplay_and_custody": counterplay_and_custody,
+        "economy": economy,
+        "second_act": second_act,
+        "feedback": feedback,
+    });
+    let payload = serde_json::json!({
+        "identity": identity,
+        "player_visible": player_visible,
+        "diagnostic": diagnostic,
     });
     fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
     Ok(path)

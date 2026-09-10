@@ -75,7 +75,10 @@ impl InformationSignal {
                 matches!(topic, InformationTopic::LegalActivity)
                     && matches!(
                         subject,
-                        EntityRef::Organization(_) | EntityRef::Investigation(_)
+                        EntityRef::Organization(_)
+                            | EntityRef::Operation(_)
+                            | EntityRef::Investigation(_)
+                            | EntityRef::Enterprise(_)
                     )
             }
             Self::PersonnelPresence { characters } => {
@@ -253,6 +256,9 @@ pub struct IntelligenceState {
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
     #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
+    #[serde(skip)]
+    internal_transfer_by_source_recipient:
+        BTreeMap<(InformationId, KnowledgeHolder), InformationId>,
 }
 
 impl IntelligenceState {
@@ -264,6 +270,7 @@ impl IntelligenceState {
         self.by_holder_topic.clear();
         self.by_subject.clear();
         self.derived_by_source.clear();
+        self.internal_transfer_by_source_recipient.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_holder
@@ -283,6 +290,17 @@ impl IntelligenceState {
                     .entry(*source)
                     .or_default()
                     .insert(id);
+            }
+            if record.source_kind() == InformationSourceKind::InternalReport
+                && record.derived_from().len() == 1
+            {
+                let source = *record
+                    .derived_from()
+                    .iter()
+                    .next()
+                    .expect("single-source internal report must have one source");
+                self.internal_transfer_by_source_recipient
+                    .insert((source, record.holder()), id);
             }
         }
     }
@@ -312,6 +330,19 @@ impl IntelligenceState {
                 self.records
                     .get(id)
                     .expect("information holder-topic index must reference information")
+            })
+    }
+    pub(crate) fn internal_transfer_for(
+        &self,
+        source: InformationId,
+        recipient: KnowledgeHolder,
+    ) -> Option<&InformationRecord> {
+        self.internal_transfer_by_source_recipient
+            .get(&(source, recipient))
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("internal transfer index must reference information")
             })
     }
     pub fn information_derived_from(
@@ -353,6 +384,18 @@ impl IntelligenceState {
                 .entry(*source)
                 .or_default()
                 .insert(id);
+        }
+        if record.source_kind() == InformationSourceKind::InternalReport {
+            debug_assert_eq!(record.derived_from().len(), 1);
+            if let Some(source) = record.derived_from().iter().next().copied() {
+                let previous = self
+                    .internal_transfer_by_source_recipient
+                    .insert((source, record.holder()), id);
+                debug_assert!(
+                    previous.is_none(),
+                    "duplicate internal information transfer inserted"
+                );
+            }
         }
         let previous = self.records.insert(id, record);
         debug_assert!(
@@ -408,6 +451,22 @@ impl IntelligenceState {
             expected_holder_topic_entries += 1;
             expected_subject_entries += 1;
             expected_source_entries += derived_from.len();
+            if record.source_kind() == InformationSourceKind::InternalReport {
+                if derived_from.len() != 1 {
+                    return false;
+                }
+                let source = *derived_from
+                    .iter()
+                    .next()
+                    .expect("single-source internal report must have one source");
+                if self
+                    .internal_transfer_by_source_recipient
+                    .get(&(source, record.holder()))
+                    != Some(&record.id())
+                {
+                    return false;
+                }
+            }
         }
         let indexed_holder_entries: usize = self.by_holder.values().map(BTreeSet::len).sum();
         if indexed_holder_entries != expected_holder_entries {
@@ -443,6 +502,14 @@ impl IntelligenceState {
                     return false;
                 }
             }
+        }
+        let expected_internal_transfers = self
+            .records
+            .values()
+            .filter(|record| record.source_kind() == InformationSourceKind::InternalReport)
+            .count();
+        if self.internal_transfer_by_source_recipient.len() != expected_internal_transfers {
+            return false;
         }
         true
     }

@@ -80,12 +80,19 @@ pub(crate) fn prepare_case_activity_knowledge(
     }
     let authority_name = organization.name().to_owned();
     let case_title = record.title().to_owned();
-    let subject = EntityRef::Organization(owner);
+    // The activity fact is about the incident/case being worked, not about the authority's
+    // entire caseload. Originated files keep their typed origin as the subject so a legitimate
+    // contact query can distinguish the burglary case from a later vice inquiry without parsing
+    // summary text or exposing an otherwise-hidden InvestigationId. Non-originated files fall
+    // back to their own investigation identity.
+    let subject = record
+        .origin()
+        .unwrap_or(EntityRef::Investigation(investigation));
     let draft = InformationDraft {
         holder: KnowledgeHolder::Character(lead),
         source_kind: InformationSourceKind::DirectObservation,
         topic: InformationTopic::LegalActivity,
-        source_entity: Some(subject),
+        source_entity: Some(EntityRef::Organization(owner)),
         subject,
         observed_at: state.now(),
         reliability: Reliability::DirectAccess,

@@ -1,8 +1,9 @@
 //! Controlled/calibration harness for deterministic strategy and integration evidence.
 //!
 //! RUSH, PRESS, and RECON use canonical production operations and player-visible information.
-//! `[DEV AUDIT]` output may inspect hidden state after decisions for diagnostics, but hidden state
-//! never feeds action selection. `[NARRATION]` lines are the harness's documentary voice: they
+//! The default narrative stays on that player-visible boundary; hidden structural evidence is
+//! retained in contracts/artifacts instead of being interleaved with the playable story.
+//! `[NARRATION]` lines are the harness's documentary voice: they
 //! explain world causality from player-visible facts and never feed action selection either.
 //! Narrative sessions also run a player-earned defector watch after an accepted defection: the
 //! organization watches every known rival through canonical surveillance and confirms where the
@@ -75,11 +76,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             strategy,
             ScenarioProfile::NightTrap,
             seed,
-            false,
-            // Observe the whole first campaign day, not just the operation: smoke evidence must
-            // include the rival's autonomous recruitment pass and its consequences instead of
-            // structurally zeroed personnel counters.
-            true,
+            SessionRunMode::Batch,
         )?;
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
@@ -127,7 +124,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             recon.player_personnel_departures,
         );
         println!(
-            "[SMOKE READOUT] Run `cargo harness-full --samples 2` for the full narrative, financial view, and audit trail."
+            "[SMOKE READOUT] Run `cargo harness-full --samples 2` for the full player narrative, financial view, and structured diagnostic artifacts."
         );
     }
     match selected_strategy {
@@ -160,10 +157,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!("===========================\n");
     println!("Mode: controlled/calibration strategy comparison with bounded scenario sensitivity.");
     println!(
-        "Evidence boundary: synthetic setup through production paths; policy inputs are player-visible, while [DEV AUDIT] is diagnostic only.\n"
+        "Evidence boundary: synthetic setup through production paths; narrated policy inputs and consequences are player-visible. Hidden structural evidence stays in contracts/artifacts.\n"
     );
     println!(
-        "Observation windows: narrative sessions run for two simulated days; matched batches run for one day to keep sensitivity evidence bounded.\n"
+        "Observation windows: full sessions capture the shared financial comparison at two simulated days; consequence arcs may continue beyond that boundary when player policy keeps waiting. Matched batches run for one day to keep sensitivity evidence bounded.\n"
     );
     println!(
         "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent seeds so every authored fixture variation gets exercised; matched branches inside one seed share one world.\n"
@@ -178,33 +175,48 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             "\n=== NARRATIVE COMPARISON SET {} of {NARRATIVE_SEED_ROTATION}: seed {narrative_seed:#x} ===",
             offset + 1
         );
-        println!("\n--- CONTROLLED SESSION: RUSH ---");
+        if deep_readout {
+            println!("\n--- CONTROLLED SESSION: RUSH ---");
+        }
         let mut rush = play_session(
             &registry,
             Strategy::Rush,
             ScenarioProfile::NightTrap,
             narrative_seed,
-            true,
-            true,
+            if deep_readout {
+                SessionRunMode::FullNarrative
+            } else {
+                SessionRunMode::FullQuiet
+            },
         )?;
-        println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
+        if deep_readout {
+            println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
+        }
         let mut press = play_session_with_fixture_view(
             &registry,
             Strategy::Press,
             ScenarioProfile::NightTrap,
             narrative_seed,
-            true,
-            true,
+            if deep_readout {
+                SessionRunMode::FullNarrative
+            } else {
+                SessionRunMode::FullQuiet
+            },
             false,
         )?;
-        println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
+        if deep_readout {
+            println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
+        }
         let mut recon = play_session_with_fixture_view(
             &registry,
             Strategy::Recon,
             ScenarioProfile::NightTrap,
             narrative_seed,
-            true,
-            true,
+            if deep_readout {
+                SessionRunMode::FullNarrative
+            } else {
+                SessionRunMode::FullQuiet
+            },
             false,
         )?;
         if deep_readout {
@@ -213,7 +225,14 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             recon.primary_narrative_set = true;
         }
 
-        println!("\n--- SAME-SCENARIO READOUT (seed {narrative_seed:#x}) ---");
+        println!(
+            "\n--- {} (seed {narrative_seed:#x}) ---",
+            if deep_readout {
+                "SAME-SCENARIO DIAGNOSTIC METRICS"
+            } else {
+                "ROTATED-VARIATION SUMMARY"
+            }
+        );
         validate_run_metrics(&rush, true)?;
         validate_run_metrics(&press, true)?;
         validate_run_metrics(&recon, true)?;
@@ -359,10 +378,11 @@ mod tests {
     use super::{
         DEFAULT_SEED, FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode,
         HarnessOptions, NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline,
-        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, parse_options,
-        patrol_intervals_from_signal, run_opportunity_portfolio_probe, run_smoke,
-        run_vice_attention_probe, validate_branch_financial_isolation,
-        validate_press_witness_counterplay, validate_second_act_evidence,
+        SessionRunMode, Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal,
+        parse_options, patrol_intervals_from_signal, play_session, run_opportunity_portfolio_probe,
+        run_smoke, run_vice_attention_probe, validate_batch_strategy_coverage,
+        validate_branch_financial_isolation, validate_press_witness_counterplay,
+        validate_second_act_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -377,6 +397,33 @@ mod tests {
                         .expect("harness patrol fixture interval must validate")
                 })
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn full_quiet_mode_changes_only_presentation() {
+        let registry = crimocracy::build_registry();
+        for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
+            let narrative = play_session(
+                &registry,
+                strategy,
+                ScenarioProfile::NightTrap,
+                DEFAULT_SEED,
+                SessionRunMode::FullNarrative,
+            )
+            .expect("full narrative session should complete");
+            let quiet = play_session(
+                &registry,
+                strategy,
+                ScenarioProfile::NightTrap,
+                DEFAULT_SEED,
+                SessionRunMode::FullQuiet,
+            )
+            .expect("full quiet session should complete");
+            assert_eq!(
+                narrative, quiet,
+                "presentation mode must not change {strategy:?} gameplay metrics"
+            );
         }
     }
 
@@ -771,6 +818,36 @@ mod tests {
         let uncased = branch_metrics(Strategy::Press, false, None);
         validate_press_witness_counterplay(&uncased)
             .expect("a session without a case has nothing to counter");
+    }
+
+    #[test]
+    fn batch_coverage_allows_per_run_absence_but_requires_reachability_when_sampled_broadly() {
+        let empty = super::Aggregate::default();
+        validate_batch_strategy_coverage(ScenarioProfile::NightTrap, 1, &empty)
+            .expect("one bounded sample cannot prove a stochastic event unreachable");
+
+        let error = validate_batch_strategy_coverage(
+            ScenarioProfile::NightTrap,
+            super::MIN_SAMPLES_FOR_VARIATION_CONTRACT,
+            &empty,
+        )
+        .expect_err("covered fixture variations should expose the authored night-trap abort path");
+        assert!(matches!(
+            error,
+            HarnessContractError::MissingBatchEvidence {
+                profile: ScenarioProfile::NightTrap,
+                ..
+            }
+        ));
+
+        let mut covered = super::Aggregate::default();
+        covered.standing_contingency_aborts = 1;
+        validate_batch_strategy_coverage(
+            ScenarioProfile::NightTrap,
+            super::MIN_SAMPLES_FOR_VARIATION_CONTRACT,
+            &covered,
+        )
+        .expect("one observed abort proves aggregate reachability without forcing every seed");
     }
 
     fn persisted_operation_id(raw: u32) -> crimocracy::core::id::OperationId {

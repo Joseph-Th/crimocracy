@@ -3719,6 +3719,84 @@ fn control_plane_surveillance_targets_proxy_to_their_owner_footprint() {
 }
 
 #[test]
+fn operation_case_geography_does_not_follow_later_organization_assets() {
+    let (registry, mut state, _police, incident_neighborhood, operation) =
+        make_exposed_business_operation_fixture(true);
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("origin operation should persist")
+        .responsible_organization();
+
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    loop {
+        let outcome = run_tick(&registry, &mut state);
+        if outcome.resolved_operations.contains(&operation) {
+            break;
+        }
+    }
+    let investigation = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .and_then(|resolution| resolution.exposure().investigation())
+        .expect("high-exposure operation should open an incident case");
+    let case = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("incident case should persist");
+    assert_eq!(
+        resolve_investigation_target_neighborhoods(&state, case),
+        BTreeSet::from([incident_neighborhood])
+    );
+
+    let later_neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Later Expansion Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(55).expect("fixture wealth should validate"),
+                    commercial_activity: Rating::try_new(55)
+                        .expect("fixture commerce should validate"),
+                    illicit_demand: Rating::try_new(55).expect("fixture demand should validate"),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(20)
+                        .expect("fixture police presence should validate"),
+                },
+            },
+        },
+    )
+    .expect("later expansion neighborhood should validate");
+    insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Later Organization Asset".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([BusinessFunction::CashIntensive]),
+            neighborhood: later_neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("later organization asset should validate");
+
+    let case = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("incident case should still persist");
+    assert_eq!(
+        resolve_investigation_target_neighborhoods(&state, case),
+        BTreeSet::from([incident_neighborhood]),
+        "an old operation case must remain anchored to its incident district after expansion"
+    );
+    validate_state(&state).expect("later unrelated asset should leave the case coherent");
+    validate_invariants(&state);
+}
+
+#[test]
 fn independent_witness_pressure_uses_case_geography_for_police_risk() {
     let registry = build_registry();
     let mut state = AppState::new(0x517A_7E13);

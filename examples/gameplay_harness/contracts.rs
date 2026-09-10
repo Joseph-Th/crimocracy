@@ -144,13 +144,45 @@ pub fn validate_strategy_evidence(
         .strategy
         .ok_or(HarnessContractError::MissingStrategy)?;
     match strategy {
-        Strategy::Rush if profile != ScenarioProfile::LatePatrol => {
+        // RUSH owns a standing pre-entry abort contingency, but whether police physically reach
+        // the target before entry is a world outcome, not a policy guarantee. When that event
+        // occurs, validate the whole abort/debrief chain. When it does not, ordinary terminal
+        // validity is already covered by `validate_run_metrics`; batch reachability is checked
+        // separately across sufficiently broad samples.
+        Strategy::Rush
+            if profile != ScenarioProfile::LatePatrol
+                && matches!(
+                    metrics.abort_cause,
+                    Some(OperationAbortCause::PoliceArrival(_))
+                ) =>
+        {
             validate_night_trap_evidence(metrics)
         }
         Strategy::Press if metrics.police_arrived => validate_night_trap_evidence(metrics),
         Strategy::Recon => validate_night_trap_evidence(metrics),
         Strategy::Rush | Strategy::Press => Ok(()),
     }
+}
+
+/// Statistical batches validate event reachability at the aggregate level instead of requiring
+/// one stochastic/world-dependent consequence in every run. Small batches are valid bounded
+/// samples but cannot establish coverage, so only the same three-variation threshold used by the
+/// fixture contract upgrades absence into a regression failure.
+pub fn validate_batch_strategy_coverage(
+    profile: ScenarioProfile,
+    samples: u64,
+    rush: &Aggregate,
+) -> Result<(), HarnessContractError> {
+    if samples < MIN_SAMPLES_FOR_VARIATION_CONTRACT || profile == ScenarioProfile::LatePatrol {
+        return Ok(());
+    }
+    if rush.standing_contingency_aborts == 0 {
+        return Err(HarnessContractError::MissingBatchEvidence {
+            profile,
+            evidence: "RUSH never encountered a pre-entry police arrival across the covered fixture variations, so the standing abort/debrief consequence was not demonstrated",
+        });
+    }
+    Ok(())
 }
 
 /// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
@@ -269,7 +301,7 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 None
             } else {
                 Some(
-                    "the RUSH second act must discover the reopened score, debrief the aborted crew's police observations into organizational knowledge, rebuild through the canonical executive path, and work the second score in the morning lull with the rebuilt crew, no fresh recon, and the debriefed patrol information in the plan",
+                    "the RUSH second act must discover the reopened score, debrief the aborted crew's police observation into organizational knowledge, rebuild through the canonical executive path, move the retry away from the known-hot overnight hour, and carry that debriefed PoliceActivity information in the plan without pretending it is a full patrol pattern",
                 )
             }
         }
@@ -337,10 +369,14 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
         && metrics.acquisition_rejections > 0;
     let diversified = acquisition_complete
         && metrics.expansion_established
-        && metrics.expansion_net_cents.is_some_and(|net| net > 0);
+        && metrics.expansion_net_cents.is_some_and(|net| net > 0)
+        && metrics.expansion_heat_cents == Some(0);
+    let clean_expansion_started = metrics.front_acquired
+        && metrics.expansion_established
+        && metrics.expansion_heat_cents == Some(0);
     let survived = metrics.cold_case_confirmed == Some(true) && !metrics.front_acquired;
     if !metrics.primary_narrative_set {
-        if (diversified || survived || (metrics.front_acquired && metrics.expansion_established))
+        if (diversified || survived || clean_expansion_started)
             && metrics.cold_case_confirmed == Some(true)
         {
             return Ok(());
@@ -364,7 +400,7 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
-            evidence: "the standing-down wait must end in legitimate wealth and district diversification: a canonical accounted-funds acquisition of the harbor venue (after a visible short-book rejection), a revised mandate, a capitalized second-district enterprise, and positive harbor earnings by session end",
+            evidence: "the standing-down wait must end in legitimate wealth and real district diversification: a canonical accounted-funds acquisition of the harbor venue (after a visible short-book rejection), a revised mandate, a capitalized second-district enterprise, positive harbor earnings, and zero harbor surcharge from the unrelated home-district case",
         })
     }
 }

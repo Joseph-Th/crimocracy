@@ -45,6 +45,26 @@ pub fn bounded_policy_choice(seed: u64, salt: u64, choices: u64) -> u64 {
     mixed % choices
 }
 
+/// Session depth and presentation are one explicit harness choice. FullQuiet deliberately runs
+/// the same policy arc and observation horizon as FullNarrative while suppressing documentary
+/// output, so changing verbosity can never change simulated behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRunMode {
+    Batch,
+    FullNarrative,
+    FullQuiet,
+}
+
+impl SessionRunMode {
+    pub const fn full_arc(self) -> bool {
+        matches!(self, Self::FullNarrative | Self::FullQuiet)
+    }
+
+    pub const fn narrative(self) -> bool {
+        matches!(self, Self::FullNarrative)
+    }
+}
+
 /// Longest authored operation duration plus a fixed margin, so the terminal-wait guard in
 /// [`crate::session`] tracks authored content instead of a constant that could go stale as
 /// authors add longer operations.
@@ -187,6 +207,11 @@ pub enum HarnessContractError {
         profile: ScenarioProfile,
         observed: usize,
         required: usize,
+    },
+    #[error("{profile:?} batch did not expose required aggregate evidence: {evidence}")]
+    MissingBatchEvidence {
+        profile: ScenarioProfile,
+        evidence: &'static str,
     },
     #[error("surveillance report did not contain actionable recurring patrol windows")]
     NoActionablePatrolWindows,
@@ -557,7 +582,7 @@ pub struct Scenario<'registry> {
     pub wait_slack_minutes: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunMetrics {
     pub strategy: Option<Strategy>,
     pub variation: Option<FixtureVariation>,
@@ -653,7 +678,7 @@ pub struct RunMetrics {
     pub second_act_property_realized_cash_cents: Option<i64>,
     /// Debrief knowledge after a standing abort: the district-scoped PoliceActivity record
     /// the organization holds as an abort artifact, carried into second-score planning.
-    pub debrief_patrol_information: Vec<InformationId>,
+    pub debrief_police_activity_information: Vec<InformationId>,
     /// Topics carried into the second-score plan, proving what act 2 actually knew.
     pub second_act_planning_topics: BTreeSet<InformationTopic>,
     // District-diversification evidence: PRESS buys its second-district venue outright
@@ -672,6 +697,10 @@ pub struct RunMetrics {
     /// ends its standing-down wait in survival rather than clean-money diversification.
     pub enterprise_till_concealed: Option<bool>,
     pub expansion_net_cents: Option<i64>,
+    /// Total street surcharge actually paid by the second-district enterprise across its
+    /// observed cycles. The diversification lesson requires this to stay zero: an older case in
+    /// the home district must not follow the organization into a later-acquired district.
+    pub expansion_heat_cents: Option<i64>,
     /// True once the branch purchased the harbor venue through the canonical acquisition
     /// path: ownership moved, and accounted funds paid the authored price in full.
     pub front_acquired: bool,

@@ -8,10 +8,7 @@ use crimocracy::economy::business_reporting::resolve_organization_business_finan
 use crimocracy::enterprises::EnterpriseLocation;
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
-use crimocracy::legal::InvestigationWorkStatus;
-use crimocracy::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationObjectiveOutcome, RoleKind,
-};
+use crimocracy::operations::{OperationAbortCause, OperationAbortPhase, OperationObjectiveOutcome};
 use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::world::{CapabilityKind, Rating};
 use std::collections::BTreeMap;
@@ -66,7 +63,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
             );
             if strategy == Strategy::Rush {
                 println!(
-                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the rebuilt crew worked the morning lull on {} planning item(s), including the debriefed police-response observation.",
+                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the retry moved away from the failed overnight hour and carried {} planning topic(s), including the debriefed police-response observation.",
                     metrics.second_act_planning_topics.len()
                 );
             } else {
@@ -87,20 +84,6 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                 "\n[ACT 2] {target} second score deliberately lapsed at minute {lapsed_at} while the case stayed hot; the standing-down cost the organization the value it refused to risk."
             );
         }
-    }
-}
-
-pub fn role_label(role: RoleKind) -> &'static str {
-    match role {
-        RoleKind::Driver => "driver",
-        RoleKind::Lookout => "lookout",
-        RoleKind::EntrySpecialist => "entry specialist",
-        RoleKind::SafeSpecialist => "safe specialist",
-        RoleKind::Muscle => "muscle",
-        RoleKind::InsideContact => "inside contact",
-        RoleKind::Coordinator => "coordinator",
-        RoleKind::Surveillance => "surveillance operator",
-        RoleKind::Negotiator => "negotiator",
     }
 }
 
@@ -276,32 +259,13 @@ pub fn print_planning_inputs(scenario: &Scenario, operation: OperationId) {
     }
 }
 
-pub fn print_resolution_factors(resolution: &crimocracy::operations::OperationResolutionRecord) {
-    let factors = resolution.factors();
-    println!(
-        "[CAUSAL FACTORS] margin {}; crew {}; leader {:?}; intelligence {} (-{} difficulty, {}/{} areas); police {:?}; response {}; approach {}; time pressure {}; variance {}.",
-        resolution.execution_margin(),
-        factors.role_capability_average().value(),
-        factors.leader_capability().map(Rating::value),
-        factors.intelligence_quality().value(),
-        factors.intelligence_adjustment().unsigned_abs(),
-        factors.intelligence_topics_covered(),
-        factors.intelligence_topics_relevant(),
-        factors.target_police_presence().map(Rating::value),
-        factors.police_response_arrived(),
-        factors.approach_adjustment(),
-        factors.time_pressure(),
-        factors.variance(),
-    );
-}
-
 pub fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
     let operation = scenario
         .state
         .operations()
         .get_operation(burglary)
         .expect("burglary must persist");
-    if let Some(resolution) = operation.resolution() {
+    if operation.resolution().is_some() {
         let legal_information: Vec<_> = scenario
             .state
             .intelligence()
@@ -318,86 +282,12 @@ pub fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
         for information in legal_information {
             println!("  - [PLAYER] {}", information.summary());
         }
-        if let Some(investigation) = resolution.exposure().investigation() {
-            let hidden = scenario
-                .state
-                .legal()
-                .get_investigation(investigation)
-                .expect("exposure-linked investigation must exist");
-            let lead = hidden
-                .lead_investigator()
-                .and_then(|lead| scenario.state.world().get_character(lead))
-                .map(|record| record.name());
-            let scheduled_work = scenario
-                .state
-                .legal()
-                .work_for_investigation(investigation)
-                .filter(|work| work.status() == InvestigationWorkStatus::Scheduled)
-                .count();
-            let completed_work = scenario
-                .state
-                .legal()
-                .work_for_investigation(investigation)
-                .filter(|work| work.status() == InvestigationWorkStatus::Completed)
-                .count();
-            println!(
-                "[DEV AUDIT] Hidden state has case '{}' with {} subject(s), {} evidence item(s), lead {:?}, {} scheduled and {} completed detective work item(s).",
-                hidden.title(),
-                hidden.subjects().len(),
-                hidden.evidence().len(),
-                lead,
-                scheduled_work,
-                completed_work,
-            );
-        }
     }
-}
-
-pub fn print_final_case_audit(scenario: &Scenario, burglary: OperationId) {
-    let Some(investigation) = scenario
-        .state
-        .operations()
-        .get_operation(burglary)
-        .and_then(|operation| operation.resolution())
-        .and_then(|resolution| resolution.exposure().investigation())
-    else {
-        return;
-    };
-    let case = scenario
-        .state
-        .legal()
-        .get_investigation(investigation)
-        .expect("exposure-linked investigation must persist");
-    let evidence_kinds = case
-        .evidence()
-        .iter()
-        .filter_map(|evidence| scenario.state.legal().get_evidence(*evidence))
-        .map(|evidence| evidence.kind())
-        .collect::<Vec<_>>();
-    let work = scenario
-        .state
-        .legal()
-        .work_for_investigation(investigation)
-        .map(|work| {
-            (
-                work.kind(),
-                work.status(),
-                work.resolution().map(|resolution| resolution.outcome()),
-            )
-        })
-        .collect::<Vec<_>>();
-    println!(
-        "\n[DEV AUDIT] Final hidden case state: {} subject(s), evidence {:?}, detective work {:?}.",
-        case.subjects().len(),
-        evidence_kinds,
-        work,
-    );
 }
 
 /// The closing counterpart to the starting player view: what the organization actually looks
 /// like after the session, assembled only from state a boss can see - roster, mandates,
-/// holdings, and the reports the organization received. Hidden case state stays in the audit
-/// lines above.
+/// holdings, and the reports the organization received.
 pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics) {
     let members = scenario
         .state
@@ -828,6 +718,37 @@ pub fn print_report_condensed(label: &str, report: &ReportRecord) {
     }
 }
 
+/// Closing brief history without one header for every quiet campaign day. Briefs that need
+/// leadership attention retain their chronology and authored entries; all-routine days collapse
+/// into one count because they add no new decision information.
+pub fn print_executive_briefs<'a>(reports: impl Iterator<Item = &'a ReportRecord>) {
+    let reports = reports.collect::<Vec<_>>();
+    let has_attention = |report: &ReportRecord| {
+        report.entries().iter().any(|entry| {
+            matches!(
+                entry.attention,
+                AttentionClass::Notable | AttentionClass::Exception | AttentionClass::Crisis
+            )
+        })
+    };
+    let quiet_count = reports
+        .iter()
+        .copied()
+        .filter(|report| !has_attention(report))
+        .count();
+    println!("\n[EXECUTIVE BRIEFS]");
+    for report in reports
+        .iter()
+        .copied()
+        .filter(|report| has_attention(report))
+    {
+        print_report_condensed("BRIEF", report);
+    }
+    if quiet_count > 0 {
+        println!("[BRIEF] {quiet_count} additional daily brief(s) contained only routine entries.");
+    }
+}
+
 pub fn print_metrics(metrics: &RunMetrics) {
     let property_acquired = optional_cents(metrics.property_acquired_value_cents);
     let property_realized = optional_cents(metrics.property_realized_cash_cents);
@@ -892,8 +813,9 @@ pub fn print_metrics(metrics: &RunMetrics) {
     );
     if metrics.expansion_established {
         println!(
-            "        diversification: second-district enterprise established, net {}",
+            "        diversification: second-district enterprise established, net {}, unrelated-case heat {}",
             optional_cents(metrics.expansion_net_cents),
+            optional_cents(metrics.expansion_heat_cents),
         );
     }
     println!(
@@ -920,16 +842,10 @@ pub fn print_metrics(metrics: &RunMetrics) {
             metrics.player_member_arrests,
         );
     }
-    println!(
-        "        world audit: rival home rackets at end {}",
-        metrics.rival_home_enterprises,
-    );
     if metrics.win_back_attempted {
         println!(
-            "        win-back: attempted (accepted {:?}, margin {:?}), refusal leak to rival {:?}",
-            metrics.win_back_accepted,
-            metrics.win_back_margin,
-            metrics.win_back_refusal_leaked_to_rival,
+            "        win-back: attempted (accepted {:?}, margin {:?})",
+            metrics.win_back_accepted, metrics.win_back_margin,
         );
     }
 }
@@ -988,7 +904,8 @@ pub fn print_experience_readout(
     // Compact fantasy scorecard for quick scannability before the detailed loop.
     let info_leverage = recon.planning_information_count > rush.planning_information_count;
     let delegated = recon.burglary.is_some() && recon.outcome.is_some();
-    let consequential = press.investigation_created && recon.property_realized_cash_cents.is_some();
+    let consequential =
+        press.player_legal_activity_information > 0 && recon.property_realized_cash_cents.is_some();
     let survivable = press.cold_case_confirmed == Some(true);
     let social = rush.player_personnel_departures > 0 && rush.replacement_recruited;
     // Direct verdict for the player's six questions: concise, actionable, not hidden in 20 checkpoints.
@@ -1003,7 +920,7 @@ pub fn print_experience_readout(
     println!(
         "[VERDICT] Game loop: {}",
         if survivable && social {
-            "COHERENT — Observe→Interpret→Decide→Delegate→Resolve→Consequence cycles compose across two campaign days, with the second act proving that waiting is also a decision."
+            "COHERENT — Observe→Interpret→Decide→Delegate→Resolve→Consequence cycles compose across the campaign, with the second act proving that waiting is also a decision."
         } else {
             "NEEDS ATTENTION — survival or personnel consequence did not resolve this seed."
         }
@@ -1019,7 +936,14 @@ pub fn print_experience_readout(
             "laundering→acquisition",
             press.front_acquired || recon.laundered_gross_cents > 0,
         ),
-        ("witness chain", press.case_witness_registered),
+        (
+            "district diversification",
+            press.expansion_established && press.expansion_heat_cents == Some(0),
+        ),
+        (
+            "personnel pressure",
+            rush.player_personnel_departures > 0 && recon.player_personnel_departures == 0,
+        ),
     ];
     let struggling = working
         .iter()
@@ -1043,24 +967,39 @@ pub fn print_experience_readout(
     }
     println!(
         "[VERDICT] Emergent interaction: {}",
-        if press.investigation_created && press.witness_pressure_attempted {
-            "YES — police arrival → witnessed exposure → named shopkeeper witness → institutional interview → player-ordered pressure → degraded cooperation or disciplined abort, all without a scripted betrayal quest."
+        if press.player_legal_activity_information > 0
+            && press.player_personnel_departures > 0
+            && press.matched_enterprise_net_cents < recon.matched_enterprise_net_cents
+        {
+            "YES — one noisy operation becomes an organization-wide problem: visible police exposure creates a case, taxes the home racket, makes an exposed crew member easier for a rival to poach, and changes where leadership is willing to work next."
         } else {
-            "LIMITED this seed — witness counterplay did not trigger."
+            "LIMITED this seed — the operation consequence did not propagate across enough player-visible systems."
         }
     );
+    let feedback_surface = [rush, press, recon]
+        .iter()
+        .all(|run| run.player_report_count > 0 && run.executive_brief_count > 0)
+        && press.decision_requests > 0
+        && recon.discovered_surveillance_information > 0;
     println!(
-        "[VERDICT] Harness fidelity: {}",
-        if info_leverage {
-            "HIGH — narrative shows player-visible reports, decisions, and derived knowledge; [DEV AUDIT]/[HIDDEN TRUTH] lines are marked audit-only and never feed decisions."
+        "[VERDICT] Harness feedback surface: {}",
+        if feedback_surface {
+            "STRONG — the run exposes organization-held intelligence, surfaced exceptions, reports/briefs, operation outcomes, personnel changes, opportunity loss, and financial consequences used by the player loop."
         } else {
-            "MEDIUM — information leverage failed; check patrol parsing or intelligence coverage."
+            "INCOMPLETE this seed — one or more player-facing feedback channels did not produce evidence."
         }
     );
+    let recon_adapted_second_act = recon.second_burglary.is_some()
+        || (recon.self_heat_case_opened
+            && recon.second_burglary.is_none()
+            && recon.second_opportunity_expired);
     println!(
         "[VERDICT] Dynamic experience: {}",
-        if recon.second_burglary.is_some() && press.second_opportunity_expired {
-            "YES — same city diverges by player choice: RECON re-invests and scores twice, PRESS stands down and pays opportunity cost, RUSH teaches failure→debrief→rebuild."
+        if rush.second_burglary.is_some()
+            && press.second_opportunity_expired
+            && recon_adapted_second_act
+        {
+            "YES — the same city diverges by policy: RUSH turns failure into a rebuild, PRESS gives up a score to manage consequences and diversify, and RECON re-invests in information then either acts on a clean read or stands down when the scouting itself creates heat."
         } else {
             "PARTIAL — second-act divergence incomplete this seed."
         }
@@ -1082,8 +1021,7 @@ pub fn print_experience_readout(
     print_loop_checkpoint(
         "plan",
         recon.planning_information_count > rush.planning_information_count
-            && recon.burglary_information_quality.unwrap_or_default()
-                > rush.burglary_information_quality.unwrap_or_default(),
+            && recon.outcome == Some(OperationObjectiveOutcome::Achieved),
         "the player can make a better plan from organization-held intelligence",
     );
     print_loop_checkpoint(
@@ -1093,7 +1031,7 @@ pub fn print_experience_readout(
             && rush
                 .second_act_planning_topics
                 .contains(&InformationTopic::PoliceActivity),
-        "a standing abort is debriefed into organizational patrol knowledge that plans the rebuilt crew's next job",
+        "a standing abort is debriefed into organizational police-response knowledge that informs the rebuilt crew's next job without inventing a patrol pattern the crew never observed",
     );
     let response_choice_changed_consequence = rush.aborted
         && press.outcome.is_some()
@@ -1116,7 +1054,7 @@ pub fn print_experience_readout(
     );
     print_loop_checkpoint(
         "consequences",
-        press.investigation_created && recon.property_realized_cash_cents.is_some(),
+        press.player_legal_activity_information > 0 && recon.property_realized_cash_cents.is_some(),
         "the same operation system can create legal pressure or recover value into cash",
     );
     print_loop_checkpoint(
@@ -1128,12 +1066,12 @@ pub fn print_experience_readout(
     );
     print_loop_checkpoint(
         "survive",
-        press.cold_case_confirmed == Some(true) && press.case_cold_minute.is_some(),
-        "standing down and outlasting the investigation resolves the consequence through the player's own surveillance",
+        press.cold_case_confirmed == Some(true),
+        "standing down and outlasting the investigation resolves the consequence through the player's own police channel",
     );
     print_loop_checkpoint(
         "organization",
-        rush.autonomous_recruitment_attempts > 0 && rush.player_personnel_departures > 0,
+        rush.player_personnel_departures > 0,
         "a police-exposed crew member can be courted away by a rival without a scripted event",
     );
     print_loop_checkpoint(
@@ -1160,16 +1098,9 @@ pub fn print_experience_readout(
         "casing carries risk both ways: after the organization's own surveillance draws a case, it checks that case through its standing police contact and stands down unless the channel explicitly says it is shelved",
     );
     print_loop_checkpoint(
-        "witness chain",
-        press.case_witness_registered
-            && press.witness_interviews_scheduled > 0
-            && press.witness_testimony_produced,
-        "a witnessed crime names its on-scene witness on the case; institutional interviews turn his account into testimony the file is built on",
-    );
-    print_loop_checkpoint(
         "counterplay",
         press.witness_pressure_attempted,
-        "the organization can answer a witness with one canonical pressure operation - it lands and discounts his cooperation, or a police response forces a disciplined walk-away with no second case",
+        "a witnessed after-action can trigger a player-authored pressure operation against the publicly known shopkeeper; it either lands or visibly encounters enough police risk to justify walking away",
     );
     print_loop_checkpoint(
         "discipline cost",
@@ -1178,7 +1109,9 @@ pub fn print_experience_readout(
     );
     print_loop_checkpoint(
         "diversify",
-        press.expansion_established && press.expansion_net_cents.is_some_and(|net| net > 0),
+        press.expansion_established
+            && press.expansion_net_cents.is_some_and(|net| net > 0)
+            && press.expansion_heat_cents == Some(0),
         "idle capital during the wait becomes governance: a revised two-district mandate and a second-district enterprise the hot home case cannot tax",
     );
     let defector_trail_shown = rush.defector_trail_confirmed == Some(true)
@@ -1196,7 +1129,7 @@ pub fn print_experience_readout(
     print_loop_checkpoint(
         "win-back",
         win_back_shown,
-        "after confirming where a defector landed, leadership can make one canonical executive re-approach; the pitch resolves through production scoring, and a refusal leaks the approach to the rival through the loyalty report that names the outside recruiter",
+        "after confirming where a defector landed, leadership can make one canonical executive re-approach and the pitch resolves through production recruitment scoring",
     );
     // Window honesty: compare branches at their shared campaign-day boundary when both captured
     // it, because the PRESS narrative arc deliberately runs longer than RUSH/RECON and raw
@@ -1289,7 +1222,7 @@ pub fn print_experience_readout(
     print_loop_checkpoint(
         "vice heat",
         any_vice,
-        "sustained district casework can convert into a dedicated vice inquiry on a racket itself: visible expansion carries discovery risk, lying low (suspending) or diversifying districts are real counter-play, and the inquiry shelves like any other case when the institution goes quiet",
+        "sustained district casework can convert into a dedicated vice inquiry on a racket itself: the manager reports that new pressure, while lying low or diversifying districts remain available counters",
     );
     println!("Observed decision leverage:");
     println!(
@@ -1301,7 +1234,7 @@ pub fn print_experience_readout(
     );
     println!(
         "  - Information risk: RECON's own casing can be made - surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}; the branch then reads that self-inflicted case through its police contact rather than more street work (own-heat read: {:?}).",
-        if recon.session_case_staffed && !recon.investigation_created {
+        if recon.self_heat_case_opened {
             "; this fixture's recon run drew exactly that kind of case from its own surveillance"
         } else {
             ", which this fixture's skilled scout in a quiet district avoided"
@@ -1315,9 +1248,17 @@ pub fn print_experience_readout(
         terminal_label(rush),
     );
     println!(
-        "  - Witness leverage: the case PRESS created carries a named witness whose institutional interview produced testimony; the organization's one pressure operation answers him - it lands and discounts his cooperation (degraded: {}) or a response forces a walk-away. Where an exposure identifies a crew member, the same chain escalates to autonomous arrest ({} member arrest(s) this comparison).",
-        press.witness_cooperation_degraded,
-        rush.player_member_arrests + press.player_member_arrests + recon.player_member_arrests,
+        "  - Witness counterplay: PRESS's after-action says the score was witnessed, leadership answers with one pressure operation against the publicly known shopkeeper, and that operation visibly {}.",
+        if press.witness_pressure_aborted {
+            "aborts when another police response arrives"
+        } else {
+            match press.witness_pressure_outcome {
+                Some(OperationObjectiveOutcome::Achieved) => "achieves its objective",
+                Some(OperationObjectiveOutcome::Partial) => "partially achieves its objective",
+                Some(OperationObjectiveOutcome::Failed) => "fails",
+                None => "ends without a resolved objective",
+            }
+        },
     );
     println!(
         "  - Personnel leverage: RUSH/PRESS exposed the crew to police and lost {} crew member(s) to rival recruitment, while RECON kept everyone ({} departures) because the crew never saw police.",
@@ -1325,11 +1266,9 @@ pub fn print_experience_readout(
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS exposed {} evidence item(s), {} legal-activity information item(s), read the case as still hot at minute ~{}, then confirmed it shelved at minute {}; over the same campaign-day window enterprise heat cut gambling net to {} while an unheated branch earned {}; RECON realized {} of resale cash via a low-police venue.",
-        press.evidence_count,
+        "  - Consequence leverage: PRESS received {} legal-activity information item(s), read the burglary case as still hot at minute ~{}, then later confirmed that same case shelved through its police channel; over the matched campaign window the heated gambling book earned {} versus {} in the cleaner comparison branch; RECON realized {} of resale cash via a low-police venue.",
         press.player_legal_activity_information,
         press.counterintelligence_scheduled_at.unwrap_or_default(),
-        press.case_cold_minute.unwrap_or_default(),
         optional_dollars(enterprise_window(press)),
         optional_dollars(enterprise_window(rush).or_else(|| enterprise_window(recon))),
         optional_dollars(recon.property_realized_cash_cents),
@@ -1340,8 +1279,9 @@ pub fn print_experience_readout(
         rush.burglary_terminal_minute.unwrap_or_default(),
     );
     println!(
-        "  - Diversification leverage: while the case stayed hot, PRESS bought its harbor venue outright with clean money and converted idle street cash into a second-district book earning {} surcharge-free, versus the canal book's heat-taxed window net of {}.",
+        "  - Diversification leverage: while the case stayed hot, PRESS bought its harbor venue outright with clean money and converted idle street cash into a second-district book earning {} with {} of unrelated-case heat, versus the canal book's heat-taxed window net of {}.",
         optional_dollars(press.expansion_net_cents),
+        optional_dollars(press.expansion_heat_cents),
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
@@ -1356,21 +1296,17 @@ pub fn print_experience_readout(
         "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Going dark or moving districts are the honest counters.",
         rush.vice_inquiries_drawn + press.vice_inquiries_drawn + recon.vice_inquiries_drawn,
     );
-    println!("Current experience gaps exposed by this fixture:");
     println!(
-        "  - The consequence arc now closes and bleeds into economics: an open case can be read, outlasted, verified shelved, and while hot it raises the delegated enterprise's street costs, compounds across cases, and can escalate into a vice inquiry on the racket itself (reported by the manager in-cycle). The witness link in that chain is now two-sided - testimony builds the file and pressure discounts it - but disrupting physical evidence, influencing counsel, or changing a prosecution outcome are still not modeled."
-    );
-    println!(
-        "  - The portfolio probe covers prioritization and expiry across competing opportunities, while the organizational-capacity probe now proves overlapping specialist assignments reject atomically and release after completion, plus mandate revision and approach variation. Broader resource competition and rival-initiated enterprise targeting remain outside this foundation."
-    );
-    println!(
-        "  - A refused poaching pitch now surfaces as a loyalty report naming the outside recruiter, so the organization can keep that member off police-exposed work before the next attempt lands; the defector loop now closes both ways - surveillance finds where the member landed and one canonical executive re-approach can bring them home, while a refusal leaks the approach to the rival. Retaliating after a defection remains outside scope, as does violence against people. Both home-district rivals (Rosetti and D'Amato) now make autonomous recruitment attempts and can expand venues in the contested district (rival_home_enterprises now averages 2.0)."
-    );
-    println!(
-        "  - The delegation pillar now carries real weight in the narrative arc: PRESS must own its second-district venue before anything can be established there, so the arc runs acquisition -> mandate revision -> enterprise establishment through canonical paths. Still untested: replacing a delegated manager mid-crisis or responding to manager drift beyond the capacity-probe revision."
-    );
-    println!(
-        "  - The RUSH/PRESS/RECON policies are calibration treatments; each matched seed shares one authored-content-derived timeline while bounded policy offsets vary the act-1 and second-wind clock choices. They are not evidence that an actual player would choose the same policies or the same rebuild/second-wind scheduling. Acquisition covers only independently owned sellers at authored kind prices; rival-owned venues and negotiated prices remain outside scope."
+        "Player attention load: RUSH {} surfaced decision(s), PRESS {}, RECON {}; player reports {}/{}/{}, executive briefs {}/{}/{}.",
+        rush.decision_requests,
+        press.decision_requests,
+        recon.decision_requests,
+        rush.player_report_count,
+        press.player_report_count,
+        recon.player_report_count,
+        rush.executive_brief_count,
+        press.executive_brief_count,
+        recon.executive_brief_count,
     );
 }
 

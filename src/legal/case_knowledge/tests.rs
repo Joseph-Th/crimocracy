@@ -238,6 +238,17 @@ fn staffing_records_lead_held_active_case_knowledge() {
         held[0].signal(),
         Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
     );
+    assert_eq!(
+        held[0].subject(),
+        fixture
+            .state
+            .legal()
+            .get_investigation(investigation)
+            .expect("staffed case must persist")
+            .origin()
+            .expect("fixture case must retain its operation origin"),
+        "case-activity knowledge must identify the incident it describes rather than the authority's whole caseload"
+    );
     assert!(summary.starts_with(case_activity_summary_prefix(CaseActivitySignal::Active)));
     assert!(summary.contains("Knowledge Precinct"));
     validate_invariants(&fixture.state);
@@ -276,6 +287,16 @@ fn cold_shelving_refreshes_the_leads_knowledge_to_shelved() {
                 ))
         })
         .expect("shelving refreshes the lead's knowledge");
+    assert_eq!(
+        shelved.subject(),
+        fixture
+            .state
+            .legal()
+            .get_investigation(investigation)
+            .expect("shelved case must persist")
+            .origin()
+            .expect("fixture case must retain its operation origin")
+    );
     assert!(shelved.summary().contains("has already shelved the case"));
     validate_invariants(&fixture.state);
 }
@@ -286,7 +307,14 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
     let mut fixture = make_test_knowledge_fixture();
     crate::world::world_system::designate_player_organization(&mut fixture.state, fixture.criminal)
         .expect("criminal organization should be eligible as the player organization");
-    let _investigation = open_operation_case(&mut fixture.state);
+    let investigation = open_operation_case(&mut fixture.state);
+    let case_subject = fixture
+        .state
+        .legal()
+        .get_investigation(investigation)
+        .expect("fixture case must persist")
+        .origin()
+        .expect("fixture case must retain its operation origin");
     apply_autonomous_investigator_staffing(&mut fixture.state).expect("staffing pass must succeed");
 
     let sponsor = fixture.criminal;
@@ -328,6 +356,7 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
         .get_information(disclosed)
         .expect("disclosed information persists");
     assert_eq!(record.holder(), KnowledgeHolder::Organization(sponsor));
+    assert_eq!(record.subject(), case_subject);
     assert_eq!(
         record.signal(),
         Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
@@ -365,6 +394,7 @@ fn contact_channel_discloses_each_new_development_exactly_once() {
             CaseActivitySignal::Shelved
         ))
     );
+    assert_eq!(record.subject(), case_subject);
     assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
     validate_invariants(&fixture.state);
 

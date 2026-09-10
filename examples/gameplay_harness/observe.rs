@@ -112,35 +112,14 @@ pub fn observe_tick(
         }
     }
 
-    // A cold-case shelf or closure is an institutional beat, not player-visible news: the
-    // organization learns it through its own channels (precinct surveillance or the police
-    // contact). The narrative prints it only as a hidden-state audit marker. Both endings
-    // exist in production - quiet cases decay cold, and cases that escalate into custody can
-    // close outright - so the observation records whichever institutional truth arrived.
+    // A cold-case shelf or closure is an institutional beat, not player-visible news. Capture it
+    // only as contract evidence; the narrative waits until the organization learns the change
+    // through its own surveillance/contact channels.
     if let Some(case) = scenario.investigation {
         let shelved = outcome.cold_case_suspensions.contains(&case);
         let closed = outcome.cold_case_closures.contains(&case);
         if shelved || closed {
             metrics.case_cold_minute = Some(outcome.now.as_minutes());
-            if narrative {
-                let owner = scenario
-                    .state
-                    .legal()
-                    .get_investigation(case)
-                    .expect("shelved case must persist")
-                    .owner();
-                let owner_name = scenario
-                    .state
-                    .world()
-                    .get_organization(owner)
-                    .expect("case owner must persist")
-                    .name();
-                let ending = if closed { "closed" } else { "shelved" };
-                println!(
-                    "[DEV AUDIT] {}: {owner_name} {ending} the case (hidden institutional beat; the organization learns this through its own channels).",
-                    stamp(outcome.now.as_minutes()),
-                );
-            }
         }
     }
 
@@ -296,92 +275,32 @@ pub fn observe_tick(
                 }
             }
         }
-        if narrative {
-            let recruiter = scenario
+        if narrative && attempt.previous_organization() == Some(scenario.player) {
+            // Recruitment attempts against other organizations are hidden world activity. For
+            // our own member, narrate only the production report delivered to leadership: an
+            // accepted defection reveals the departure but not the rival destination, while a
+            // refusal names the outside recruiter through the loyalty-report path.
+            let report = scenario
                 .state
-                .world()
-                .get_character(attempt.recruiter())
-                .expect("autonomous recruiter must exist");
-            let candidate = scenario
-                .state
-                .world()
-                .get_character(attempt.candidate())
-                .expect("autonomous candidate must exist");
-            println!(
-                "[AUTONOMY] {}: {} → {} via {:?}; margin {}, pressure {}, outcome {:?}.",
-                stamp(outcome.now.as_minutes()),
-                recruiter.name(),
-                candidate.name(),
-                attempt.approach(),
-                attempt.margin(),
-                attempt.factors().perceived_legal_pressure(),
-                attempt.outcome(),
-            );
-            narrate_recruitment_causality(scenario, metrics, attempt, candidate);
-            if attempt.previous_organization() == Some(scenario.player)
-                && attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Refused
-            {
-                // Quote the loyalty report the production path delivered to the player, so the
-                // narrative shows the organization's own information rather than a reconstruction.
-                let report =
-                    scenario
-                        .state
-                        .reports()
-                        .get_report(attempt.member_report().expect(
-                            "refused poaching against a member must link its loyalty report",
-                        ))
-                        .expect("linked recruitment member report must persist");
-                for entry in report.entries() {
-                    println!(
-                        "[POACH WARNING] {}: {}",
-                        stamp(outcome.now.as_minutes()),
-                        entry.summary
-                    );
-                }
+                .reports()
+                .get_report(attempt.member_report().expect(
+                    "recruitment involving a current player member must link its personnel report",
+                ))
+                .expect("linked recruitment member report must persist");
+            let label = match attempt.outcome() {
+                crimocracy::recruitment::RecruitmentOutcome::Accepted => "PERSONNEL",
+                crimocracy::recruitment::RecruitmentOutcome::Refused => "POACH WARNING",
+            };
+            for entry in report.entries() {
+                println!(
+                    "[{label}] {}: {}",
+                    stamp(outcome.now.as_minutes()),
+                    entry.summary
+                );
             }
         }
     }
 
-    if narrative {
-        // Audit staffing/work is now condensed: one line per tick instead of per-item
-        // spam, so the player-visible narrative stays legible while the audit trail
-        // still proves deterministic investigator assignment and evidence work.
-        if !outcome.staffed_investigations.is_empty() {
-            let assignments: Vec<_> = outcome
-                .staffed_investigations
-                .iter()
-                .map(|(investigation, investigator)| {
-                    let case = scenario
-                        .state
-                        .legal()
-                        .get_investigation(*investigation)
-                        .expect("staffed investigation must persist");
-                    let investigator = scenario
-                        .state
-                        .world()
-                        .get_character(*investigator)
-                        .expect("staffed investigator must persist");
-                    format!("{}→{}", case.title(), investigator.name())
-                })
-                .collect();
-            println!(
-                "[DEV AUDIT] {}: staffing {} case(s): {}.",
-                stamp(outcome.now.as_minutes()),
-                outcome.staffed_investigations.len(),
-                assignments.join(", ")
-            );
-        }
-        if !outcome.scheduled_investigation_work.is_empty()
-            || !outcome.resolved_investigation_work.is_empty()
-        {
-            println!(
-                "[DEV AUDIT] {}: detective work — scheduled {} EvidenceReview, resolved {} (see audit detail with --verbose).",
-                stamp(outcome.now.as_minutes()),
-                outcome.scheduled_investigation_work.len(),
-                outcome.resolved_investigation_work.len(),
-            );
-        }
-    }
     metrics.investigation_work_scheduled = metrics.investigation_work_scheduled.saturating_add(
         u32::try_from(outcome.scheduled_investigation_work.len()).unwrap_or(u32::MAX),
     );
@@ -395,13 +314,6 @@ pub fn observe_tick(
     metrics.witness_interviews_scheduled = metrics.witness_interviews_scheduled.saturating_add(
         u32::try_from(outcome.scheduled_witness_interviews.len()).unwrap_or(u32::MAX),
     );
-    if narrative && !outcome.scheduled_witness_interviews.is_empty() {
-        println!(
-            "[DEV AUDIT] {}: scheduled {} witness interview(s).",
-            stamp(outcome.now.as_minutes()),
-            outcome.scheduled_witness_interviews.len()
-        );
-    }
 
     // An autonomous evidence-threshold arrest is a production custody event. The organization
     // learns of an arrested member through custody and representation channels; here it is
@@ -545,56 +457,6 @@ pub fn observe_tick(
         validate_harness_state(scenario.registry, &scenario.state)?;
     }
     Ok(())
-}
-
-/// Explains why an autonomous recruitment attempt landed or failed, connecting it to this
-/// session's player-visible events. `[NARRATION]` is the harness's documentary voice: it may
-/// explain world causality, but it never feeds action selection and never reads hidden
-/// case/evidence state.
-pub fn narrate_recruitment_causality(
-    scenario: &Scenario,
-    metrics: &RunMetrics,
-    attempt: &crimocracy::recruitment::RecruitmentAttemptRecord,
-    candidate: &crimocracy::world::CharacterRecord,
-) {
-    let candidate_name = candidate.name();
-    let crew_role = metrics
-        .burglary
-        .and_then(|operation| scenario.state.operations().get_operation(operation))
-        .and_then(|operation| {
-            operation
-                .roles()
-                .iter()
-                .find_map(|(role, member)| (*member == attempt.candidate()).then_some(*role))
-        });
-    let operation_title = metrics
-        .burglary
-        .and_then(|operation| scenario.state.operations().get_operation(operation))
-        .map(|operation| operation.title().to_owned());
-    let accepted = attempt.outcome() == crimocracy::recruitment::RecruitmentOutcome::Accepted;
-    match (accepted, metrics.police_arrived, crew_role, operation_title) {
-        (true, true, Some(role), Some(title)) => println!(
-            "[NARRATION] {candidate_name} was on the {title} crew when police arrived. That direct contact is the lever a rival's {:?} pitch exploited; the organization loses its {} for burglary work.",
-            attempt.approach(),
-            role_label(role),
-        ),
-        (true, true, _, Some(title)) => println!(
-            "[NARRATION] Police contact during the {title} operation opened the pressure window a rival's {:?} pitch exploited.",
-            attempt.approach(),
-        ),
-        (true, _, _, _) => println!(
-            "[NARRATION] {candidate_name} left the organization even without a revealed police contact this session; the rival's {:?} approach found another opening.",
-            attempt.approach(),
-        ),
-        (false, false, _, _) => println!(
-            "[NARRATION] {candidate_name} was not exposed to police this session, so the rival's {:?} pitch carried no immediate legal-pressure lever and it failed. The organization keeps its personnel.",
-            attempt.approach(),
-        ),
-        (false, true, _, _) => println!(
-            "[NARRATION] {candidate_name} refused the rival's {:?} pitch despite this session's police contact; the organization keeps its personnel.",
-            attempt.approach(),
-        ),
-    }
 }
 
 /// True when the tick produced any transaction a player could observe or that persists state.

@@ -5,6 +5,7 @@ use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -347,6 +348,42 @@ fn record_source_information_with_topic(
     .expect("source information should validate")
     .commit(&mut fixture.state)
     .expect("source information should commit")
+}
+
+#[test]
+fn pending_contact_sources_are_freshest_first() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let contact = establish(&mut fixture);
+    let source_character = fixture.source;
+    let older = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    let newer = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, contact),
+        vec![newer, older],
+        "a live contact should offer the newest held status before stale undisclosed history"
+    );
+
+    validate_contact_disclosure(&fixture.state, contact, newer)
+        .expect("freshest source should be disclosable")
+        .commit(&mut fixture.state)
+        .expect("freshest disclosure should commit");
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, contact),
+        vec![older],
+        "older undisclosed history remains available after the current status was shared"
+    );
+    validate_state(&fixture.state).expect("freshness ordering must not change contact state");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

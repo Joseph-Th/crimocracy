@@ -51,6 +51,14 @@ pub enum IntelligenceError {
     },
     #[error("source and recipient knowledge holders are identical")]
     SameHolder,
+    #[error(
+        "information {source_information} was already transferred to {recipient:?} as information {existing}"
+    )]
+    DuplicateTransfer {
+        source_information: InformationId,
+        recipient: KnowledgeHolder,
+        existing: InformationId,
+    },
     #[error("knowledge cannot be transferred internally from {source_holder:?} to {recipient:?}")]
     TransferNotPermitted {
         source_holder: KnowledgeHolder,
@@ -309,6 +317,7 @@ impl ValidatedInformationTransfer {
             }
         }
         validate_transfer_relationship(state, source_holder, self.recipient)?;
+        ensure_transfer_not_duplicate(state, self.source, self.recipient)?;
         let draft = build_transfer_draft(source, self.recipient);
         validate_internal_transfer_information(state, draft, self.source)?.commit(state)
     }
@@ -328,11 +337,27 @@ pub fn validate_information_transfer(
     }
     let expected_character_versions =
         validate_transfer_relationship(state, source_holder, draft.recipient)?;
+    ensure_transfer_not_duplicate(state, draft.source, draft.recipient)?;
     Ok(ValidatedInformationTransfer {
         source: draft.source,
         recipient: draft.recipient,
         expected_character_versions,
     })
+}
+
+fn ensure_transfer_not_duplicate(
+    state: &AppState,
+    source: InformationId,
+    recipient: KnowledgeHolder,
+) -> Result<(), IntelligenceError> {
+    if let Some(existing) = state.intelligence.internal_transfer_for(source, recipient) {
+        return Err(IntelligenceError::DuplicateTransfer {
+            source_information: source,
+            recipient,
+            existing: existing.id(),
+        });
+    }
+    Ok(())
 }
 
 fn build_transfer_draft(

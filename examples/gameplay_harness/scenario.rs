@@ -1419,9 +1419,7 @@ pub fn recruit_replacement(
             attempt_record.approach()
         );
         println!(
-            "[NARRATION] {recruiter_name}'s pitch was backed by an existing relationship and the candidate's greed drive; margin {}, outcome {:?}. No hidden or audit state influenced the decision.",
-            attempt_record.margin(),
-            attempt_record.outcome()
+            "[NARRATION] {recruiter_name} had an existing relationship with {candidate_name}, giving leadership a player-visible reason to make the approach."
         );
     }
     Ok(candidate)
