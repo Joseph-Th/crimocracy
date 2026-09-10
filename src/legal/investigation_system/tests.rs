@@ -365,6 +365,126 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
 }
 
 #[test]
+fn resumed_incident_rejects_witness_already_tracked_as_subject_on_the_shelf() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xD091_5E1F);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Shelf Conflict Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Shelf Conflict Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let conflicted = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Conflicted Follow-up Witness".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("conflicted character fixture should validate");
+    let (_, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Shelf conflict");
+    let first = open_test_origin_incident(
+        &mut state,
+        police,
+        criminal,
+        origin,
+        "Original shelf conflict incident",
+    );
+    validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation: first,
+            custodian: police,
+            subject: EntityRef::Character(conflicted),
+            origin: Some(EntityRef::Operation(origin)),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Unknown,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("actionable evidence should validate")
+    .commit(&mut state)
+    .expect("actionable evidence should promote the character into the subject set");
+    validate_transition_investigation(&state, first, InvestigationTransition::Suspend)
+        .expect("fixture case should suspend")
+        .commit(&mut state)
+        .expect("fixture suspension should commit");
+    let before = state
+        .legal()
+        .get_investigation(first)
+        .expect("shelf should persist")
+        .clone();
+    let next_witness = state.ids.next_raw(IdKind::CaseWitness);
+    let next_evidence = state.ids.next_raw(IdKind::Evidence);
+
+    let error = match validate_incident_intake(
+        &state,
+        IncidentIntakeDraft {
+            owner: police,
+            title: "Conflicted follow-up incident".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Operation(origin)]),
+            evidence: vec![crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Operation(origin),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::Surveillance,
+                strength: EvidenceStrength::Weak,
+                reliability: EvidenceReliability::Questionable,
+                admissibility: Admissibility::Unknown,
+                discovered_at: state.now(),
+            }],
+            origin: Some(EntityRef::Operation(origin)),
+            notified_organizations: BTreeSet::from([criminal]),
+            witness: Some(crate::legal::IncidentWitnessDraft {
+                character: conflicted,
+                cooperation: crate::legal::WitnessCooperation::Cooperative,
+            }),
+        },
+    ) {
+        Ok(_) => {
+            panic!("a resumed shelf must not register one of its tracked subjects as a witness")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        InvestigationError::WitnessIsCaseSubject {
+            character: conflicted,
+        }
+    );
+    assert_eq!(state.ids.next_raw(IdKind::CaseWitness), next_witness);
+    assert_eq!(state.ids.next_raw(IdKind::Evidence), next_evidence);
+    let after = state
+        .legal()
+        .get_investigation(first)
+        .expect("rejected continuation should retain the shelf");
+    assert_eq!(after.status(), InvestigationStatus::Suspended);
+    assert_eq!(after.version(), before.version());
+    assert_eq!(after.evidence(), before.evidence());
+    validate_state(&state).expect("resumed-shelf witness conflict rejection should preserve state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn investigation_subject_cannot_be_assigned_to_investigate_their_own_case() {
     let registry = build_registry();
     let mut state = AppState::new(0x5E1F_C45E);
@@ -1314,9 +1434,21 @@ fn incident_intake_resumes_most_relevant_shelf_and_keeps_all_declared_subjects()
     assert_eq!(continued.status(), InvestigationStatus::Active);
     assert!(
         continued
+            .declared_subjects()
+            .contains(&EntityRef::Character(second_leader)),
+        "continuation must record an explicitly redeclared subject even when earlier evidence had already promoted it"
+    );
+    assert!(
+        continued
             .subjects()
             .contains(&EntityRef::Organization(weak_subject)),
         "resuming a shelf must retain a validated weak non-character incident subject just as opening a new case would"
+    );
+    assert!(
+        continued
+            .declared_subjects()
+            .contains(&EntityRef::Organization(weak_subject)),
+        "weak incident subject matter must persist as declared provenance even though evidence cannot promote it"
     );
     validate_state(&state).expect("ranked shelf continuation should remain structurally valid");
     validate_state_against_registry(&registry, &state)
@@ -3084,6 +3216,15 @@ fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
             .expect("investigation should exist")
             .subjects()
             .contains(&EntityRef::Character(suspect))
+    );
+    assert!(
+        !state
+            .legal()
+            .get_investigation(investigation)
+            .expect("investigation should exist")
+            .declared_subjects()
+            .contains(&EntityRef::Character(suspect)),
+        "actionable evidence promotes effective subjects without rewriting declared provenance"
     );
     assert_ne!(weak_tip, corroboration);
     assert_ne!(questionable_tip, corroboration);

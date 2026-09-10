@@ -20,12 +20,13 @@ use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::records::{
     ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord,
     InformantRecord, InvestigationRecord, InvestigationStatus, InvestigationWorkCancellation,
-    InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkRecord,
-    InvestigationWorkResolution, InvestigationWorkStatus, JurisdictionRecord, LegalIndexes,
-    LegalRepresentationEndReason, LegalRepresentationOrigin, LegalRepresentationRecord,
-    LegalRepresentationStatus, PatrolDeploymentRecord, PatrolDeploymentStatus, PatrolWindow,
-    PoliceResponseRecord, PoliceResponseStatus, ProsecutionCaseRecord, ProsecutionCaseResolution,
-    ProsecutionCaseStatus, ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
+    InvestigationWorkCancellationReason, InvestigationWorkFocus, InvestigationWorkKind,
+    InvestigationWorkRecord, InvestigationWorkResolution, InvestigationWorkStatus,
+    JurisdictionRecord, LegalIndexes, LegalRepresentationEndReason, LegalRepresentationOrigin,
+    LegalRepresentationRecord, LegalRepresentationStatus, PatrolDeploymentRecord,
+    PatrolDeploymentStatus, PatrolWindow, PoliceResponseRecord, PoliceResponseStatus,
+    ProsecutionCaseRecord, ProsecutionCaseResolution, ProsecutionCaseStatus,
+    ProsecutionReferralRecord, WitnessCooperation, WitnessStatementRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

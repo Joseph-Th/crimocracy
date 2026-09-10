@@ -6,7 +6,10 @@ use crate::core::id::{CaseWitnessId, EvidenceId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
-use crate::legal::witness_system::{resolve_witness_reliability, resolve_witness_strength};
+use crate::legal::witness_system::{
+    resolve_witness_reliability, resolve_witness_strength,
+    witness_statement_subject_is_case_relevant,
+};
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceRecord, InvestigationRecord, InvestigationStatus,
     InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
@@ -39,7 +42,10 @@ fn validate_investigation(
 fn validate_investigation_definition(
     investigation: &InvestigationRecord,
 ) -> Result<(), StateValidationError> {
-    if investigation.title().trim().is_empty() || investigation.subjects().is_empty() {
+    if investigation.title().trim().is_empty()
+        || investigation.declared_subjects().is_empty()
+        || investigation.subjects().is_empty()
+    {
         return Err(StateValidationError::InvalidInvestigationDefinition {
             investigation: investigation.id(),
         });
@@ -168,6 +174,30 @@ fn validate_investigation_subjects(
     state: &AppState,
     investigation: &InvestigationRecord,
 ) -> Result<(), StateValidationError> {
+    let mut expected_subjects = investigation.declared_subjects().clone();
+    for subject in investigation.declared_subjects() {
+        if !is_entity_present(state, *subject) {
+            return Err(StateValidationError::MissingEntity {
+                context: "investigation declared subject",
+                entity: *subject,
+            });
+        }
+    }
+    for evidence_id in investigation.evidence() {
+        let evidence = state.legal.get_evidence(*evidence_id).ok_or(
+            StateValidationError::InvalidInvestigationDefinition {
+                investigation: investigation.id(),
+            },
+        )?;
+        if crate::legal::investigation_system::evidence_is_actionable_case_lead(evidence) {
+            expected_subjects.insert(evidence.subject());
+        }
+    }
+    if expected_subjects != *investigation.subjects() {
+        return Err(StateValidationError::InvalidInvestigationDefinition {
+            investigation: investigation.id(),
+        });
+    }
     for subject in investigation.subjects() {
         if !is_entity_present(state, *subject) {
             return Err(StateValidationError::MissingEntity {
@@ -228,9 +258,13 @@ fn validate_investigation_work_record(
     validate_work_focus(state, work)?;
     validate_work_schedule_shape(state, work)?;
     match work.status() {
-        InvestigationWorkStatus::Scheduled => {
-            validate_scheduled_work(work, investigation, investigator, scheduled_investigators)
-        }
+        InvestigationWorkStatus::Scheduled => validate_scheduled_work(
+            state,
+            work,
+            investigation,
+            investigator,
+            scheduled_investigators,
+        ),
         InvestigationWorkStatus::Completed => validate_completed_work(
             state,
             work,
@@ -297,14 +331,24 @@ fn validate_work_schedule_shape(
 }
 
 fn validate_scheduled_work(
+    state: &AppState,
     work: &InvestigationWorkRecord,
     investigation: &InvestigationRecord,
     investigator: &crate::world::CharacterRecord,
     scheduled_investigators: &mut BTreeSet<crate::core::id::CharacterId>,
 ) -> Result<(), StateValidationError> {
+    let invalid_witness_focus = work
+        .focus()
+        .witness_id()
+        .and_then(|case_witness| state.legal.get_case_witness(case_witness))
+        .is_some_and(|witness| {
+            !witness.statements().is_empty()
+                || crate::legal::witness_system::case_witness_is_case_subject(state, witness)
+        });
     if work.version() != 1
         || work.resolution().is_some()
         || work.cancellation().is_some()
+        || invalid_witness_focus
         || !scheduled_investigators.insert(work.investigator())
         || investigation.status() != InvestigationStatus::Active
         || investigation.lead_investigator() != Some(work.investigator())
@@ -423,19 +467,51 @@ fn validate_cancelled_work(
     work: &InvestigationWorkRecord,
 ) -> Result<(), StateValidationError> {
     let cancellation = work.cancellation().ok_or_else(|| invalid_work(work))?;
-    let arrest = match cancellation.reason() {
+    let reason_valid = match cancellation.reason() {
         crate::legal::InvestigationWorkCancellationReason::InvestigatorDetained(arrest) => {
-            state.legal.get_arrest(arrest)
+            state.legal.get_arrest(arrest).is_some_and(|arrest| {
+                arrest.character() == work.investigator()
+                    && arrest.arrested_at() == cancellation.cancelled_at()
+            })
+        }
+        crate::legal::InvestigationWorkCancellationReason::WitnessBecameCaseSubject(evidence_id) => {
+            work.kind() == InvestigationWorkKind::WitnessInterview
+                && work
+                    .focus()
+                    .witness_id()
+                    .and_then(|case_witness| state.legal.get_case_witness(case_witness))
+                    .is_some_and(|witness| {
+                        let evidence = state.legal.get_evidence(evidence_id);
+                        witness.investigation() == work.investigation()
+                            && evidence.is_some_and(|evidence| {
+                                evidence.investigation() == work.investigation()
+                                    && evidence.subject()
+                                        == EntityRef::Character(witness.witness())
+                                    && crate::legal::investigation_system::evidence_is_actionable_case_lead(
+                                        evidence,
+                                    )
+                                    && evidence.discovered_at() <= cancellation.cancelled_at()
+                            })
+                    })
+        }
+        crate::legal::InvestigationWorkCancellationReason::WitnessStatementRecorded(statement) => {
+            work.kind() == InvestigationWorkKind::WitnessInterview
+                && work.focus().witness_id().is_some_and(|case_witness| {
+                    state
+                        .legal
+                        .get_witness_statement(statement)
+                        .is_some_and(|statement| {
+                            statement.case_witness() == case_witness
+                                && statement.recorded_at() == cancellation.cancelled_at()
+                        })
+                })
         }
     };
     if work.version() != 2
         || work.resolution().is_some()
         || cancellation.cancelled_at() < work.scheduled_at()
         || cancellation.cancelled_at() > state.now()
-        || arrest.is_none_or(|arrest| {
-            arrest.character() != work.investigator()
-                || arrest.arrested_at() != cancellation.cancelled_at()
-        })
+        || !reason_valid
     {
         return Err(invalid_work(work));
     }
@@ -562,6 +638,12 @@ pub(super) fn validate_witness_statements(
             || statement.recorded_at() < case_witness.registered_at()
             || statement.recorded_at() > state.now()
             || !is_entity_present(state, statement.subject())
+            || !witness_statement_subject_is_case_relevant(
+                state,
+                investigation,
+                statement.subject(),
+                Some(statement.evidence()),
+            )
             || statement
                 .origin()
                 .is_some_and(|origin| !is_entity_present(state, origin))

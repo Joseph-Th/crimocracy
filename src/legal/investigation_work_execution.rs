@@ -51,6 +51,13 @@ pub enum InvestigationWorkError {
     #[error("case witness {witness} already gave a statement and needs no further interview")]
     WitnessAlreadyStatemented { witness: CaseWitnessId },
     #[error(
+        "case witness {witness} is now case subject {character} and cannot be interviewed as a witness"
+    )]
+    WitnessIsCaseSubject {
+        witness: CaseWitnessId,
+        character: CharacterId,
+    },
+    #[error(
         "case witness {witness} has exhausted the interview attempt limit ({attempts}/{limit})"
     )]
     WitnessInterviewLimitReached {
@@ -350,6 +357,12 @@ fn resolve_interview_focus(
         .ok_or(InvestigationWorkError::InvalidFocus)?;
     if witness.investigation() != draft.investigation {
         return Err(InvestigationWorkError::InvalidFocus);
+    }
+    if crate::legal::witness_system::case_witness_is_case_subject(state, witness) {
+        return Err(InvestigationWorkError::WitnessIsCaseSubject {
+            witness: case_witness,
+            character: witness.witness(),
+        });
     }
     if !witness.statements().is_empty() {
         return Err(InvestigationWorkError::WitnessAlreadyStatemented {
@@ -840,17 +853,19 @@ impl ValidatedInvestigationWorkResolution {
         // Successful witness interviews record the testimony through the canonical
         // witness-statement path validated during plan validation.
         let interview_statement_outcome = match self.interview_statement {
-            Some(statement) => Some(statement.commit(state).map_err(|error| {
-                InvestigationWorkError::InterviewStatementFailed {
-                    work: self.plan.work,
-                    error,
-                }
-            })?),
+            Some(statement) => Some(
+                statement
+                    .commit_from_investigation_work(state, self.plan.work)
+                    .map_err(|error| InvestigationWorkError::InterviewStatementFailed {
+                        work: self.plan.work,
+                        error,
+                    })?,
+            ),
             None => None,
         };
         let derived_evidence = if let Some(draft) = derived_evidence_draft {
             let id = state.ids.next_evidence()?;
-            state.legal.insert_evidence(
+            state.legal.insert_evidence_from_investigation_work(
                 EvidenceRecord {
                     identity: EvidenceIdentity {
                         id,
@@ -872,6 +887,7 @@ impl ValidatedInvestigationWorkResolution {
                     discovered_at: self.plan.resolved_at,
                 },
                 self.plan.resolved_at,
+                self.plan.work,
             );
             Some(id)
         } else {
@@ -1003,6 +1019,9 @@ pub fn apply_witness_interview_scheduling(
             .legal
             .case_witnesses_for_investigation(investigation_id)
             .filter(|witness| witness.statements().is_empty())
+            .filter(|witness| {
+                !crate::legal::witness_system::case_witness_is_case_subject(state, witness)
+            })
             // A witness who has sat through the authored attempt limit without producing a
             // statement stops consuming institutional work: further interviews are futile,
             // and each one would otherwise keep the case's activity clock fresh forever.

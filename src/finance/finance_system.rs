@@ -79,6 +79,23 @@ pub enum FinanceError {
         mandate: MandateId,
         account: FinancialAccountId,
     },
+    #[error(
+        "mandate {mandate} budget transaction cannot debit account {account}; designated funding account is {funding_account}"
+    )]
+    UnauthorizedBudgetOutflow {
+        mandate: MandateId,
+        account: FinancialAccountId,
+        funding_account: FinancialAccountId,
+    },
+    #[error(
+        "mandate {mandate} funding account {account} holds {available_cents} cents but transaction requires {requested_cents}"
+    )]
+    InsufficientBudgetFunds {
+        mandate: MandateId,
+        account: FinancialAccountId,
+        available_cents: i64,
+        requested_cents: i64,
+    },
     #[error("budget arithmetic overflow for mandate {0}")]
     BudgetOverflow(MandateId),
     #[error(
@@ -509,6 +526,35 @@ fn resolve_transaction_budget(
             mandate,
             limit_cents: summary.limit.cents(),
             used_cents: summary.used.cents(),
+            requested_cents,
+        });
+    }
+    // A mandate budget is spending authority over one designated pool, not a generic ledger
+    // signature. Every outflow in an authorized transaction must come from that exact account;
+    // otherwise a small budget posting could disguise a larger debit from unrelated funds.
+    if let Some(other) = draft.postings.iter().find(|candidate| {
+        candidate.amount < Money::ZERO && candidate.account != budget.funding_account
+    }) {
+        return Err(FinanceError::UnauthorizedBudgetOutflow {
+            mandate,
+            account: other.account,
+            funding_account: budget.funding_account,
+        });
+    }
+    // The authored limit caps how much the manager may spend. It does not create financing.
+    // Delegated spending therefore requires the designated accounted-funds balance to cover the
+    // outflow at validation time. Account version pinning below makes that solvency snapshot stale
+    // if any intervening transaction changes the source before commit.
+    let funding = state
+        .finance
+        .get_account(budget.funding_account)
+        .ok_or(FinanceError::MissingAccount(budget.funding_account))?;
+    let available_cents = funding.balance().cents().max(0);
+    if available_cents < requested_cents {
+        return Err(FinanceError::InsufficientBudgetFunds {
+            mandate,
+            account: budget.funding_account,
+            available_cents,
             requested_cents,
         });
     }

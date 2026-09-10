@@ -146,6 +146,7 @@ pub(crate) fn pressureable_witness_targets(
             active_foreign_case(state, responsible_organization, witness.investigation())
                 && witness.statements().is_empty()
                 && witness.cooperation() != WitnessCooperation::Hostile
+                && !crate::legal::witness_system::case_witness_is_case_subject(state, witness)
         })
         .map(|witness| (witness.id(), witness.cooperation()))
         .collect()

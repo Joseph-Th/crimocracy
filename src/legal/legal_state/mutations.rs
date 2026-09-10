@@ -56,7 +56,9 @@ impl LegalState {
                 .investigations
                 .get_mut(&investigation_id)
                 .expect("validated investigation disappeared before subject merge");
+            let mut declared_changed = false;
             for subject in subjects {
+                declared_changed |= investigation.declared_subjects.insert(subject);
                 if investigation.subjects.insert(subject) {
                     added.push(subject);
                 }
@@ -65,7 +67,7 @@ impl LegalState {
             for organization in notified_organizations {
                 notifications_changed |= investigation.notified_organizations.insert(organization);
             }
-            if added.is_empty() && !notifications_changed {
+            if !declared_changed && !notifications_changed {
                 return;
             }
             investigation.version = advance_version_preflighted(investigation.version);
@@ -172,7 +174,37 @@ impl LegalState {
         );
     }
     pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord, activity_at: SimTime) {
+        self.insert_evidence_with_work_exemption(record, activity_at, None);
+    }
+
+    pub(crate) fn insert_evidence_from_investigation_work(
+        &mut self,
+        record: EvidenceRecord,
+        activity_at: SimTime,
+        originating_work: InvestigationWorkId,
+    ) {
+        self.insert_evidence_with_work_exemption(record, activity_at, Some(originating_work));
+    }
+
+    fn insert_evidence_with_work_exemption(
+        &mut self,
+        record: EvidenceRecord,
+        activity_at: SimTime,
+        originating_work: Option<InvestigationWorkId>,
+    ) {
         let investigation_id = record.investigation();
+        let evidence_id = record.id();
+        let invalidated_witness = if evidence_is_actionable_case_lead(&record)
+            && let EntityRef::Character(character) = record.subject()
+        {
+            self.indexes
+                .witnesses
+                .case_witness_by_case_character
+                .get(&(investigation_id, character))
+                .copied()
+        } else {
+            None
+        };
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
@@ -204,6 +236,18 @@ impl LegalState {
             previous.is_none(),
             "Index Uniqueness: duplicate evidence ID inserted"
         );
+        if let Some(case_witness) = invalidated_witness {
+            // Evidence is the causative case mutation and already advanced the investigation
+            // version above. Cancel only the work record here so the composite state change has
+            // one case revision while immediately releasing an interview that is now conflicted.
+            self.cancel_scheduled_witness_interview_for_case_mutation(
+                investigation_id,
+                case_witness,
+                activity_at,
+                InvestigationWorkCancellationReason::WitnessBecameCaseSubject(evidence_id),
+                originating_work,
+            );
+        }
         // Advance the case's last-activity instant to the commit minute, not the evidence's
         // discovery time: backdated evidence is legal (see validate_evidence_draft), but the case
         // still gained active work at the instant the evidence was actually added, so the
@@ -273,9 +317,26 @@ impl LegalState {
         investigation.version = advance_version_preflighted(investigation.version);
     }
     pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
+        self.insert_witness_statement_with_work_exemption(record, None);
+    }
+
+    pub(crate) fn insert_witness_statement_from_investigation_work(
+        &mut self,
+        record: WitnessStatementRecord,
+        originating_work: InvestigationWorkId,
+    ) {
+        self.insert_witness_statement_with_work_exemption(record, Some(originating_work));
+    }
+
+    fn insert_witness_statement_with_work_exemption(
+        &mut self,
+        record: WitnessStatementRecord,
+        originating_work: Option<InvestigationWorkId>,
+    ) {
         let id = record.id();
         let evidence = record.evidence();
         let case_witness = record.case_witness();
+        let recorded_at = record.recorded_at();
         let witness = self
             .case_witnesses
             .get_mut(&case_witness)
@@ -301,6 +362,16 @@ impl LegalState {
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate witness statement ID inserted"
+        );
+        // A statement entered outside a scheduled interview makes any pending interview for the
+        // same witness redundant. Statement insertion already advanced the investigation version,
+        // so cancel only the work record as part of this one composite case mutation.
+        self.cancel_scheduled_witness_interview_for_case_mutation(
+            investigation_id,
+            case_witness,
+            recorded_at,
+            InvestigationWorkCancellationReason::WitnessStatementRecorded(id),
+            originating_work,
         );
     }
     pub(crate) fn insert_investigation_work(&mut self, record: InvestigationWorkRecord) {
@@ -416,6 +487,60 @@ impl LegalState {
         id: InvestigationWorkId,
         cancellation: InvestigationWorkCancellation,
     ) {
+        let investigation_id = self.set_investigation_work_cancellation_runtime(id, cancellation);
+        let investigation = self
+            .investigations
+            .get_mut(&investigation_id)
+            .expect("validated investigation disappeared before work cancellation");
+        investigation.version = advance_version_preflighted(investigation.version);
+    }
+
+    /// Cancels a witness interview whose invalidating cause is already advancing the case version
+    /// in the same owner mutation. This prevents double-counting one semantic revision while still
+    /// keeping work lifecycle/index state synchronized immediately.
+    fn cancel_scheduled_witness_interview_for_case_mutation(
+        &mut self,
+        investigation_id: InvestigationId,
+        case_witness: CaseWitnessId,
+        cancelled_at: SimTime,
+        reason: InvestigationWorkCancellationReason,
+        originating_work: Option<InvestigationWorkId>,
+    ) {
+        let focus = InvestigationWorkFocus::witness(case_witness);
+        let Some(work) = self
+            .indexes
+            .work
+            .scheduled_work_by_focus
+            .get(&(
+                investigation_id,
+                InvestigationWorkKind::WitnessInterview,
+                focus,
+            ))
+            .copied()
+        else {
+            return;
+        };
+        if Some(work) == originating_work {
+            return;
+        }
+        self.set_investigation_work_cancellation_runtime(
+            work,
+            InvestigationWorkCancellation {
+                cancelled_at,
+                reason,
+            },
+        );
+    }
+
+    /// Applies only the work-owned portion of cancellation and returns its investigation. Most
+    /// callers use `set_investigation_work_cancellation`, which also advances the case. Composite
+    /// witness/evidence mutations use this directly through the helper above because their
+    /// causative mutation has already revised the same investigation.
+    fn set_investigation_work_cancellation_runtime(
+        &mut self,
+        id: InvestigationWorkId,
+        cancellation: InvestigationWorkCancellation,
+    ) -> InvestigationId {
         let (due_at, focus_key) = {
             let record = self
                 .investigation_work
@@ -433,7 +558,7 @@ impl LegalState {
             }
         }
         self.indexes.work.scheduled_work_by_focus.remove(&focus_key);
-        let investigation_id = {
+        {
             let record = self
                 .investigation_work
                 .get_mut(&id)
@@ -443,12 +568,7 @@ impl LegalState {
             record.runtime.cancellation = Some(cancellation);
             record.runtime.version = advance_version_preflighted(record.runtime.version);
             record.investigation()
-        };
-        let investigation = self
-            .investigations
-            .get_mut(&investigation_id)
-            .expect("validated investigation disappeared before work cancellation");
-        investigation.version = advance_version_preflighted(investigation.version);
+        }
     }
     pub(crate) fn set_investigation_status(
         &mut self,

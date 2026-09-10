@@ -203,6 +203,17 @@ fn validate_budget_usage(
             posting.account == usage.funding_account() && posting.amount.cents() == expected
         })
     });
+    let only_designated_outflow = transaction
+        .postings()
+        .iter()
+        .filter(|posting| posting.amount < Money::ZERO)
+        .all(|posting| posting.account == usage.funding_account());
+    let funding_raw = usage.funding_account().raw() as usize;
+    // `validate_postings` has already applied this transaction to the running historical balance,
+    // so this is the exact post-spend balance at the transaction instant, unaffected by later
+    // ledger activity. Canonical delegated spending cannot overdraw its designated funding pool.
+    let funding_remains_solvent = funding_raw < scratch.derived_balance_cents.len()
+        && scratch.derived_balance_cents[funding_raw] >= 0;
     let current_budget_matches = if usage.mandate_version() == mandate.version() {
         mandate.budget().is_some_and(|budget| {
             let window = budget.period.window(transaction.occurred_at());
@@ -230,6 +241,8 @@ fn validate_budget_usage(
             transaction.occurred_at(),
         )
         || !matching_posting
+        || !only_designated_outflow
+        || !funding_remains_solvent
     {
         return Err(StateValidationError::InvalidBudgetUsage {
             transaction: transaction.id(),

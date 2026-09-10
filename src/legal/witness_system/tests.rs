@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::build_registry;
+use crate::core::id::IdKind;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
@@ -11,7 +12,10 @@ use crate::legal::investigation_system::{
     InvestigationTransition, validate_add_evidence, validate_open_investigation,
     validate_transition_investigation,
 };
-use crate::legal::{CaseWitnessRecord, EvidenceDraft, InvestigationDraft, WitnessStatementDraft};
+use crate::legal::{
+    CaseWitnessRecord, EvidenceDraft, EvidenceRecord, InvestigationDraft, InvestigationRecord,
+    WitnessStatementDraft,
+};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, Rating};
 use serde::Serialize;
@@ -36,6 +40,160 @@ struct CaseWitnessRecordWire {
     statements: BTreeSet<crate::core::id::WitnessStatementId>,
     interview_attempts: u8,
     version: u32,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceIdentityWire {
+    id: EvidenceId,
+    investigation: InvestigationId,
+    custodian: crate::core::id::OrganizationId,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceConnectionWire {
+    subject: EntityRef,
+    origin: Option<EntityRef>,
+    source: Option<EntityRef>,
+    derived_from: BTreeSet<EvidenceId>,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceAssessmentWire {
+    kind: EvidenceKind,
+    strength: EvidenceStrength,
+    reliability: EvidenceReliability,
+    admissibility: Admissibility,
+}
+
+#[derive(Clone, Serialize)]
+struct EvidenceRecordWire {
+    identity: EvidenceIdentityWire,
+    connection: EvidenceConnectionWire,
+    assessment: EvidenceAssessmentWire,
+    discovered_at: SimTime,
+}
+
+#[derive(Clone, Serialize)]
+struct InvestigationRecordWire {
+    id: InvestigationId,
+    owner: crate::core::id::OrganizationId,
+    title: String,
+    status: InvestigationStatus,
+    lead_investigator: Option<CharacterId>,
+    declared_subjects: BTreeSet<EntityRef>,
+    subjects: BTreeSet<EntityRef>,
+    evidence: BTreeSet<EvidenceId>,
+    opened_at: SimTime,
+    origin: Option<EntityRef>,
+    notified_organizations: BTreeSet<crate::core::id::OrganizationId>,
+    last_activity_at: SimTime,
+    version: u32,
+}
+
+fn investigation_wire(record: &InvestigationRecord) -> InvestigationRecordWire {
+    InvestigationRecordWire {
+        id: record.id(),
+        owner: record.owner(),
+        title: record.title().to_owned(),
+        status: record.status(),
+        lead_investigator: record.lead_investigator(),
+        declared_subjects: record.declared_subjects().clone(),
+        subjects: record.subjects().clone(),
+        evidence: record.evidence().clone(),
+        opened_at: record.opened_at(),
+        origin: record.origin(),
+        notified_organizations: record.notified_organizations().clone(),
+        last_activity_at: record.last_activity_at(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_investigation(
+    envelope: SaveEnvelope,
+    original: &InvestigationRecord,
+    replacement: &InvestigationRecordWire,
+) -> SaveEnvelope {
+    let original_bytes =
+        bincode::serialize(original).expect("investigation record should serialize");
+    let mirror = investigation_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("investigation mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement investigation should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized investigation must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout investigation corruption must remain decodable")
+}
+
+fn evidence_wire(record: &EvidenceRecord) -> EvidenceRecordWire {
+    EvidenceRecordWire {
+        identity: EvidenceIdentityWire {
+            id: record.id(),
+            investigation: record.investigation(),
+            custodian: record.custodian(),
+        },
+        connection: EvidenceConnectionWire {
+            subject: record.subject(),
+            origin: record.origin(),
+            source: record.source(),
+            derived_from: record.derived_from().clone(),
+        },
+        assessment: EvidenceAssessmentWire {
+            kind: record.kind(),
+            strength: record.strength(),
+            reliability: record.reliability(),
+            admissibility: record.admissibility(),
+        },
+        discovered_at: record.discovered_at(),
+    }
+}
+
+fn replace_serialized_evidence(
+    envelope: SaveEnvelope,
+    original: &EvidenceRecord,
+    replacement: &EvidenceRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("evidence should serialize");
+    let mirror = evidence_wire(original);
+    assert_eq!(
+        bincode::serialize(&mirror).expect("evidence mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement evidence should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized evidence must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout evidence corruption must remain decodable")
 }
 
 fn case_witness_wire(record: &CaseWitnessRecord) -> CaseWitnessRecordWire {
@@ -153,6 +311,285 @@ fn make_fixture() -> WitnessFixture {
         witness,
         subject,
     }
+}
+
+#[test]
+fn case_subject_cannot_be_registered_as_case_witness() {
+    let fixture = make_fixture();
+    let next_witness = fixture.state.ids.next_raw(IdKind::CaseWitness);
+
+    assert_eq!(
+        validate_register_case_witness(
+            &fixture.state,
+            CaseWitnessDraft {
+                investigation: fixture.investigation,
+                witness: fixture.subject,
+                cooperation: WitnessCooperation::Cooperative,
+            },
+        )
+        .expect_err("a case subject cannot simultaneously enter that case as its witness"),
+        WitnessError::WitnessIsCaseSubject {
+            investigation: fixture.investigation,
+            witness: fixture.subject,
+        }
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::CaseWitness),
+        next_witness
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .case_witness_for(fixture.investigation, fixture.subject)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("rejected self-conflicted witness state must stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_effective_investigation_subject_without_declared_or_evidence_provenance() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let outsider = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Forged Effective Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("outsider fixture should validate");
+    let investigation = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation fixture should persist")
+        .clone();
+    assert_eq!(investigation.declared_subjects(), investigation.subjects());
+    assert!(investigation.evidence().is_empty());
+    let mut corrupted = investigation_wire(&investigation);
+    corrupted.subjects = BTreeSet::from([EntityRef::Character(outsider)]);
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_investigation(
+            build_save(&registry, &fixture.state)
+                .expect("valid investigation should save before subject corruption"),
+            &investigation,
+            &corrupted,
+        ),
+    )
+    .expect_err(
+        "restore must derive effective investigation subjects from declared context and evidence",
+    );
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidInvestigationDefinition {
+                investigation: invalid
+            }
+        ) if invalid == fixture.investigation
+    ));
+}
+
+#[test]
+fn witness_statement_cannot_introduce_unrelated_case_subject() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let outsider = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unrelated Bystander".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("unrelated character fixture should validate");
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness registration should commit");
+    let next_statement = fixture.state.ids.next_raw(IdKind::WitnessStatement);
+    let next_evidence = fixture.state.ids.next_raw(IdKind::Evidence);
+
+    assert_eq!(
+        validate_record_witness_statement(
+            &registry,
+            &fixture.state,
+            WitnessStatementDraft {
+                case_witness,
+                subject: EntityRef::Character(outsider),
+                origin: None,
+                confidence: rating(95),
+                summary: "The witness names someone with no connection to this case.".to_owned(),
+            },
+        )
+        .expect_err("testimony must not manufacture evidence against an unrelated entity"),
+        WitnessError::StatementSubjectOutsideCase {
+            witness: case_witness,
+            subject: EntityRef::Character(outsider),
+        }
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::WitnessStatement),
+        next_statement
+    );
+    assert_eq!(fixture.state.ids.next_raw(IdKind::Evidence), next_evidence);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("investigation should persist")
+            .evidence()
+            .iter()
+            .all(|evidence| fixture
+                .state
+                .legal()
+                .get_evidence(*evidence)
+                .is_some_and(|record| record.subject() != EntityRef::Character(outsider)))
+    );
+    validate_state(&fixture.state).expect("rejected unrelated testimony must preserve valid state");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("rejected unrelated testimony must preserve authored validity");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_statement_whose_only_case_connection_is_its_own_subject_promotion() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let lead = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Weakly Connected Lead".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("weak lead fixture should validate");
+    let decoy = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unconnected Decoy".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("decoy fixture should validate");
+    let weak_connection = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(lead),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Weak,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("weak case connection should validate")
+    .commit(&mut fixture.state)
+    .expect("weak case connection should commit");
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case witness should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness should commit");
+    let statement = validate_record_witness_statement(
+        &registry,
+        &fixture.state,
+        WitnessStatementDraft {
+            case_witness,
+            subject: EntityRef::Character(lead),
+            origin: None,
+            confidence: rating(95),
+            summary: "The witness develops the weak lead into an identified subject.".to_owned(),
+        },
+    )
+    .expect("testimony may develop an already connected weak lead")
+    .commit(&mut fixture.state)
+    .expect("lead-developing testimony should commit");
+    let investigation = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist");
+    assert!(
+        !investigation
+            .declared_subjects()
+            .contains(&EntityRef::Character(lead)),
+        "evidence-derived subject promotion must not rewrite declared case provenance"
+    );
+    assert!(
+        investigation
+            .subjects()
+            .contains(&EntityRef::Character(lead)),
+        "actionable testimony should promote the connected lead into effective subjects"
+    );
+    let weak_record = fixture
+        .state
+        .legal()
+        .get_evidence(weak_connection)
+        .expect("weak connection should persist")
+        .clone();
+    let mut corrupted = evidence_wire(&weak_record);
+    corrupted.connection.subject = EntityRef::Character(decoy);
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_evidence(
+            build_save(&registry, &fixture.state)
+                .expect("valid testimony should save before provenance corruption"),
+            &weak_record,
+            &corrupted,
+        ),
+    )
+    .expect_err(
+        "a promoted effective subject must not let testimony justify its own prior case relevance",
+    );
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidWitnessStatement {
+                statement: invalid
+            }
+        ) if invalid == statement.statement
+    ));
 }
 
 #[test]
@@ -400,6 +837,124 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
     validate_state(&restored).expect("restored testimony state should be structurally valid");
     validate_state_against_registry(&registry, &restored)
         .expect("restored testimony state should remain registry-valid");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn later_subject_promotion_preserves_historical_testimony_but_ends_witness_role() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("independent witness should register")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let historical = validate_record_witness_statement(
+        &registry,
+        &fixture.state,
+        WitnessStatementDraft {
+            case_witness,
+            subject: EntityRef::Character(fixture.subject),
+            origin: None,
+            confidence: rating(88),
+            summary: "Mercer identifies Dello before later evidence implicates Mercer himself."
+                .to_owned(),
+        },
+    )
+    .expect("historical testimony should validate")
+    .commit(&mut fixture.state)
+    .expect("historical testimony should commit");
+
+    validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.witness),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("later actionable evidence against the witness should validate")
+    .commit(&mut fixture.state)
+    .expect("later actionable evidence should commit");
+
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("investigation should persist")
+            .subjects()
+            .contains(&EntityRef::Character(fixture.witness)),
+        "actionable evidence should promote the former witness into the arrest-eligible subject set"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_witness_statement(historical.statement)
+            .is_some()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_evidence(historical.evidence)
+            .is_some()
+    );
+    assert_eq!(
+        validate_set_witness_cooperation(&fixture.state, case_witness, WitnessCooperation::Hostile)
+            .expect_err("a current case subject cannot keep acting through witness cooperation"),
+        WitnessError::WitnessIsCaseSubject {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+        }
+    );
+    assert!(
+        !crate::operations::operation_objective::has_pressureable_witness_case(
+            &fixture.state,
+            fixture.criminal,
+            fixture.witness,
+        ),
+        "counter-play must not treat a newly arrest-eligible subject as a pressureable witness"
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("historical testimony plus later role conflict should remain save-valid"),
+    )
+    .expect("historical testimony plus later role conflict should restore");
+    assert!(
+        restored
+            .legal()
+            .get_witness_statement(historical.statement)
+            .is_some()
+    );
+    assert!(restored.legal().get_evidence(historical.evidence).is_some());
+    assert!(
+        restored
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("restored investigation should persist")
+            .subjects()
+            .contains(&EntityRef::Character(fixture.witness))
+    );
+    validate_state(&restored)
+        .expect("restored historical testimony should remain structurally valid");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored historical testimony should remain registry-valid");
     validate_invariants(&restored);
 }
 

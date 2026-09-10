@@ -33,10 +33,22 @@ pub enum WitnessError {
         witness: CharacterId,
         existing: CaseWitnessId,
     },
+    #[error(
+        "character {witness} is a subject of investigation {investigation} and cannot act as its witness"
+    )]
+    WitnessIsCaseSubject {
+        investigation: InvestigationId,
+        witness: CharacterId,
+    },
     #[error("case witness {0} does not exist")]
     MissingCaseWitness(CaseWitnessId),
     #[error("case witness {0} already has a recorded statement")]
     WitnessAlreadyStatemented(CaseWitnessId),
+    #[error("case witness {witness} cannot give testimony about unrelated entity {subject:?}")]
+    StatementSubjectOutsideCase {
+        witness: CaseWitnessId,
+        subject: EntityRef,
+    },
     #[error("witness statement summary must not be empty")]
     EmptyStatement,
     #[error("witness statement references missing entity {0:?}")]
@@ -177,6 +189,15 @@ fn validate_registration_dependencies(
         .world
         .get_character(draft.witness)
         .ok_or(WitnessError::MissingCharacter(draft.witness))?;
+    if investigation
+        .subjects()
+        .contains(&EntityRef::Character(draft.witness))
+    {
+        return Err(WitnessError::WitnessIsCaseSubject {
+            investigation: draft.investigation,
+            witness: draft.witness,
+        });
+    }
     if let Some(existing) = state
         .legal
         .case_witness_for(draft.investigation, draft.witness)
@@ -284,6 +305,22 @@ impl ValidatedWitnessStatement {
     }
 
     pub fn commit(self, state: &mut AppState) -> Result<WitnessStatementOutcome, WitnessError> {
+        self.commit_with_originating_work(state, None)
+    }
+
+    pub(crate) fn commit_from_investigation_work(
+        self,
+        state: &mut AppState,
+        originating_work: crate::core::id::InvestigationWorkId,
+    ) -> Result<WitnessStatementOutcome, WitnessError> {
+        self.commit_with_originating_work(state, Some(originating_work))
+    }
+
+    fn commit_with_originating_work(
+        self,
+        state: &mut AppState,
+        originating_work: Option<crate::core::id::InvestigationWorkId>,
+    ) -> Result<WitnessStatementOutcome, WitnessError> {
         state
             .ids
             .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
@@ -315,50 +352,59 @@ impl ValidatedWitnessStatement {
             .get_investigation(investigation_id)
             .expect("validated witness investigation must exist");
         let recorded_at = state.now();
-        state.legal.insert_evidence(
-            EvidenceRecord {
-                identity: EvidenceIdentity {
-                    id: evidence,
-                    investigation: investigation_id,
-                    custodian: investigation.owner(),
-                },
-                connection: EvidenceConnection {
-                    subject: self.draft.subject,
-                    origin: self.draft.origin,
-                    source: Some(EntityRef::Character(witness_id)),
-                    derived_from: Default::default(),
-                },
-                assessment: EvidenceAssessment {
-                    kind: EvidenceKind::WitnessTestimony,
-                    strength: resolve_witness_strength(
-                        self.testimony,
-                        self.draft.confidence,
-                        cooperation,
-                    ),
-                    reliability: resolve_witness_reliability(
-                        self.testimony,
-                        self.draft.confidence,
-                        cooperation,
-                    ),
-                    admissibility: Admissibility::Unknown,
-                },
-                discovered_at: recorded_at,
+        let evidence_record = EvidenceRecord {
+            identity: EvidenceIdentity {
+                id: evidence,
+                investigation: investigation_id,
+                custodian: investigation.owner(),
             },
-            recorded_at,
-        );
-        state
-            .legal
-            .insert_witness_statement(WitnessStatementRecord {
-                id: statement,
-                case_witness: self.draft.case_witness,
+            connection: EvidenceConnection {
                 subject: self.draft.subject,
                 origin: self.draft.origin,
-                confidence: self.draft.confidence,
-                cooperation,
-                summary: self.draft.summary,
-                evidence,
+                source: Some(EntityRef::Character(witness_id)),
+                derived_from: Default::default(),
+            },
+            assessment: EvidenceAssessment {
+                kind: EvidenceKind::WitnessTestimony,
+                strength: resolve_witness_strength(
+                    self.testimony,
+                    self.draft.confidence,
+                    cooperation,
+                ),
+                reliability: resolve_witness_reliability(
+                    self.testimony,
+                    self.draft.confidence,
+                    cooperation,
+                ),
+                admissibility: Admissibility::Unknown,
+            },
+            discovered_at: recorded_at,
+        };
+        match originating_work {
+            Some(work) => state.legal.insert_evidence_from_investigation_work(
+                evidence_record,
                 recorded_at,
-            });
+                work,
+            ),
+            None => state.legal.insert_evidence(evidence_record, recorded_at),
+        }
+        let statement_record = WitnessStatementRecord {
+            id: statement,
+            case_witness: self.draft.case_witness,
+            subject: self.draft.subject,
+            origin: self.draft.origin,
+            confidence: self.draft.confidence,
+            cooperation,
+            summary: self.draft.summary,
+            evidence,
+            recorded_at,
+        };
+        match originating_work {
+            Some(work) => state
+                .legal
+                .insert_witness_statement_from_investigation_work(statement_record, work),
+            None => state.legal.insert_witness_statement(statement_record),
+        }
         Ok(WitnessStatementOutcome {
             statement,
             evidence,
@@ -421,6 +467,7 @@ fn validate_witness_mutation_snapshot(
     if investigation.status() != InvestigationStatus::Active {
         return Err(WitnessError::InactiveInvestigation(investigation.id()));
     }
+    validate_witness_not_case_subject(investigation, case_witness.witness())?;
     Ok(case_witness)
 }
 
@@ -439,7 +486,42 @@ fn validate_case_witness_for_active_case(
     if investigation.status() != InvestigationStatus::Active {
         return Err(WitnessError::InactiveInvestigation(investigation.id()));
     }
+    validate_witness_not_case_subject(investigation, witness.witness())?;
     Ok(witness)
+}
+
+fn validate_witness_not_case_subject(
+    investigation: &crate::legal::InvestigationRecord,
+    witness: CharacterId,
+) -> Result<(), WitnessError> {
+    if investigation
+        .subjects()
+        .contains(&EntityRef::Character(witness))
+    {
+        return Err(WitnessError::WitnessIsCaseSubject {
+            investigation: investigation.id(),
+            witness,
+        });
+    }
+    Ok(())
+}
+
+/// Current role-conflict predicate shared by investigation-work and witness-pressure consumers.
+/// A witness registration is historical and remains valid after later case development, but a
+/// character who has become an arrest-eligible subject cannot continue supplying witness actions
+/// in that same case.
+pub(crate) fn case_witness_is_case_subject(
+    state: &AppState,
+    case_witness: &CaseWitnessRecord,
+) -> bool {
+    state
+        .legal
+        .get_investigation(case_witness.investigation())
+        .is_some_and(|investigation| {
+            investigation
+                .subjects()
+                .contains(&EntityRef::Character(case_witness.witness()))
+        })
 }
 
 fn validate_statement_dependencies(
@@ -456,6 +538,18 @@ fn validate_statement_dependencies(
     if !is_entity_present(state, draft.subject) {
         return Err(WitnessError::MissingEntity(draft.subject));
     }
+    let investigation = state
+        .legal
+        .get_investigation(case_witness.investigation())
+        .ok_or(WitnessError::MissingInvestigation(
+            case_witness.investigation(),
+        ))?;
+    if !witness_statement_subject_is_case_relevant(state, investigation, draft.subject, None) {
+        return Err(WitnessError::StatementSubjectOutsideCase {
+            witness: case_witness.id(),
+            subject: draft.subject,
+        });
+    }
     if let Some(origin) = draft.origin
         && !is_entity_present(state, origin)
     {
@@ -463,6 +557,29 @@ fn validate_statement_dependencies(
     }
     validate_current_witness_character(state, case_witness.witness())?;
     Ok(())
+}
+
+/// Named testimony may strengthen explicitly declared case subject matter, identify the case's
+/// originating event, or develop an entity already connected by other evidence. It may not
+/// introduce an entity with no prior connection to the investigation. `excluded_evidence` lets
+/// restore validation ignore the statement's own testimony evidence. Declared subjects are kept
+/// separately from evidence-promoted effective subjects so the latter cannot circularly justify
+/// the testimony that promoted them.
+pub(crate) fn witness_statement_subject_is_case_relevant(
+    state: &AppState,
+    investigation: &crate::legal::InvestigationRecord,
+    subject: EntityRef,
+    excluded_evidence: Option<EvidenceId>,
+) -> bool {
+    investigation.origin() == Some(subject)
+        || investigation.declared_subjects().contains(&subject)
+        || investigation.evidence().iter().copied().any(|evidence_id| {
+            Some(evidence_id) != excluded_evidence
+                && state
+                    .legal
+                    .get_evidence(evidence_id)
+                    .is_some_and(|evidence| evidence.subject() == subject)
+        })
 }
 
 fn validate_current_witness_character(

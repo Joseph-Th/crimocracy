@@ -109,6 +109,8 @@ struct TestScenario {
     mandate: crate::core::id::MandateId,
 }
 
+const SOAK_OPENING_BUDGET_LIQUIDITY_CENTS: i64 = 50_000;
+
 fn level(value: u8) -> RelationshipLevel {
     RelationshipLevel::try_new(value).expect("fixture relationship level must be valid")
 }
@@ -317,6 +319,35 @@ fn make_test_scenario() -> TestScenario {
         },
     )
     .expect("budget destination account fixture should validate");
+    let budget_capitalization = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("budget capitalization counterparty should validate");
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Opening delegated budget liquidity".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: budget_capitalization,
+                    amount: Money::from_cents(-SOAK_OPENING_BUDGET_LIQUIDITY_CENTS),
+                },
+                LedgerPosting {
+                    account: budget_funding,
+                    amount: Money::from_cents(SOAK_OPENING_BUDGET_LIQUIDITY_CENTS),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("opening delegated budget liquidity should validate")
+    .commit(&mut state)
+    .expect("opening delegated budget liquidity should commit");
 
     validate_set_relationship(
         &state,
@@ -636,11 +667,11 @@ fn mixed_scenario_soak_preserves_invariants() {
                         postings: vec![
                             LedgerPosting {
                                 account: budget_funding,
-                                amount: Money::from_cents(-50_000),
+                                amount: Money::from_cents(-SOAK_OPENING_BUDGET_LIQUIDITY_CENTS),
                             },
                             LedgerPosting {
                                 account: budget_destination,
-                                amount: Money::from_cents(50_000),
+                                amount: Money::from_cents(SOAK_OPENING_BUDGET_LIQUIDITY_CENTS),
                             },
                         ],
                         authorization: Some(budget_authorization),
@@ -831,9 +862,11 @@ fn mixed_scenario_soak_preserves_invariants() {
     assert_eq!(
         organization_liquid,
         enterprise_net
+            .checked_add(Money::from_cents(SOAK_OPENING_BUDGET_LIQUIDITY_CENTS))
+            .expect("soak opening liquidity plus enterprise proceeds should fit money")
             .checked_sub(player_payroll_paid)
             .expect("soak aggregate liquid balance should reconcile after payroll"),
-        "the delegated budget transfer is liquid-to-liquid and net-zero, while enterprise cycles add liquidity and payroll removes it regardless of which eligible account funds wages"
+        "opening delegated liquidity and enterprise cycles add organization cash, the budget transfer is liquid-to-liquid and net-zero, and payroll removes liquidity regardless of which eligible account funds wages"
     );
     assert_eq!(
         state

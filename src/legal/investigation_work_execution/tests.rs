@@ -25,6 +25,7 @@ struct WorkFixture {
     first: CharacterId,
     middle: CharacterId,
     target: CharacterId,
+    witness: CharacterId,
     first_evidence: EvidenceId,
     /// Kept in the case graph so review support has multi-evidence context; not focused directly.
     _second_evidence: EvidenceId,
@@ -110,6 +111,19 @@ fn make_fixture(
     let first = insert_subject("Frank Dello");
     let middle = insert_subject("Maria Vale");
     let target = insert_subject("Fulton Garage Manager");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Independent Case Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("case witness fixture should validate");
     let investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -162,6 +176,7 @@ fn make_fixture(
         first,
         middle,
         target,
+        witness,
         first_evidence,
         _second_evidence: second_evidence,
     }
@@ -563,7 +578,7 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
         &fixture.state,
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
-            witness: fixture.first,
+            witness: fixture.witness,
             cooperation: crate::legal::WitnessCooperation::Hostile,
         },
     )
@@ -644,7 +659,7 @@ fn witness_interview_scheduling_prioritizes_unattempted_witness_before_retry() {
         &fixture.state,
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
-            witness: fixture.first,
+            witness: fixture.witness,
             cooperation: crate::legal::WitnessCooperation::Hostile,
         },
     )
@@ -721,7 +736,7 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
         &fixture.state,
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
-            witness: fixture.first,
+            witness: fixture.witness,
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -762,6 +777,220 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
     );
     validate_state(&fixture.state).expect("rejected redundant interview must leave valid state");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn actionable_evidence_against_witness_cancels_pending_interview_and_blocks_future_interviews() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("independent witness should register")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect("witness interview should initially schedule")
+    .commit(&mut fixture.state)
+    .expect("witness interview should commit");
+
+    let promotion = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.witness),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("new evidence against the witness should validate")
+    .commit(&mut fixture.state)
+    .expect("new evidence should promote the witness into the case subject set");
+
+    let record = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("invalidated interview should remain historical");
+    assert_eq!(record.status(), InvestigationWorkStatus::Cancelled);
+    assert_eq!(
+        record
+            .cancellation()
+            .expect("invalidated interview should record cancellation")
+            .reason(),
+        InvestigationWorkCancellationReason::WitnessBecameCaseSubject(promotion)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("investigation should persist")
+            .subjects()
+            .contains(&EntityRef::Character(fixture.witness))
+    );
+    assert_eq!(
+        validate_schedule_investigation_work(
+            &registry,
+            &fixture.state,
+            InvestigationWorkDraft {
+                investigation: fixture.investigation,
+                investigator: fixture.investigator,
+                kind: InvestigationWorkKind::WitnessInterview,
+                focus: InvestigationWorkFocus::witness(case_witness),
+            },
+        )
+        .expect_err("a promoted case subject cannot be scheduled as a witness again"),
+        InvestigationWorkError::WitnessIsCaseSubject {
+            witness: case_witness,
+            character: fixture.witness,
+        }
+    );
+    assert_eq!(
+        crate::legal::witness_system::validate_set_witness_cooperation(
+            &fixture.state,
+            case_witness,
+            crate::legal::WitnessCooperation::Hostile,
+        )
+        .expect_err("a promoted case subject cannot keep acting as a witness"),
+        crate::legal::witness_system::WitnessError::WitnessIsCaseSubject {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+        }
+    );
+    validate_state(&fixture.state).expect("witness-role invalidation should leave valid state");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("witness-role invalidation should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("subject-conflict cancellation should remain save-valid"),
+    )
+    .expect("subject-conflict cancellation should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_investigation_work(work)
+            .and_then(|record| record.cancellation())
+            .map(|cancellation| cancellation.reason()),
+        Some(InvestigationWorkCancellationReason::WitnessBecameCaseSubject(promotion))
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
+fn direct_statement_cancels_redundant_pending_interview_without_cancelling_its_case() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness should register")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect("interview should schedule")
+    .commit(&mut fixture.state)
+    .expect("interview should commit");
+
+    let statement = crate::legal::witness_system::validate_record_witness_statement(
+        &registry,
+        &fixture.state,
+        crate::legal::WitnessStatementDraft {
+            case_witness,
+            subject: EntityRef::Character(fixture.target),
+            origin: None,
+            confidence: rating(80),
+            summary: "The witness voluntarily gave the account before the appointment.".to_owned(),
+        },
+    )
+    .expect("direct statement should validate while an interview is pending")
+    .commit(&mut fixture.state)
+    .expect("direct statement should cancel the now-redundant interview");
+
+    let work_record = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("cancelled interview should remain historical");
+    assert_eq!(work_record.status(), InvestigationWorkStatus::Cancelled);
+    assert_eq!(
+        work_record
+            .cancellation()
+            .expect("cancelled interview should keep provenance")
+            .reason(),
+        InvestigationWorkCancellationReason::WitnessStatementRecorded(statement.statement)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .find_investigation_work_due_at_or_before(SimTime::from_minutes(u64::MAX))
+            .iter()
+            .all(|candidate| *candidate != work),
+        "cancelled interview must leave the due-work index immediately"
+    );
+    validate_state(&fixture.state).expect("redundant interview cancellation should be valid");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("redundant interview cancellation should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("statement cancellation provenance should remain save-valid"),
+    )
+    .expect("statement cancellation provenance should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_investigation_work(work)
+            .and_then(|record| record.cancellation())
+            .map(|cancellation| cancellation.reason()),
+        Some(InvestigationWorkCancellationReason::WitnessStatementRecorded(statement.statement))
+    );
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -939,7 +1168,7 @@ fn later_witness_pressure_does_not_rewrite_completed_interview_support() {
         &fixture.state,
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
-            witness: fixture.first,
+            witness: fixture.witness,
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1034,7 +1263,7 @@ fn witness_scheduler_surfaces_work_id_exhaustion_without_partial_schedule() {
         &fixture.state,
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
-            witness: fixture.first,
+            witness: fixture.witness,
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )

@@ -522,6 +522,14 @@ pub enum InvestigationWorkStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvestigationWorkCancellationReason {
     InvestigatorDetained(ArrestId),
+    /// Later case development made the interview target an arrest-eligible subject of the same
+    /// investigation. The witness registration remains historical, but unfinished interview work
+    /// cannot continue across that conflict.
+    WitnessBecameCaseSubject(EvidenceId),
+    /// A statement entered through the canonical witness path before the scheduled interview
+    /// completed, making that interview redundant. The statement id keeps cancellation
+    /// provenance exact without duplicating witness facts on the work record.
+    WitnessStatementRecorded(WitnessStatementId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,6 +936,11 @@ pub struct InvestigationRecord {
     pub(super) title: String,
     pub(super) status: InvestigationStatus,
     pub(super) lead_investigator: Option<CharacterId>,
+    /// Subject matter explicitly declared when the case was opened or later continued by a
+    /// validated incident. `subjects` is the effective tracked set and additionally includes
+    /// entities promoted by actionable evidence. Keeping both makes that promotion provenance
+    /// re-derivable at restore instead of letting an evidence-produced subject justify itself.
+    pub(super) declared_subjects: BTreeSet<EntityRef>,
     pub(super) subjects: BTreeSet<EntityRef>,
     pub(super) evidence: BTreeSet<EvidenceId>,
     pub(super) opened_at: SimTime,
@@ -963,6 +976,9 @@ impl InvestigationRecord {
     }
     pub fn lead_investigator(&self) -> Option<CharacterId> {
         self.lead_investigator
+    }
+    pub fn declared_subjects(&self) -> &BTreeSet<EntityRef> {
+        &self.declared_subjects
     }
     pub fn subjects(&self) -> &BTreeSet<EntityRef> {
         &self.subjects

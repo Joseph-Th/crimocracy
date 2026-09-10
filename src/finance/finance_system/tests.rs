@@ -127,9 +127,9 @@ fn restore_rejects_financial_account_version_not_derived_from_ledger() {
         .finance()
         .get_account(funding)
         .expect("funding account should persist");
-    assert_eq!(account.version(), 2);
+    assert_eq!(account.version(), 3);
     let mut corrupted = account_wire(account);
-    corrupted.version = 3;
+    corrupted.version = 4;
 
     let registry = build_registry();
     let error = restore_save(
@@ -250,6 +250,35 @@ fn make_test_budget() -> (
         },
     )
     .expect("destination account should validate");
+    let capitalization = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("budget capitalization counterparty should validate");
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Opening delegated budget reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: capitalization,
+                    amount: Money::from_cents(-2_500),
+                },
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(2_500),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("budget reserve capitalization should validate")
+    .commit(&mut state)
+    .expect("budget reserve capitalization should commit");
     let mandate = validate_assign_mandate(
         &state,
         MandateDraft {
@@ -661,7 +690,7 @@ fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked()
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::from_cents(-500)
+        Money::from_cents(2_000)
     );
     assert_eq!(
         state
@@ -930,7 +959,7 @@ fn mandate_budget_usage_is_derived_from_ledger_and_enforced() {
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::from_cents(-1_500)
+        Money::from_cents(1_000)
     );
     assert_eq!(
         state
@@ -1002,7 +1031,7 @@ fn validated_budget_transaction_becomes_stale_after_mandate_revision() {
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::ZERO
+        Money::from_cents(2_500)
     );
     assert_eq!(
         state
@@ -1124,6 +1153,113 @@ fn restore_rejects_current_budget_usage_with_forged_period_window() {
         ),
     )
     .expect_err("current-version budget usage must retain the authored period window");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBudgetUsage {
+                transaction: invalid
+            }
+        ) if invalid == transaction
+    ));
+}
+
+#[test]
+fn restore_rejects_budget_transaction_with_secondary_outflow() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let organization = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist")
+        .organization();
+    let secondary = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("secondary account should validate");
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Persisted delegated split allocation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-1_000),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(100),
+                },
+                LedgerPosting {
+                    account: secondary,
+                    amount: Money::from_cents(900),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("valid delegated split allocation should validate")
+    .commit(&mut state)
+    .expect("valid delegated split allocation should commit");
+
+    let transaction_record = state
+        .finance()
+        .get_transaction(transaction)
+        .expect("delegated transaction should persist");
+    let mut corrupted_transaction = transaction_wire(transaction_record);
+    corrupted_transaction.postings = vec![
+        LedgerPosting {
+            account: funding,
+            amount: Money::from_cents(-100),
+        },
+        LedgerPosting {
+            account: destination,
+            amount: Money::from_cents(1_000),
+        },
+        LedgerPosting {
+            account: secondary,
+            amount: Money::from_cents(-900),
+        },
+    ];
+    corrupted_transaction
+        .budget_usage
+        .as_mut()
+        .expect("delegated transaction should carry budget usage")
+        .amount = Money::from_cents(100);
+
+    let funding_record = state
+        .finance()
+        .get_account(funding)
+        .expect("funding account should persist");
+    let destination_record = state
+        .finance()
+        .get_account(destination)
+        .expect("destination account should persist");
+    let secondary_record = state
+        .finance()
+        .get_account(secondary)
+        .expect("secondary account should persist");
+    let mut corrupted_funding = account_wire(funding_record);
+    corrupted_funding.balance = Money::from_cents(2_400);
+    let mut corrupted_destination = account_wire(destination_record);
+    corrupted_destination.balance = Money::from_cents(1_000);
+    let mut corrupted_secondary = account_wire(secondary_record);
+    corrupted_secondary.balance = Money::from_cents(-900);
+
+    let registry = build_registry();
+    let envelope = build_save(&registry, &state)
+        .expect("valid delegated transaction should save before corruption");
+    let envelope = replace_serialized_account(envelope, funding_record, &corrupted_funding);
+    let envelope = replace_serialized_account(envelope, destination_record, &corrupted_destination);
+    let envelope = replace_serialized_account(envelope, secondary_record, &corrupted_secondary);
+    let envelope =
+        replace_serialized_transaction(envelope, transaction_record, &corrupted_transaction);
+    let error = restore_save(&registry, envelope)
+        .expect_err("restore must reject a delegated transaction that hides another outflow");
     assert!(matches!(
         error,
         crate::core::persistence::LoadError::InvalidState(
@@ -1262,7 +1398,7 @@ fn delegated_spend_rejects_manager_who_does_not_own_mandate() {
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::ZERO
+        Money::from_cents(2_500)
     );
     assert_eq!(
         state
@@ -1319,7 +1455,7 @@ fn delegated_spend_rejects_scope_outside_mandate() {
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::ZERO
+        Money::from_cents(2_500)
     );
     assert_eq!(
         state
@@ -1327,6 +1463,187 @@ fn delegated_spend_rejects_scope_outside_mandate() {
             .get_account(destination)
             .expect("destination account should exist")
             .balance(),
+        Money::ZERO
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn delegated_budget_rejects_secondary_outflow_outside_designated_funding_account() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let organization = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist")
+        .organization();
+    let secondary = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("secondary reserve should validate");
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Partition delegated reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-900),
+                },
+                LedgerPosting {
+                    account: secondary,
+                    amount: Money::from_cents(900),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("fixture reserve partition should validate")
+    .commit(&mut state)
+    .expect("fixture reserve partition should commit");
+
+    let error = match validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Disguised overreach".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: secondary,
+                    amount: Money::from_cents(-900),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(1_000),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    ) {
+        Ok(_) => panic!("a budget signature must not authorize debits from any other account"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        FinanceError::UnauthorizedBudgetOutflow {
+            mandate,
+            account: secondary,
+            funding_account: funding,
+        }
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(funding)
+            .map(|record| record.balance()),
+        Some(Money::from_cents(1_600))
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(secondary)
+            .map(|record| record.balance()),
+        Some(Money::from_cents(900))
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(destination)
+            .map(|record| record.balance()),
+        Some(Money::ZERO)
+    );
+    assert_eq!(
+        resolve_budget_usage(&state, mandate, state.now())
+            .expect("rejected transaction must leave budget usage unchanged")
+            .used,
+        Money::ZERO
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn delegated_budget_limit_does_not_finance_an_underfunded_account() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Drain most delegated reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-2_400),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(2_400),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("fixture reserve drain should validate")
+    .commit(&mut state)
+    .expect("fixture reserve drain should commit");
+
+    let error = match validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Unfunded delegated allocation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    ) {
+        Ok(_) => panic!("unused budget authority must not create financing when cash is absent"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        FinanceError::InsufficientBudgetFunds {
+            mandate,
+            account: funding,
+            available_cents: 100,
+            requested_cents: 500,
+        }
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(funding)
+            .map(|record| record.balance()),
+        Some(Money::from_cents(100))
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(destination)
+            .map(|record| record.balance()),
+        Some(Money::from_cents(2_400))
+    );
+    assert_eq!(
+        resolve_budget_usage(&state, mandate, state.now())
+            .expect("rejected unfunded transaction must leave budget usage unchanged")
+            .used,
         Money::ZERO
     );
     validate_invariants(&state);

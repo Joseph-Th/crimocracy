@@ -236,13 +236,15 @@ impl ValidatedInvestigation {
     pub fn commit(self, state: &mut AppState) -> Result<InvestigationId, InvestigationError> {
         validate_investigation_draft(state, &self.draft)?;
         let id = state.ids.next_investigation()?;
+        let subjects = self.draft.subjects;
         state.legal.insert_investigation(InvestigationRecord {
             id,
             owner: self.draft.owner,
             title: self.draft.title,
             status: InvestigationStatus::Active,
             lead_investigator: None,
-            subjects: self.draft.subjects,
+            declared_subjects: subjects.clone(),
+            subjects,
             evidence: Default::default(),
             opened_at: state.now(),
             origin: None,
@@ -972,6 +974,15 @@ impl ValidatedIncidentIntake {
                 .get_investigation(shelf)
                 .expect("resumable incident shelf must still exist");
             if let Some(witness) = &self.draft.witness
+                && record
+                    .subjects()
+                    .contains(&EntityRef::Character(witness.character))
+            {
+                return Err(InvestigationError::WitnessIsCaseSubject {
+                    character: witness.character,
+                });
+            }
+            if let Some(witness) = &self.draft.witness
                 && let Some(existing) = state.legal.case_witness_for(shelf, witness.character)
             {
                 return Err(InvestigationError::DuplicateIncidentWitness {
@@ -983,7 +994,7 @@ impl ValidatedIncidentIntake {
             let adds_incident_context = self
                 .draft
                 .subjects
-                .difference(record.subjects())
+                .difference(record.declared_subjects())
                 .next()
                 .is_some()
                 || self
@@ -1058,6 +1069,7 @@ impl ValidatedIncidentIntake {
                     title: self.draft.title,
                     status: InvestigationStatus::Active,
                     lead_investigator: None,
+                    declared_subjects: subjects.clone(),
                     subjects,
                     evidence: Default::default(),
                     opened_at: state.now(),
