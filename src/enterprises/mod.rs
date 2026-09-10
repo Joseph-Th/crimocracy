@@ -443,6 +443,17 @@ impl EnterpriseState {
             })
     }
 
+    /// Every active enterprise in deterministic (mandate ID, enterprise ID) order. Daily
+    /// planning passes use this live-work projection instead of rescanning retired and suspended
+    /// enterprise history when only current operating commitments matter.
+    pub(crate) fn active_enterprises(&self) -> impl Iterator<Item = &EnterpriseRecord> {
+        self.active_by_mandate.values().flatten().map(|id| {
+            self.records
+                .get(id)
+                .expect("active mandate-enterprise index must reference an enterprise")
+        })
+    }
+
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,

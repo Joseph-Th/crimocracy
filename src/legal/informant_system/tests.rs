@@ -570,6 +570,7 @@ fn informant_relationship_is_exclusive_and_save_round_trip_preserves_history() {
 
 #[test]
 fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
+    let registry = build_registry();
     let mut fixture = fixture();
     let case = crate::legal::investigation_system::validate_open_investigation(
         &fixture.state,
@@ -599,6 +600,23 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     .expect("case evidence should validate")
     .commit(&mut fixture.state)
     .expect("case evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.member),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating case evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating case evidence should commit");
 
     // The member already works for this handler from an earlier stint; a re-arrest must
     // not draw a second recruitment decision, which establishment would reject and the
@@ -614,11 +632,12 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     .commit(&mut fixture.state)
     .expect("informant establishment should commit");
     crate::legal::arrest_system::validate_arrest(
+        &registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.member,
             investigation: case,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("custody arrest should validate")
@@ -626,12 +645,9 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
     .expect("custody arrest should commit");
 
     fixture.state.advance_clock(SimDuration::from_minutes(
-        build_registry()
-            .legal()
-            .informant_decision_delay()
-            .as_minutes(),
+        registry.legal().informant_decision_delay().as_minutes(),
     ));
-    let recruited = apply_detainee_informant_recruitment(&build_registry(), &mut fixture.state)
+    let recruited = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
         .expect("recruitment pass should resolve without aborting the tick");
     assert!(recruited.is_empty());
     assert_eq!(fixture.state.legal().informants().count(), 1);
@@ -696,12 +712,30 @@ fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
     .expect("case evidence should validate")
     .commit(&mut fixture.state)
     .expect("case evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating case evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating case evidence should commit");
     crate::legal::arrest_system::validate_arrest(
+        &registry,
         &fixture.state,
         ArrestDraft {
             character: detainee,
             investigation: case,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("custody arrest should validate")
@@ -741,6 +775,7 @@ fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
 
 #[test]
 fn per_tick_scan_indexes_track_lifecycle_transitions() {
+    let registry = build_registry();
     let mut fixture = fixture();
     let active_cases = |state: &crate::core::state::AppState| -> Vec<InvestigationId> {
         state
@@ -781,12 +816,30 @@ fn per_tick_scan_indexes_track_lifecycle_transitions() {
     .expect("case evidence should validate")
     .commit(&mut fixture.state)
     .expect("case evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.member),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating case evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating case evidence should commit");
     let arrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.member,
             investigation: case,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("custody arrest should validate")

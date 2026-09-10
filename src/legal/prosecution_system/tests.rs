@@ -28,7 +28,12 @@ struct Fixture {
     investigation: InvestigationId,
     arrest: ArrestId,
     arrest_evidence: EvidenceId,
+    arrest_corroboration: EvidenceId,
     supplemental_evidence: EvidenceId,
+}
+
+fn arrest_evidence_set(fixture: &Fixture) -> BTreeSet<EvidenceId> {
+    BTreeSet::from([fixture.arrest_evidence, fixture.arrest_corroboration])
 }
 
 #[derive(Clone, Serialize)]
@@ -146,7 +151,11 @@ fn prosecution_referrals_reject_evidence_about_another_person_in_the_same_police
             arrest: fixture.arrest,
             prosecutor_office: fixture.office,
             prosecutor: fixture.lead,
-            evidence: BTreeSet::from([fixture.arrest_evidence, unrelated]),
+            evidence: BTreeSet::from([
+                fixture.arrest_evidence,
+                fixture.arrest_corroboration,
+                unrelated,
+            ]),
         },
     ) {
         Ok(_) => panic!("initial referral must not import unrelated evidence from the police file"),
@@ -185,7 +194,7 @@ fn prosecution_referrals_reject_evidence_about_another_person_in_the_same_police
             .get_prosecution_case(case)
             .expect("case should remain unchanged")
             .evidence(),
-        &BTreeSet::from([fixture.arrest_evidence])
+        &arrest_evidence_set(&fixture)
     );
     validate_state(&fixture.state).expect("rejected unrelated referrals leave valid state");
     validate_invariants(&fixture.state);
@@ -453,12 +462,20 @@ fn fixture() -> Fixture {
         defendant,
         EvidenceKind::Document,
     );
+    let arrest_corroboration = add_evidence(
+        &mut state,
+        police,
+        investigation,
+        defendant,
+        EvidenceKind::KnownAssociation,
+    );
     let arrest = validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: defendant,
             investigation,
-            evidence: BTreeSet::from([arrest_evidence]),
+            evidence: BTreeSet::from([arrest_evidence, arrest_corroboration]),
         },
     )
     .expect("arrest should validate")
@@ -481,6 +498,7 @@ fn fixture() -> Fixture {
         investigation,
         arrest,
         arrest_evidence,
+        arrest_corroboration,
         supplemental_evidence,
     }
 }
@@ -490,7 +508,7 @@ fn opening_draft(fixture: &Fixture) -> ProsecutionCaseDraft {
         arrest: fixture.arrest,
         prosecutor_office: fixture.office,
         prosecutor: fixture.lead,
-        evidence: BTreeSet::from([fixture.arrest_evidence]),
+        evidence: arrest_evidence_set(fixture),
     }
 }
 
@@ -516,10 +534,7 @@ fn referral_preserves_police_custody_and_survives_save_before_supplement() {
     assert_eq!(record.source_authority(), fixture.police);
     assert_eq!(record.prosecutor_office(), fixture.office);
     assert_eq!(record.assigned_prosecutor(), Some(fixture.lead));
-    assert_eq!(
-        record.evidence(),
-        &BTreeSet::from([fixture.arrest_evidence])
-    );
+    assert_eq!(record.evidence(), &arrest_evidence_set(&fixture));
     assert_eq!(record.version(), 1);
     let initial_referral = record.initial_referral();
     let referral = fixture
@@ -574,7 +589,11 @@ fn referral_preserves_police_custody_and_survives_save_before_supplement() {
     assert_eq!(updated.referrals().len(), 2);
     assert_eq!(
         updated.evidence(),
-        &BTreeSet::from([fixture.arrest_evidence, fixture.supplemental_evidence])
+        &BTreeSet::from([
+            fixture.arrest_evidence,
+            fixture.arrest_corroboration,
+            fixture.supplemental_evidence,
+        ])
     );
     assert_eq!(
         restored
@@ -741,7 +760,7 @@ fn open_case_is_unique_per_office_but_other_prosecutor_office_may_receive_referr
             arrest: fixture.arrest,
             prosecutor_office: second_office,
             prosecutor: second_lead,
-            evidence: BTreeSet::from([fixture.arrest_evidence]),
+            evidence: arrest_evidence_set(&fixture),
         },
     )
     .expect("different prosecutor office may receive same arrest referral")
@@ -1034,12 +1053,20 @@ fn detained_prosecutor_releases_review_for_deterministic_office_restaffing() {
         fixture.lead,
         EvidenceKind::Document,
     );
+    let lead_corroboration = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        lead_investigation,
+        fixture.lead,
+        EvidenceKind::KnownAssociation,
+    );
     let lead_arrest = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.lead,
             investigation: lead_investigation,
-            evidence: BTreeSet::from([lead_evidence]),
+            evidence: BTreeSet::from([lead_evidence, lead_corroboration]),
         },
     )
     .expect("lead prosecutor may be arrested without freezing unrelated prosecution work")
@@ -1150,12 +1177,20 @@ fn arrest_stales_when_prosecutor_acquires_review_after_custody_preflight() {
         fixture.lead,
         EvidenceKind::Document,
     );
+    let misconduct_corroboration = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        misconduct,
+        fixture.lead,
+        EvidenceKind::KnownAssociation,
+    );
     let stale_arrest = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.lead,
             investigation: misconduct,
-            evidence: BTreeSet::from([misconduct_evidence]),
+            evidence: BTreeSet::from([misconduct_evidence, misconduct_corroboration]),
         },
     )
     .expect("arrest should validate before the prosecutor acquires review work");
@@ -1236,7 +1271,7 @@ fn private_legal_services_and_generic_legal_authority_cannot_act_as_prosecutor_o
                 arrest: fixture.arrest,
                 prosecutor_office: invalid_office,
                 prosecutor: invalid_lead,
-                evidence: BTreeSet::from([fixture.arrest_evidence]),
+                evidence: arrest_evidence_set(&fixture),
             },
         ) {
             Ok(_) => panic!("non-prosecutor institution must not open prosecution case"),

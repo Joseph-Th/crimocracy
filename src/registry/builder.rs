@@ -50,7 +50,7 @@ pub(crate) enum RegistryBuildError {
     MissingInformationQuality,
     #[error("information-quality scores must be in 0..=100")]
     InvalidInformationQuality,
-    #[error("recruitment cooldown and legal-pressure age must be positive")]
+    #[error("recruitment cooldown, autonomous cadence, and legal-pressure age must be positive")]
     InvalidRecruitmentDuration,
     #[error("recruitment weights and membership resistance must be in 0..=100")]
     InvalidRecruitmentWeight,
@@ -211,7 +211,7 @@ pub(crate) enum RegistryBuildError {
     InvalidLegalWitnessTestimony,
     #[error("legal informant decision delay must be positive")]
     InvalidLegalInformantDelay,
-    #[error("legal autonomous-arrest evidence count must be positive")]
+    #[error("legal arrest qualifying-source count must be positive")]
     InvalidLegalArrestEvidenceCount,
     #[error("legal informant chance tuning must remain within a 0..=100 percent range")]
     InvalidLegalInformantChance,

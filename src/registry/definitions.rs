@@ -798,7 +798,7 @@ pub struct LegalConfigSpec {
     pub witness_testimony: WitnessTestimonyDefinition,
     /// How long after detention a detainee faces their single informant-recruitment decision.
     pub informant_decision_delay: SimDuration,
-    /// Independent qualifying evidence items required before police autonomously make an arrest.
+    /// Independent qualifying evidence sources required before police make an arrest.
     pub minimum_arrest_qualifying_evidence: u8,
     /// Baseline chance that a due detainee accepts an informant offer, before personal pressure.
     pub informant_base_flip_chance_percent: u8,
@@ -905,8 +905,8 @@ pub struct LaunderingConfigSpec {
     /// Basis points of each laundered transfer kept by the front business as revenue
     /// (for example 1_500 = a 15 percent laundering cut).
     pub fee_basis_points: u32,
-    /// Maximum single-transfer size as basis points of the front's legitimate gross
-    /// potential (for example 5_000 = half of one cycle's legitimate gross).
+    /// Maximum aggregate laundering volume per operating cycle as basis points of the front's
+    /// current legitimate gross potential (for example 5_000 = half of one cycle's gross).
     pub plausibility_gross_basis_points: u32,
 }
 #[derive(Clone, Copy, Debug)]

@@ -36,6 +36,7 @@ use crate::operations::operation_abort::{
     ValidatedOperationAbort, validate_participant_detention_abort_operation,
 };
 use crate::operations::operation_system::OperationError;
+use crate::registry::Registry;
 use crate::world::OrganizationKind;
 use thiserror::Error;
 
@@ -69,6 +70,12 @@ pub enum ArrestError {
     },
     #[error("arrest must cite at least one evidence record")]
     NoEvidence,
+    #[error(
+        "arrest requires at least {required} independent qualifying evidence sources; found {found}"
+    )]
+    InsufficientIndependentEvidence { found: usize, required: u8 },
+    #[error("arrest requires at least one independent Strong or Direct evidence source")]
+    NoStrongIndependentEvidence,
     #[error("evidence {0} does not exist")]
     MissingEvidence(EvidenceId),
     #[error("evidence {evidence} does not belong to investigation {investigation}")]
@@ -175,6 +182,7 @@ impl std::fmt::Debug for ValidatedCustodyOperationPreemption {
 pub struct ValidatedArrest {
     draft: ArrestDraft,
     authority: OrganizationId,
+    minimum_qualifying_evidence: u8,
     expected_investigation_version: u32,
     expected_character_version: u32,
     validated_at: SimTime,
@@ -215,7 +223,8 @@ impl ValidatedArrest {
                 found: character.version(),
             });
         }
-        let authority = validate_arrest_dependencies(state, &self.draft)?;
+        let authority =
+            validate_arrest_dependencies(state, &self.draft, self.minimum_qualifying_evidence)?;
         debug_assert_eq!(authority, self.authority);
 
         let current_work = scheduled_work_for_investigator(state, self.draft.character);
@@ -305,10 +314,12 @@ impl ValidatedArrest {
 }
 
 pub fn validate_arrest(
+    registry: &Registry,
     state: &AppState,
     draft: ArrestDraft,
 ) -> Result<ValidatedArrest, ArrestError> {
-    let authority = validate_arrest_dependencies(state, &draft)?;
+    let minimum_qualifying_evidence = registry.legal().minimum_arrest_qualifying_evidence();
+    let authority = validate_arrest_dependencies(state, &draft, minimum_qualifying_evidence)?;
     let investigation = state
         .legal
         .get_investigation(draft.investigation)
@@ -343,6 +354,7 @@ pub fn validate_arrest(
     Ok(ValidatedArrest {
         draft,
         authority,
+        minimum_qualifying_evidence,
         expected_investigation_version: investigation.version(),
         expected_character_version: character.version(),
         validated_at: state.now(),
@@ -384,6 +396,7 @@ fn ensure_custody_investigation_version_budget(
 fn validate_arrest_dependencies(
     state: &AppState,
     draft: &ArrestDraft,
+    minimum_qualifying_evidence: u8,
 ) -> Result<OrganizationId, ArrestError> {
     let _ = state
         .world
@@ -424,6 +437,7 @@ fn validate_arrest_dependencies(
     if draft.evidence.is_empty() {
         return Err(ArrestError::NoEvidence);
     }
+    let mut assessment = CustodyEvidenceAssessment::default();
     for evidence_id in &draft.evidence {
         let evidence = state
             .legal
@@ -460,6 +474,17 @@ fn validate_arrest_dependencies(
                 reliability: evidence.reliability(),
             });
         }
+        assessment.observe(state, evidence);
+    }
+
+    if assessment.independent_qualifying() < usize::from(minimum_qualifying_evidence) {
+        return Err(ArrestError::InsufficientIndependentEvidence {
+            found: assessment.independent_qualifying(),
+            required: minimum_qualifying_evidence,
+        });
+    }
+    if !assessment.has_strong_independent() {
+        return Err(ArrestError::NoStrongIndependentEvidence);
     }
 
     Ok(authority)
@@ -476,6 +501,94 @@ fn has_minimum_custody_quality(
 ) -> bool {
     strength != crate::legal::EvidenceStrength::Weak
         && reliability != crate::legal::EvidenceReliability::Questionable
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CustodyCorroborationSource {
+    /// Witness and informant evidence carry explicit source provenance. Multiple statements
+    /// from the same source may add useful detail, but they remain one corroborating source.
+    Named(EntityRef),
+    /// Source-less primary evidence is the model's abstraction for a distinct physical,
+    /// documentary, surveillance, or other independently gathered fact.
+    PrimaryEvidence(EvidenceId),
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CustodyEvidenceAssessment {
+    sources: std::collections::BTreeMap<CustodyCorroborationSource, bool>,
+}
+
+impl CustodyEvidenceAssessment {
+    fn observe(&mut self, state: &AppState, evidence: &crate::legal::EvidenceRecord) -> bool {
+        if !evidence_qualifies_for_custody(evidence) {
+            return false;
+        }
+        let source_evidence = match evidence.derived_from().len() {
+            0 => evidence,
+            1 => {
+                let source_id = *evidence
+                    .derived_from()
+                    .iter()
+                    .next()
+                    .expect("single-source derived evidence must name its source");
+                let Some(source) = state.legal.get_evidence(source_id) else {
+                    return false;
+                };
+                source
+            }
+            _ => return false,
+        };
+        let source = source_evidence
+            .source()
+            .map(CustodyCorroborationSource::Named)
+            .unwrap_or(CustodyCorroborationSource::PrimaryEvidence(
+                source_evidence.id(),
+            ));
+        let strong = matches!(
+            evidence.strength(),
+            crate::legal::EvidenceStrength::Strong | crate::legal::EvidenceStrength::Direct
+        );
+        self.sources
+            .entry(source)
+            .and_modify(|has_strong| *has_strong |= strong)
+            .or_insert(strong);
+        true
+    }
+
+    fn independent_qualifying(&self) -> usize {
+        self.sources.len()
+    }
+
+    fn has_strong_independent(&self) -> bool {
+        self.sources.values().any(|has_strong| *has_strong)
+    }
+
+    fn meets(&self, minimum_qualifying_evidence: u8) -> bool {
+        self.independent_qualifying() >= usize::from(minimum_qualifying_evidence)
+            && self.has_strong_independent()
+    }
+}
+
+/// Registry-aware corroboration rule used by persistence validation. Canonical direct and
+/// autonomous arrest paths use the same `CustodyEvidenceAssessment` owner while assembling their
+/// evidence. Derived evidence may be cited on a direct arrest but cannot manufacture an
+/// independent fact.
+/// Multiple witness/informant records naming the same explicit source count once; source-less
+/// primary records represent distinct gathered facts. At least one independent source must carry
+/// Strong or Direct weight.
+pub(crate) fn arrest_evidence_meets_threshold(
+    state: &AppState,
+    evidence_ids: &std::collections::BTreeSet<EvidenceId>,
+    minimum_qualifying_evidence: u8,
+) -> bool {
+    let mut assessment = CustodyEvidenceAssessment::default();
+    for evidence_id in evidence_ids {
+        let Some(evidence) = state.legal.get_evidence(*evidence_id) else {
+            return false;
+        };
+        assessment.observe(state, evidence);
+    }
+    assessment.meets(minimum_qualifying_evidence)
 }
 
 /// Single semantic predicate for evidence that may support custody. Runtime arrest validation,
@@ -593,8 +706,8 @@ pub(crate) fn apply_due_custody_releases(
     Ok(due)
 }
 
-/// Evidence bar for the autonomous conversion step: at least two qualifying items, at
-/// least one of them Strong or Direct. Qualifying evidence targets the subject directly,
+/// Evidence bar for the autonomous conversion step: the authored number of independent
+/// qualifying sources, with at least one Strong or Direct. Qualifying evidence targets the subject directly,
 /// is held by the case's own authority, is not known inadmissible, and meets the same minimum
 /// strength/reliability floor as the canonical arrest path. This is a
 /// deliberately conservative institutional gate — it consumes case evidence that already
@@ -676,10 +789,10 @@ pub fn apply_autonomous_evidence_arrests(
             return Err(ArrestError::InactiveInvestigation(investigation_id));
         }
         let owner = investigation.owner();
-        // Single lookup per evidence record decides qualification and the strong/direct
-        // bar together, instead of resolving each qualifying item a second time.
-        let mut qualifying: Vec<EvidenceId> = Vec::new();
-        let mut has_strong = false;
+        // One lookup per case evidence record decides both eligibility and corroboration source.
+        // Canonical arrest validation intentionally rechecks the final draft before mutation.
+        let mut qualifying = std::collections::BTreeSet::new();
+        let mut assessment = CustodyEvidenceAssessment::default();
         for evidence_id in investigation.evidence().iter() {
             let evidence = state
                 .legal
@@ -687,27 +800,16 @@ pub fn apply_autonomous_evidence_arrests(
                 .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
             if evidence.subject() != EntityRef::Character(character)
                 || evidence.custodian() != owner
-                || !evidence_qualifies_for_custody(evidence)
             {
                 continue;
             }
-            // Corroboration means independent facts: a forensic analysis derived from case
-            // evidence restates its source's subject and strength, so counting both would let
-            // one underlying fact satisfy the two-item bar by itself. Derivatives still
-            // strengthen the institution's hand through improved reliability and later
-            // informant or witness work; they just cannot be their own second witness.
-            if !evidence.derived_from().is_empty() {
-                continue;
+            if evidence.derived_from().is_empty() && assessment.observe(state, evidence) {
+                // Autonomous custody cites qualifying primary evidence only. Derived analyses
+                // remain case evidence and cannot duplicate the underlying source on the arrest.
+                qualifying.insert(evidence.id());
             }
-            has_strong |= matches!(
-                evidence.strength(),
-                crate::legal::EvidenceStrength::Strong | crate::legal::EvidenceStrength::Direct
-            );
-            qualifying.push(evidence.id());
         }
-        if qualifying.len() < usize::from(registry.legal().minimum_arrest_qualifying_evidence())
-            || !has_strong
-        {
+        if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
             continue;
         }
 
@@ -715,11 +817,12 @@ pub fn apply_autonomous_evidence_arrests(
         // part of the validated custody transaction, so validation or allocation failure is
         // exceptional and must surface rather than being mistaken for "not enough evidence yet".
         let arrest = validate_arrest(
+            registry,
             state,
             ArrestDraft {
                 character,
                 investigation: investigation_id,
-                evidence: qualifying.into_iter().collect(),
+                evidence: qualifying,
             },
         )?
         .commit(state)?;

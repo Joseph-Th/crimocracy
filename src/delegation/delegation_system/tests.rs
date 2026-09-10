@@ -8,7 +8,10 @@ use crate::delegation::ResponsibilityFunction;
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,
 };
-use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use crate::world::{
+    ApprovalPolicy, AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, PolicyKind,
+    PolicySetting,
+};
 
 fn make_authority_fixture() -> (crate::Registry, AppState, MandateAuthority) {
     let registry = build_registry();
@@ -59,6 +62,89 @@ fn make_authority_fixture() -> (crate::Registry, AppState, MandateAuthority) {
             scope: ResponsibilityScope::Function(ResponsibilityFunction::Finance),
         },
     )
+}
+
+#[test]
+fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore() {
+    let (registry, mut state, authority) = make_authority_fixture();
+    let organization = state
+        .delegation()
+        .get_mandate(authority.mandate)
+        .expect("mandate fixture should persist")
+        .organization();
+
+    let initial = resolve_policy_for_manager(
+        &state,
+        authority.manager,
+        PolicyKind::IndependentRecruitment,
+    )
+    .expect("organization fallback policy should resolve");
+    assert_eq!(
+        initial.setting,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
+    );
+    assert_eq!(initial.source, PolicySource::Organization(organization));
+    assert_eq!(initial.source_version, 1);
+
+    set_policy(
+        &registry,
+        &mut state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("first real organization-policy change should commit");
+    set_policy(
+        &registry,
+        &mut state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("second real organization-policy change should commit");
+    let returned = resolve_policy_for_manager(
+        &state,
+        authority.manager,
+        PolicyKind::IndependentRecruitment,
+    )
+    .expect("returned organization policy should resolve");
+    assert_eq!(returned.setting, initial.setting);
+    assert_eq!(returned.source, initial.source);
+    assert_eq!(returned.source_version, 3);
+    assert_ne!(
+        returned, initial,
+        "source version must distinguish an ABA policy cycle from an unchanged policy"
+    );
+
+    set_policy(&registry, &mut state, organization, returned.setting)
+        .expect("identical policy set should be a no-op");
+    assert_eq!(
+        resolve_policy_for_manager(
+            &state,
+            authority.manager,
+            PolicyKind::IndependentRecruitment,
+        )
+        .expect("unchanged organization policy should still resolve")
+        .source_version,
+        3,
+        "a no-op write must not invalidate held policy snapshots"
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("versioned policy state should save"),
+    )
+    .expect("versioned policy state should restore");
+    assert_eq!(
+        resolve_policy_for_manager(
+            &restored,
+            authority.manager,
+            PolicyKind::IndependentRecruitment,
+        )
+        .expect("restored organization policy should resolve")
+        .source_version,
+        3
+    );
+    validate_state(&restored).expect("restored policy versions should remain structurally valid");
+    validate_invariants(&restored);
 }
 
 #[test]

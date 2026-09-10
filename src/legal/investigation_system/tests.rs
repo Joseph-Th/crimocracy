@@ -2905,15 +2905,33 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
         .get_investigation(identified)
         .and_then(|record| record.evidence().iter().next())
         .expect("intake recorded its evidence");
+    let corroborating = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation: identified,
+            custodian: police,
+            subject: EntityRef::Character(lieutenant),
+            origin: Some(EntityRef::Operation(origin)),
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating arrest evidence should validate")
+    .commit(&mut state)
+    .expect("corroborating arrest evidence should commit");
 
     // The subject's arrest sits under this very case; the case is cleared by arrest and
     // must close through decay instead of lingering active with a held investigator slot.
     crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         crate::legal::ArrestDraft {
             character: lieutenant,
             investigation: identified,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("evidence-backed arrest should validate")

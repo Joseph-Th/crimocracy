@@ -564,12 +564,29 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
         },
     )?
     .commit(&mut state)?;
+    let corroborating_evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(defendant),
+            origin: None,
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )?
+    .commit(&mut state)?;
+    let arrest_evidence = BTreeSet::from([evidence, corroborating_evidence]);
     let arrest = validate_arrest(
+        registry,
         &state,
         ArrestDraft {
             character: defendant,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: arrest_evidence.clone(),
         },
     )?
     .commit(&mut state)?;
@@ -635,7 +652,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
             arrest,
             prosecutor_office,
             prosecutor,
-            evidence: BTreeSet::from([evidence]),
+            evidence: arrest_evidence,
         },
     )?
     .commit(&mut state)?;

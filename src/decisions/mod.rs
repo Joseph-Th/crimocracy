@@ -145,6 +145,9 @@ pub enum DecisionCancellationReason {
     /// The mandate snapshot behind a recruitment approval was permanently superseded by a
     /// revision or revocation, so the old request can no longer be approved coherently.
     RecruitmentAuthorityChanged(MandateId),
+    /// The organization-level recruitment policy that supplied this approval's effective rule
+    /// changed, so the pending request no longer represents current delegated authority.
+    RecruitmentOrganizationPolicyChanged(OrganizationId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

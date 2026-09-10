@@ -5,7 +5,9 @@ use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::legal::arrest_system::{custody_release_at, evidence_qualifies_for_custody};
+use crate::legal::arrest_system::{
+    arrest_evidence_meets_threshold, custody_release_at, evidence_qualifies_for_custody,
+};
 use crate::legal::informant_system::{
     informant_reliability, informant_strength, information_is_relevant_to_investigation,
 };
@@ -119,11 +121,15 @@ pub(in crate::core::invariants) fn validate_arrests_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     let maximum_detention = registry.legal().maximum_detention();
+    let minimum_qualifying_evidence = registry.legal().minimum_arrest_qualifying_evidence();
     for arrest in state.legal.arrests() {
         let release_boundary = custody_release_at(arrest.arrested_at(), maximum_detention);
         let invalid = || StateValidationError::InvalidArrest {
             arrest: arrest.id(),
         };
+        if !arrest_evidence_meets_threshold(state, arrest.evidence(), minimum_qualifying_evidence) {
+            return Err(invalid());
+        }
         match arrest.status() {
             ArrestStatus::Detained => {
                 // At the absolute clock endpoint an arrest can be authored at the same instant as

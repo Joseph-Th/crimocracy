@@ -9,12 +9,15 @@ use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::decisions::decision_system::{
     ValidatedRecruitmentApprovalCancellations,
     validate_cancel_recruitment_approvals_for_mandate_change,
+    validate_cancel_recruitment_approvals_for_organization_policy_change,
 };
 use crate::delegation::{
     BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord, MandateStatus,
     ResolvedMandateAuthority, ResponsibilityScope, build_mandate_record,
 };
 use crate::finance::FinancialOwner;
+use crate::registry::Registry;
+use crate::world::world_system::{WorldError, set_policy as set_world_policy};
 use crate::world::{PolicyKind, PolicySetting};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -119,6 +122,44 @@ pub enum DelegationError {
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
     VersionCapacity(#[from] VersionCapacityError),
+    #[error(transparent)]
+    World(#[from] WorldError),
+}
+
+/// Canonical organization-policy mutation. Policy records are stored by `world`, while this
+/// governance layer coordinates policy changes with any decision-owned lifecycle that the
+/// effective policy can permanently supersede. All fallible cancellation preflight happens
+/// before the world-owned setting changes, so the composite mutation is atomic on failure.
+pub fn set_policy(
+    registry: &Registry,
+    state: &mut AppState,
+    organization: OrganizationId,
+    setting: PolicySetting,
+) -> Result<(), DelegationError> {
+    let organization_record = state
+        .world
+        .get_organization(organization)
+        .ok_or(DelegationError::MissingOrganization(organization))?;
+    registry.get_policy(setting.kind());
+    if organization_record.policy(setting.kind()) == Some(setting) {
+        return Ok(());
+    }
+
+    let approval_cancellations = matches!(setting, PolicySetting::IndependentRecruitment(_))
+        .then(|| {
+            validate_cancel_recruitment_approvals_for_organization_policy_change(
+                state,
+                organization,
+            )
+        })
+        .transpose()?;
+
+    set_world_policy(registry, state, organization, setting)?;
+    if let Some(cancellations) = approval_cancellations {
+        debug_assert!(cancellations.is_current(state));
+        cancellations.commit_preflighted(state);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -452,6 +493,7 @@ pub enum PolicySource {
 pub struct ResolvedPolicy {
     pub setting: PolicySetting,
     pub source: PolicySource,
+    pub source_version: u32,
 }
 
 pub fn resolve_policy_for_manager(
@@ -470,7 +512,12 @@ pub fn resolve_policy_for_manager(
     if let Some(mandate) = state.delegation.active_for_manager(manager)
         && let Some(setting) = mandate.standing_order(kind)
     {
-        return resolve_resolved_policy(kind, setting, PolicySource::Mandate(mandate.id()));
+        return resolve_resolved_policy(
+            kind,
+            setting,
+            PolicySource::Mandate(mandate.id()),
+            mandate.version(),
+        );
     }
     let organization_record = state
         .world
@@ -483,19 +530,35 @@ pub fn resolve_policy_for_manager(
                 organization,
                 policy: kind,
             })?;
-    resolve_resolved_policy(kind, setting, PolicySource::Organization(organization))
+    let source_version = organization_record.policy_version(kind).ok_or(
+        DelegationError::MissingOrganizationPolicy {
+            organization,
+            policy: kind,
+        },
+    )?;
+    resolve_resolved_policy(
+        kind,
+        setting,
+        PolicySource::Organization(organization),
+        source_version,
+    )
 }
 
 fn resolve_resolved_policy(
     expected: PolicyKind,
     setting: PolicySetting,
     source: PolicySource,
+    source_version: u32,
 ) -> Result<ResolvedPolicy, DelegationError> {
     let actual = setting.kind();
     if actual != expected {
         return Err(DelegationError::PolicyKindMismatch { expected, actual });
     }
-    Ok(ResolvedPolicy { setting, source })
+    Ok(ResolvedPolicy {
+        setting,
+        source,
+        source_version,
+    })
 }
 
 impl ResolvedPolicy {

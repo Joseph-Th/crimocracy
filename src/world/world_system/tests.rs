@@ -2,14 +2,18 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::validate_invariants;
+use crate::core::invariants::{
+    StateValidationError, validate_invariants, validate_state_against_registry,
+};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::world::{
-    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
-    NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
-    NeighborhoodProfile, OrganizationDraft, OrganizationKind, Rating,
+    ApprovalPolicy, AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+    CharacterDraft, LegalSupportPolicy, NeighborhoodDraft, NeighborhoodEconomyProfile,
+    NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+    PolicyKind, Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +36,95 @@ fn make_test_character(
         },
     )
     .expect("test character should validate")
+}
+
+fn replace_serialized_organization(
+    envelope: SaveEnvelope,
+    original: &OrganizationRecord,
+    replacement: &OrganizationRecord,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("organization should serialize");
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement organization should serialize");
+    assert_eq!(original_bytes.len(), replacement_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "organization record should occur once in save"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout organization corruption should remain decodable")
+}
+
+#[test]
+fn recruitment_policy_history_is_reconstructible_from_toggle_versions() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x504F_4C48);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Policy History Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+
+    let record = state
+        .world()
+        .get_organization(organization)
+        .expect("organization should persist");
+    assert_eq!(
+        record.independent_recruitment_policy_at_version(1),
+        Some(ApprovalPolicy::RequireApproval)
+    );
+
+    set_policy(
+        &registry,
+        &mut state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("first real policy change should establish version two");
+    set_policy(
+        &registry,
+        &mut state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("second real policy change should establish version three");
+
+    let record = state
+        .world()
+        .get_organization(organization)
+        .expect("organization should persist after policy changes");
+    assert_eq!(
+        record.policy_version(PolicyKind::IndependentRecruitment),
+        Some(3)
+    );
+    assert_eq!(
+        record.independent_recruitment_policy_at_version(1),
+        Some(ApprovalPolicy::RequireApproval)
+    );
+    assert_eq!(
+        record.independent_recruitment_policy_at_version(2),
+        Some(ApprovalPolicy::Delegated)
+    );
+    assert_eq!(
+        record.independent_recruitment_policy_at_version(3),
+        Some(ApprovalPolicy::RequireApproval)
+    );
+    assert_eq!(record.independent_recruitment_policy_at_version(0), None);
+    assert_eq!(record.independent_recruitment_policy_at_version(4), None);
+    validate_invariants(&state);
 }
 
 fn rating(value: u8) -> Rating {
@@ -75,6 +168,208 @@ fn make_test_business(
         },
     )
     .expect("test business should validate")
+}
+
+#[test]
+fn player_organization_designation_is_single_assignment_campaign_identity() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x504C_4159);
+    let first = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "First Player Family".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("first criminal organization should validate");
+    let second = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Second Player Family".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second criminal organization should validate");
+
+    designate_player_organization(&mut state, first)
+        .expect("first player organization designation should commit");
+    assert_eq!(state.player_organization(), Some(first));
+
+    assert_eq!(
+        designate_player_organization(&mut state, second),
+        Err(WorldError::PlayerOrganizationAlreadyDesignated {
+            current: first,
+            requested: second,
+        })
+    );
+    assert_eq!(state.player_organization(), Some(first));
+    assert_eq!(
+        designate_player_organization(&mut state, first),
+        Err(WorldError::PlayerOrganizationAlreadyDesignated {
+            current: first,
+            requested: first,
+        }),
+        "designation is a campaign identity assignment, not a repeatable mutation"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn restore_rejects_zero_organization_policy_version() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x504F_4C59);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Versioned Policy Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let original = state
+        .world()
+        .get_organization(organization)
+        .expect("organization fixture should persist")
+        .clone();
+    let mut corrupted = original.clone();
+    corrupted
+        .policy_versions
+        .insert(PolicyKind::IndependentRecruitment, 0);
+
+    let envelope = build_save(&registry, &state).expect("valid policy state should save");
+    let corrupted_envelope = replace_serialized_organization(envelope, &original, &corrupted);
+
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("zero organization-policy version must be rejected on restore");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidOrganizationPolicyVersion {
+            organization,
+            policy: PolicyKind::IndependentRecruitment,
+        })
+    );
+}
+
+#[test]
+fn registry_validation_rejects_unreachable_organization_policy_version_history() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x504F_4C52);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Policy Reachability Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let original = state
+        .world()
+        .get_organization(organization)
+        .expect("organization should persist")
+        .clone();
+    let mut corrupted = original.clone();
+    corrupted
+        .policy_versions
+        .insert(PolicyKind::IndependentRecruitment, 2);
+    let envelope = build_save(&registry, &state).expect("canonical policy state should save");
+    let corrupted_envelope = replace_serialized_organization(envelope, &original, &corrupted);
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("version two cannot retain the version-one recruitment default");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidOrganizationPolicyVersion {
+            organization,
+            policy: PolicyKind::IndependentRecruitment,
+        })
+    );
+
+    let mut reachable = original.clone();
+    reachable
+        .policy_versions
+        .insert(PolicyKind::IndependentRecruitment, 3);
+    assert_eq!(
+        reachable.independent_recruitment_policy_at_version(2),
+        Some(ApprovalPolicy::Delegated)
+    );
+    // The binary policy can return to the authored default at odd versions, so the registry-aware
+    // check must reject only unreachable histories rather than treating every version > 1 as bad.
+    let valid_envelope = build_save(&registry, &state).expect("canonical state should still save");
+    let reachable_envelope = replace_serialized_organization(valid_envelope, &original, &reachable);
+    let restored = restore_save(&registry, reachable_envelope)
+        .expect("version three with the authored recruitment default is reachable");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored reachable policy history should remain registry-valid");
+}
+
+#[test]
+fn registry_validation_tracks_three_state_legal_support_policy_reachability() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x504F_4C4C);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Legal Policy Reachability Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let original = state
+        .world()
+        .get_organization(organization)
+        .expect("organization should persist")
+        .clone();
+
+    let mut impossible_v2 = original.clone();
+    impossible_v2
+        .policy_versions
+        .insert(PolicyKind::AssociateLegalSupport, 2);
+    let envelope = build_save(&registry, &state).expect("canonical policy state should save");
+    let impossible_envelope = replace_serialized_organization(envelope, &original, &impossible_v2);
+    let error = restore_save(&registry, impossible_envelope)
+        .expect_err("version two cannot retain the version-one legal-support default");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidOrganizationPolicyVersion {
+            organization,
+            policy: PolicyKind::AssociateLegalSupport,
+        })
+    );
+
+    let mut reachable_v2 = original.clone();
+    reachable_v2
+        .policy_versions
+        .insert(PolicyKind::AssociateLegalSupport, 2);
+    reachable_v2.policies.insert(
+        PolicyKind::AssociateLegalSupport,
+        PolicySetting::AssociateLegalSupport(LegalSupportPolicy::Automatic),
+    );
+    let envelope = build_save(&registry, &state).expect("canonical policy state should still save");
+    let reachable_envelope = replace_serialized_organization(envelope, &original, &reachable_v2);
+    let restored = restore_save(&registry, reachable_envelope)
+        .expect("version two with a non-default legal-support setting is reachable");
+    assert_eq!(
+        restored
+            .world()
+            .get_organization(organization)
+            .and_then(|record| record.policy(PolicyKind::AssociateLegalSupport)),
+        Some(PolicySetting::AssociateLegalSupport(
+            LegalSupportPolicy::Automatic
+        ))
+    );
+
+    let mut reachable_v3 = original.clone();
+    reachable_v3
+        .policy_versions
+        .insert(PolicyKind::AssociateLegalSupport, 3);
+    let envelope = build_save(&registry, &state).expect("canonical policy state should still save");
+    let reachable_envelope = replace_serialized_organization(envelope, &original, &reachable_v3);
+    restore_save(&registry, reachable_envelope)
+        .expect("three-state legal support may return to its authored default by version three");
 }
 
 #[test]

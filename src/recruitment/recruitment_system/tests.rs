@@ -8,13 +8,15 @@ use crate::core::invariants::{
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
-    DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
+    validate_request_recruitment_approval, validate_resolve_decision,
 };
 use crate::decisions::{
     DecisionCancellationReason, DecisionContext, DecisionResponse, DecisionStatus,
     RecruitmentApprovalRequestDraft,
 };
-use crate::delegation::delegation_system::{validate_assign_mandate, validate_revoke_mandate};
+use crate::delegation::delegation_system::{
+    set_policy, validate_assign_mandate, validate_revoke_mandate,
+};
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{InformationDraft, InformationSourceKind, Reliability, Specificity};
@@ -28,12 +30,15 @@ use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
-    insert_character, insert_organization, set_policy, validate_reassign_character,
+    designate_player_organization, insert_character, insert_organization,
+    validate_reassign_character,
 };
 use crate::world::{
-    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
-    PolicyKind, PolicySetting, Rating, TraitKind,
+    ALL_POLICY_KINDS, ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind,
+    OrganizationDraft, OrganizationKind, OrganizationRecord, PolicyKind, PolicySetting, Rating,
+    TraitKind,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -44,6 +49,77 @@ struct Fixture {
     incumbent: CharacterId,
     recruiter: CharacterId,
     candidate: CharacterId,
+}
+
+#[derive(Clone, Serialize)]
+struct OrganizationRecordWire {
+    id: OrganizationId,
+    name: String,
+    kind: OrganizationKind,
+    policies: BTreeMap<PolicyKind, PolicySetting>,
+    policy_versions: BTreeMap<PolicyKind, u32>,
+}
+
+fn organization_wire(record: &OrganizationRecord) -> OrganizationRecordWire {
+    OrganizationRecordWire {
+        id: record.id(),
+        name: record.name().to_owned(),
+        kind: record.kind(),
+        policies: ALL_POLICY_KINDS
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind,
+                    record
+                        .policy(kind)
+                        .expect("fixture organization must retain every policy"),
+                )
+            })
+            .collect(),
+        policy_versions: ALL_POLICY_KINDS
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind,
+                    record
+                        .policy_version(kind)
+                        .expect("fixture organization must retain every policy version"),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn replace_serialized_organization(
+    envelope: SaveEnvelope,
+    original: &OrganizationRecord,
+    replacement: &OrganizationRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("organization should serialize");
+    assert_eq!(
+        bincode::serialize(&organization_wire(original))
+            .expect("organization mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production organization layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement organization should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "target organization record should occur once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout organization corruption must remain decodable")
 }
 
 #[test]
@@ -726,7 +802,7 @@ fn autonomous_recruitment_shared_prospect_favors_stronger_relationship_over_mand
 }
 
 #[test]
-fn delegated_autonomous_recruitment_skips_candidate_with_pending_approval_route() {
+fn organization_policy_change_reopens_pending_approval_route_for_autonomous_recruitment() {
     let registry = build_registry();
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, None);
@@ -758,27 +834,40 @@ fn delegated_autonomous_recruitment_skips_candidate_with_pending_approval_route(
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
     let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-        .expect("a blocked pair is ordinary unavailability, not an autonomous pass failure");
-    assert!(outcome.attempts.is_empty());
+        .expect("delegated policy should make the formerly blocked route actionable");
+    assert_eq!(outcome.attempts.len(), 1);
     assert!(outcome.approval_requests.is_empty());
     assert_eq!(
         fixture
             .state
             .decisions()
             .pending_for_recruitment_approval(fixture.target, fixture.candidate),
-        Some(request.decision),
-        "the still-pending decision continues to own this organization-candidate route"
+        None,
+        "the superseded approval must release this organization-candidate route"
+    );
+    let cancelled = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("superseded approval should remain durable history");
+    assert_eq!(cancelled.status(), DecisionStatus::Cancelled);
+    assert_eq!(
+        cancelled
+            .cancellation()
+            .expect("superseded organization-policy approval should record cancellation")
+            .reason(),
+        DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(fixture.target)
     );
     assert_eq!(
         fixture
             .state
             .world()
             .get_character(fixture.candidate)
-            .expect("blocked candidate should persist")
+            .expect("autonomously recruited candidate should persist")
             .organization(),
-        Some(fixture.source)
+        Some(fixture.target)
     );
-    validate_state(&fixture.state).expect("blocked autonomous route should remain valid");
+    validate_state(&fixture.state).expect("reopened autonomous route should remain valid");
     validate_invariants(&fixture.state);
 }
 
@@ -859,7 +948,10 @@ fn approval_required_recruitment_executes_only_after_approval() {
             mandate_version: 1,
             manager_version: 1,
             policy: ApprovalPolicy::RequireApproval,
-            policy_source: RecruitmentPolicySource::Organization(fixture.target),
+            policy_source: RecruitmentPolicySource::Organization {
+                organization: fixture.target,
+                version: 1,
+            },
         }
     );
     assert_eq!(
@@ -1021,7 +1113,66 @@ fn rejected_recruitment_approval_records_no_attempt() {
 }
 
 #[test]
-fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
+fn resolved_organization_sourced_approval_remains_valid_history_after_policy_aba() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager requests approval before a later policy cycle.".to_owned(),
+        },
+    )
+    .expect("organization-sourced approval should validate at policy version one")
+    .commit(&mut fixture.state)
+    .expect("organization-sourced approval should commit");
+    validate_resolve_decision(
+        &fixture.registry,
+        &fixture.state,
+        request.decision,
+        fixture.target,
+        DecisionResponse::Reject,
+    )
+    .expect("approval rejection should validate")
+    .commit(&mut fixture.state)
+    .expect("approval rejection should commit");
+
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("later delegated policy should establish version two");
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("later approval-required policy should establish version three");
+
+    let decision = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("resolved approval should remain durable history");
+    assert_eq!(decision.status(), DecisionStatus::Resolved);
+    assert!(decision.cancellation().is_none());
+    validate_state(&fixture.state)
+        .expect("historical version-one approval source should reconstruct under version three");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn organization_policy_change_cancels_superseded_recruitment_approval() {
     let registry = build_registry();
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, None);
@@ -1048,18 +1199,27 @@ fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("organization should be able to delegate recruitment later");
-    let error = match validate_resolve_decision(
-        &fixture.registry,
-        &fixture.state,
-        request.decision,
-        fixture.target,
-        DecisionResponse::Approve,
-    ) {
-        Ok(_) => panic!("stale approval must not execute under changed authority"),
-        Err(error) => error,
-    };
-    assert_eq!(error, DecisionError::StaleRecruitmentApprovalAuthority);
+    .expect("organization should atomically delegate recruitment and retire the old approval");
+    let decision = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("superseded approval should remain durable history");
+    assert_eq!(decision.status(), DecisionStatus::Cancelled);
+    assert_eq!(
+        decision
+            .cancellation()
+            .expect("policy-superseded approval should record cancellation")
+            .reason(),
+        DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(fixture.target)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        None
+    );
     assert!(
         fixture
             .state
@@ -1067,7 +1227,128 @@ fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
             .get_attempt_for_approval_decision(request.decision)
             .is_none()
     );
+    validate_delegated_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        personnel_authority(&fixture, mandate),
+        protection_draft(&fixture),
+    )
+    .expect("new delegated policy should reopen the candidate route immediately");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("policy-cancelled approval state should save"),
+    )
+    .expect("policy-cancelled approval state should restore");
+    assert_eq!(
+        restored
+            .decisions()
+            .get_decision(request.decision)
+            .and_then(|decision| decision.cancellation())
+            .map(|cancellation| cancellation.reason()),
+        Some(DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(fixture.target))
+    );
+    validate_state(&fixture.state).expect("policy-cancelled approval state should validate");
+    validate_invariants(&fixture.state);
+}
 
+#[test]
+fn organization_policy_change_preserves_mandate_sourced_recruitment_approval() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Mandate-sourced personnel approval remains authoritative.".to_owned(),
+        },
+    )
+    .expect("mandate-sourced approval should validate")
+    .commit(&mut fixture.state)
+    .expect("mandate-sourced approval should commit");
+
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("underlying organization policy may change beneath a mandate override");
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .get_decision(request.decision)
+            .map(|decision| decision.status()),
+        Some(DecisionStatus::Pending),
+        "a mandate-sourced RequireApproval order is unaffected by organization fallback changes"
+    );
+    validate_resolve_decision(
+        &fixture.registry,
+        &fixture.state,
+        request.decision,
+        fixture.target,
+        DecisionResponse::Approve,
+    )
+    .expect("still-current mandate approval should remain resolvable")
+    .commit(&mut fixture.state)
+    .expect("mandate approval should execute after the unrelated organization-policy change");
+    validate_state(&fixture.state).expect("mandate-sourced approval should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn noop_or_unrelated_policy_write_preserves_organization_sourced_recruitment_approval() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Organization-sourced personnel approval remains pending.".to_owned(),
+        },
+    )
+    .expect("organization-sourced approval should validate")
+    .commit(&mut fixture.state)
+    .expect("organization-sourced approval should commit");
+
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("writing the already-effective recruitment policy should be a no-op");
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("an unrelated organization policy should change independently");
+
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        Some(request.decision),
+        "only a real IndependentRecruitment change may cancel this approval"
+    );
     validate_resolve_decision(
         &fixture.registry,
         &fixture.state,
@@ -1075,10 +1356,92 @@ fn stale_recruitment_approval_cannot_execute_but_can_be_rejected() {
         fixture.target,
         DecisionResponse::Reject,
     )
-    .expect("stale request should remain dismissible")
+    .expect("approval should remain resolvable after no-op and unrelated policy writes")
     .commit(&mut fixture.state)
-    .expect("stale request rejection should commit");
-    validate_state(&fixture.state).expect("dismissed stale approval state should validate");
+    .expect("still-current approval should resolve normally");
+    validate_state(&fixture.state).expect("unrelated policy change should preserve decision state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn organization_policy_version_exhaustion_preserves_pending_approval_atomically() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let original = fixture
+        .state
+        .world()
+        .get_organization(fixture.target)
+        .expect("target organization should persist");
+    let mut replacement = organization_wire(original);
+    replacement
+        .policy_versions
+        .insert(PolicyKind::IndependentRecruitment, u32::MAX);
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("ordinary fixture should save before boundary-state injection");
+    let boundary_envelope = replace_serialized_organization(envelope, original, &replacement);
+    fixture.state = restore_save(&registry, boundary_envelope)
+        .expect("maximum representable organization-policy version is structurally valid");
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: crate::core::attention::AttentionClass::Exception,
+            summary: "Personnel manager requests approval at the policy-version boundary."
+                .to_owned(),
+        },
+    )
+    .expect("maximum representable policy version remains a valid current authority")
+    .commit(&mut fixture.state)
+    .expect("approval request at maximum policy version should commit");
+
+    let error = set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect_err("exhausted policy version must reject before cancelling the approval");
+    assert!(matches!(
+        error,
+        crate::delegation::delegation_system::DelegationError::World(
+            crate::world::world_system::WorldError::VersionCapacity(_)
+        )
+    ));
+    let resolved = resolve_policy_for_manager(
+        &fixture.state,
+        fixture.recruiter,
+        PolicyKind::IndependentRecruitment,
+    )
+    .expect("failed policy mutation must preserve the old current policy");
+    assert_eq!(
+        resolved.setting,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
+    );
+    assert_eq!(resolved.source_version, u32::MAX);
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
+        Some(request.decision),
+        "failed policy mutation must not retire the still-current approval"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .get_decision(request.decision)
+            .expect("approval must remain durable")
+            .status(),
+        DecisionStatus::Pending
+    );
+    validate_state(&fixture.state).expect("failed policy mutation must leave valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -1164,7 +1527,10 @@ fn delegated_recruitment_persists_exact_mandate_and_policy_authority() {
             mandate_version: 1,
             manager_version: 1,
             policy: ApprovalPolicy::Delegated,
-            policy_source: RecruitmentPolicySource::Mandate(mandate),
+            policy_source: RecruitmentPolicySource::Mandate {
+                mandate,
+                version: 1,
+            },
         }
     );
     assert_eq!(record.outcome(), RecruitmentOutcome::Accepted);
@@ -1173,7 +1539,7 @@ fn delegated_recruitment_persists_exact_mandate_and_policy_authority() {
 }
 
 #[test]
-fn delegated_recruitment_token_rejects_organization_policy_change_without_mutation() {
+fn delegated_recruitment_token_rejects_organization_policy_aba_without_mutation() {
     let registry = build_registry();
     let mut fixture = fixture();
     set_policy(
@@ -1197,10 +1563,17 @@ fn delegated_recruitment_token_rejects_organization_policy_change_without_mutati
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
-    .expect("policy revision should validate");
+    .expect("policy revocation should validate");
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("policy may visibly return to its original setting");
     let error = token
         .commit(&mut fixture.state)
-        .expect_err("stale delegated recruitment must not survive policy revocation");
+        .expect_err("stale delegated recruitment must not survive change-away-and-back ABA");
     assert_eq!(error, RecruitmentError::StaleRecruitmentPolicy);
     assert_eq!(
         fixture
@@ -1219,6 +1592,59 @@ fn delegated_recruitment_token_rejects_organization_policy_change_without_mutati
             .filter(|attempt| attempt.candidate() == fixture.candidate)
             .count(),
         0
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn historical_organization_policy_snapshot_survives_later_toggle() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("delegated organization policy should establish version two");
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let attempt = validate_delegated_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        personnel_authority(&fixture, mandate),
+        protection_draft(&fixture),
+    )
+    .expect("version-two delegated policy should authorize the attempt")
+    .commit(&mut fixture.state)
+    .expect("delegated attempt should commit");
+    set_policy(
+        &registry,
+        &mut fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("later policy change should establish version three");
+    validate_state(&fixture.state)
+        .expect("a version-two delegated attempt remains valid history under version three");
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(attempt)
+            .expect("historical delegated attempt should persist")
+            .authority(),
+        RecruitmentAuthority::Delegated {
+            mandate,
+            manager: fixture.recruiter,
+            scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+            mandate_version: 1,
+            manager_version: 1,
+            policy: ApprovalPolicy::Delegated,
+            policy_source: RecruitmentPolicySource::Organization {
+                organization: fixture.target,
+                version: 2,
+            },
+        }
     );
     validate_invariants(&fixture.state);
 }
@@ -2418,7 +2844,8 @@ fn player_organization_approval_requests_wait_for_the_player() {
     let mut fixture = fixture();
     // The recruiting organization is the player's: its manager must raise a durable
     // request and wait, never resolve it autonomously.
-    fixture.state.set_player_organization(fixture.target);
+    designate_player_organization(&mut fixture.state, fixture.target)
+        .expect("target criminal organization should be eligible as player organization");
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
 
     fixture
@@ -2453,7 +2880,8 @@ fn player_organization_approval_requests_wait_for_the_player() {
 fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_character_id() {
     let registry = build_registry();
     let mut fixture = fixture();
-    fixture.state.set_player_organization(fixture.target);
+    designate_player_organization(&mut fixture.state, fixture.target)
+        .expect("target criminal organization should be eligible as player organization");
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
 
     let stronger_candidate = insert_character(

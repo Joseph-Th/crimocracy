@@ -11,10 +11,11 @@ use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::{InformationRecord, InformationSourceKind, KnowledgeHolder};
+use crate::registry::Registry;
 use crate::social::RelationshipRecord;
 use crate::world::{
     ALL_POLICY_KINDS, BusinessOwner, BusinessRecord, CharacterRecord, OrganizationKind,
-    OrganizationRecord,
+    OrganizationRecord, PolicySetting,
 };
 use std::collections::BTreeSet;
 
@@ -82,6 +83,77 @@ fn validate_organization(organization: &OrganizationRecord) -> Result<(), StateV
                 expected: policy,
                 actual: setting.kind(),
             });
+        }
+        if organization.policy_version(policy) == Some(0) {
+            return Err(StateValidationError::InvalidOrganizationPolicyVersion {
+                organization: organization.id(),
+                policy,
+            });
+        }
+        if organization.policy_version(policy).is_none() {
+            return Err(StateValidationError::MissingPolicy {
+                organization: organization.id(),
+                policy,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Registry-aware reachability for versioned organization policies. The registry authors version
+/// one; every later version is a real setting change because the canonical writer does not bump
+/// no-op writes. Binary recruitment policy therefore alternates exactly. Three-state legal
+/// support can return to any setting after two changes, but version two still cannot equal the
+/// authored default.
+pub(in crate::core::invariants) fn validate_organization_policies_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for organization in state.world.organizations() {
+        for kind in ALL_POLICY_KINDS {
+            let current = organization
+                .policy(kind)
+                .ok_or(StateValidationError::MissingPolicy {
+                    organization: organization.id(),
+                    policy: kind,
+                })?;
+            let version =
+                organization
+                    .policy_version(kind)
+                    .ok_or(StateValidationError::MissingPolicy {
+                        organization: organization.id(),
+                        policy: kind,
+                    })?;
+            let default = registry.get_policy(kind).default();
+            let reachable = match (default, current) {
+                (
+                    PolicySetting::IndependentRecruitment(default),
+                    PolicySetting::IndependentRecruitment(current),
+                ) => {
+                    version > 0
+                        && if !version.is_multiple_of(2) {
+                            current == default
+                        } else {
+                            current != default
+                        }
+                }
+                (
+                    PolicySetting::AssociateLegalSupport(default),
+                    PolicySetting::AssociateLegalSupport(current),
+                ) => match version {
+                    0 => false,
+                    1 => current == default,
+                    2 => current != default,
+                    _ => true,
+                },
+                _ => false,
+            };
+            if !reachable {
+                return Err(StateValidationError::InvalidOrganizationPolicyVersion {
+                    organization: organization.id(),
+                    policy: kind,
+                });
+            }
         }
     }
     Ok(())

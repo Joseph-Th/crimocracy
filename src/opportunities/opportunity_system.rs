@@ -143,7 +143,7 @@ pub enum OpportunityError {
         operation_kind: OperationKind,
         opportunity_kind: OperationKind,
     },
-    #[error("operation {operation} targets do not exactly match opportunity targets")]
+    #[error("operation {operation} must target exactly one entity covered by the opportunity")]
     OperationTargetsMismatch { operation: OperationId },
     #[error("operation {operation} is already linked to opportunity {opportunity}")]
     OperationAlreadyLinked {

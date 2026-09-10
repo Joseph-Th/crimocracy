@@ -487,12 +487,26 @@ fn custody_cancelled_evidence_review_is_retryable_after_restaffing() {
             admissibility: Admissibility::Admissible,
         },
     );
+    let misconduct_corroboration = add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: misconduct_case,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.investigator),
+            origin: EntityRef::Character(fixture.second_investigator),
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
     validate_arrest(
+        &registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.investigator,
             investigation: misconduct_case,
-            evidence: BTreeSet::from([misconduct_evidence]),
+            evidence: BTreeSet::from([misconduct_evidence, misconduct_corroboration]),
         },
     )
     .expect("detective arrest should validate")

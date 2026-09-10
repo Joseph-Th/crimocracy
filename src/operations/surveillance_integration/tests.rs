@@ -271,12 +271,30 @@ fn detain_character_for_surveillance_test(
     .expect("custody evidence should validate")
     .commit(&mut fixture.state)
     .expect("custody evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating custody evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating custody evidence should commit");
     validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("evidence-backed detention should validate")

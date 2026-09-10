@@ -29,6 +29,7 @@ pub struct OrganizationRecord {
     name: String,
     kind: OrganizationKind,
     policies: BTreeMap<PolicyKind, PolicySetting>,
+    policy_versions: BTreeMap<PolicyKind, u32>,
 }
 
 impl OrganizationRecord {
@@ -46,6 +47,39 @@ impl OrganizationRecord {
 
     pub fn policy(&self, kind: PolicyKind) -> Option<PolicySetting> {
         self.policies.get(&kind).copied()
+    }
+
+    pub(crate) fn policy_version(&self, kind: PolicyKind) -> Option<u32> {
+        self.policy_versions.get(&kind).copied()
+    }
+
+    /// Reconstructs an older organization-level recruitment setting from the current value and
+    /// its monotone version. `ApprovalPolicy` is binary and policy versions advance only on real
+    /// changes, so every increment is necessarily a toggle. Keeping this derivation with the
+    /// organization record gives every historical authority validator the same rule.
+    pub(crate) fn independent_recruitment_policy_at_version(
+        &self,
+        historical_version: u32,
+    ) -> Option<ApprovalPolicy> {
+        let current_version = self.policy_version(PolicyKind::IndependentRecruitment)?;
+        let PolicySetting::IndependentRecruitment(current_policy) =
+            self.policy(PolicyKind::IndependentRecruitment)?
+        else {
+            return None;
+        };
+        if historical_version == 0 || historical_version > current_version {
+            return None;
+        }
+        Some(
+            if (current_version - historical_version).is_multiple_of(2) {
+                current_policy
+            } else {
+                match current_policy {
+                    ApprovalPolicy::RequireApproval => ApprovalPolicy::Delegated,
+                    ApprovalPolicy::Delegated => ApprovalPolicy::RequireApproval,
+                }
+            },
+        )
     }
 }
 

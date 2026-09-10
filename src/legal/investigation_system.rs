@@ -265,7 +265,7 @@ pub fn validate_open_investigation(
 }
 
 /// Evidence quality sufficient to turn a referenced entity into an actionable case subject.
-/// This is intentionally below the autonomous-arrest corroboration bar, but material the
+/// This is intentionally below the custody corroboration bar, but material the
 /// institution itself still considers Questionable is only a lead to develop, not enough to
 /// keep a person permanently tracked as an identified suspect.
 pub(crate) fn evidence_assessment_is_actionable_case_lead(

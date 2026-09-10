@@ -1,4 +1,5 @@
-//! Persistent manager mandates and responsibility indexes; `delegation_system` owns assignment, revision, and revocation.
+//! Persistent manager mandates and responsibility indexes; `delegation_system` owns mandate
+//! lifecycle plus organization-policy governance over settings stored by `world`.
 
 pub mod delegation_system;
 

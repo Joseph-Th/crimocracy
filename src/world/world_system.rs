@@ -157,6 +157,13 @@ pub enum WorldError {
         "organization {0} is not a criminal organization and cannot be the player organization"
     )]
     InvalidPlayerOrganization(OrganizationId),
+    #[error(
+        "player organization is already designated as {current}; cannot replace it with {requested}"
+    )]
+    PlayerOrganizationAlreadyDesignated {
+        current: OrganizationId,
+        requested: OrganizationId,
+    },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -173,11 +180,13 @@ pub fn insert_organization(
     }
     let id = state.ids.next_organization()?;
     let policies = registry.default_policies();
+    let policy_versions = policies.keys().copied().map(|kind| (kind, 1)).collect();
     state.world.insert_organization(OrganizationRecord {
         id,
         name: draft.name,
         kind: draft.kind,
         policies,
+        policy_versions,
     });
     Ok(id)
 }
@@ -192,6 +201,12 @@ pub fn designate_player_organization(
         .ok_or(WorldError::MissingOrganization(organization))?;
     if record.kind() != OrganizationKind::Criminal {
         return Err(WorldError::InvalidPlayerOrganization(organization));
+    }
+    if let Some(current) = state.player_organization() {
+        return Err(WorldError::PlayerOrganizationAlreadyDesignated {
+            current,
+            requested: organization,
+        });
     }
     state.set_player_organization(organization);
     Ok(())
@@ -681,17 +696,24 @@ fn validate_business_owner(state: &AppState, owner: BusinessOwner) -> Result<(),
     }
 }
 
-pub fn set_policy(
+pub(crate) fn set_policy(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,
     setting: PolicySetting,
 ) -> Result<(), WorldError> {
-    state
+    let organization_record = state
         .world
         .get_organization(organization)
         .ok_or(WorldError::MissingOrganization(organization))?;
     registry.get_policy(setting.kind());
+    if organization_record.policy(setting.kind()) == Some(setting) {
+        return Ok(());
+    }
+    let policy_version = organization_record
+        .policy_version(setting.kind())
+        .expect("validated organization must retain every authored policy version");
+    ensure_version_can_advance(policy_version, "organization policy")?;
     state.world.set_policy(organization, setting);
     Ok(())
 }

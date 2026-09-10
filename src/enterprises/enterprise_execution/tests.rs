@@ -1791,6 +1791,23 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     .expect("custody evidence should validate")
     .commit(&mut fixture.state)
     .expect("custody evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(manager),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating custody evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating custody evidence should commit");
 
     fixture
         .state
@@ -1803,11 +1820,12 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     )
     .expect("due cycle should plan while the manager is free");
     let arrest = validate_arrest(
+        &registry,
         &fixture.state,
         ArrestDraft {
             character: manager,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("manager arrest should not require revoking formal enterprise authority")

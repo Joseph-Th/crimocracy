@@ -65,6 +65,11 @@ pub enum StateValidationError {
         expected: PolicyKind,
         actual: PolicyKind,
     },
+    #[error("organization {organization} policy {policy:?} has invalid persisted version/history")]
+    InvalidOrganizationPolicyVersion {
+        organization: OrganizationId,
+        policy: PolicyKind,
+    },
     #[error("character {character} and supervisor {supervisor} belong to different organizations")]
     SupervisorOrganizationMismatch {
         character: CharacterId,
@@ -593,6 +598,7 @@ pub fn validate_state_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
+    world::validate_organization_policies_against_registry(registry, state)?;
     legal_invariants::validate_arrests_against_registry(registry, state)?;
     legal_invariants::validate_witness_statements_against_registry(registry, state)?;
     operations::validate_operations_against_registry(registry, state)?;

@@ -93,8 +93,14 @@ pub enum RecruitmentOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecruitmentPolicySource {
-    Organization(OrganizationId),
-    Mandate(MandateId),
+    Organization {
+        organization: OrganizationId,
+        version: u32,
+    },
+    Mandate {
+        mandate: MandateId,
+        version: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

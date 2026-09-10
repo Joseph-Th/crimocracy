@@ -207,13 +207,31 @@ fn detention_cancels_pending_operation_decision_and_aborts_operation() {
     .expect("detention evidence should validate")
     .commit(&mut state)
     .expect("detention evidence should commit");
+    let corroborating = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(leader),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating detention evidence should validate")
+    .commit(&mut state)
+    .expect("corroborating detention evidence should commit");
     let detained_at = state.now();
     let arrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: leader,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("custody should validate while leadership decision is pending")
@@ -2936,12 +2954,30 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect("evidence should validate")
     .commit(&mut state)
     .expect("evidence should commit");
+    let corroborating = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating evidence should validate")
+    .commit(&mut state)
+    .expect("corroborating evidence should commit");
     let arrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("evidence-backed arrest should validate")
@@ -3225,11 +3261,12 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     // due resolution must become a practical objective failure, not panic because the release
     // transaction no longer has an arrest to consume.
     let rearrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("explicit re-arrest should validate")
@@ -3258,11 +3295,12 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         .commit(&mut state)
         .expect("first re-arrest release should commit");
     let replacement_arrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("replacement custody should validate")
@@ -3321,11 +3359,12 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         .commit(&mut state)
         .expect("external custody release should commit");
     let later_arrest = crate::legal::arrest_system::validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("a later re-arrest is a distinct legal event")

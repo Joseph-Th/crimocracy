@@ -8,13 +8,21 @@ use crate::core::invariants::{
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
+use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
+use crate::legal::informant_system::{
+    validate_establish_informant, validate_record_informant_disclosure,
+};
 use crate::legal::investigation_system::{
     InvestigationError, InvestigationTransition, validate_add_evidence,
     validate_open_investigation, validate_transition_investigation,
 };
 use crate::legal::{
     Admissibility, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    InvestigationDraft,
+    InformantDisclosureDraft, InformantDraft, InvestigationDraft,
 };
 use crate::registry::Registry;
 use crate::world::world_system::{
@@ -31,6 +39,216 @@ struct Fixture {
     suspect: CharacterId,
     investigation: InvestigationId,
     evidence: EvidenceId,
+}
+
+fn add_two_same_source_informant_statements(fixture: &mut Fixture) -> BTreeSet<EvidenceId> {
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .and_then(|record| record.organization())
+        .expect("suspect fixture should belong to a criminal organization");
+    let source = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Single Confidential Source".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("confidential-source fixture should validate");
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: source,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("informant relationship should commit");
+
+    let mut statement_evidence = BTreeSet::new();
+    for (topic, summary) in [
+        (
+            InformationTopic::Personnel,
+            "The source identifies the suspect through personnel knowledge.",
+        ),
+        (
+            InformationTopic::OperationalOutcome,
+            "The source independently describes the suspect's operational activity.",
+        ),
+    ] {
+        let information = validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(source),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic,
+                source_entity: None,
+                subject: EntityRef::Character(fixture.suspect),
+                observed_at: fixture.state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: summary.to_owned(),
+            },
+        )
+        .expect("source information should validate")
+        .commit(&mut fixture.state)
+        .expect("source information should commit");
+        let disclosure = validate_record_informant_disclosure(
+            &fixture.state,
+            InformantDisclosureDraft {
+                informant,
+                investigation: fixture.investigation,
+                source_information: information,
+            },
+        )
+        .expect("relevant source disclosure should validate")
+        .commit(&mut fixture.state)
+        .expect("source disclosure should commit");
+        let evidence = fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .find(|record| record.id() == disclosure)
+            .expect("source disclosure should persist")
+            .evidence();
+        statement_evidence.insert(evidence);
+    }
+    assert_eq!(statement_evidence.len(), 2);
+    statement_evidence
+}
+
+#[test]
+fn repeated_statements_from_one_named_source_count_as_one_corroborator() {
+    let mut fixture = fixture();
+    let mut statement_evidence = add_two_same_source_informant_statements(&mut fixture);
+
+    let error = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: statement_evidence.clone(),
+        },
+    )
+    .expect_err("two statements from one named source must remain one corroborator");
+    assert_eq!(
+        error,
+        ArrestError::InsufficientIndependentEvidence {
+            found: 1,
+            required: fixture
+                .registry
+                .legal()
+                .minimum_arrest_qualifying_evidence(),
+        }
+    );
+
+    statement_evidence.insert(fixture.evidence);
+    validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: statement_evidence,
+        },
+    )
+    .expect("one named source plus one independent primary fact should satisfy corroboration");
+    validate_state(&fixture.state).expect("same-source disclosure state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_arrest_with_duplicate_named_corroboration_source() {
+    let mut fixture = fixture();
+    let statement_evidence = add_two_same_source_informant_statements(&mut fixture);
+    let first_statement = *statement_evidence
+        .iter()
+        .next()
+        .expect("same-source fixture should contain statement evidence");
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, first_statement]),
+        },
+    )
+    .expect("one named source plus one primary fact should support a valid arrest")
+    .commit(&mut fixture.state)
+    .expect("valid mixed-source arrest should commit");
+
+    let original = fixture
+        .state
+        .legal()
+        .get_arrest(arrest)
+        .expect("valid arrest should persist")
+        .clone();
+    let mut corrupted = original.clone();
+    corrupted.evidence = statement_evidence;
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("valid mixed-source custody state should save before corruption");
+    let original_bytes = bincode::serialize(&original).expect("arrest record should serialize");
+    let corrupted_bytes =
+        bincode::serialize(&corrupted).expect("corrupted arrest should serialize");
+    assert_eq!(original_bytes.len(), corrupted_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "arrest record should occur once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + corrupted_bytes.len()].copy_from_slice(&corrupted_bytes);
+    let corrupted_envelope: SaveEnvelope = bincode::deserialize(&envelope_bytes)
+        .expect("same-layout arrest corruption should remain decodable");
+
+    let error = restore_save(&fixture.registry, corrupted_envelope)
+        .expect_err("restore must enforce the same named-source corroboration rule as runtime");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid }
+        ) if invalid == arrest
+    ));
+}
+
+#[test]
+fn direct_arrest_requires_authored_independent_corroboration() {
+    let fixture = fixture();
+    let error = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence]),
+        },
+    )
+    .expect_err("one strong fact must not bypass the authored custody corroboration bar");
+    assert_eq!(
+        error,
+        ArrestError::InsufficientIndependentEvidence {
+            found: 1,
+            required: fixture
+                .registry
+                .legal()
+                .minimum_arrest_qualifying_evidence(),
+        }
+    );
 }
 
 #[test]
@@ -243,6 +461,7 @@ fn arrest_rejects_questionable_evidence_even_when_strong() {
     .expect("questionable material should persist as investigative evidence");
 
     let error = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
@@ -502,13 +721,16 @@ fn custody_cancels_scheduled_investigation_work_with_arrest_provenance() {
     .expect("arrest case should commit");
     let arrest_evidence =
         add_character_evidence(&mut fixture.state, second_authority, arrest_case, detective);
+    let arrest_corroboration =
+        add_character_evidence(&mut fixture.state, second_authority, arrest_case, detective);
     let detained_at = fixture.state.now();
     let arrest = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: detective,
             investigation: arrest_case,
-            evidence: BTreeSet::from([arrest_evidence]),
+            evidence: BTreeSet::from([arrest_evidence, arrest_corroboration]),
         },
     )
     .expect("scheduled detective work should not immunize its owner from custody")
@@ -638,6 +860,8 @@ fn custody_preflights_shared_case_version_budget_for_work_cancel_and_lead_releas
     .expect("detective custody case should commit");
     let arrest_evidence =
         add_character_evidence(&mut fixture.state, fixture.police, arrest_case, detective);
+    let arrest_corroboration =
+        add_character_evidence(&mut fixture.state, fixture.police, arrest_case, detective);
 
     fixture
         .state
@@ -647,11 +871,12 @@ fn custody_preflights_shared_case_version_budget_for_work_cancel_and_lead_releas
         .expect("work case should persist")
         .version = u32::MAX - 1;
     let error = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: detective,
             investigation: arrest_case,
-            evidence: BTreeSet::from([arrest_evidence]),
+            evidence: BTreeSet::from([arrest_evidence, arrest_corroboration]),
         },
     )
     .expect_err("custody must reject before two case-version advances exceed capacity");
@@ -777,12 +1002,19 @@ fn add_character_evidence(
 }
 
 fn arrest_fixture(fixture: &mut Fixture) -> ArrestId {
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
     validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence]),
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
         },
     )
     .expect("evidence-backed arrest should validate")
@@ -802,7 +1034,9 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
     assert_eq!(record.status(), ArrestStatus::Detained);
     assert_eq!(record.version(), 1);
     assert_eq!(record.authority(), fixture.police);
-    assert_eq!(record.evidence(), &BTreeSet::from([fixture.evidence]));
+    assert_eq!(record.evidence().len(), 2);
+    assert!(record.evidence().contains(&fixture.evidence));
+    let arrest_evidence = record.evidence().clone();
     assert_eq!(
         fixture
             .state
@@ -841,11 +1075,12 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
         .commit(&mut restored)
         .expect("restored detention release should commit");
     let rearrest = validate_arrest(
+        &fixture.registry,
         &restored,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence]),
+            evidence: arrest_evidence,
         },
     )
     .expect("released restored character should permit a later evidence-backed arrest")
@@ -1004,13 +1239,15 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
         1
     );
 
-    // Explicit legal action remains distinct from the conservative autonomous conversion.
+    // Explicit legal action may deliberately re-arrest after release, but it must satisfy the
+    // same evidentiary custody threshold as autonomous policing.
     let explicit_rearrest = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence]),
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
         },
     )
     .expect("the canonical command may deliberately re-arrest after release")
@@ -1024,12 +1261,19 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
 #[test]
 fn arrest_validation_is_case_specific_and_stales_when_case_evidence_changes() {
     let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
     let stale = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence]),
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
         },
     )
     .expect("initial arrest plan should validate");
@@ -1069,6 +1313,7 @@ fn arrest_validation_is_case_specific_and_stales_when_case_evidence_changes() {
         fixture.suspect,
     );
     let error = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
@@ -1294,12 +1539,19 @@ fn custody_defers_authorized_operation_until_participant_release() {
     .commit(&mut fixture.state)
     .expect("authorized operation should commit");
 
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
     let arrest = validate_arrest(
+        &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence]),
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
         },
     )
     .expect("custody should validate despite the future operation booking")
@@ -1359,7 +1611,7 @@ fn custody_defers_authorized_operation_until_participant_release() {
 }
 
 #[test]
-fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
+fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
     use crate::core::entity::EntityRef;
     use crate::core::simulation::run_tick;
     use crate::legal::investigation_system::{
@@ -1528,15 +1780,36 @@ fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
             break;
         }
     }
-    assert!(
-        fixture
-            .state
-            .legal()
-            .work_for_investigation(case)
-            .any(|entry| entry
+    let derived = fixture
+        .state
+        .legal()
+        .work_for_investigation(case)
+        .find_map(|entry| {
+            entry
                 .resolution()
-                .is_some_and(|resolution| resolution.derived_evidence().is_some())),
-        "the review must have produced a forensic derivative"
+                .and_then(|resolution| resolution.derived_evidence())
+        })
+        .expect("the review must have produced a forensic derivative");
+
+    let error = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: case,
+            evidence: BTreeSet::from([source, derived]),
+        },
+    )
+    .expect_err("a source and its forensic derivative must remain one corroborating fact");
+    assert_eq!(
+        error,
+        ArrestError::InsufficientIndependentEvidence {
+            found: 1,
+            required: fixture
+                .registry
+                .legal()
+                .minimum_arrest_qualifying_evidence(),
+        }
     );
 
     // One independent item plus its own derivative is still one fact: no custody.
@@ -1549,6 +1822,16 @@ fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
 
     // A second INDEPENDENT strong item completes the corroboration bar and custody follows.
     let second = add_character_evidence(&mut fixture.state, fixture.police, case, fixture.suspect);
+    validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: case,
+            evidence: BTreeSet::from([derived, second]),
+        },
+    )
+    .expect("a forensic derivative may stand in for its source without creating a new source");
     let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("autonomous arrest pass should resolve");
     assert_eq!(arrests.len(), 1);
@@ -1561,7 +1844,7 @@ fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
     assert_eq!(
         record.evidence(),
         &BTreeSet::from([source, second]),
-        "only independent items carry the arrest"
+        "autonomous custody cites the primary evidence sources"
     );
     validate_state(&fixture.state).expect("custody state should remain valid");
     validate_invariants(&fixture.state);

@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 41;
+pub const CURRENT_CONTENT_REVISION: u32 = 42;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -93,7 +93,8 @@ pub fn build_registry() -> Registry {
             },
             // One custody day before a detainee faces their informant-recruitment decision.
             informant_decision_delay: SimDuration::from_minutes(1_440),
-            // Autonomous custody requires corroboration from two independent qualifying facts.
+            // Custody requires corroboration from two independent qualifying sources, including
+            // at least one Strong or Direct source. Direct and autonomous arrest use the same bar.
             minimum_arrest_qualifying_evidence: 2,
             // A detainee starts at 25 percent cooperation risk. A maximum Safety drive adds
             // 50 points; active counsel removes 25 points and can fully suppress the modeled
@@ -156,10 +157,9 @@ fn register_laundering(builder: &mut RegistryBuilder) {
             // The front keeps a meaningful cut: laundering is a service the legitimate
             // business charges for, not a free conversion button.
             fee_basis_points: 1_500,
-            // A front can plausibly hide 100% of one legitimate cycle's gross per transfer.
-            // Ordinary resale proceeds fit within a small number of daily sweeps while larger
-            // diversification still requires additional fronts, preserving capacity as a
-            // visible strategic constraint rather than a free conversion path.
+            // A front can plausibly hide aggregate volume up to 100% of one legitimate cycle's
+            // current gross. Splitting one sum across several transfers does not reset that
+            // allowance, so larger diversification still requires additional fronts.
             plausibility_gross_basis_points: 10_000,
         })
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));

@@ -8,6 +8,7 @@ use crate::contacts::contact_system::{
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
+use crate::delegation::delegation_system::set_policy;
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
@@ -23,7 +24,6 @@ use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::PolicyKind;
 use crate::world::PolicySetting;
-use crate::world::world_system::set_policy;
 use crate::world::world_system::{
     insert_character, insert_organization, validate_reassign_character,
 };
@@ -552,12 +552,30 @@ fn fixture_with_options(counsel_kind: OrganizationKind, supervised_defendant: bo
     .expect("case evidence should validate")
     .commit(&mut state)
     .expect("case evidence should commit");
+    let corroborating = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(defendant),
+            origin: None,
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating case evidence should validate")
+    .commit(&mut state)
+    .expect("corroborating case evidence should commit");
     let arrest = validate_arrest(
+        &registry,
         &state,
         ArrestDraft {
             character: defendant,
             investigation,
-            evidence: BTreeSet::from([evidence]),
+            evidence: BTreeSet::from([evidence, corroborating]),
         },
     )
     .expect("arrest should validate")
@@ -691,10 +709,27 @@ fn arrest_draft_for_character(
     .expect("custody test evidence should validate")
     .commit(&mut fixture.state)
     .expect("custody test evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(character),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating custody evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating custody evidence should commit");
     ArrestDraft {
         character,
         investigation,
-        evidence: BTreeSet::from([evidence]),
+        evidence: BTreeSet::from([evidence, corroborating]),
     }
 }
 
@@ -871,12 +906,30 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
     .expect("counsel evidence should validate")
     .commit(&mut fx.state)
     .expect("counsel evidence should commit");
+    let counsel_corroborating = validate_add_evidence(
+        &fx.state,
+        EvidenceDraft {
+            investigation: counsel_case,
+            custodian: police,
+            subject: EntityRef::Character(fx.counsel),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fx.state.now(),
+        },
+    )
+    .expect("corroborating counsel evidence should validate")
+    .commit(&mut fx.state)
+    .expect("corroborating counsel evidence should commit");
     validate_arrest(
+        &fx.registry,
         &fx.state,
         ArrestDraft {
             character: fx.counsel,
             investigation: counsel_case,
-            evidence: BTreeSet::from([counsel_evidence]),
+            evidence: BTreeSet::from([counsel_evidence, counsel_corroborating]),
         },
     )
     .expect("counsel detention should validate")
@@ -1403,7 +1456,7 @@ fn arresting_retained_counsel_ends_representation_before_custody() {
     let draft =
         arrest_draft_for_character(&mut fixture, counsel, "Counsel obstruction investigation");
 
-    let counsel_arrest = validate_arrest(&fixture.state, draft)
+    let counsel_arrest = validate_arrest(&fixture.registry, &fixture.state, draft)
         .expect("counsel custody should validate with representation preemption")
         .commit(&mut fixture.state)
         .expect("counsel custody should end representation atomically");
@@ -1449,7 +1502,7 @@ fn counsel_arrest_token_stales_when_representation_is_retained_after_validation(
         counsel,
         "Counsel stale-preflight investigation",
     );
-    let validated = validate_arrest(&fixture.state, draft)
+    let validated = validate_arrest(&fixture.registry, &fixture.state, draft)
         .expect("counsel arrest should validate before a matter is retained");
     let representation = retain(&mut fixture, 8_000, None);
 

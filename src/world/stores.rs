@@ -498,7 +498,13 @@ impl WorldState {
             .organizations
             .get_mut(&id)
             .expect("validated organization disappeared before policy commit");
-        record.policies.insert(setting.kind(), setting);
+        let kind = setting.kind();
+        let version = record
+            .policy_versions
+            .get_mut(&kind)
+            .expect("validated organization must retain every authored policy version");
+        *version = advance_version_preflighted(*version);
+        record.policies.insert(kind, setting);
     }
     pub(crate) fn reassign_character(
         &mut self,

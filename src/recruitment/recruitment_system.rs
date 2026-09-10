@@ -409,6 +409,7 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::DetainedSupervisor { .. }
         | WorldError::StaleCharacter { .. }
         | WorldError::InvalidPlayerOrganization(_)
+        | WorldError::PlayerOrganizationAlreadyDesignated { .. }
         | WorldError::IdExhaustion(_)
         | WorldError::VersionCapacity(_) => false,
     }
@@ -616,7 +617,7 @@ pub fn validate_delegated_recruitment_attempt(
         mandate_version: resolved_authority.mandate_version(),
         manager_version: resolved_authority.manager_version(),
         policy: approval,
-        policy_source: recruitment_policy_source(policy.source),
+        policy_source: recruitment_policy_source(policy),
     };
     validate_recruitment_plan_with_authority(
         registry,
@@ -656,7 +657,7 @@ pub(crate) fn validate_approved_recruitment_attempt(
         mandate_version: resolved_authority.mandate_version(),
         manager_version: resolved_authority.manager_version(),
         policy: approval,
-        policy_source: recruitment_policy_source(policy.source),
+        policy_source: recruitment_policy_source(policy),
     };
     validate_recruitment_plan_with_authority(
         registry,
@@ -1040,12 +1041,16 @@ impl ValidatedRecruitmentAttempt {
     }
 }
 
-pub(crate) fn recruitment_policy_source(source: PolicySource) -> RecruitmentPolicySource {
-    match source {
-        PolicySource::Organization(organization) => {
-            RecruitmentPolicySource::Organization(organization)
-        }
-        PolicySource::Mandate(mandate) => RecruitmentPolicySource::Mandate(mandate),
+pub(crate) fn recruitment_policy_source(policy: ResolvedPolicy) -> RecruitmentPolicySource {
+    match policy.source {
+        PolicySource::Organization(organization) => RecruitmentPolicySource::Organization {
+            organization,
+            version: policy.source_version,
+        },
+        PolicySource::Mandate(mandate) => RecruitmentPolicySource::Mandate {
+            mandate,
+            version: policy.source_version,
+        },
     }
 }
 

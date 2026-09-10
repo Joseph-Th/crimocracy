@@ -28,12 +28,12 @@ use crate::operations::operation_abort::{
 };
 use crate::operations::operation_system::{OperationError, has_operation_deadline_fully_passed};
 use crate::operations::{OperationContingency, OperationStatus};
-use crate::recruitment::RecruitmentDraft;
 use crate::recruitment::recruitment_system::{
     RecruitmentError, ValidatedRecruitmentAttempt, ValidatedRecruitmentProposal,
     recruitment_policy_source, validate_approved_recruitment_attempt,
     validate_recruitment_proposal,
 };
+use crate::recruitment::{RecruitmentDraft, RecruitmentPolicySource};
 use crate::registry::Registry;
 use crate::world::{ApprovalPolicy, PolicyKind, PolicySetting};
 use std::collections::BTreeSet;
@@ -267,12 +267,18 @@ pub(crate) fn validate_cancel_operation_decision_for_detention(
     }))
 }
 
-/// Frozen set of pending recruitment approvals whose mandate authority is about to be
-/// superseded. Mandate revision/revocation composes this decision-owned lifecycle change so an
-/// obsolete approval never remains pending with an Approve option that can no longer succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecruitmentApprovalCancellationScope {
+    Mandate(MandateId),
+    OrganizationPolicy(OrganizationId),
+}
+
+/// Frozen set of pending recruitment approvals whose effective authority is about to be
+/// superseded. Mandate and organization-policy mutations compose this decision-owned lifecycle
+/// change so an obsolete approval never remains pending with an Approve option that cannot work.
 #[derive(Debug)]
 pub(crate) struct ValidatedRecruitmentApprovalCancellations {
-    mandate: MandateId,
+    scope: RecruitmentApprovalCancellationScope,
     decisions: Vec<(DecisionRequestId, u32)>,
     cancelled_at: SimTime,
 }
@@ -280,18 +286,22 @@ pub(crate) struct ValidatedRecruitmentApprovalCancellations {
 impl ValidatedRecruitmentApprovalCancellations {
     pub(crate) fn is_current(&self, state: &AppState) -> bool {
         state.now() == self.cancelled_at
-            && pending_recruitment_approvals_for_mandate(state, self.mandate) == self.decisions
+            && pending_recruitment_approvals_for_scope(state, self.scope) == self.decisions
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {
+        let reason = match self.scope {
+            RecruitmentApprovalCancellationScope::Mandate(mandate) => {
+                DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
+            }
+            RecruitmentApprovalCancellationScope::OrganizationPolicy(organization) => {
+                DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(organization)
+            }
+        };
         for (decision, _) in self.decisions {
-            state.decisions.cancel(
-                decision,
-                build_cancellation(
-                    self.cancelled_at,
-                    DecisionCancellationReason::RecruitmentAuthorityChanged(self.mandate),
-                ),
-            );
+            state
+                .decisions
+                .cancel(decision, build_cancellation(self.cancelled_at, reason));
         }
     }
 }
@@ -300,7 +310,27 @@ pub(crate) fn validate_cancel_recruitment_approvals_for_mandate_change(
     state: &AppState,
     mandate: MandateId,
 ) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
-    let decisions = pending_recruitment_approvals_for_mandate(state, mandate);
+    validate_cancel_recruitment_approvals_for_scope(
+        state,
+        RecruitmentApprovalCancellationScope::Mandate(mandate),
+    )
+}
+
+pub(crate) fn validate_cancel_recruitment_approvals_for_organization_policy_change(
+    state: &AppState,
+    organization: OrganizationId,
+) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
+    validate_cancel_recruitment_approvals_for_scope(
+        state,
+        RecruitmentApprovalCancellationScope::OrganizationPolicy(organization),
+    )
+}
+
+fn validate_cancel_recruitment_approvals_for_scope(
+    state: &AppState,
+    scope: RecruitmentApprovalCancellationScope,
+) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
+    let decisions = pending_recruitment_approvals_for_scope(state, scope);
     for (decision, _) in &decisions {
         let record = state
             .decisions
@@ -309,26 +339,39 @@ pub(crate) fn validate_cancel_recruitment_approvals_for_mandate_change(
         ensure_version_can_advance(record.version(), "decision request")?;
     }
     Ok(ValidatedRecruitmentApprovalCancellations {
-        mandate,
+        scope,
         decisions,
         cancelled_at: state.now(),
     })
 }
 
-fn pending_recruitment_approvals_for_mandate(
+fn pending_recruitment_approvals_for_scope(
     state: &AppState,
-    mandate: MandateId,
+    scope: RecruitmentApprovalCancellationScope,
 ) -> Vec<(DecisionRequestId, u32)> {
     state
         .decisions
         .decisions()
         .filter(|decision| decision.status() == DecisionStatus::Pending)
         .filter(|decision| {
-            matches!(
-                decision.context(),
-                DecisionContext::RecruitmentApproval(context)
-                    if context.authority().authority().mandate == mandate
-            )
+            let DecisionContext::RecruitmentApproval(context) = decision.context() else {
+                return false;
+            };
+            match scope {
+                RecruitmentApprovalCancellationScope::Mandate(mandate) => {
+                    context.authority().authority().mandate == mandate
+                }
+                RecruitmentApprovalCancellationScope::OrganizationPolicy(organization) => {
+                    context.target_organization() == organization
+                        && matches!(
+                            context.authority().policy_source(),
+                            RecruitmentPolicySource::Organization {
+                                organization: source,
+                                ..
+                            } if source == organization
+                        )
+                }
+            }
         })
         .map(|decision| (decision.id(), decision.version()))
         .collect()
@@ -742,7 +785,7 @@ pub fn validate_request_recruitment_approval(
             draft.authority,
             authority.mandate_version(),
             authority.manager_version(),
-            recruitment_policy_source(policy.source),
+            recruitment_policy_source(policy),
         ),
     );
     Ok(ValidatedRecruitmentApprovalRequest {
@@ -1042,7 +1085,7 @@ fn validate_recruitment_approval_authority_snapshot(
         PolicyKind::IndependentRecruitment,
     )?;
     if policy.setting != PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
-        || recruitment_policy_source(policy.source) != snapshot.policy_source()
+        || recruitment_policy_source(policy) != snapshot.policy_source()
     {
         return Err(DecisionError::StaleRecruitmentApprovalAuthority);
     }

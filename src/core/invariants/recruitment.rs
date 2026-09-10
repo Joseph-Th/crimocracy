@@ -517,10 +517,23 @@ fn recruitment_authority_snapshot_is_valid(
         return false;
     }
     match policy_source {
-        RecruitmentPolicySource::Organization(organization) => {
+        RecruitmentPolicySource::Organization {
+            organization,
+            version,
+        } => {
             organization == attempt.target_organization()
+                && state
+                    .world
+                    .get_organization(organization)
+                    .is_some_and(|record| {
+                        record.independent_recruitment_policy_at_version(version)
+                            == Some(expected_policy)
+                    })
         }
-        RecruitmentPolicySource::Mandate(source_mandate) => source_mandate == mandate,
+        RecruitmentPolicySource::Mandate {
+            mandate: source_mandate,
+            version,
+        } => source_mandate == mandate && version == mandate_version,
     }
 }
 

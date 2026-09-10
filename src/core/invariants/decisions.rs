@@ -18,7 +18,7 @@ use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationContingency, OperationStatus,
 };
 use crate::recruitment::RecruitmentPolicySource;
-use crate::world::OrganizationKind;
+use crate::world::{ApprovalPolicy, OrganizationKind, PolicyKind, PolicySetting};
 
 pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
     for decision in state.decisions.decisions() {
@@ -390,7 +390,8 @@ fn validate_cancelled_operation_decision(
         .ok_or_else(|| invalid_decision_context(decision))?;
     let character = match cancellation.reason() {
         DecisionCancellationReason::OperationParticipantDetained(character) => character,
-        DecisionCancellationReason::RecruitmentAuthorityChanged(_) => {
+        DecisionCancellationReason::RecruitmentAuthorityChanged(_)
+        | DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(_) => {
             return Err(invalid_decision_context(decision));
         }
     };
@@ -478,8 +479,18 @@ fn validate_recruitment_approval_authority(
         .get_mandate(mandate_authority.mandate)
         .ok_or_else(|| invalid_decision_context(decision))?;
     let valid_policy_source = match authority.policy_source() {
-        RecruitmentPolicySource::Organization(source) => source == context.target_organization(),
-        RecruitmentPolicySource::Mandate(source) => source == mandate_authority.mandate,
+        RecruitmentPolicySource::Organization {
+            organization: source,
+            version,
+        } => {
+            source == context.target_organization()
+                && organization.independent_recruitment_policy_at_version(version)
+                    == Some(ApprovalPolicy::RequireApproval)
+        }
+        RecruitmentPolicySource::Mandate {
+            mandate: source,
+            version,
+        } => source == mandate_authority.mandate && version == authority.mandate_version(),
     };
     if organization.kind() != OrganizationKind::Criminal
         || mandate_authority.manager != context.recruiter()
@@ -528,21 +539,38 @@ fn validate_cancelled_recruitment_approval(
     let cancellation = decision
         .cancellation()
         .ok_or_else(|| invalid_decision_context(decision))?;
-    let mandate_id = match cancellation.reason() {
-        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate) => mandate,
+    let authority = context.authority();
+    let cancellation_is_valid = match cancellation.reason() {
+        DecisionCancellationReason::RecruitmentAuthorityChanged(mandate_id) => {
+            let mandate = state
+                .delegation
+                .get_mandate(mandate_id)
+                .ok_or_else(|| invalid_decision_context(decision))?;
+            authority.authority().mandate == mandate_id
+                && authority.mandate_version() < mandate.version()
+        }
+        DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(organization) => {
+            context.target_organization() == organization
+                && matches!(
+                    authority.policy_source(),
+                    RecruitmentPolicySource::Organization {
+                        organization: source,
+                        version,
+                    } if source == organization
+                        && state
+                            .world
+                            .get_organization(organization)
+                            .and_then(|record| {
+                                record.policy_version(PolicyKind::IndependentRecruitment)
+                            })
+                            .is_some_and(|current| current > version)
+                )
+        }
         DecisionCancellationReason::OperationParticipantDetained(_) => {
             return Err(invalid_decision_context(decision));
         }
     };
-    let authority = context.authority();
-    let mandate = state
-        .delegation
-        .get_mandate(mandate_id)
-        .ok_or_else(|| invalid_decision_context(decision))?;
-    if authority.authority().mandate != mandate_id
-        || authority.mandate_version() >= mandate.version()
-        || linked_attempt.is_some()
-    {
+    if !cancellation_is_valid || linked_attempt.is_some() {
         return Err(invalid_decision_context(decision));
     }
     Ok(())
@@ -554,11 +582,55 @@ fn validate_pending_recruitment_approval(
     context: RecruitmentApprovalContext,
     linked_attempt: Option<&crate::recruitment::RecruitmentAttemptRecord>,
 ) -> Result<(), StateValidationError> {
+    let authority = context.authority();
+    let mandate = state
+        .delegation
+        .get_mandate(authority.authority().mandate)
+        .ok_or_else(|| invalid_decision_context(decision))?;
+    let recruiter = state
+        .world
+        .get_character(context.recruiter())
+        .ok_or_else(|| invalid_decision_context(decision))?;
+    let organization = state
+        .world
+        .get_organization(context.target_organization())
+        .ok_or_else(|| invalid_decision_context(decision))?;
+    let (effective_policy, effective_source) = mandate
+        .standing_orders()
+        .get(&PolicyKind::IndependentRecruitment)
+        .copied()
+        .map(|setting| {
+            (
+                setting,
+                RecruitmentPolicySource::Mandate {
+                    mandate: mandate.id(),
+                    version: mandate.version(),
+                },
+            )
+        })
+        .or_else(|| {
+            let setting = organization.policy(PolicyKind::IndependentRecruitment)?;
+            let version = organization.policy_version(PolicyKind::IndependentRecruitment)?;
+            Some((
+                setting,
+                RecruitmentPolicySource::Organization {
+                    organization: context.target_organization(),
+                    version,
+                },
+            ))
+        })
+        .ok_or_else(|| invalid_decision_context(decision))?;
     if state
         .decisions
         .pending_for_recruitment_approval(context.target_organization(), context.candidate())
         != Some(decision.id())
         || linked_attempt.is_some()
+        || mandate.status() != MandateStatus::Active
+        || mandate.version() != authority.mandate_version()
+        || recruiter.version() != authority.manager_version()
+        || effective_policy
+            != PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
+        || effective_source != authority.policy_source()
     {
         return Err(invalid_decision_context(decision));
     }

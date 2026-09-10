@@ -1142,6 +1142,18 @@ fn next_unattempted_review_source(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
 ) -> Result<Option<EvidenceId>, InvestigationWorkError> {
+    // Build the attempted set once for this case. The previous implementation rescanned the
+    // same work history for every evidence item, making a quiet per-minute scheduling pass
+    // quadratic in accumulated case evidence and work history.
+    let attempted_reviews: BTreeSet<EvidenceId> = state
+        .legal
+        .work_for_investigation(investigation.id())
+        .filter(|work| {
+            work.kind() == InvestigationWorkKind::EvidenceReview
+                && work.status() != InvestigationWorkStatus::Cancelled
+        })
+        .filter_map(|work| work.focus().evidence_id())
+        .collect();
     for evidence_id in investigation.evidence() {
         // The investigation owns this evidence reference. A missing backing record is a broken
         // case graph, not "no reviewable evidence yet"; surface it at the autonomous consumer.
@@ -1152,15 +1164,7 @@ fn next_unattempted_review_source(
         if !is_reviewable_evidence_kind(evidence.kind()) {
             continue;
         }
-        let attempted = state
-            .legal
-            .work_for_investigation(investigation.id())
-            .any(|work| {
-                work.kind() == InvestigationWorkKind::EvidenceReview
-                    && work.focus() == InvestigationWorkFocus::evidence(evidence.id())
-                    && work.status() != InvestigationWorkStatus::Cancelled
-            });
-        if !attempted {
+        if !attempted_reviews.contains(&evidence.id()) {
             return Ok(Some(evidence.id()));
         }
     }

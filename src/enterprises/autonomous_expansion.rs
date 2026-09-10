@@ -15,7 +15,7 @@ use crate::enterprises::enterprise_execution::{
     validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
-    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
+    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
 };
 use crate::finance::finance_system::{FinanceError, validate_open_accounts};
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
@@ -742,10 +742,7 @@ fn resolve_committed_working_capital(
     observed_district_pressure: &ObservedDistrictPressure,
 ) -> Result<BTreeMap<FinancialAccountId, Money>, AutonomousExpansionError> {
     let mut reservations = BTreeMap::new();
-    for enterprise in state.enterprises().enterprises() {
-        if enterprise.status() != EnterpriseStatus::Active {
-            continue;
-        }
+    for enterprise in state.enterprises().active_enterprises() {
         let observed_active_cases = resolve_observed_district_case_count(
             state,
             observed_district_pressure,
