@@ -53,25 +53,10 @@ pub fn resolve_organization_business_financial_summary(
         state,
         state
             .world()
-            .businesses_ever_owned_by_organization(organization)
-            .filter(|business| {
-                let Some(economy) = state.economy().get_business_economy(business.id()) else {
-                    return false;
-                };
-                if economy.established_at() > period_end {
-                    return false;
-                }
-                let ownership_start = period_start.max(economy.established_at());
-                state.world.has_business_owner_during(
-                    business.id(),
-                    owner,
-                    ownership_start,
-                    period_end,
-                )
-            }),
+            .businesses_ever_owned_by_organization(organization),
         period_start,
         period_end,
-        Some(owner),
+        owner,
     )
 }
 
@@ -94,7 +79,7 @@ fn resolve_summary<'a>(
     businesses: impl IntoIterator<Item = &'a crate::world::BusinessRecord>,
     period_start: SimTime,
     period_end: SimTime,
-    cycle_owner: Option<BusinessOwner>,
+    owner: BusinessOwner,
 ) -> Result<BusinessFinancialSummary, BusinessReportingError> {
     let mut totals = BusinessFinancialTotals::default();
     let mut by_kind = BTreeMap::new();
@@ -105,14 +90,36 @@ fn resolve_summary<'a>(
         if economy.established_at() > period_end {
             continue;
         }
-        increment_business_count(&mut totals)?;
-        let kind_totals = by_kind.entry(business.kind()).or_default();
-        increment_business_count(kind_totals)?;
+        let ownership_start = period_start.max(economy.established_at());
+        let mut counted_business = state.world.has_business_owner_during(
+            business.id(),
+            owner,
+            ownership_start,
+            period_end,
+        );
+        if counted_business {
+            increment_business_count(&mut totals)?;
+            increment_business_count(by_kind.entry(business.kind()).or_default())?;
+        }
         for cycle in state.economy().cycles_for(business.id()).filter(|cycle| {
             cycle.occurred_at() >= period_start
                 && cycle.occurred_at() <= period_end
-                && cycle_owner.is_none_or(|owner| cycle.owner() == owner)
+                && cycle.owner() == owner
         }) {
+            // Ownership changes have minute precision, while cycle records persist the exact
+            // owner at commit. If a business settles for the outgoing owner and transfers later
+            // in that same minute, the generic interval query correctly reports the incoming
+            // owner at that timestamp, but this cycle is stronger historical evidence that the
+            // outgoing owner participated in the reporting window. Count the business lazily
+            // when that provenance exists instead of dropping its real financial activity.
+            if !counted_business {
+                increment_business_count(&mut totals)?;
+                increment_business_count(by_kind.entry(business.kind()).or_default())?;
+                counted_business = true;
+            }
+            let kind_totals = by_kind
+                .get_mut(&business.kind())
+                .expect("a counted business must have its kind bucket");
             add_cycle(
                 &mut totals,
                 cycle.gross_revenue(),

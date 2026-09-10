@@ -52,6 +52,16 @@ pub enum StateValidationError {
         organization: OrganizationId,
         audience: crate::reputation::AudienceKind,
     },
+    #[error("organization {organization:?} stores future-dated {audience:?} reputation movement")]
+    InvalidReputationChronology {
+        organization: OrganizationId,
+        audience: crate::reputation::AudienceKind,
+    },
+    #[error("organization {organization:?} stores a neutral {audience:?} reputation record")]
+    NeutralReputationRecord {
+        organization: OrganizationId,
+        audience: crate::reputation::AudienceKind,
+    },
     #[error("player organization {organization} is not a criminal organization")]
     InvalidPlayerOrganization { organization: OrganizationId },
     #[error("organization {organization} is missing policy {policy:?}")]
@@ -401,6 +411,12 @@ fn validate_reputations(state: &AppState) -> Result<(), StateValidationError> {
                     audience: record.audience(),
                 });
             }
+            if record.changed_at(dimension) > state.now() {
+                return Err(StateValidationError::InvalidReputationChronology {
+                    organization: record.organization(),
+                    audience: record.audience(),
+                });
+            }
         }
     }
     Ok(())
@@ -610,7 +626,27 @@ pub fn validate_state_against_registry(
     )?;
     validate_enterprises_against_registry(registry, state)?;
     validate_recruitment_against_registry(registry, state)?;
+    validate_reputations_against_registry(registry, state)?;
     validate_executive_briefs_against_registry(registry, state)?;
+    Ok(())
+}
+
+fn validate_reputations_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let baseline = registry.reputation().baseline();
+    for record in state.reputation.records() {
+        if crate::reputation::ALL_REPUTATION_DIMENSIONS
+            .iter()
+            .all(|dimension| record.score(*dimension) == baseline)
+        {
+            return Err(StateValidationError::NeutralReputationRecord {
+                organization: record.organization(),
+                audience: record.audience(),
+            });
+        }
+    }
     Ok(())
 }
 

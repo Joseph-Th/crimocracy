@@ -1597,6 +1597,13 @@ fn count_district_originated_cases(
                 .kind()
                 == OrganizationKind::LawEnforcement
                 && investigation.origin().is_some()
+                // Enterprise settlements at one simulation instant are peer events. A vice
+                // inquiry opened or resumed by an earlier-settled racket this minute must not
+                // retroactively tax a later peer cycle merely because stable scheduler order
+                // committed the first record earlier. Legal activity that existed before this
+                // enterprise phase, including operation-created casework earlier in the tick,
+                // still counts immediately.
+                && !enterprise_vice_inquiry_became_active_this_minute(state, investigation)
                 && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
                 state, investigation,
             )
@@ -1609,6 +1616,29 @@ fn count_district_originated_cases(
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+fn enterprise_vice_inquiry_became_active_this_minute(
+    state: &crate::core::state::AppState,
+    investigation: &crate::legal::InvestigationRecord,
+) -> bool {
+    investigation.evidence().iter().any(|evidence_id| {
+        let evidence = state
+            .legal
+            .get_evidence(*evidence_id)
+            .expect("investigation evidence index must reference persisted evidence");
+        let Some(EntityRef::Enterprise(enterprise)) = evidence.origin() else {
+            return false;
+        };
+        evidence.discovered_at() == state.now()
+            && is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+            && state
+                .enterprises
+                .latest_cycle(enterprise)
+                .is_some_and(|cycle| {
+                    cycle.occurred_at() == state.now() && cycle.drew_vice_attention()
+                })
+    })
+}
+
 /// Whether this racket already has an active dedicated inquiry under any authority. Jurisdiction
 /// priority can change while an existing investigation remains owned by the authority that opened
 /// it, so restricting this lookup to the district's current intake authority would allow a second
@@ -1619,17 +1649,48 @@ fn has_active_enterprise_inquiry(
     enterprise: EnterpriseId,
 ) -> bool {
     state.legal.active_investigations().any(|investigation| {
-        state
-            .world
-            .get_organization(investigation.owner())
-            .expect("active investigation owner must reference a persisted organization")
-            .kind()
-            == OrganizationKind::LawEnforcement
-            && investigation.origin() == Some(EntityRef::Enterprise(enterprise))
-            && investigation
-                .subjects()
-                .contains(&EntityRef::Enterprise(enterprise))
+        investigation.evidence().iter().any(|evidence_id| {
+            let evidence = state
+                .legal
+                .get_evidence(*evidence_id)
+                .expect("investigation evidence index must reference persisted evidence");
+            is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+        })
     })
+}
+
+/// Canonical persisted signature of enterprise vice intake. Incident continuation may resume a
+/// shelf whose original case origin names some other overlapping incident, so the investigation's
+/// `origin` alone is not reliable provenance for later vice-cycle behavior. The intake evidence is:
+/// every vice event adds one enterprise-specific surveillance item even when it reuses a shelf.
+pub(crate) fn is_enterprise_vice_evidence(
+    state: &crate::core::state::AppState,
+    investigation: &crate::legal::InvestigationRecord,
+    evidence: &crate::legal::EvidenceRecord,
+    enterprise: EnterpriseId,
+) -> bool {
+    let Some(record) = state.enterprises.get_enterprise(enterprise) else {
+        return false;
+    };
+    state
+        .world
+        .get_organization(investigation.owner())
+        .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+        && investigation
+            .subjects()
+            .contains(&EntityRef::Enterprise(enterprise))
+        && investigation
+            .notified_organizations()
+            .contains(&record.organization())
+        && evidence.investigation() == investigation.id()
+        && evidence.custodian() == investigation.owner()
+        && evidence.subject() == EntityRef::Enterprise(enterprise)
+        && evidence.origin() == Some(EntityRef::Enterprise(enterprise))
+        && evidence.source().is_none()
+        && evidence.kind() == crate::legal::EvidenceKind::Surveillance
+        && evidence.strength() == crate::legal::EvidenceStrength::Weak
+        && evidence.reliability() == crate::legal::EvidenceReliability::Questionable
+        && evidence.admissibility() == crate::legal::Admissibility::Unknown
 }
 
 /// Builds the intake draft for a vice inquiry opened onto this racket: one questionable

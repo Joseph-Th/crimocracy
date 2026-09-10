@@ -465,7 +465,7 @@ pub(crate) fn apply_detainee_informant_recruitment(
         let validated = validate_establish_informant(state, InformantDraft { character, handler })?;
         let mut advanced_rng = state.investigation_rng_mut().clone();
         let roll = crate::core::simulation::draw_index(&mut advanced_rng, 100)
-            .expect("percentile draw over a nonempty 1..=100 range cannot fail");
+            .expect("percentile draw over the nonempty 0..100 index range cannot fail");
         if roll as u32 >= chance {
             *state.investigation_rng_mut() = advanced_rng;
             continue;

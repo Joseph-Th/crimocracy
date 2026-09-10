@@ -2533,6 +2533,17 @@ fn refused_recruitment_near_clock_horizon_reports_cooldown_overflow_instead_of_p
         RecruitmentError::SimulationTimeOverflow
     );
     assert_eq!(
+        find_recruitment_candidates(
+            &fixture.registry,
+            &fixture.state,
+            fixture.target,
+            fixture.recruiter,
+        )
+        .expect_err("candidate discovery must not hide an unrepresentable cooldown endpoint"),
+        RecruitmentError::SimulationTimeOverflow,
+        "query-style candidate filtering may suppress only a real cooldown, not arithmetic failure"
+    );
+    assert_eq!(
         fixture
             .state
             .recruitment()

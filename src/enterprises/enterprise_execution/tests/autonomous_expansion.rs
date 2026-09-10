@@ -1,6 +1,7 @@
 //! Autonomous delegated-expansion behavior exercised through enterprise production paths.
 
 use super::*;
+use crate::world::territory_influence::resolve_neighborhood_influence;
 
 fn designate_player(registry: &Registry, state: &mut AppState) -> OrganizationId {
     let player = insert_organization(
@@ -15,6 +16,159 @@ fn designate_player(registry: &Registry, state: &mut AppState) -> OrganizationId
     crate::world::world_system::designate_player_organization(state, player)
         .expect("player designation fixture should validate");
     player
+}
+
+#[test]
+fn autonomous_expansion_shared_slot_prefers_district_leader_over_organization_id() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+
+    // The fixture organization has the lower stable id but no existing district influence.
+    // A later-created rival owns one live racket here and therefore leads the district before
+    // this autonomous pass. Stable creation order must not let the outsider claim the shared
+    // Protection slot first.
+    let leader_organization = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Higher Id District Leader".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("district leader organization should validate");
+    assert!(leader_organization > fixture.organization);
+    let leader_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Higher Id District Manager".to_owned(),
+            organization: Some(leader_organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("district leader manager should validate");
+    // Give the incumbent only broad Enterprise authority while the lower-id outsider retains
+    // its explicit neighborhood mandate. Internal delegation specificity must not outrank the
+    // world-level fact that this organization already leads the contested district.
+    let leader_scope = ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
+    let leader_mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: leader_organization,
+            manager: leader_manager,
+            scopes: BTreeSet::from([leader_scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("district leader mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("district leader mandate should commit");
+    let leader_cash = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(leader_organization),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("district leader cash account should validate");
+    let leader_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(leader_organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("district leader settlement account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Fund higher-id district leader".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: leader_settlement,
+                    amount: Money::from_cents(-100_000),
+                },
+                LedgerPosting {
+                    account: leader_cash,
+                    amount: Money::from_cents(100_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("district leader funding should validate")
+    .commit(&mut fixture.state)
+    .expect("district leader funding should commit");
+    let leader_support = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Leader Hiring Warehouse".to_owned(),
+            kind: BusinessKind::Warehouse,
+            functions: BTreeSet::from([
+                BusinessFunction::UnionAccess,
+                BusinessFunction::Warehousing,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(leader_organization),
+        },
+    )
+    .expect("district leader support business should validate");
+    validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::LaborRacketeering,
+            organization: leader_organization,
+            authority: MandateAuthority {
+                mandate: leader_mandate,
+                manager: leader_manager,
+                scope: leader_scope,
+            },
+            location: EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::from([leader_support]),
+            cash_account: leader_cash,
+            settlement_account: leader_settlement,
+        },
+    )
+    .expect("leadership-establishing labor racket should validate")
+    .commit(&mut fixture.state)
+    .expect("leadership-establishing labor racket should commit");
+    assert_eq!(
+        resolve_neighborhood_influence(&fixture.state, neighborhood)
+            .expect("district influence should resolve")
+            .economic_leader(),
+        Some(leader_organization)
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("competing autonomous expansion should resolve");
+    let protection = fixture
+        .state
+        .enterprises()
+        .enterprises_at(EnterpriseLocation::Neighborhood(neighborhood))
+        .find(|enterprise| enterprise.kind() == EnterpriseKind::Protection)
+        .expect("one contender should claim the shared protection slot");
+    assert_eq!(
+        protection.organization(),
+        leader_organization,
+        "phase-wide contention must honor district leadership before stable organization id"
+    );
+    assert!(established.contains(&protection.id()));
+    validate_invariants(&fixture.state);
 }
 
 #[test]
@@ -288,6 +442,15 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         .commit(&mut fixture.state)
         .expect("heated enterprise retirement should commit");
 
+    // Save/restore deliberately drops derived indexes. Rebuild must recover the recent-cycle
+    // time projection from authoritative history or the observation below would disappear early.
+    fixture.state = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("retired heated enterprise should remain saveable"),
+    )
+    .expect("retired heated enterprise should restore with derived cycle indexes rebuilt");
+
     // Normalize liquid cash to exactly the quiet runway. If the retired racket's last observed
     // heat were remembered forever, that stale surcharge would make the replacement appear
     // unaffordable and permanently block re-entry.
@@ -325,6 +488,14 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         .commit(&mut fixture.state)
         .expect("cash normalization should commit");
     }
+
+    let mut still_fresh = fixture.state.clone();
+    assert!(
+        apply_due_autonomous_enterprises(&registry, &mut still_fresh)
+            .expect("restored recent pressure should remain usable planning knowledge")
+            .is_empty(),
+        "the rebuilt recent-cycle index must retain fresh observed heat after restore"
+    );
 
     let cold_window = registry.legal().cold_case_window();
     fixture.state.advance_clock(cold_window);

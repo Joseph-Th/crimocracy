@@ -832,6 +832,29 @@ fn transferred_business_cycles_remain_attributed_to_the_owner_at_commit() {
     .commit(&mut fixture.state)
     .expect("same-minute ownership transfer should commit");
 
+    let transfer_minute = fixture.state.now();
+    let original_boundary_summary = resolve_organization_business_financial_summary(
+        &fixture.state,
+        fixture.organization,
+        transfer_minute,
+        transfer_minute,
+    )
+    .expect("outgoing owner boundary summary should preserve its committed cycle");
+    assert_eq!(original_boundary_summary.totals.business_count, 1);
+    assert_eq!(
+        original_boundary_summary.totals.cycle_count, 1,
+        "the cycle's persisted owner proves the outgoing organization settled before the same-minute transfer"
+    );
+    let successor_boundary_summary = resolve_organization_business_financial_summary(
+        &fixture.state,
+        successor,
+        transfer_minute,
+        transfer_minute,
+    )
+    .expect("incoming owner boundary summary should resolve");
+    assert_eq!(successor_boundary_summary.totals.business_count, 1);
+    assert_eq!(successor_boundary_summary.totals.cycle_count, 0);
+
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));

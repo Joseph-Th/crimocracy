@@ -155,7 +155,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
-    // decay removes yesterday's stale impression first, while operation/vice consequences from
+    // decay advances only impressions old enough to fade, while operation/vice consequences from
     // this minute land before candidates judge an outfit's underworld competence. Together with
     // payroll, every authored recruitment input therefore reflects the current minute rather
     // than a mixture of pre- and post-boundary state.
@@ -408,7 +408,7 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
     enterprise_cycles
 }
 
-/// Day-boundary decay runs first in the reputation cluster: yesterday's impressions fade one
+/// Day-boundary decay runs first in the reputation cluster: eligible aged impressions fade one
 /// authored step before anything new lands, so consequences applied this minute are not
 /// immediately eroded by the same boundary's decay pass. Resolved operations feed competence/
 /// fear/exposure consequences; rackets that drew a vice inquiry this tick pay the same

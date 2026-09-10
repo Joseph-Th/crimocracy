@@ -38,6 +38,7 @@ use crate::operations::operation_abort::{
 use crate::operations::operation_system::OperationError;
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -519,9 +520,12 @@ struct CustodyEvidenceAssessment {
 }
 
 impl CustodyEvidenceAssessment {
-    fn observe(&mut self, state: &AppState, evidence: &crate::legal::EvidenceRecord) -> bool {
+    fn corroboration_source(
+        state: &AppState,
+        evidence: &crate::legal::EvidenceRecord,
+    ) -> Option<CustodyCorroborationSource> {
         if !evidence_qualifies_for_custody(evidence) {
-            return false;
+            return None;
         }
         let source_evidence = match evidence.derived_from().len() {
             0 => evidence,
@@ -531,19 +535,24 @@ impl CustodyEvidenceAssessment {
                     .iter()
                     .next()
                     .expect("single-source derived evidence must name its source");
-                let Some(source) = state.legal.get_evidence(source_id) else {
-                    return false;
-                };
-                source
+                state.legal.get_evidence(source_id)?
             }
-            _ => return false,
+            _ => return None,
         };
-        let source = source_evidence
-            .source()
-            .map(CustodyCorroborationSource::Named)
-            .unwrap_or(CustodyCorroborationSource::PrimaryEvidence(
-                source_evidence.id(),
-            ));
+        Some(
+            source_evidence
+                .source()
+                .map(CustodyCorroborationSource::Named)
+                .unwrap_or(CustodyCorroborationSource::PrimaryEvidence(
+                    source_evidence.id(),
+                )),
+        )
+    }
+
+    fn observe(&mut self, state: &AppState, evidence: &crate::legal::EvidenceRecord) -> bool {
+        let Some(source) = Self::corroboration_source(state, evidence) else {
+            return false;
+        };
         let strong = matches!(
             evidence.strength(),
             crate::legal::EvidenceStrength::Strong | crate::legal::EvidenceStrength::Direct
@@ -563,10 +572,92 @@ impl CustodyEvidenceAssessment {
         self.sources.values().any(|has_strong| *has_strong)
     }
 
+    fn strong_independent(&self) -> usize {
+        self.sources
+            .values()
+            .filter(|has_strong| **has_strong)
+            .count()
+    }
+
     fn meets(&self, minimum_qualifying_evidence: u8) -> bool {
         self.independent_qualifying() >= usize::from(minimum_qualifying_evidence)
             && self.has_strong_independent()
     }
+}
+
+#[derive(Debug)]
+struct AutonomousArrestCandidate {
+    investigation: InvestigationId,
+    character: CharacterId,
+    evidence: BTreeSet<EvidenceId>,
+    independent_sources: usize,
+    strong_sources: usize,
+}
+
+fn resolve_autonomous_arrest_candidate(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+    investigation_id: InvestigationId,
+    character: CharacterId,
+) -> Result<Option<AutonomousArrestCandidate>, ArrestError> {
+    if state.legal.active_arrest_for_character(character).is_some()
+        || state
+            .legal
+            .arrests_for_investigation(investigation_id)
+            .any(|arrest| arrest.character() == character)
+    {
+        return Ok(None);
+    }
+    let investigation = state
+        .legal
+        .get_investigation(investigation_id)
+        .ok_or(ArrestError::MissingInvestigation(investigation_id))?;
+    if investigation.status() != InvestigationStatus::Active {
+        return Err(ArrestError::InactiveInvestigation(investigation_id));
+    }
+    let owner = investigation.owner();
+    let mut assessment = CustodyEvidenceAssessment::default();
+    let mut citations: BTreeMap<CustodyCorroborationSource, EvidenceId> = BTreeMap::new();
+    for evidence_id in investigation.evidence() {
+        let evidence = state
+            .legal
+            .get_evidence(*evidence_id)
+            .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
+        if evidence.subject() != EntityRef::Character(character) || evidence.custodian() != owner {
+            continue;
+        }
+        let Some(source) = CustodyEvidenceAssessment::corroboration_source(state, evidence) else {
+            continue;
+        };
+        assessment.observe(state, evidence);
+        // Cite one qualifying record per independent source. Prefer the primary source when it
+        // is itself custody-grade; otherwise a developed derivative must stand in for the weak
+        // or questionable original that it legitimately improved. Evidence review preserves
+        // source strength, so a custody-grade primary cannot discard a Strong/Direct property
+        // that exists only on its derivative.
+        let citation = match evidence.derived_from().iter().next().copied() {
+            Some(source_id) => state
+                .legal
+                .get_evidence(source_id)
+                .filter(|source_evidence| evidence_qualifies_for_custody(source_evidence))
+                .map_or(evidence.id(), crate::legal::EvidenceRecord::id),
+            None => evidence.id(),
+        };
+        citations
+            .entry(source)
+            .and_modify(|current| *current = (*current).min(citation))
+            .or_insert(citation);
+    }
+    if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
+        return Ok(None);
+    }
+    Ok(Some(AutonomousArrestCandidate {
+        investigation: investigation_id,
+        character,
+        evidence: citations.into_values().collect(),
+        independent_sources: assessment.independent_qualifying(),
+        strong_sources: assessment.strong_independent(),
+    }))
 }
 
 /// Registry-aware corroboration rule used by persistence validation. Canonical direct and
@@ -724,7 +815,7 @@ pub fn apply_autonomous_evidence_arrests(
     // Single scan over active cases. Case provenance controls lifecycle and information flow,
     // not whether equally strong evidence can produce custody; subject pairs append directly so
     // a tick with no candidates allocates nothing beyond the one candidate buffer.
-    let mut candidates: Vec<(InvestigationId, CharacterId)> = Vec::new();
+    let mut case_subjects: Vec<(InvestigationId, CharacterId)> = Vec::new();
     for investigation in state.legal().active_investigations() {
         // Legal authorities can own investigative files, but only law-enforcement institutions
         // have custody authority. Skip non-police case owners here instead of turning a valid
@@ -737,7 +828,7 @@ pub fn apply_autonomous_evidence_arrests(
             continue;
         }
         let investigation_id = investigation.id();
-        candidates.extend(
+        case_subjects.extend(
             investigation
                 .subjects()
                 .iter()
@@ -756,63 +847,39 @@ pub fn apply_autonomous_evidence_arrests(
                 }),
         );
     }
-    if candidates.is_empty() {
+    if case_subjects.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut arrests = Vec::new();
-    for (investigation_id, character) in candidates {
-        if state.legal.active_arrest_for_character(character).is_some() {
-            continue;
+    let mut candidates = Vec::new();
+    for (investigation, character) in case_subjects {
+        if let Some(candidate) =
+            resolve_autonomous_arrest_candidate(registry, state, investigation, character)?
+        {
+            candidates.push(candidate);
         }
-        // Autonomous custody is a conservative one-time conversion for one case/person pair.
-        // Once that detention has ended, unchanged case evidence must not manufacture an
-        // arrest-release-arrest loop every authored custody window. A later deliberate re-arrest
-        // remains available through `validate_arrest`; a distinct investigation can also make
-        // its own autonomous custody decision.
+    }
+    // One character can be arrestable in several police files at once, but only one active
+    // detention can own them. Prefer the case with more independent qualifying sources, then
+    // more Strong/Direct independent sources. Stable case id breaks only a true evidentiary tie
+    // instead of silently rewarding whichever investigation happened to be opened first.
+    candidates.sort_unstable_by_key(|candidate| {
+        (
+            candidate.character,
+            std::cmp::Reverse(candidate.independent_sources),
+            std::cmp::Reverse(candidate.strong_sources),
+            candidate.investigation,
+        )
+    });
+    let mut arrests = Vec::new();
+    for candidate in candidates {
         if state
             .legal
-            .arrests_for_investigation(investigation_id)
-            .any(|arrest| arrest.character() == character)
+            .active_arrest_for_character(candidate.character)
+            .is_some()
         {
             continue;
         }
-
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .ok_or(ArrestError::MissingInvestigation(investigation_id))?;
-        if investigation.status() != InvestigationStatus::Active {
-            // Another arrest earlier in this pass can make a duplicate character candidate
-            // irrelevant, but this pass itself never transitions investigations. An inactive
-            // record in the active-case candidate snapshot therefore signals a broken index.
-            return Err(ArrestError::InactiveInvestigation(investigation_id));
-        }
-        let owner = investigation.owner();
-        // One lookup per case evidence record decides both eligibility and corroboration source.
-        // Canonical arrest validation intentionally rechecks the final draft before mutation.
-        let mut qualifying = std::collections::BTreeSet::new();
-        let mut assessment = CustodyEvidenceAssessment::default();
-        for evidence_id in investigation.evidence().iter() {
-            let evidence = state
-                .legal
-                .get_evidence(*evidence_id)
-                .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
-            if evidence.subject() != EntityRef::Character(character)
-                || evidence.custodian() != owner
-            {
-                continue;
-            }
-            if evidence.derived_from().is_empty() && assessment.observe(state, evidence) {
-                // Autonomous custody cites qualifying primary evidence only. Derived analyses
-                // remain case evidence and cannot duplicate the underlying source on the arrest.
-                qualifying.insert(evidence.id());
-            }
-        }
-        if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
-            continue;
-        }
-
         // The draft is assembled from current case/evidence state. Responsibility preemption is
         // part of the validated custody transaction, so validation or allocation failure is
         // exceptional and must surface rather than being mistaken for "not enough evidence yet".
@@ -820,9 +887,9 @@ pub fn apply_autonomous_evidence_arrests(
             registry,
             state,
             ArrestDraft {
-                character,
-                investigation: investigation_id,
-                evidence: qualifying,
+                character: candidate.character,
+                investigation: candidate.investigation,
+                evidence: candidate.evidence,
             },
         )?
         .commit(state)?;

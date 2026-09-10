@@ -52,7 +52,7 @@ pub(super) fn validate_operation_property_disposition(
         .world
         .get_business_ownership_change_for_version(disposition.venue(), disposition.venue_version())
         .ok_or_else(invalid)?;
-    let next_ownership_at_disposition = disposition
+    let next_ownership_before_disposition = disposition
         .venue_version()
         .checked_add(1)
         .and_then(|version| {
@@ -60,18 +60,17 @@ pub(super) fn validate_operation_property_disposition(
                 .world
                 .get_business_ownership_change_for_version(disposition.venue(), version)
         })
-        .is_some_and(|next| next.changed_at() <= disposition.disposed_at());
+        .is_some_and(|next| next.changed_at() < disposition.disposed_at());
     if disposition.venue_version() > venue.version()
         || ownership.new_owner()
             != BusinessOwner::Organization(operation.responsible_organization())
         || ownership.changed_at() > disposition.disposed_at()
-        || next_ownership_at_disposition
-        || state
-            .world
-            .business_owner_at(disposition.venue(), disposition.disposed_at())
-            != Some(BusinessOwner::Organization(
-                operation.responsible_organization(),
-            ))
+        // `venue_version` is the exact ownership revision observed by the canonical disposition
+        // transaction. Cross-domain events sharing one SimTime have no persisted sub-minute
+        // order, so a later ownership revision at the same minute may legitimately have followed
+        // the liquidation. Only a strictly earlier next revision proves the pinned version could
+        // not have been current when disposition committed.
+        || next_ownership_before_disposition
         || !venue.has_function(BusinessFunction::ResaleMarket)
     {
         return Err(invalid());

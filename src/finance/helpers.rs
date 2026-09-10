@@ -77,9 +77,14 @@ pub(crate) fn describe_gross_variance(basis_points: i16) -> String {
     if magnitude < 500 {
         "gross came in close to plan".to_owned()
     } else {
-        let percent = magnitude as f64 / 100.0;
+        // Basis points are exact integer simulation data. Render one decimal percent without
+        // introducing floating-point formatting into durable report text: ten basis points are
+        // one tenth of a percent, and the discarded remainder rounds half up.
+        let tenths_percent = (magnitude + 5) / 10;
+        let whole_percent = tenths_percent / 10;
+        let fractional_percent = tenths_percent % 10;
         let direction = if basis_points > 0 { "over" } else { "under" };
-        format!("gross ran about {percent:.1}% {direction} plan")
+        format!("gross ran about {whole_percent}.{fractional_percent}% {direction} plan")
     }
 }
 
@@ -137,6 +142,10 @@ mod tests {
         assert_eq!(
             describe_gross_variance(-1128),
             "gross ran about 11.3% under plan"
+        );
+        assert_eq!(
+            describe_gross_variance(1055),
+            "gross ran about 10.6% over plan"
         );
     }
 }

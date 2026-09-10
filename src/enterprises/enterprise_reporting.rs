@@ -85,7 +85,7 @@ fn resolve_summary<'a>(
         if enterprise.established_at() > period_end
             || enterprise
                 .retired_at()
-                .is_some_and(|retired_at| retired_at <= period_start)
+                .is_some_and(|retired_at| retired_at < period_start)
         {
             continue;
         }
@@ -321,6 +321,18 @@ mod tests {
         )
         .expect("period containing the enterprise lifetime should include it");
         assert_eq!(historical.totals.enterprise_count, 1);
+
+        let retirement_minute = resolve_organization_enterprise_financial_summary(
+            &state,
+            organization,
+            SimTime::from_minutes(10),
+            SimTime::from_minutes(10),
+        )
+        .expect("inclusive reporting at the retirement instant should resolve");
+        assert_eq!(
+            retirement_minute.totals.enterprise_count, 1,
+            "an enterprise established and retired at the reporting instant still overlaps that inclusive window"
+        );
 
         state.advance_clock(SimDuration::from_minutes(10));
         let after_retirement = resolve_organization_enterprise_financial_summary(

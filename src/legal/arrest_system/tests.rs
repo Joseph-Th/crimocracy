@@ -41,6 +41,167 @@ struct Fixture {
     evidence: EvidenceId,
 }
 
+#[test]
+fn autonomous_arrest_prefers_stronger_case_over_earlier_investigation_id() {
+    let mut fixture = fixture();
+    add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let stronger_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Later stronger custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.suspect)]),
+        },
+    )
+    .expect("stronger case should validate")
+    .commit(&mut fixture.state)
+    .expect("stronger case should commit");
+    assert!(stronger_case > fixture.investigation);
+    for _ in 0..3 {
+        add_character_evidence(
+            &mut fixture.state,
+            fixture.police,
+            stronger_case,
+            fixture.suspect,
+        );
+    }
+
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("competing arrestable cases should resolve");
+    assert_eq!(arrests.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(arrests[0])
+            .expect("autonomous arrest should persist")
+            .investigation(),
+        stronger_case,
+        "evidentiary strength must outrank investigation creation order"
+    );
+    validate_state(&fixture.state).expect("stronger-case custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_arrest_can_cite_developed_evidence_when_primary_source_is_not_custody_grade() {
+    use crate::legal::investigation_system::validate_assign_investigator;
+    use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+    use crate::legal::{InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind};
+    use crate::world::{CapabilityKind, Rating};
+
+    let mut fixture = fixture();
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Developed corroboration custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.suspect)]),
+        },
+    )
+    .expect("developed-evidence case should validate")
+    .commit(&mut fixture.state)
+    .expect("developed-evidence case should commit");
+    let source = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("questionable source should remain valid investigative evidence")
+    .commit(&mut fixture.state)
+    .expect("questionable source should commit");
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Development Detective".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(100).expect("fixture rating should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("development detective should validate");
+    validate_assign_investigator(&fixture.state, case, detective)
+        .expect("development detective assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("development detective assignment should commit");
+    let work = validate_schedule_investigation_work(
+        &fixture.registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: case,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(source),
+        },
+    )
+    .expect("questionable source review should schedule")
+    .commit(&mut fixture.state)
+    .expect("questionable source review should commit");
+    loop {
+        let tick = run_tick(&fixture.registry, &mut fixture.state);
+        if tick.resolved_investigation_work.contains(&work) {
+            break;
+        }
+    }
+    let derived = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .and_then(|work| work.resolution())
+        .and_then(|resolution| resolution.derived_evidence())
+        .expect("high-skill review should develop qualifying forensic evidence");
+    let developed = fixture
+        .state
+        .legal()
+        .get_evidence(derived)
+        .expect("developed forensic evidence should persist");
+    assert_eq!(developed.strength(), EvidenceStrength::Corroborating);
+    assert_eq!(developed.reliability(), EvidenceReliability::Mixed);
+    assert!(!evidence_qualifies_for_custody(
+        fixture
+            .state
+            .legal()
+            .get_evidence(source)
+            .expect("primary source should persist")
+    ));
+    assert!(evidence_qualifies_for_custody(developed));
+    let strong = add_character_evidence(&mut fixture.state, fixture.police, case, fixture.suspect);
+
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("developed corroboration should produce a valid autonomous arrest");
+    assert_eq!(arrests.len(), 1);
+    let arrest = fixture
+        .state
+        .legal()
+        .get_arrest(arrests[0])
+        .expect("developed-evidence arrest should persist");
+    assert_eq!(arrest.investigation(), case);
+    assert_eq!(arrest.evidence(), &BTreeSet::from([derived, strong]));
+    assert!(!arrest.evidence().contains(&source));
+    validate_state(&fixture.state).expect("developed-evidence custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
 fn add_two_same_source_informant_statements(fixture: &mut Fixture) -> BTreeSet<EvidenceId> {
     let criminal = fixture
         .state

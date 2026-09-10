@@ -791,3 +791,82 @@ fn property_disposition_reporting_respects_executive_brief_window() {
     validate_invariants(&same_window);
     validate_invariants(&later_window);
 }
+
+#[test]
+fn same_minute_post_disposition_venue_transfer_preserves_save_restore() {
+    let (registry, mut state, _police, neighborhood, operation) =
+        make_exposed_business_operation_fixture(false);
+    let start = run_tick(&registry, &mut state);
+    assert_eq!(start.started_operations, vec![operation]);
+    state.advance_clock(SimDuration::from_minutes(45));
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("favorable property operation should resolve");
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("property operation should validate")
+        .commit(&mut state)
+        .expect("property operation should commit");
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("completed property operation should persist")
+        .responsible_organization();
+    let (venue, cash_account, settlement_account) =
+        insert_property_disposition_fixture(&registry, &mut state, neighborhood, organization);
+    validate_dispose_property(
+        &registry,
+        &state,
+        PropertyDispositionDraft {
+            operation,
+            venue,
+            cash_account,
+            settlement_account,
+        },
+    )
+    .expect("held property should be disposable through the owned resale venue")
+    .commit(&mut state)
+    .expect("property disposition should commit");
+    let disposition_version = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.property_disposition())
+        .expect("property disposition should persist")
+        .venue_version();
+
+    // World ownership may change later in this same minute. The disposition already froze the
+    // exact venue version it used, while cross-domain sub-minute ordering is intentionally not
+    // persisted. Restore must therefore not reinterpret the final owner at this timestamp as if
+    // it had necessarily preceded the liquidation.
+    validate_transfer_business_ownership(&state, venue, BusinessOwner::Independent)
+        .expect("resale venue should be transferable after disposition")
+        .commit(&mut state)
+        .expect("same-minute post-disposition transfer should commit");
+    assert!(
+        state
+            .world()
+            .get_business(venue)
+            .expect("transferred venue should persist")
+            .version()
+            > disposition_version
+    );
+    validate_state(&state).expect("same-minute disposition transfer should remain valid state");
+    validate_state_against_registry(&registry, &state)
+        .expect("pinned disposition ownership version should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("same-minute disposition transfer should save"),
+    )
+    .expect("same-minute disposition transfer should restore");
+    let restored_disposition = restored
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.property_disposition())
+        .expect("restored property disposition should persist");
+    assert_eq!(restored_disposition.venue(), venue);
+    assert_eq!(restored_disposition.venue_version(), disposition_version);
+    validate_invariants(&restored);
+}

@@ -8,7 +8,9 @@ use crate::operations::{OperationApproach, OperationExposureLevel, OperationObje
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::reputation::{AudienceKind, ReputationDimension, ReputationRecord, ReputationState};
+use crate::reputation::{
+    AudienceKind, ReputationDimension, ReputationRecord, ReputationScore, ReputationState,
+};
 use crate::world::OrganizationKind;
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -61,19 +63,27 @@ fn apply_delta(
     let proposed = i32::from(current) + i32::from(delta);
     let next = u8::try_from(proposed.clamp(0, 100))
         .expect("clamped reputation arithmetic stays inside the score range");
+    if next == current {
+        return Ok(current);
+    }
     let key = (organization, audience);
     if !state.reputation.records_contains_key(key) {
         let baseline = registry.reputation().baseline();
-        let mut record = ReputationRecord::at_baseline(organization, audience, baseline);
-        record.set_score(dimension, next);
+        let mut record =
+            ReputationRecord::at_baseline(organization, audience, baseline, state.now());
+        record.set_score(dimension, next, state.now());
         state.reputation.insert_record(record);
     } else {
+        let changed_at = state.now();
         let record = state
             .reputation
             .record_mut(key)
             .expect("touched reputation record must exist");
-        record.set_score(dimension, next);
+        record.set_score(dimension, next, changed_at);
     }
+    state
+        .reputation
+        .remove_if_at_baseline(key, registry.reputation().baseline());
     Ok(next)
 }
 
@@ -376,34 +386,36 @@ fn validate_standing_feedback_report(
     )
 }
 
-/// Day-boundary decay: every touched impression drifts one authored step toward the
-/// baseline from both sides, so old events fade instead of ratcheting forever. Absent
-/// records stay absent — decay never manufactures impressions. Runs on the payroll's day
-/// boundary so all daily passes observe the same campaign-day rhythm.
+/// Day-boundary decay: every touched dimension at least one campaign day old drifts one authored
+/// step toward the baseline from both sides, so old events fade instead of ratcheting forever.
+/// Fresh dimensions wait until a later day boundary rather than losing impact simply because
+/// their event happened shortly before, or earlier within, the current boundary tick. Absent
+/// records stay absent; decay never manufactures impressions.
 pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppState) -> usize {
     if !crate::core::time::is_day_boundary(state.now()) {
         return 0;
     }
     // Snapshot the touched impressions first: mutation goes through the canonical path,
     // which cannot run while the records map is borrowed for iteration.
-    let touched: Vec<(OrganizationId, AudienceKind)> = state
-        .reputation()
-        .records()
-        .map(|record| (record.organization(), record.audience()))
-        .collect();
+    let touched: Vec<ReputationRecord> = state.reputation().records().copied().collect();
     let step = i8::try_from(i64::from(registry.reputation().daily_decay_step()))
         .expect("authored decay step fits i8");
     let baseline = registry.reputation().baseline();
     let mut adjusted = 0_usize;
-    for (organization, audience) in touched {
+    for record in touched {
+        let organization = record.organization();
+        let audience = record.audience();
         for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
-            let current = resolve_score(
-                registry,
-                &state.reputation,
-                organization,
-                audience,
-                dimension,
-            );
+            let current = record.score(dimension);
+            let changed_at = record.changed_at(dimension);
+            if state
+                .now()
+                .as_minutes()
+                .saturating_sub(changed_at.as_minutes())
+                < crate::core::time::DAY_MINUTES
+            {
+                continue;
+            }
             let current_i = i64::from(current);
             let drifted = if current_i > i64::from(baseline) {
                 (current_i - i64::from(step)).max(i64::from(baseline))
@@ -421,9 +433,6 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
             }
         }
     }
-    // A fully faded impression is indistinguishable from an absent one by design: erase it
-    // so the sparse-record contract stays literal and state does not grow monotonically.
-    state.reputation.remove_at_baseline(baseline);
     adjusted
 }
 
@@ -432,14 +441,16 @@ impl ReputationRecord {
         organization: OrganizationId,
         audience: AudienceKind,
         baseline: u8,
+        changed_at: crate::core::time::SimTime,
     ) -> Self {
+        let score = ReputationScore::at(baseline, changed_at);
         Self {
             organization,
             audience,
-            fear: baseline,
-            reliability: baseline,
-            competence: baseline,
-            treachery: baseline,
+            fear: score,
+            reliability: score,
+            competence: score,
+            treachery: score,
         }
     }
 }
@@ -708,6 +719,226 @@ mod tests {
                 .get_record(organization, AudienceKind::Underworld)
                 .is_none(),
             "fully decayed record must be removed"
+        );
+    }
+
+    #[test]
+    fn fresh_reputation_does_not_decay_at_the_next_day_boundary() {
+        let (registry, mut state, organization) = make_state();
+        let baseline = registry.reputation().baseline();
+        state.advance_clock(SimDuration::from_minutes(1_439));
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+            10,
+        )
+        .expect("fresh police fear should apply");
+
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 0);
+        assert_eq!(
+            resolve_score(
+                &registry,
+                &state.reputation,
+                organization,
+                AudienceKind::Police,
+                ReputationDimension::Fear,
+            ),
+            baseline + 10,
+            "a one-minute-old consequence must not lose a full daily decay step"
+        );
+
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 1);
+        assert_eq!(
+            resolve_score(
+                &registry,
+                &state.reputation,
+                organization,
+                AudienceKind::Police,
+                ReputationDimension::Fear,
+            ),
+            baseline + 9,
+            "the first later day boundary after a full day of age should decay normally"
+        );
+    }
+
+    #[test]
+    fn reputation_dimensions_age_independently() {
+        let (registry, mut state, organization) = make_state();
+        let baseline = registry.reputation().baseline();
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Underworld,
+            ReputationDimension::Treachery,
+            10,
+        )
+        .expect("old treachery impression should apply");
+        state.advance_clock(SimDuration::from_minutes(1_439));
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Underworld,
+            ReputationDimension::Competence,
+            10,
+        )
+        .expect("fresh competence impression should apply");
+
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 1);
+        let record = state
+            .reputation()
+            .get_record(organization, AudienceKind::Underworld)
+            .expect("one audience record should retain both active dimensions");
+        assert_eq!(record.score(ReputationDimension::Treachery), baseline + 9);
+        assert_eq!(record.score(ReputationDimension::Competence), baseline + 10);
+    }
+
+    #[test]
+    fn clamped_noop_does_not_refresh_reputation_age() {
+        let (registry, mut state, organization) = make_state();
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+            100,
+        )
+        .expect("initial fear should clamp at the upper rail");
+        state.advance_clock(SimDuration::from_minutes(1_439));
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+            1,
+        )
+        .expect("a clamped no-op remains a valid reputation request");
+
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 1);
+        assert_eq!(
+            resolve_score(
+                &registry,
+                &state.reputation,
+                organization,
+                AudienceKind::Police,
+                ReputationDimension::Fear,
+            ),
+            99,
+            "an event that changed nothing must not make an old impression artificially fresh"
+        );
+    }
+
+    #[test]
+    fn direct_neutralization_removes_sparse_reputation_record_immediately() {
+        let (registry, mut state, organization) = make_state();
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Businesses,
+            ReputationDimension::Fear,
+            7,
+        )
+        .expect("positive standing movement should apply");
+        assert!(
+            state
+                .reputation()
+                .get_record(organization, AudienceKind::Businesses)
+                .is_some()
+        );
+
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Businesses,
+            ReputationDimension::Fear,
+            -7,
+        )
+        .expect("countervailing standing movement should apply");
+        assert!(
+            state
+                .reputation()
+                .get_record(organization, AudienceKind::Businesses)
+                .is_none(),
+            "a fully neutral impression is represented by absence, not a stored baseline record"
+        );
+    }
+
+    #[test]
+    fn save_rejects_future_dated_reputation_movement() {
+        use crate::core::invariants::StateValidationError;
+        use crate::core::persistence::{SaveError, build_save};
+
+        let (registry, mut state, organization) = make_state();
+        apply_reputation_delta(
+            &registry,
+            &mut state,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+            5,
+        )
+        .expect("valid reputation should exist before corruption");
+        let future = state
+            .now()
+            .checked_add(SimDuration::ONE_MINUTE)
+            .expect("fixture clock has room");
+        let score = state
+            .reputation()
+            .get_record(organization, AudienceKind::Police)
+            .expect("fixture reputation should persist")
+            .score(ReputationDimension::Fear);
+        state
+            .reputation
+            .record_mut((organization, AudienceKind::Police))
+            .expect("fixture reputation should remain mutable inside its owner test")
+            .set_score(ReputationDimension::Fear, score, future);
+
+        let error = build_save(&registry, &state)
+            .expect_err("future-dated reputation freshness must fail the real save boundary");
+        assert_eq!(
+            error,
+            SaveError::InvalidState(StateValidationError::InvalidReputationChronology {
+                organization,
+                audience: AudienceKind::Police,
+            })
+        );
+    }
+
+    #[test]
+    fn save_rejects_persisted_neutral_reputation_record() {
+        use crate::core::invariants::StateValidationError;
+        use crate::core::persistence::{SaveError, build_save};
+
+        let (registry, mut state, organization) = make_state();
+        state
+            .reputation
+            .insert_record(ReputationRecord::at_baseline(
+                organization,
+                AudienceKind::Residents,
+                registry.reputation().baseline(),
+                state.now(),
+            ));
+
+        let error = build_save(&registry, &state)
+            .expect_err("neutral sparse reputation must fail the registry-relative save boundary");
+        assert_eq!(
+            error,
+            SaveError::InvalidState(StateValidationError::NeutralReputationRecord {
+                organization,
+                audience: AudienceKind::Residents,
+            })
         );
     }
 

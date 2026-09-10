@@ -12,6 +12,7 @@
 pub mod reputation_system;
 
 use crate::core::id::OrganizationId;
+use crate::core::time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -48,16 +49,30 @@ pub const ALL_REPUTATION_DIMENSIONS: [ReputationDimension; 4] = [
     ReputationDimension::Treachery,
 ];
 
-/// One audience's current impression of one organization. Absent from the map means every
-/// dimension sits at the authored baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReputationScore {
+    value: u8,
+    changed_at: SimTime,
+}
+
+impl ReputationScore {
+    const fn at(value: u8, changed_at: SimTime) -> Self {
+        Self { value, changed_at }
+    }
+}
+
+/// One audience's current impression of one organization. Each dimension retains the time of
+/// its latest real movement because daily decay must age the event that produced that specific
+/// impression rather than weakening fresh standing merely because the campaign crossed midnight.
+/// Absent from the map means every dimension sits at the authored baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReputationRecord {
     organization: OrganizationId,
     audience: AudienceKind,
-    fear: u8,
-    reliability: u8,
-    competence: u8,
-    treachery: u8,
+    fear: ReputationScore,
+    reliability: ReputationScore,
+    competence: ReputationScore,
+    treachery: ReputationScore,
 }
 
 impl ReputationRecord {
@@ -71,19 +86,34 @@ impl ReputationRecord {
 
     pub fn score(&self, dimension: ReputationDimension) -> u8 {
         match dimension {
-            ReputationDimension::Fear => self.fear,
-            ReputationDimension::Reliability => self.reliability,
-            ReputationDimension::Competence => self.competence,
-            ReputationDimension::Treachery => self.treachery,
+            ReputationDimension::Fear => self.fear.value,
+            ReputationDimension::Reliability => self.reliability.value,
+            ReputationDimension::Competence => self.competence.value,
+            ReputationDimension::Treachery => self.treachery.value,
         }
     }
 
-    pub(crate) fn set_score(&mut self, dimension: ReputationDimension, value: u8) {
+    pub(crate) fn changed_at(&self, dimension: ReputationDimension) -> SimTime {
         match dimension {
-            ReputationDimension::Fear => self.fear = value,
-            ReputationDimension::Reliability => self.reliability = value,
-            ReputationDimension::Competence => self.competence = value,
-            ReputationDimension::Treachery => self.treachery = value,
+            ReputationDimension::Fear => self.fear.changed_at,
+            ReputationDimension::Reliability => self.reliability.changed_at,
+            ReputationDimension::Competence => self.competence.changed_at,
+            ReputationDimension::Treachery => self.treachery.changed_at,
+        }
+    }
+
+    pub(crate) fn set_score(
+        &mut self,
+        dimension: ReputationDimension,
+        value: u8,
+        changed_at: SimTime,
+    ) {
+        let score = ReputationScore::at(value, changed_at);
+        match dimension {
+            ReputationDimension::Fear => self.fear = score,
+            ReputationDimension::Reliability => self.reliability = score,
+            ReputationDimension::Competence => self.competence = score,
+            ReputationDimension::Treachery => self.treachery = score,
         }
     }
 }
@@ -122,21 +152,21 @@ impl ReputationState {
         );
     }
 
-    /// Removes every record whose dimensions all sit at `baseline`. Decay erases fully faded
-    /// impressions instead of pinning them at baseline forever, keeping "absent means
-    /// unremarkable" literally true and bounding state growth.
-    pub(crate) fn remove_at_baseline(&mut self, baseline: u8) {
-        let faded: Vec<(OrganizationId, AudienceKind)> = self
-            .records
-            .iter()
-            .filter(|(_, record)| {
-                crate::reputation::ALL_REPUTATION_DIMENSIONS
-                    .iter()
-                    .all(|dimension| record.score(*dimension) == baseline)
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in faded {
+    /// Removes one touched record when every dimension has returned to `baseline`. Canonical
+    /// reputation mutation changes exactly one `(organization, audience)` record at a time, so
+    /// rescanning the whole sparse map after every delta would make a day-boundary decay
+    /// needlessly quadratic as a campaign accumulates audiences.
+    pub(crate) fn remove_if_at_baseline(
+        &mut self,
+        key: (OrganizationId, AudienceKind),
+        baseline: u8,
+    ) {
+        let is_neutral = self.records.get(&key).is_some_and(|record| {
+            crate::reputation::ALL_REPUTATION_DIMENSIONS
+                .iter()
+                .all(|dimension| record.score(*dimension) == baseline)
+        });
+        if is_neutral {
             self.records.remove(&key);
         }
     }

@@ -276,6 +276,11 @@ pub struct EnterpriseState {
     by_settlement_account: BTreeMap<FinancialAccountId, EnterpriseId>,
     #[serde(skip)]
     cycles_by_enterprise: BTreeMap<EnterpriseId, BTreeSet<EnterpriseCycleId>>,
+    /// Settled cycle ids keyed by authoritative occurrence time. This is a derived scan index,
+    /// omitted from save bytes and rebuilt from `cycles`, for consumers that need only a recent
+    /// time window rather than lifetime enterprise history.
+    #[serde(skip)]
+    cycles_by_time: BTreeMap<SimTime, BTreeSet<EnterpriseCycleId>>,
 }
 
 impl EnterpriseState {
@@ -291,6 +296,7 @@ impl EnterpriseState {
         self.active_by_next_cycle.clear();
         self.by_settlement_account.clear();
         self.cycles_by_enterprise.clear();
+        self.cycles_by_time.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_organization
@@ -327,7 +333,32 @@ impl EnterpriseState {
                 .entry(cycle.enterprise())
                 .or_default()
                 .insert(cycle.id());
+            self.cycles_by_time
+                .entry(cycle.occurred_at())
+                .or_default()
+                .insert(cycle.id());
         }
+    }
+
+    /// Settled cycles in `(start, end]`, ordered by occurrence time then cycle id. `None` for
+    /// `start` means campaign start. The index is derived solely from cycle records, so bounded
+    /// historical consumers can avoid scanning every enterprise ever created.
+    pub(crate) fn cycles_after_through(
+        &self,
+        start: Option<SimTime>,
+        end: SimTime,
+    ) -> impl Iterator<Item = &EnterpriseCycleRecord> {
+        let lower = start
+            .as_ref()
+            .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        self.cycles_by_time
+            .range((lower, std::ops::Bound::Included(&end)))
+            .flat_map(|(_, ids)| ids.iter())
+            .map(|id| {
+                self.cycles
+                    .get(id)
+                    .expect("enterprise cycle time index must reference a cycle")
+            })
     }
 
     pub fn get_enterprise(&self, id: EnterpriseId) -> Option<&EnterpriseRecord> {
@@ -561,6 +592,10 @@ impl EnterpriseState {
             .entry(enterprise_id)
             .or_default()
             .insert(cycle.id());
+        self.cycles_by_time
+            .entry(cycle.occurred_at())
+            .or_default()
+            .insert(cycle.id());
         let previous = self.cycles.insert(cycle.id(), cycle);
         debug_assert!(
             previous.is_none(),
@@ -751,6 +786,26 @@ impl EnterpriseState {
                 {
                     return false;
                 }
+            }
+        }
+        for (time, ids) in &self.cycles_by_time {
+            for id in ids {
+                if !self
+                    .cycles
+                    .get(id)
+                    .is_some_and(|cycle| cycle.occurred_at() == *time)
+                {
+                    return false;
+                }
+            }
+        }
+        for cycle in self.cycles.values() {
+            if !self
+                .cycles_by_time
+                .get(&cycle.occurred_at())
+                .is_some_and(|ids| ids.contains(&cycle.id()))
+            {
+                return false;
             }
         }
         for (mandate, ids) in &self.active_by_mandate {

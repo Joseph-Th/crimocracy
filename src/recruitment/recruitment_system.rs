@@ -355,7 +355,7 @@ pub fn find_recruitment_candidates(
             state,
             candidate,
             target_organization,
-        ) {
+        )? {
             continue;
         }
         if let Err(error) = validate_reassign_character(
@@ -1192,8 +1192,12 @@ fn recruitment_is_on_cooldown(
     state: &AppState,
     candidate: CharacterId,
     organization: OrganizationId,
-) -> bool {
-    validate_cooldown(definition, state, candidate, organization).is_err()
+) -> Result<bool, RecruitmentError> {
+    match validate_cooldown(definition, state, candidate, organization) {
+        Ok(()) => Ok(false),
+        Err(RecruitmentError::Cooldown { .. }) => Ok(true),
+        Err(error) => Err(error),
+    }
 }
 
 fn validate_cooldown(

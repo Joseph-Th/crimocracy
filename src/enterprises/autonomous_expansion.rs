@@ -102,15 +102,105 @@ pub(crate) fn apply_due_autonomous_enterprises(
     let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
     let mut working_capital_reservations =
         resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
-    let mandates = resolve_eligible_expansion_mandates(registry, state, player_organization)?;
+    let mut mandates = resolve_eligible_expansion_mandates(registry, state, player_organization)?;
     let mut established = Vec::new();
-    for (organization, organization_mandates) in mandates {
-        established.extend(apply_organization_autonomous_expansion(
+    // Organizations compete in one phase-wide queue. Resolving an entire organization before
+    // considering the next one would let OrganizationId decide shared location claims and could
+    // allow a lower-id outsider to take a district slot before its incumbent economic leader.
+    // Recompute after every establishment because the committed racket can legitimately change
+    // occupancy and territorial influence for the remaining same-minute decisions.
+    while !mandates.is_empty() {
+        // State is immutable while this iteration evaluates candidates. Resolve each district's
+        // current economic leader once, then discard the cache after the chosen establishment
+        // because that mutation may legitimately change territorial standing.
+        let mut district_leaders: BTreeMap<NeighborhoodId, Option<OrganizationId>> =
+            BTreeMap::new();
+        let mut selected: Option<(
+            OrganizationId,
+            usize,
+            crate::core::id::MandateId,
+            bool,
+            AutonomousExpansionPlan,
+        )> = None;
+        for (organization, organization_mandates) in &mandates {
+            let Some(available_working_capital) = resolve_max_autonomous_working_capital(
+                state,
+                *organization,
+                &working_capital_reservations,
+            ) else {
+                continue;
+            };
+            for (index, mandate) in organization_mandates.iter().enumerate() {
+                let Some(plan) = decide_autonomous_expansion(
+                    registry,
+                    state,
+                    *organization,
+                    mandate,
+                    available_working_capital,
+                    &observed_district_pressure,
+                )?
+                else {
+                    continue;
+                };
+                let neighborhood = resolve_location_neighborhood(state, plan.location)
+                    .expect("autonomous candidate location must resolve to a live neighborhood");
+                let district_leader = *district_leaders.entry(neighborhood).or_insert_with(|| {
+                    resolve_neighborhood_influence(state, neighborhood)
+                        .expect("autonomous candidate neighborhood must resolve for influence")
+                        .economic_leader()
+                });
+                let candidate = (
+                    *organization,
+                    index,
+                    mandate.id(),
+                    district_leader == Some(*organization),
+                    plan,
+                );
+                let replace = selected.as_ref().is_none_or(
+                    |(
+                        selected_organization,
+                        _,
+                        selected_mandate,
+                        selected_leads_district,
+                        selected_plan,
+                    )| {
+                        compare_phase_expansion_candidates(
+                            candidate.0,
+                            candidate.3,
+                            &candidate.4,
+                            *selected_organization,
+                            *selected_leads_district,
+                            selected_plan,
+                        )
+                        .then(candidate.0.cmp(selected_organization))
+                        .then(candidate.2.cmp(selected_mandate))
+                        .is_lt()
+                    },
+                );
+                if replace {
+                    selected = Some(candidate);
+                }
+            }
+        }
+        let Some((organization, mandate_index, _, _, plan)) = selected else {
+            break;
+        };
+        let (mandate, remove_organization) = {
+            let organization_mandates = mandates
+                .get_mut(&organization)
+                .expect("selected autonomous organization must retain its mandate queue");
+            let mandate = organization_mandates.remove(mandate_index);
+            (mandate, organization_mandates.is_empty())
+        };
+        if remove_organization {
+            mandates.remove(&organization);
+        }
+        established.push(commit_autonomous_expansion_plan(
             registry,
             state,
             organization,
-            organization_mandates,
-            &observed_district_pressure,
+            &mandate,
+            plan,
             &mut working_capital_reservations,
         )?);
     }
@@ -162,65 +252,6 @@ fn resolve_eligible_expansion_mandates(
             .push(mandate.clone());
     }
     Ok(by_organization)
-}
-
-fn apply_organization_autonomous_expansion(
-    registry: &Registry,
-    state: &mut AppState,
-    organization: OrganizationId,
-    mut mandates: Vec<crate::delegation::MandateRecord>,
-    observed_district_pressure: &ObservedDistrictPressure,
-    working_capital_reservations: &mut BTreeMap<FinancialAccountId, Money>,
-) -> Result<Vec<EnterpriseId>, AutonomousExpansionError> {
-    let mut established = Vec::new();
-    while !mandates.is_empty() {
-        let Some(available_working_capital) = resolve_max_autonomous_working_capital(
-            state,
-            organization,
-            working_capital_reservations,
-        ) else {
-            break;
-        };
-        let mut selected: Option<(usize, crate::core::id::MandateId, AutonomousExpansionPlan)> =
-            None;
-        for (index, mandate) in mandates.iter().enumerate() {
-            let Some(plan) = decide_autonomous_expansion(
-                registry,
-                state,
-                organization,
-                mandate,
-                available_working_capital,
-                observed_district_pressure,
-            )?
-            else {
-                continue;
-            };
-            let candidate = (index, mandate.id(), plan);
-            let replace = selected
-                .as_ref()
-                .is_none_or(|(_, selected_mandate, selected_plan)| {
-                    compare_expansion_plans(&candidate.2, selected_plan)
-                        .then(candidate.1.cmp(selected_mandate))
-                        .is_lt()
-                });
-            if replace {
-                selected = Some(candidate);
-            }
-        }
-        let Some((mandate_index, _, plan)) = selected else {
-            break;
-        };
-        let mandate = mandates.remove(mandate_index);
-        established.push(commit_autonomous_expansion_plan(
-            registry,
-            state,
-            organization,
-            &mandate,
-            plan,
-            working_capital_reservations,
-        )?);
-    }
-    Ok(established)
 }
 
 fn commit_autonomous_expansion_plan(
@@ -641,6 +672,35 @@ fn compare_expansion_plans(
         .then(left.supporting_businesses.cmp(&right.supporting_businesses))
 }
 
+/// Orders one candidate from each active mandate for the phase-wide competition. A mandate's
+/// `authority_rank` is an internal governance preference: it decides which plan that manager
+/// brings forward, but it cannot grant one organization priority over another organization in a
+/// shared district. Cross-organization competition instead honors existing territorial leadership,
+/// then the concrete economics of the proposed racket. Stable identifiers settle only exact
+/// world/economic ties.
+fn compare_phase_expansion_candidates(
+    left_organization: OrganizationId,
+    left_leads_district: bool,
+    left: &AutonomousExpansionPlan,
+    right_organization: OrganizationId,
+    right_leads_district: bool,
+    right: &AutonomousExpansionPlan,
+) -> std::cmp::Ordering {
+    if left_organization == right_organization {
+        return compare_expansion_plans(left, right);
+    }
+    usize::from(!left_leads_district)
+        .cmp(&usize::from(!right_leads_district))
+        .then_with(|| right.expected_net_cash.cmp(&left.expected_net_cash))
+        .then(
+            left.required_working_capital
+                .cmp(&right.required_working_capital),
+        )
+        .then(left.kind.cmp(&right.kind))
+        .then(left.location.cmp(&right.location))
+        .then(left.supporting_businesses.cmp(&right.supporting_businesses))
+}
+
 fn host_satisfies_business_requirements(
     definition: &EnterpriseDefinition,
     business: &crate::world::BusinessRecord,
@@ -773,10 +833,23 @@ fn resolve_observed_district_pressure(
     state: &AppState,
 ) -> Result<ObservedDistrictPressure, AutonomousExpansionError> {
     let mut latest_observations = BTreeMap::new();
-    for enterprise in state.enterprises().enterprises() {
-        let Some(cycle) = state.enterprises().latest_cycle(enterprise.id()) else {
-            continue;
-        };
+    let maximum_age = u64::from(registry.legal().cold_case_window().as_minutes());
+    let lower_bound = state
+        .now()
+        .as_minutes()
+        .checked_sub(maximum_age)
+        .map(crate::core::time::SimTime::from_minutes);
+    // Only observations younger than the legal cold-case horizon can influence today's plan.
+    // The cycle-time index therefore bounds this pass by recent settlement volume instead of
+    // rescanning every retired enterprise accumulated over the lifetime of a campaign.
+    for cycle in state
+        .enterprises()
+        .cycles_after_through(lower_bound, state.now())
+    {
+        let enterprise = state
+            .enterprises()
+            .get_enterprise(cycle.enterprise())
+            .expect("enterprise cycle must reference its persisted enterprise");
         let per_case = registry
             .get_enterprise(enterprise.kind())
             .economics()
@@ -797,21 +870,9 @@ fn resolve_observed_district_pressure(
             *observation = (key, inferred);
         }
     }
-    let maximum_age = u64::from(registry.legal().cold_case_window().as_minutes());
     Ok(latest_observations
         .into_iter()
-        .filter_map(|(district, ((observed_at, _), count))| {
-            let age = state
-                .now()
-                .as_minutes()
-                .checked_sub(observed_at.as_minutes())
-                .expect("persisted enterprise cycles cannot occur in the future");
-            // Legal cold-case decay shelves originated cases once a complete inactivity window
-            // has elapsed, and that phase runs before delegated expansion on the same tick.
-            // Drop an equally old operating observation here as well so planning cannot retain
-            // pressure the legal owner has already declared cold.
-            (age < maximum_age).then_some((district, count))
-        })
+        .map(|(district, (_, count))| (district, count))
         .collect())
 }
 

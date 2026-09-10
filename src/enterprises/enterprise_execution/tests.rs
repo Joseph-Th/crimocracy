@@ -3480,6 +3480,160 @@ fn find_vice_investigation(
 }
 
 #[test]
+fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let protection = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Peer Settlement Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("second settlement account should validate");
+    let gambling = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: second_settlement,
+        },
+    )
+    .expect("peer gambling enterprise should validate")
+    .commit(&mut fixture.state)
+    .expect("peer gambling enterprise should commit");
+    let police = insert_district_police(
+        &registry,
+        &mut fixture,
+        "Peer Settlement Vice Bureau",
+        neighborhood,
+    );
+    open_district_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        "Preexisting peer pressure",
+        neighborhood,
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let first_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        protection,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("first hot peer cycle should resolve");
+    assert_eq!(
+        first_plan.economics.investigation_heat,
+        Money::from_cents(5_000),
+        "the one preexisting district case should price the first peer cycle"
+    );
+    let first_cycle = validate_enterprise_cycle_plan(&fixture.state, first_plan)
+        .expect("first peer cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("first peer cycle should commit");
+    assert!(
+        fixture
+            .state
+            .enterprises()
+            .get_cycle(first_cycle)
+            .expect("first peer cycle should persist")
+            .drew_vice_attention(),
+        "the first peer should create the same-minute vice inquiry used by this regression"
+    );
+
+    let second_plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        gambling,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("second same-minute peer cycle should resolve");
+    assert_eq!(
+        second_plan.economics.investigation_heat,
+        Money::from_cents(5_000),
+        "a peer inquiry created by an earlier settlement at the same instant cannot retroactively tax this cycle"
+    );
+    validate_enterprise_cycle_plan(&fixture.state, second_plan)
+        .expect(
+            "same-minute peer cycle must remain valid against the phase-consistent pressure view",
+        )
+        .commit(&mut fixture.state)
+        .expect("same-minute peer cycle should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let source_next_day = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        protection,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("next-day source cycle should resolve");
+    assert_eq!(
+        source_next_day.economics.investigation_heat,
+        Money::from_cents(10_000),
+        "the preexisting pressure case and yesterday's vice inquiry should both apply to the source racket"
+    );
+    let source_cycle = validate_enterprise_cycle_plan(&fixture.state, source_next_day)
+        .expect("next-day source cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("next-day source cycle should commit");
+    assert!(
+        !fixture
+            .state
+            .enterprises()
+            .get_cycle(source_cycle)
+            .expect("next-day source cycle should persist")
+            .drew_vice_attention(),
+        "an already-active inquiry must suppress a duplicate vice draw"
+    );
+    let next_day = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        gambling,
+        EnterpriseCycleRandomness::new(0, u16::MAX),
+    )
+    .expect("next-day peer cycle should resolve");
+    assert_eq!(
+        next_day.economics.investigation_heat,
+        Money::from_cents(10_000),
+        "on the next cycle the preexisting case and yesterday's vice inquiry must both apply"
+    );
+    validate_state(&fixture.state).expect("peer settlement pressure state should validate");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("peer settlement economics should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
