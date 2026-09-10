@@ -518,6 +518,7 @@ pub(super) fn validate_case_witnesses(
         if state.world.get_character(witness.witness()).is_none()
             || witness.registered_at() < investigation.opened_at()
             || witness.registered_at() > state.now()
+            || witness.statements().len() > 1
             || u32::from(witness.interview_attempts()) != completed_interviews
             // Registration starts at version 1. Every completed interview and every persisted
             // statement advances the witness exactly once; cooperation changes may add further
@@ -581,10 +582,6 @@ pub(super) fn validate_witness_statements(
             || evidence.origin() != statement.origin()
             || evidence.source() != Some(EntityRef::Character(case_witness.witness()))
             || evidence.kind() != EvidenceKind::WitnessTestimony
-            || evidence.strength()
-                != resolve_witness_strength(statement.confidence(), statement.cooperation())
-            || evidence.reliability()
-                != resolve_witness_reliability(statement.confidence(), statement.cooperation())
             || evidence.admissibility() != Admissibility::Unknown
             || evidence.discovered_at() != statement.recorded_at()
             || !evidence.derived_from().is_empty()
@@ -596,6 +593,34 @@ pub(super) fn validate_witness_statements(
     }
 
     Ok(named_witness_evidence)
+}
+
+pub(crate) fn validate_witness_statements_against_registry(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let testimony = registry.legal().witness_testimony();
+    for statement in state.legal.witness_statements() {
+        let evidence = state.legal.get_evidence(statement.evidence()).ok_or(
+            StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            },
+        )?;
+        if evidence.strength()
+            != resolve_witness_strength(testimony, statement.confidence(), statement.cooperation())
+            || evidence.reliability()
+                != resolve_witness_reliability(
+                    testimony,
+                    statement.confidence(),
+                    statement.cooperation(),
+                )
+        {
+            return Err(StateValidationError::InvalidWitnessStatement {
+                statement: statement.id(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_evidence_records(

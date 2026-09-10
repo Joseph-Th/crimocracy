@@ -208,6 +208,7 @@ pub(crate) fn resolve_recruitment_outcome(margin: i16) -> RecruitmentOutcome {
 }
 
 pub(crate) fn resolve_perceived_legal_pressure_at(
+    quality: crate::registry::InformationQualityDefinition,
     definition: &RecruitmentDefinition,
     state: &AppState,
     candidate: CharacterId,
@@ -219,13 +220,14 @@ pub(crate) fn resolve_perceived_legal_pressure_at(
         at,
         definition.perceived_legal_pressure_max_age(),
     );
-    resolve_perceived_legal_pressure_from_ids(definition, state, &ids, at)
+    resolve_perceived_legal_pressure_from_ids(quality, definition, state, &ids, at)
 }
 
 /// Selection runs over exactly the ID set the staleness token captures, so a fresh plan can
 /// never spuriously fail with `StalePressureKnowledge`. Decide passes the set it already
 /// collected for the token; validation recomputes it and must reach the same selection.
 pub(crate) fn resolve_perceived_legal_pressure_from_ids(
+    quality: crate::registry::InformationQualityDefinition,
     definition: &RecruitmentDefinition,
     state: &AppState,
     pressure_information_ids: &BTreeSet<InformationId>,
@@ -242,7 +244,7 @@ pub(crate) fn resolve_perceived_legal_pressure_from_ids(
         .map(|information| {
             (
                 information.id(),
-                perceived_legal_pressure_score(definition, information, at),
+                perceived_legal_pressure_score(quality, definition, information, at),
                 information.observed_at(),
             )
         })
@@ -251,11 +253,11 @@ pub(crate) fn resolve_perceived_legal_pressure_from_ids(
         .map_or((None, 0), |(id, score, _)| (Some(id), score))
 }
 fn perceived_legal_pressure_score(
+    quality: crate::registry::InformationQualityDefinition,
     definition: &RecruitmentDefinition,
     information: &InformationRecord,
     at: SimTime,
 ) -> u8 {
-    let quality = definition.information_quality();
     let reliability = u16::from(quality.reliability_score(information.reliability()));
     let specificity = u16::from(quality.specificity_score(information.specificity()));
     let base = (reliability + specificity) / 2;

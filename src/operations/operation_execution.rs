@@ -3,8 +3,8 @@
 mod resolution_factors;
 
 pub(crate) use resolution_factors::{
-    MAX_TIME_PRESSURE, has_police_response_arrived_by, resolve_execution_margin,
-    resolve_exposure_level, resolve_exposure_score, resolve_intelligence_factors,
+    has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
+    resolve_exposure_score, resolve_intelligence_factors,
     resolve_investigation_target_neighborhoods, resolve_objective_outcome,
     resolve_operation_police_alert_context,
 };
@@ -348,8 +348,12 @@ pub(crate) fn decide_operation_resolution(
     let approach_adjustment = execution
         .approach_difficulty_adjustment(record.approach())
         .expect("validated operation approach must have an authored execution adjustment");
-    let time_pressure =
-        resolve_time_pressure(started_at, due_at, execution.duration().as_minutes());
+    let time_pressure = resolve_time_pressure(
+        started_at,
+        due_at,
+        execution.duration().as_minutes(),
+        execution.max_time_pressure(),
+    );
 
     let factors = OperationResolutionFactors {
         role_capability_average,
@@ -397,7 +401,8 @@ pub(crate) fn decide_operation_resolution(
     let property_proceeds_plan =
         resolve_property_proceeds(registry, state, record, objective_outcome)?;
     let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
-    let surveillance = decide_surveillance_intelligence(state, record, objective_outcome)?;
+    let surveillance =
+        decide_surveillance_intelligence(registry, state, record, objective_outcome)?;
     // Every after-action summary leads with the operation title so executive-brief entries stay
     // identifiable when several operations resolve into the same brief window.
     let mut summary = format!("{}: ", record.title());
@@ -406,6 +411,7 @@ pub(crate) fn decide_operation_resolution(
         base_objective_outcome,
         factors,
         exposure.level(),
+        execution.high_police_presence_narrative_threshold(),
     ));
     // A depleted haul must narrate even when recent scores left nothing to carry home:
     // silencing the clause would make an Achieved outcome look like an ordinary score.
@@ -1000,6 +1006,7 @@ pub(crate) fn build_legal_activity_summary(
 }
 
 fn resolve_incident_witness(
+    execution: &crate::registry::OperationExecutionDefinition,
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     exposure: &OperationExposurePlan,
@@ -1037,8 +1044,12 @@ fn resolve_incident_witness(
     }
     // Patrol presence shapes whether a witness is willing to stand behind an account (§31).
     let cooperation = match target_police_presence.map(Rating::value) {
-        Some(presence) if presence >= 60 => WitnessCooperation::Cooperative,
-        Some(presence) if presence >= 30 => WitnessCooperation::Reluctant,
+        Some(presence) if presence >= execution.witness_cooperative_police_presence() => {
+            WitnessCooperation::Cooperative
+        }
+        Some(presence) if presence >= execution.witness_reluctant_police_presence() => {
+            WitnessCooperation::Reluctant
+        }
         _ => WitnessCooperation::Hostile,
     };
     Some(IncidentWitnessDraft {
@@ -1091,14 +1102,18 @@ fn validate_exposure_incident(
     if let Some(character) = exposure.identified_character {
         subjects.insert(EntityRef::Character(character));
     }
-    let kind = registry
-        .get_operation(operation.kind())
-        .execution()
-        .exposure_evidence_kind();
+    let execution = registry.get_operation(operation.kind()).execution();
+    let kind = execution.exposure_evidence_kind();
     // A witnessed or identifying exposure leaves a named witness when the target is a
     // character-owned business: the owner saw it happen. Members of the responsible
     // organization and the identified participant never count as the case's witness.
-    let witness = resolve_incident_witness(state, operation, exposure, target_police_presence);
+    let witness = resolve_incident_witness(
+        execution,
+        state,
+        operation,
+        exposure,
+        target_police_presence,
+    );
     let incident = validate_incident_intake(
         state,
         IncidentIntakeDraft {
@@ -1276,6 +1291,7 @@ fn build_after_action_summary(
     tactical_outcome: OperationObjectiveOutcome,
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
+    high_police_presence_threshold: u8,
 ) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
     // Practical blockers can turn a tactically successful execution into an objective failure.
@@ -1317,7 +1333,7 @@ fn build_after_action_summary(
         factors.police_response_arrived(),
     ) {
         (presence, true) => {
-            if presence.is_some_and(|rating| rating.value() >= 65) {
+            if presence.is_some_and(|rating| rating.value() >= high_police_presence_threshold) {
                 parts.push(
                     "High local police presence materially increased execution pressure."
                         .to_owned(),
@@ -1328,7 +1344,7 @@ fn build_after_action_summary(
                     .to_owned(),
             );
         }
-        (Some(rating), false) if rating.value() >= 65 => parts
+        (Some(rating), false) if rating.value() >= high_police_presence_threshold => parts
             .push("High local police presence materially increased execution pressure.".to_owned()),
         (None, false) => parts.push(
             "No location-based police pressure could be established from the operation target."

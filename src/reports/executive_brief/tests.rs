@@ -2,9 +2,7 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::{
-    StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
-};
+use crate::core::invariants::{StateValidationError, validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::decisions::decision_system::{
@@ -16,6 +14,7 @@ use crate::delegation::{
     MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
 };
 use crate::recruitment::RecruitmentApproach;
+use crate::reports::ReportRecord;
 use crate::reports::report_system::validate_record_report;
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
@@ -25,7 +24,59 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft, OrganizationKind, Rating,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Serialize)]
+struct ReportRecordWire {
+    id: crate::core::id::ReportId,
+    recipient: OrganizationId,
+    kind: ReportKind,
+    title: String,
+    generated_at: SimTime,
+    entries: Vec<ReportEntry>,
+}
+
+fn report_wire(record: &ReportRecord) -> ReportRecordWire {
+    ReportRecordWire {
+        id: record.id(),
+        recipient: record.recipient(),
+        kind: record.kind(),
+        title: record.title().to_owned(),
+        generated_at: record.generated_at(),
+        entries: record.entries().to_vec(),
+    }
+}
+
+fn replace_serialized_report(
+    envelope: SaveEnvelope,
+    original: &ReportRecord,
+    replacement: &ReportRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("report should serialize");
+    assert_eq!(
+        bincode::serialize(&report_wire(original)).expect("report wire mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production report persistence layout exactly"
+    );
+    let replacement_bytes = bincode::serialize(replacement).expect("replacement should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized report must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout report corruption must remain decodable")
+}
 
 struct BriefFixture {
     registry: Registry,
@@ -299,29 +350,42 @@ fn source_entry_limit_prefers_newer_items_within_the_same_attention_class() {
 #[test]
 fn registry_validation_rejects_forged_off_cadence_executive_brief() {
     let mut fixture = make_test_brief_fixture();
-    let report = fixture
+    fixture
         .state
-        .ids
-        .next_report()
-        .expect("forged brief fixture should allocate a report id");
-    fixture.state.reports.insert(crate::reports::ReportRecord {
-        id: report,
-        recipient: fixture.organization,
-        kind: ReportKind::ExecutiveBrief,
-        title: "Executive brief".to_owned(),
-        generated_at: fixture.state.now(),
-        entries: vec![entry(
-            AttentionClass::Routine,
-            "No immediate decision or notable exception requires executive attention.",
-        )],
-    });
-
-    validate_state(&fixture.state)
-        .expect("generic structural validation cannot infer the authored brief cadence");
-    assert_eq!(
-        validate_state_against_registry(&fixture.registry, &fixture.state),
-        Err(StateValidationError::InvalidExecutiveBrief { report })
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
+        .expect("daily executive brief should be due at the authored cadence");
+    let report = validate_executive_brief_plan(&fixture.state, plan)
+        .expect("production executive-brief plan should validate")
+        .commit(&mut fixture.state)
+        .expect("production executive brief should commit through the report owner");
+    let original = fixture
+        .state
+        .reports()
+        .get_report(report)
+        .expect("produced brief should persist")
+        .clone();
+    let mut forged = report_wire(&original);
+    forged.generated_at = SimTime::from_minutes(
+        original
+            .generated_at()
+            .as_minutes()
+            .checked_sub(1)
+            .expect("daily brief fixture must occur after minute zero"),
     );
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("production-created brief should save before corruption");
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_report(envelope, &original, &forged),
+    )
+    .expect_err("off-cadence executive brief must be rejected during restore validation");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            StateValidationError::InvalidExecutiveBrief { report: invalid }
+        ) if invalid == report
+    ));
 }
 
 #[test]

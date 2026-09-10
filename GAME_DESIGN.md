@@ -1262,6 +1262,8 @@ Legal outcomes depend on:
 - Witness intimidation.
 - Procedural mistakes.
 
+In the current foundation, legal representation already has a concrete pre-court effect: counsel retained before the detainee's one-time informant decision reduces the authored chance that custodial pressure produces cooperation. Later charging and court systems should extend legal representation rather than replace that causal role.
+
 The player therefore has strategic options after an arrest that do not amount to "pay fine to remove heat."
 
 ---

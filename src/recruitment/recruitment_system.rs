@@ -295,7 +295,7 @@ pub(crate) fn validate_recruitment_proposal(
 ) -> Result<ValidatedRecruitmentProposal, RecruitmentError> {
     let plan = decide_recruitment_attempt(registry, state, draft)?;
     validate_plan_state_snapshot(state, &plan)?;
-    validate_plan_definition(registry.recruitment(), state, &plan)?;
+    validate_plan_definition(registry, state, &plan)?;
     if plan.context.outcome == RecruitmentOutcome::Accepted {
         validate_reassign_character(
             state,
@@ -458,6 +458,7 @@ fn decide_recruitment_attempt_with_approval(
     );
     let (pressure_information, perceived_legal_pressure) =
         resolve_perceived_legal_pressure_from_ids(
+            registry.information_quality(),
             registry.recruitment(),
             state,
             &pressure_information_snapshot,
@@ -678,7 +679,7 @@ fn validate_recruitment_plan_with_authority(
     delegated_guard: Option<MandateRecruitmentGuard>,
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
     validate_plan_state_snapshot(state, &plan)?;
-    validate_plan_definition(registry.recruitment(), state, &plan)?;
+    validate_plan_definition(registry, state, &plan)?;
     let approval_decision = match &authority {
         RecruitmentAuthority::ApprovedDecision { decision, .. } => Some(*decision),
         RecruitmentAuthority::ExecutiveApproval | RecruitmentAuthority::Delegated { .. } => None,
@@ -1309,10 +1310,11 @@ fn validate_plan_state_snapshot(
 }
 
 fn validate_plan_definition(
-    definition: &RecruitmentDefinition,
+    registry: &Registry,
     state: &AppState,
     plan: &RecruitmentPlan,
 ) -> Result<(), RecruitmentError> {
+    let definition = registry.recruitment();
     let candidate = state
         .world
         .get_character(plan.draft.candidate)
@@ -1322,6 +1324,7 @@ fn validate_plan_definition(
         .get_character(plan.draft.recruiter)
         .ok_or(RecruitmentError::MissingRecruiter(plan.draft.recruiter))?;
     let (pressure_information, perceived_legal_pressure) = resolve_perceived_legal_pressure_at(
+        registry.information_quality(),
         definition,
         state,
         plan.draft.candidate,

@@ -13,9 +13,10 @@ pub use definitions::*;
 pub(crate) use builder::RegistryBuilder;
 
 #[cfg(test)]
+use crate::core::time::SimDuration;
+#[cfg(test)]
 use crate::registry::builder::RegistryBuildError;
 
-use crate::core::time::SimDuration;
 use crate::enterprises::EnterpriseKind;
 use crate::legal::InvestigationWorkKind;
 use crate::operations::OperationKind;
@@ -25,6 +26,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub struct Registry {
     content_revision: u32,
+    information_quality: InformationQualityDefinition,
     recruitment: RecruitmentDefinition,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
@@ -39,42 +41,12 @@ pub struct Registry {
     reputation: ReputationConfigDefinition,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LegalConfigDefinition {
-    pub(super) cold_case_window: SimDuration,
-    pub(super) witness_interview_attempt_limit: u8,
-    pub(super) informant_decision_delay: SimDuration,
-    pub(super) maximum_detention: SimDuration,
-}
-
-impl LegalConfigDefinition {
-    /// How long an origin-linked investigation remains institutionally active after its
-    /// last evidence/work activity before the owning authority deterministically shelves it.
-    pub fn cold_case_window(self) -> SimDuration {
-        self.cold_case_window
-    }
-
-    /// Completed interviews a case witness may sit through without producing a statement
-    /// before investigators stop scheduling further futile interviews.
-    pub fn witness_interview_attempt_limit(self) -> u8 {
-        self.witness_interview_attempt_limit
-    }
-
-    /// How long after detention a detainee faces their single informant-recruitment decision.
-    pub fn informant_decision_delay(self) -> SimDuration {
-        self.informant_decision_delay
-    }
-
-    /// Maximum continuous custody duration modeled before release. This bounds detention in
-    /// the current foundation, which deliberately does not model charging, bail, or trial.
-    pub fn maximum_detention(self) -> SimDuration {
-        self.maximum_detention
-    }
-}
-
 impl Registry {
     pub fn content_revision(&self) -> u32 {
         self.content_revision
+    }
+    pub fn information_quality(&self) -> InformationQualityDefinition {
+        self.information_quality
     }
     pub fn recruitment(&self) -> &RecruitmentDefinition {
         &self.recruitment
@@ -158,17 +130,84 @@ mod tests {
         )
     }
 
+    fn information_quality_spec() -> InformationQualityDefinition {
+        InformationQualityDefinition {
+            unknown_reliability: 20,
+            unreliable_reliability: 10,
+            mixed_reliability: 40,
+            generally_reliable: 70,
+            direct_access: 100,
+            vague_specificity: 25,
+            general_specificity: 50,
+            specific_specificity: 75,
+            precise_specificity: 100,
+        }
+    }
+
+    fn legal_spec() -> LegalConfigSpec {
+        LegalConfigSpec {
+            cold_case_window: SimDuration::from_minutes(1_440),
+            witness_interview_attempt_limit: 2,
+            witness_testimony: WitnessTestimonyDefinition {
+                strength_corroborating_min_confidence: 35,
+                strength_strong_min_confidence: 60,
+                strength_direct_min_confidence: 85,
+                reliability_mixed_min_confidence: 25,
+                reliability_credible_min_confidence: 50,
+                reliability_highly_reliable_min_confidence: 80,
+                reluctant_band_discount: 1,
+                hostile_band_discount: 2,
+            },
+            informant_decision_delay: SimDuration::from_minutes(1_440),
+            minimum_arrest_qualifying_evidence: 2,
+            informant_base_flip_chance_percent: 25,
+            informant_safety_bonus_percent: 50,
+            represented_informant_reduction_percent: 25,
+            automatic_support_retainer: Money::from_cents(5_000),
+            maximum_detention: SimDuration::from_minutes(2_880),
+        }
+    }
+
+    #[test]
+    fn information_quality_definition_is_global_unique_and_bounded() {
+        let registry = build_registry();
+        let quality = registry.information_quality();
+        assert_eq!(
+            quality.reliability_score(crate::intelligence::Reliability::Unknown),
+            20
+        );
+        assert_eq!(
+            quality.specificity_score(crate::intelligence::Specificity::Precise),
+            100
+        );
+
+        let mut builder = RegistryBuilder::default();
+        let valid = information_quality_spec();
+        builder
+            .register_information_quality(valid)
+            .expect("first information-quality definition should register");
+        assert!(matches!(
+            builder.register_information_quality(valid),
+            Err(RegistryBuildError::DuplicateInformationQuality)
+        ));
+
+        let mut invalid = information_quality_spec();
+        invalid.direct_access = 101;
+        let mut invalid_builder = RegistryBuilder::default();
+        assert!(matches!(
+            invalid_builder.register_information_quality(invalid),
+            Err(RegistryBuildError::InvalidInformationQuality)
+        ));
+    }
+
     #[test]
     fn operation_leaders_use_their_authored_domain_capability() {
         let registry = build_registry();
 
-        assert_eq!(
-            registry
-                .get_operation(OperationKind::Burglary)
-                .execution()
-                .leader_capability(),
-            CapabilityKind::Management
-        );
+        let burglary = registry.get_operation(OperationKind::Burglary).execution();
+        assert_eq!(burglary.leader_capability(), CapabilityKind::Management);
+        assert_eq!(burglary.role_capability_weight(), 3);
+        assert_eq!(burglary.leader_capability_weight(), 1);
         assert_eq!(
             registry
                 .get_operation(OperationKind::Surveillance)
@@ -218,17 +257,6 @@ mod tests {
                     dependence_weight: 1,
                     divisor: 4,
                 },
-            },
-            information_quality: RecruitmentInformationQualityDefinition {
-                unknown_reliability: 20,
-                unreliable_reliability: 10,
-                mixed_reliability: 40,
-                generally_reliable: 70,
-                direct_access: 100,
-                vague_specificity: 25,
-                general_specificity: 50,
-                specific_specificity: 75,
-                precise_specificity: 100,
             },
             approach_drives: BTreeMap::from([
                 (
@@ -293,19 +321,43 @@ mod tests {
         );
         assert_eq!(legal.maximum_detention(), SimDuration::from_minutes(2_880));
         assert!(legal.maximum_detention() > legal.informant_decision_delay());
+        assert_eq!(legal.minimum_arrest_qualifying_evidence(), 2);
+        assert_eq!(legal.automatic_support_retainer(), Money::from_cents(5_000));
+        assert_eq!(
+            legal.witness_testimony().strength_thresholds(),
+            [35, 60, 85]
+        );
     }
 
     #[test]
     fn legal_registry_rejects_a_custody_window_that_cannot_reach_the_informant_decision() {
         let mut builder = RegistryBuilder::default();
+        let mut spec = legal_spec();
+        spec.maximum_detention = spec.informant_decision_delay;
         assert!(matches!(
-            builder.register_legal(LegalConfigSpec {
-                cold_case_window: SimDuration::from_minutes(1_440),
-                witness_interview_attempt_limit: 2,
-                informant_decision_delay: SimDuration::from_minutes(1_440),
-                maximum_detention: SimDuration::from_minutes(1_440),
-            }),
+            builder.register_legal(spec),
             Err(RegistryBuildError::InvalidLegalMaximumDetention)
+        ));
+    }
+
+    #[test]
+    fn legal_registry_rejects_invalid_witness_testimony_bands() {
+        let mut builder = RegistryBuilder::default();
+        let mut spec = legal_spec();
+        spec.witness_testimony.strength_direct_min_confidence =
+            spec.witness_testimony.strength_strong_min_confidence;
+        assert!(matches!(
+            builder.register_legal(spec),
+            Err(RegistryBuildError::InvalidLegalWitnessTestimony)
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        let mut spec = legal_spec();
+        spec.witness_testimony.reluctant_band_discount = 3;
+        spec.witness_testimony.hostile_band_discount = 2;
+        assert!(matches!(
+            builder.register_legal(spec),
+            Err(RegistryBuildError::InvalidLegalWitnessTestimony)
         ));
     }
 
@@ -457,8 +509,66 @@ mod tests {
     }
 
     #[test]
+    fn operation_definition_rejects_outcome_thresholds_its_own_factors_cannot_reach() {
+        let (approaches, roles, execution) = burglary_operation_parts();
+
+        // This remains inside the old project-wide coarse upper bound but exceeds what the
+        // burglary definition itself can achieve even with perfect crew, intelligence, and luck.
+        let mut impossible_success = execution.clone();
+        impossible_success.difficulty.achieved_margin = 100;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                impossible_success,
+            ),
+            Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(
+                OperationKind::Burglary
+            ))
+        ));
+
+        // Likewise, a partial threshold below the definition's own worst possible margin makes
+        // failure impossible and must be rejected even though the number is globally bounded.
+        let mut impossible_failure = execution;
+        impossible_failure.difficulty.partial_margin = -200;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                impossible_failure,
+            ),
+            Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(
+                OperationKind::Burglary
+            ))
+        ));
+    }
+
+    #[test]
     fn operation_definition_rejects_empty_or_inert_approach_authorship() {
         let (approaches, roles, execution) = burglary_operation_parts();
+
+        let mut invalid_weights = execution.clone();
+        invalid_weights.difficulty.role_capability_weight = 0;
+        invalid_weights.difficulty.leader_capability_weight = 0;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                invalid_weights,
+            ),
+            Err(RegistryBuildError::InvalidOperationAbilityWeights(
+                OperationKind::Burglary
+            ))
+        ));
 
         let mut builder = RegistryBuilder::default();
         assert!(matches!(
@@ -472,6 +582,29 @@ mod tests {
             Err(RegistryBuildError::MissingOperationApproaches(
                 OperationKind::Burglary
             ))
+        ));
+
+        let mut difficulty_missing = execution.clone();
+        let missing_approach = *approaches
+            .first()
+            .expect("burglary must have at least one authored approach");
+        difficulty_missing
+            .difficulty
+            .approach_difficulty_adjustments
+            .remove(&missing_approach);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                difficulty_missing,
+            ),
+            Err(RegistryBuildError::MissingOperationApproachAdjustment {
+                operation: OperationKind::Burglary,
+                approach,
+            }) if approach == missing_approach
         ));
 
         let mut difficulty_extra = execution.clone();

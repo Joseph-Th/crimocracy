@@ -11,18 +11,20 @@
 use super::operation_execution::OperationResolutionError;
 use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
-use crate::core::time::SimDuration;
+use crate::core::time::{SimDuration, SimTime};
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
 };
 use crate::registry::Registry;
-/// A successful same-kind take from the same business inside this window finds only partially
-/// replenished value in that operation channel, so repeat scores decay without unrelated kinds
-/// suppressing each other.
-pub(crate) const RECENT_HIT_WINDOW: SimDuration = SimDuration::from_minutes(3 * 24 * 60);
-/// Each recent prior successful take leaves this share of the remaining loot value.
-pub(crate) const RECENT_HIT_VALUE_BASIS_POINTS: i128 = 5_000;
+
+#[derive(Clone, Copy, Debug)]
+struct TakeEconomics {
+    full_basis_points: u32,
+    partial_basis_points: u16,
+    recovery_window: SimDuration,
+    immediate_repeat_value_basis_points: u16,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PropertyProceedsPlan {
@@ -64,20 +66,31 @@ pub(crate) fn resolve_property_proceeds(
     }
 
     let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let recent_hits = recent_take_hits(state, operation, *business);
+    let reference_at = take_reference_time(state, operation);
+    let recent_hits = recent_take_times(
+        state,
+        operation,
+        *business,
+        definition.recent_take_recovery_window(),
+    );
     let cents = resolve_take_cents(
         operation.id(),
         gross.cents(),
-        definition.business_gross_basis_points(),
-        definition.partial_recovery_basis_points(),
+        TakeEconomics {
+            full_basis_points: definition.business_gross_basis_points(),
+            partial_basis_points: definition.partial_recovery_basis_points(),
+            recovery_window: definition.recent_take_recovery_window(),
+            immediate_repeat_value_basis_points: definition.immediate_repeat_value_basis_points(),
+        },
         outcome,
-        recent_hits,
+        reference_at,
+        &recent_hits,
         |operation| OperationResolutionError::PropertyProceedsOverflow { operation },
     )?;
     if cents <= 0 {
         return Ok(PropertyProceedsPlan {
             proceeds: None,
-            depleted_by_recent_take: recent_hits > 0,
+            depleted_by_recent_take: !recent_hits.is_empty(),
         });
     }
     Ok(PropertyProceedsPlan {
@@ -85,52 +98,60 @@ pub(crate) fn resolve_property_proceeds(
             EntityRef::Business(*business),
             crate::finance::Money::from_cents(cents),
         )),
-        depleted_by_recent_take: recent_hits > 0,
+        depleted_by_recent_take: !recent_hits.is_empty(),
     })
 }
 
 /// Recent successful same-kind takes against the same target at this operation's own resolution
 /// instant. A committed operation must keep validating against exactly the take history it saw
 /// when it resolved.
-pub(crate) fn recent_take_hits(
+fn take_reference_time(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+) -> SimTime {
+    operation
+        .resolution()
+        .map(|resolution| resolution.resolved_at())
+        .unwrap_or_else(|| state.now())
+}
+
+pub(crate) fn recent_take_times(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     business: crate::core::id::BusinessId,
-) -> u32 {
-    let reference_at = operation
-        .resolution()
-        .map(|resolution| resolution.resolved_at())
-        .unwrap_or_else(|| state.now());
+    recovery_window: SimDuration,
+) -> Vec<SimTime> {
+    let reference_at = take_reference_time(state, operation);
     // Served from the depletion index maintained at completion commit time.
-    state.operations.recent_successful_takes(
+    state.operations.recent_successful_take_times(
         business,
         operation.kind(),
         reference_at,
-        RECENT_HIT_WINDOW,
+        recovery_window,
         operation.id(),
     )
 }
 
 /// Shared take economics: authored basis points of the target's gross potential, scaled down on a
 /// partial outcome and again by each recent successful same-kind hit against the same target.
-pub(crate) fn resolve_take_cents(
+fn resolve_take_cents(
     operation: crate::core::id::OperationId,
     gross_cents: i64,
-    full_basis_points: u32,
-    partial_basis_points: u16,
+    economics: TakeEconomics,
     outcome: OperationObjectiveOutcome,
-    recent_hits: u32,
+    reference_at: SimTime,
+    recent_hits: &[SimTime],
     overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
 ) -> Result<i64, OperationResolutionError> {
     let full_value = i128::from(gross_cents)
-        .checked_mul(i128::from(full_basis_points))
+        .checked_mul(i128::from(economics.full_basis_points))
         .ok_or(overflow(operation))?
         / 10_000_i128;
     let mut value = match outcome {
         OperationObjectiveOutcome::Achieved => full_value,
         OperationObjectiveOutcome::Partial => {
             full_value
-                .checked_mul(i128::from(partial_basis_points))
+                .checked_mul(i128::from(economics.partial_basis_points))
                 .ok_or(overflow(operation))?
                 / 10_000_i128
         }
@@ -138,11 +159,21 @@ pub(crate) fn resolve_take_cents(
             unreachable!("failed takes return early")
         }
     };
-    // Each prior hit inside the recency window multiplies the remaining take down so farming
-    // one target decays.
-    for _ in 0..recent_hits {
+    let window_minutes = u64::from(economics.recovery_window.as_minutes());
+    let depletion_span = 10_000_u64 - u64::from(economics.immediate_repeat_value_basis_points);
+    // Each prior hit starts at the authored immediate-repeat penalty and recovers linearly to
+    // full value over the authored window. Multiple recent hits compound independently, which
+    // keeps repeated farming unattractive without an all-or-nothing replenishment cliff.
+    for hit_at in recent_hits {
+        let age = reference_at
+            .as_minutes()
+            .saturating_sub(hit_at.as_minutes())
+            .min(window_minutes);
+        let unrecovered = window_minutes.saturating_sub(age);
+        let depletion = depletion_span.saturating_mul(unrecovered) / window_minutes;
+        let value_basis_points = 10_000_u64.saturating_sub(depletion);
         value = value
-            .checked_mul(RECENT_HIT_VALUE_BASIS_POINTS)
+            .checked_mul(i128::from(value_basis_points))
             .ok_or(overflow(operation))?
             / 10_000_i128;
     }
@@ -191,20 +222,31 @@ pub(crate) fn resolve_cash_proceeds(
     }
 
     let gross = resolve_business_gross_potential(registry, state, *business)?;
-    let recent_hits = recent_take_hits(state, operation, *business);
+    let reference_at = take_reference_time(state, operation);
+    let recent_hits = recent_take_times(
+        state,
+        operation,
+        *business,
+        definition.recent_take_recovery_window(),
+    );
     let cents = resolve_take_cents(
         operation.id(),
         gross.cents(),
-        definition.business_take_basis_points(),
-        definition.partial_take_basis_points(),
+        TakeEconomics {
+            full_basis_points: definition.business_take_basis_points(),
+            partial_basis_points: definition.partial_take_basis_points(),
+            recovery_window: definition.recent_take_recovery_window(),
+            immediate_repeat_value_basis_points: definition.immediate_repeat_value_basis_points(),
+        },
         outcome,
-        recent_hits,
+        reference_at,
+        &recent_hits,
         |operation| OperationResolutionError::CashProceedsOverflow { operation },
     )?;
     if cents <= 0 {
         return Ok(CashProceedsPlan {
             proceeds: None,
-            depleted_by_recent_take: recent_hits > 0,
+            depleted_by_recent_take: !recent_hits.is_empty(),
         });
     }
     Ok(CashProceedsPlan {
@@ -212,7 +254,7 @@ pub(crate) fn resolve_cash_proceeds(
             EntityRef::Business(*business),
             crate::finance::Money::from_cents(cents),
         )),
-        depleted_by_recent_take: recent_hits > 0,
+        depleted_by_recent_take: !recent_hits.is_empty(),
     })
 }
 

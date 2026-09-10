@@ -32,7 +32,6 @@ use crate::legal::{
     PatrolDeploymentDraft, PatrolWindow, PoliceResponsePatrolSnapshot, PoliceResponseRecord,
     PoliceResponseStatus, WitnessCooperation, WitnessStatementDraft,
 };
-use crate::operations::operation_economics::RECENT_HIT_WINDOW;
 use crate::operations::operation_system::{
     OperationError, OperationTransition, apply_transition, validate_authorize_operation,
 };
@@ -1116,6 +1115,7 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
     assert_eq!(started.started_operations, vec![pressure]);
 
     let statement = crate::legal::witness_system::validate_record_witness_statement(
+        &registry,
         &state,
         WitnessStatementDraft {
             case_witness,
@@ -1624,6 +1624,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         OperationObjectiveOutcome::Achieved,
         factors,
         OperationExposureLevel::None,
+        65,
     );
     assert!(!achieved.contains("unplanned circumstances"));
     assert!(!achieved.contains("crew overcame them"));
@@ -1633,6 +1634,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         OperationObjectiveOutcome::Partial,
         factors,
         OperationExposureLevel::None,
+        65,
     );
     assert!(partial.contains("reduced the result"));
 
@@ -1641,6 +1643,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         OperationObjectiveOutcome::Failed,
         factors,
         OperationExposureLevel::None,
+        65,
     );
     assert!(failed.contains("contributed to the failure"));
 }
@@ -1668,6 +1671,7 @@ fn practical_objective_failure_does_not_misattribute_tactical_success() {
         OperationObjectiveOutcome::Achieved,
         factors,
         OperationExposureLevel::None,
+        65,
     );
     assert!(summary.starts_with("Objective failed."));
     assert!(!summary.contains("Assigned-role competence"));
@@ -1700,6 +1704,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Achieved,
         neutral,
         OperationExposureLevel::None,
+        65,
     );
     assert!(routine.starts_with("Objective achieved."));
     assert!(!routine.contains("Assigned-role competence"));
@@ -1722,6 +1727,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Achieved,
         thin,
         OperationExposureLevel::None,
+        65,
     );
     assert!(thin_crew.contains("Assigned-role competence was competent."));
 
@@ -1736,6 +1742,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Achieved,
         informed,
         OperationExposureLevel::None,
+        65,
     );
     assert!(planned.contains("Planning intelligence covered 2 of 4 relevant areas"));
     assert!(planned.contains("reduced execution uncertainty"));
@@ -1751,6 +1758,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Achieved,
         gapped,
         OperationExposureLevel::None,
+        65,
     );
     assert!(gapped_plan.contains("Planning intelligence covered 1 of 4 relevant areas"));
     assert!(gapped_plan.contains("large gaps remained in the plan's information"));
@@ -1764,6 +1772,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Achieved,
         pressured,
         OperationExposureLevel::None,
+        65,
     );
     assert!(rushed.contains("compressed the execution window"));
 
@@ -1772,6 +1781,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         OperationObjectiveOutcome::Partial,
         neutral,
         OperationExposureLevel::Witnessed,
+        65,
     );
     assert!(witnessed.contains("witnessed or otherwise clearly observed"));
 }

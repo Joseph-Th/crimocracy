@@ -8,8 +8,8 @@ use crate::core::time::{SimDuration, SimTime};
 use crate::core::version::advance_version_preflighted;
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord, OperationKind,
-    OperationObjectiveOutcome, OperationPropertyDispositionRecord, OperationRecord,
-    OperationResolutionRecord, OperationStatus,
+    OperationPropertyDispositionRecord, OperationRecord, OperationResolutionRecord,
+    OperationStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,10 +115,7 @@ impl OperationState {
                     self.by_discovered_information.insert(*information, id);
                 }
                 if record.status() == OperationStatus::Completed
-                    && matches!(
-                        resolution.objective_outcome(),
-                        OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
-                    )
+                    && resolution_has_positive_take(resolution)
                     && let Some(business) = record.objective().taken_business()
                 {
                     self.successful_takes_by_business_kind
@@ -452,9 +449,9 @@ impl OperationState {
             record.runtime.resolution = Some(resolution);
             record.runtime.awaiting_decision_since = None;
         }
-        // A successful take against a business enters its operation-kind depletion channel at
-        // the resolution instant, so later same-kind takes price the target without a
-        // full-history scan or cross-depleting unrelated revenue models.
+        // A take that actually removed positive economic value from a business enters its
+        // operation-kind depletion channel at the resolution instant. Tactical success with no
+        // proceeds cannot make an already-empty target still more depleted.
         let record = self
             .records
             .get(&id)
@@ -462,10 +459,8 @@ impl OperationState {
         let resolution = record
             .resolution()
             .expect("just-attached resolution must be present");
-        if matches!(
-            resolution.objective_outcome(),
-            OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
-        ) && let Some(business) = record.objective().taken_business()
+        if resolution_has_positive_take(resolution)
+            && let Some(business) = record.objective().taken_business()
         {
             // NOTE: deliberately unpruned. Load-time validation re-derives every
             // historical settlement's take economics against that settlement's own
@@ -485,14 +480,14 @@ impl OperationState {
     /// elapses. Ordering by operation ID within one simulation minute mirrors the canonical
     /// due-operation pass and keeps historical re-derivation stable when several takes resolve
     /// at the same `SimTime`.
-    pub(crate) fn recent_successful_takes(
+    pub(crate) fn recent_successful_take_times(
         &self,
         business: BusinessId,
         kind: OperationKind,
         at: SimTime,
         window: SimDuration,
         current_operation: OperationId,
-    ) -> u32 {
+    ) -> Vec<SimTime> {
         let at_minutes = at.as_minutes();
         let window_minutes = u64::from(window.as_minutes());
         let lower_bound = SimTime::from_minutes(at_minutes.saturating_sub(window_minutes));
@@ -515,9 +510,10 @@ impl OperationState {
             .map(|takes| {
                 takes
                     .range((lower_range_bound, std::ops::Bound::Excluded(&upper_key)))
-                    .count() as u32
+                    .map(|(resolved_at, _)| *resolved_at)
+                    .collect()
             })
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_property_disposition(
@@ -711,10 +707,7 @@ impl OperationState {
                 let taken_business = record.objective().taken_business();
                 let should_index = taken_business.is_some()
                     && record.status() == OperationStatus::Completed
-                    && matches!(
-                        resolution.objective_outcome(),
-                        OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial
-                    );
+                    && resolution_has_positive_take(resolution);
                 let indexed = taken_business
                     .and_then(|business| {
                         self.successful_takes_by_business_kind
@@ -769,6 +762,10 @@ impl OperationState {
     }
 }
 
+fn resolution_has_positive_take(resolution: &crate::operations::OperationResolutionRecord) -> bool {
+    resolution.property_proceeds().is_some() || resolution.cash_proceeds().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,13 +802,25 @@ mod tests {
         );
 
         assert_eq!(
-            state.recent_successful_takes(business, OperationKind::Burglary, at, window, current,),
-            2,
+            state.recent_successful_take_times(
+                business,
+                OperationKind::Burglary,
+                at,
+                window,
+                current,
+            ),
+            vec![SimTime::from_minutes(681), at],
             "only interior-window takes that precede the current operation may deplete it"
         );
         assert_eq!(
-            state.recent_successful_takes(business, OperationKind::Smuggling, at, window, current,),
-            0,
+            state.recent_successful_take_times(
+                business,
+                OperationKind::Smuggling,
+                at,
+                window,
+                current,
+            ),
+            Vec::<SimTime>::new(),
             "a different operation kind at the same business must not share depletion"
         );
 
@@ -825,14 +834,14 @@ mod tests {
             ]),
         );
         assert_eq!(
-            early_state.recent_successful_takes(
+            early_state.recent_successful_take_times(
                 business,
                 OperationKind::Burglary,
                 early,
                 window,
                 OperationId::from_raw(2),
             ),
-            1,
+            vec![SimTime::from_minutes(0)],
             "before a full window has elapsed, campaign-start takes are still recent"
         );
     }

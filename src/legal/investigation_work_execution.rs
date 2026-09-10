@@ -19,7 +19,9 @@ use crate::legal::{
     InvestigationWorkResolution, InvestigationWorkRuntime, InvestigationWorkStatus,
     WitnessCooperation, WitnessStatementDraft,
 };
-use crate::registry::{InvestigationWorkDefinition, Registry};
+use crate::registry::{
+    InvestigationSourceSupportDefinition, InvestigationWorkDefinition, Registry,
+};
 use crate::world::{CapabilityKind, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -642,7 +644,7 @@ pub(crate) fn resolve_work_factors_and_margin(
         .ok_or(InvestigationWorkError::MissingInvestigationCapability(
             work.investigator(),
         ))?;
-    let source_support = resolve_source_support(state, work)?;
+    let source_support = resolve_source_support(definition, state, work)?;
     let source_evidence_count = u8::try_from(work.source_evidence().len())
         .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
     let difficulty = resolve_work_difficulty(definition, source_evidence_count);
@@ -698,7 +700,7 @@ pub(crate) fn validate_historical_work_factors(
     let expected_difficulty = resolve_work_difficulty(definition, source_evidence_count);
     let support_valid = match work.kind() {
         InvestigationWorkKind::EvidenceReview => {
-            factors.source_support() == resolve_source_support(state, work)?
+            factors.source_support() == resolve_source_support(definition, state, work)?
         }
         InvestigationWorkKind::WitnessInterview => [
             WitnessCooperation::Hostile,
@@ -706,7 +708,10 @@ pub(crate) fn validate_historical_work_factors(
             WitnessCooperation::Cooperative,
         ]
         .into_iter()
-        .any(|cooperation| factors.source_support() == witness_cooperation_support(cooperation)),
+        .any(|cooperation| {
+            factors.source_support()
+                == witness_cooperation_support(definition.source_support(), cooperation)
+        }),
     };
     if factors.investigation_capability() != investigation_capability
         || factors.source_evidence_count() != source_evidence_count
@@ -719,9 +724,11 @@ pub(crate) fn validate_historical_work_factors(
 }
 
 pub(crate) fn resolve_source_support(
+    definition: &InvestigationWorkDefinition,
     state: &AppState,
     work: &InvestigationWorkRecord,
 ) -> Result<Rating, InvestigationWorkError> {
+    let support = definition.source_support();
     // Interview support is the witness's current cooperation, not evidence quality.
     if work.kind() == InvestigationWorkKind::WitnessInterview {
         let case_witness = work
@@ -732,7 +739,7 @@ pub(crate) fn resolve_source_support(
             .legal
             .get_case_witness(case_witness)
             .ok_or(InvestigationWorkError::InvalidFocus)?;
-        return Ok(witness_cooperation_support(witness.cooperation()));
+        return Ok(witness_cooperation_support(support, witness.cooperation()));
     }
     let mut total = 0_u32;
     let mut count = 0_u32;
@@ -745,9 +752,11 @@ pub(crate) fn resolve_source_support(
             return Err(InvestigationWorkError::InvalidSourceEvidence(*evidence_id));
         }
         total = total
-            .saturating_add(u32::from(strength_score(evidence.strength())))
-            .saturating_add(u32::from(reliability_score(evidence.reliability())))
-            .saturating_add(u32::from(admissibility_score(evidence.admissibility())));
+            .saturating_add(u32::from(support.strength_score(evidence.strength())))
+            .saturating_add(u32::from(support.reliability_score(evidence.reliability())))
+            .saturating_add(u32::from(
+                support.admissibility_score(evidence.admissibility()),
+            ));
         count = count.saturating_add(3);
     }
     let average = total.checked_div(count).unwrap_or(0);
@@ -757,40 +766,12 @@ pub(crate) fn resolve_source_support(
     )
 }
 
-fn witness_cooperation_support(cooperation: WitnessCooperation) -> Rating {
-    let score = match cooperation {
-        WitnessCooperation::Hostile => 20,
-        WitnessCooperation::Reluctant => 50,
-        WitnessCooperation::Cooperative => 85,
-    };
+fn witness_cooperation_support(
+    support: InvestigationSourceSupportDefinition,
+    cooperation: WitnessCooperation,
+) -> Rating {
+    let score = support.witness_score(cooperation);
     Rating::try_new(score).expect("canonical witness support scores are valid ratings")
-}
-
-fn strength_score(strength: EvidenceStrength) -> u8 {
-    match strength {
-        EvidenceStrength::Weak => 20,
-        EvidenceStrength::Corroborating => 45,
-        EvidenceStrength::Strong => 70,
-        EvidenceStrength::Direct => 95,
-    }
-}
-
-fn reliability_score(reliability: EvidenceReliability) -> u8 {
-    match reliability {
-        EvidenceReliability::Questionable => 15,
-        EvidenceReliability::Mixed => 40,
-        EvidenceReliability::Credible => 70,
-        EvidenceReliability::HighlyReliable => 95,
-    }
-}
-
-fn admissibility_score(admissibility: Admissibility) -> u8 {
-    match admissibility {
-        Admissibility::Unknown => 35,
-        Admissibility::Inadmissible => 0,
-        Admissibility::Disputed => 50,
-        Admissibility::Admissible => 90,
-    }
 }
 
 pub struct ValidatedInvestigationWorkResolution {
@@ -947,6 +928,7 @@ pub(crate) fn resolve_improved_evidence_reliability(
 /// subject of any kind so institution-authored cases without an operation origin still
 /// produce a connected statement. Confidence is a deterministic function of the margin.
 fn resolve_interview_statement_draft(
+    definition: &InvestigationWorkDefinition,
     state: &AppState,
     work: &InvestigationWorkRecord,
     case_witness: CaseWitnessId,
@@ -986,13 +968,13 @@ fn resolve_interview_statement_draft(
                 .or_else(|| investigation.subjects().iter().next().copied())
         })
         .ok_or(InvestigationWorkError::InvalidFocus)?;
-    let confidence = if margin >= 20 {
-        Rating::try_new(85).expect("interview confidence must be valid")
-    } else if margin >= 10 {
-        Rating::try_new(65).expect("interview confidence must be valid")
-    } else {
-        Rating::try_new(40).expect("interview confidence must be valid")
-    };
+    let confidence = Rating::try_new(
+        definition
+            .interview_outcome()
+            .expect("witness interview definition must author outcome confidence")
+            .confidence_for_margin(margin),
+    )
+    .expect("authored interview confidence must be a valid rating");
     Ok(WitnessStatementDraft {
         case_witness,
         subject,
@@ -1241,8 +1223,15 @@ pub fn validate_investigation_work_resolution_plan(
             .expect("interview focus must reference a case witness");
         Some(
             crate::legal::witness_system::validate_record_witness_statement(
+                registry,
                 state,
-                resolve_interview_statement_draft(state, work, case_witness, plan.margin)?,
+                resolve_interview_statement_draft(
+                    definition,
+                    state,
+                    work,
+                    case_witness,
+                    plan.margin,
+                )?,
             )
             .map_err(|error| InvestigationWorkError::InterviewStatementFailed {
                 work: plan.work,

@@ -95,7 +95,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // Phase order is the contract: bounded custody release first; opportunity expiry next so its
     // durable lifecycle report is available to every remaining same-minute consumer; then
     // operations (start, deadline aborts, police arrivals, resolution), legal institutional work
-    // (staffing, detective work, new custody, informants, representation, cold decay), economy
+    // (staffing, detective work, new custody, representation, informants, cold decay), economy
     // cycles (businesses, enterprises), then the day-boundary governance cluster: payroll,
     // reputation (decay before current consequences), recruitment, delegated expansion (which
     // consumes current police fear), and executive synthesis last so the due brief sees everything
@@ -123,27 +123,28 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // The police institution converts accumulated case evidence into custody after detective
     // work resolves, so an interview or forensic analysis finishing this minute is visible to
     // the same minute's arrest decision.
-    let evidence_arrests = crate::legal::arrest_system::apply_autonomous_evidence_arrests(state)
-        .expect("valid state should convert qualifying case evidence into custody");
+    let evidence_arrests =
+        crate::legal::arrest_system::apply_autonomous_evidence_arrests(registry, state)
+            .expect("valid state should convert qualifying case evidence into custody");
     // Custody can remove a prosecutor from every review they were carrying. Restaff immediately
     // after arrests so one individual's detention cannot freeze unrelated prosecution matters.
     let staffed_prosecution_cases =
         crate::legal::prosecution_system::apply_autonomous_prosecution_staffing(state)
             .expect("valid state should staff available prosecutors onto open reviews");
-    // Detainee informant recruitment runs right after custody conversion: a member arrested
-    // exactly one cadence window ago faces their single recruitment decision this minute, and
-    // informants disclose personally-held knowledge into their handler's cases.
+    // Legal-support governance runs before the detainee's one-time informant decision. This lets
+    // promised counsel materially affect custodial cooperation risk instead of retaining counsel
+    // only after the irreversible decision. It also sees every new arrest created above and
+    // concludes automatic retainers for matters already ended.
+    let automatic_legal_support =
+        crate::legal::legal_representation_system::apply_automatic_legal_support(registry, state)
+            .expect("valid state should resolve automatic legal-support retention");
+    // A member arrested exactly one cadence window ago now faces the decision with current
+    // representation visible. New informants then disclose personally-held knowledge.
     let informant_recruitments =
         crate::legal::informant_system::apply_detainee_informant_recruitment(registry, state)
             .expect("valid state should resolve detainee informant recruitment decisions");
     let informant_disclosures = crate::legal::informant_system::apply_informant_disclosures(state)
         .expect("valid state should record due informant disclosures");
-    // Automatic legal-support governance runs after the custody/informant work: it concludes
-    // policy retainers released at this minute's lifecycle boundary, sees every new arrest made
-    // above, and retains counsel through the canonical representation path when policy promises it.
-    let automatic_legal_support =
-        crate::legal::legal_representation_system::apply_automatic_legal_support(state)
-            .expect("valid state should resolve automatic legal-support retention");
     // Cold-case decay runs after detective work resolution so the case's last-activity instant is
     // final for the minute; an authored institutional-inactivity window then shelves operation-
     // originated cases whose owning authority has gone quiet. No random stream is consumed, so the

@@ -4,7 +4,9 @@ use crate::core::attention::AttentionClass;
 use crate::core::time::SimDuration;
 use crate::finance::Money;
 use crate::intelligence::{InformationTopic, Reliability, Specificity};
-use crate::legal::EvidenceKind;
+use crate::legal::{
+    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, WitnessCooperation,
+};
 use crate::operations::{OperationApproach, RoleKind};
 use crate::recruitment::RecruitmentApproach;
 use crate::world::{BusinessFunction, CapabilityKind, DriveKind, PolicySetting, TraitKind};
@@ -34,7 +36,7 @@ pub struct RecruitmentRelationshipDefinition {
     pub incumbent_attachment: RecruitmentIncumbentRelationshipDefinition,
 }
 #[derive(Clone, Copy, Debug)]
-pub struct RecruitmentInformationQualityDefinition {
+pub struct InformationQualityDefinition {
     pub unknown_reliability: u8,
     pub unreliable_reliability: u8,
     pub mixed_reliability: u8,
@@ -45,7 +47,7 @@ pub struct RecruitmentInformationQualityDefinition {
     pub specific_specificity: u8,
     pub precise_specificity: u8,
 }
-impl RecruitmentInformationQualityDefinition {
+impl InformationQualityDefinition {
     pub fn reliability_score(self, reliability: Reliability) -> u8 {
         match reliability {
             Reliability::Unknown => self.unknown_reliability,
@@ -62,6 +64,19 @@ impl RecruitmentInformationQualityDefinition {
             Specificity::Specific => self.specific_specificity,
             Specificity::Precise => self.precise_specificity,
         }
+    }
+    pub(crate) fn values(self) -> [u8; 9] {
+        [
+            self.unknown_reliability,
+            self.unreliable_reliability,
+            self.mixed_reliability,
+            self.generally_reliable,
+            self.direct_access,
+            self.vague_specificity,
+            self.general_specificity,
+            self.specific_specificity,
+            self.precise_specificity,
+        ]
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +118,6 @@ pub struct RecruitmentDefinitionSpec {
     pub scoring: RecruitmentScoringDefinition,
     pub recruiter_capabilities: BTreeSet<CapabilityKind>,
     pub relationships: RecruitmentRelationshipDefinition,
-    pub information_quality: RecruitmentInformationQualityDefinition,
     pub approach_drives: BTreeMap<RecruitmentApproach, BTreeSet<DriveKind>>,
     pub trait_rules: Vec<RecruitmentTraitRuleDefinition>,
 }
@@ -113,7 +127,6 @@ pub struct RecruitmentDefinition {
     pub(super) scoring: RecruitmentScoringDefinition,
     pub(super) recruiter_capabilities: BTreeSet<CapabilityKind>,
     pub(super) relationships: RecruitmentRelationshipDefinition,
-    pub(super) information_quality: RecruitmentInformationQualityDefinition,
     pub(super) approach_drives: BTreeMap<RecruitmentApproach, BTreeSet<DriveKind>>,
     pub(super) trait_rules: Vec<RecruitmentTraitRuleDefinition>,
 }
@@ -148,9 +161,6 @@ impl RecruitmentDefinition {
     pub fn relationships(&self) -> RecruitmentRelationshipDefinition {
         self.relationships
     }
-    pub fn information_quality(&self) -> RecruitmentInformationQualityDefinition {
-        self.information_quality
-    }
     pub fn drives_for_approach(&self, approach: RecruitmentApproach) -> &BTreeSet<DriveKind> {
         self.approach_drives
             .get(&approach)
@@ -168,6 +178,8 @@ pub struct InvestigationWorkDefinition {
     pub(crate) source_support_weight: u8,
     pub(crate) variance_limit: u8,
     pub(crate) connected_margin: i16,
+    pub(crate) source_support: InvestigationSourceSupportDefinition,
+    pub(crate) interview_outcome: Option<InvestigationInterviewOutcomeDefinition>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct InvestigationWorkDefinitionSpec {
@@ -177,6 +189,97 @@ pub struct InvestigationWorkDefinitionSpec {
     pub source_support_weight: u8,
     pub variance_limit: u8,
     pub connected_margin: i16,
+    pub source_support: InvestigationSourceSupportDefinition,
+    pub interview_outcome: Option<InvestigationInterviewOutcomeDefinition>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct InvestigationSourceSupportDefinition {
+    pub witness_hostile: u8,
+    pub witness_reluctant: u8,
+    pub witness_cooperative: u8,
+    pub evidence_weak: u8,
+    pub evidence_corroborating: u8,
+    pub evidence_strong: u8,
+    pub evidence_direct: u8,
+    pub reliability_questionable: u8,
+    pub reliability_mixed: u8,
+    pub reliability_credible: u8,
+    pub reliability_highly_reliable: u8,
+    pub admissibility_unknown: u8,
+    pub admissibility_inadmissible: u8,
+    pub admissibility_disputed: u8,
+    pub admissibility_admissible: u8,
+}
+impl InvestigationSourceSupportDefinition {
+    pub fn witness_score(self, cooperation: WitnessCooperation) -> u8 {
+        match cooperation {
+            WitnessCooperation::Hostile => self.witness_hostile,
+            WitnessCooperation::Reluctant => self.witness_reluctant,
+            WitnessCooperation::Cooperative => self.witness_cooperative,
+        }
+    }
+    pub fn strength_score(self, strength: EvidenceStrength) -> u8 {
+        match strength {
+            EvidenceStrength::Weak => self.evidence_weak,
+            EvidenceStrength::Corroborating => self.evidence_corroborating,
+            EvidenceStrength::Strong => self.evidence_strong,
+            EvidenceStrength::Direct => self.evidence_direct,
+        }
+    }
+    pub fn reliability_score(self, reliability: EvidenceReliability) -> u8 {
+        match reliability {
+            EvidenceReliability::Questionable => self.reliability_questionable,
+            EvidenceReliability::Mixed => self.reliability_mixed,
+            EvidenceReliability::Credible => self.reliability_credible,
+            EvidenceReliability::HighlyReliable => self.reliability_highly_reliable,
+        }
+    }
+    pub fn admissibility_score(self, admissibility: Admissibility) -> u8 {
+        match admissibility {
+            Admissibility::Unknown => self.admissibility_unknown,
+            Admissibility::Inadmissible => self.admissibility_inadmissible,
+            Admissibility::Disputed => self.admissibility_disputed,
+            Admissibility::Admissible => self.admissibility_admissible,
+        }
+    }
+    pub(crate) fn values(self) -> [u8; 15] {
+        [
+            self.witness_hostile,
+            self.witness_reluctant,
+            self.witness_cooperative,
+            self.evidence_weak,
+            self.evidence_corroborating,
+            self.evidence_strong,
+            self.evidence_direct,
+            self.reliability_questionable,
+            self.reliability_mixed,
+            self.reliability_credible,
+            self.reliability_highly_reliable,
+            self.admissibility_unknown,
+            self.admissibility_inadmissible,
+            self.admissibility_disputed,
+            self.admissibility_admissible,
+        ]
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct InvestigationInterviewOutcomeDefinition {
+    pub medium_margin: i16,
+    pub high_margin: i16,
+    pub low_confidence: u8,
+    pub medium_confidence: u8,
+    pub high_confidence: u8,
+}
+impl InvestigationInterviewOutcomeDefinition {
+    pub fn confidence_for_margin(self, margin: i16) -> u8 {
+        if margin >= self.high_margin {
+            self.high_confidence
+        } else if margin >= self.medium_margin {
+            self.medium_confidence
+        } else {
+            self.low_confidence
+        }
+    }
 }
 impl InvestigationWorkDefinition {
     pub fn duration(&self) -> SimDuration {
@@ -196,6 +299,12 @@ impl InvestigationWorkDefinition {
     }
     pub fn connected_margin(&self) -> i16 {
         self.connected_margin
+    }
+    pub fn source_support(&self) -> InvestigationSourceSupportDefinition {
+        self.source_support
+    }
+    pub fn interview_outcome(&self) -> Option<InvestigationInterviewOutcomeDefinition> {
+        self.interview_outcome
     }
 }
 #[derive(Clone, Debug)]
@@ -229,8 +338,15 @@ pub struct OperationDifficultyDefinition {
     pub(crate) duration: SimDuration,
     pub(crate) base_difficulty: u8,
     pub(crate) role_capabilities: BTreeMap<RoleKind, CapabilityKind>,
+    /// Relative contribution of the crew's role-skill average to effective execution ability.
+    pub(crate) role_capability_weight: u8,
+    /// Relative contribution of the operation leader's authored domain capability.
+    pub(crate) leader_capability_weight: u8,
     pub(crate) approach_difficulty_adjustments: BTreeMap<OperationApproach, i8>,
     pub(crate) police_pressure_weight: u8,
+    /// Maximum difficulty penalty produced when an operation is forced to finish inside less
+    /// time than its authored base duration.
+    pub(crate) max_time_pressure: u8,
     pub(crate) variance_limit: u8,
     pub(crate) achieved_margin: i16,
     pub(crate) partial_margin: i16,
@@ -240,6 +356,7 @@ pub struct OperationIntelligenceDefinition {
     pub(crate) relevant_topics: BTreeSet<InformationTopic>,
     pub(crate) max_difficulty_reduction: u8,
     pub(crate) max_useful_age: SimDuration,
+    pub(crate) patrol_observation_bucket: SimDuration,
 }
 #[derive(Clone, Debug)]
 pub struct OperationExposureDefinition {
@@ -252,6 +369,9 @@ pub struct OperationExposureDefinition {
     pub(crate) trace_threshold: i16,
     pub(crate) witnessed_threshold: i16,
     pub(crate) identifying_threshold: i16,
+    pub(crate) witness_reluctant_police_presence: u8,
+    pub(crate) witness_cooperative_police_presence: u8,
+    pub(crate) high_police_presence_narrative_threshold: u8,
     pub(crate) evidence_kind: EvidenceKind,
 }
 #[derive(Clone, Debug)]
@@ -268,7 +388,13 @@ pub struct OperationPoliceResponseDefinition {
 pub struct OperationPropertyProceedsDefinition {
     pub(crate) business_gross_basis_points: u32,
     pub(crate) partial_recovery_basis_points: u16,
+    pub(crate) recent_take_recovery_window: SimDuration,
+    pub(crate) immediate_repeat_value_basis_points: u16,
     pub(crate) liquidation_recovery_basis_points: u16,
+    pub(crate) liquidation_police_neutral_rating: u8,
+    pub(crate) liquidation_police_adjustment_basis_points_per_point: u16,
+    pub(crate) liquidation_min_recovery_basis_points: u16,
+    pub(crate) liquidation_max_recovery_basis_points: u16,
 }
 /// Authored cash-take economics for kinds whose success yields money directly rather
 /// than held property: `business_take_basis_points` of the target business's gross
@@ -278,6 +404,8 @@ pub struct OperationPropertyProceedsDefinition {
 pub struct OperationCashProceedsDefinition {
     pub(crate) business_take_basis_points: u32,
     pub(crate) partial_take_basis_points: u16,
+    pub(crate) recent_take_recovery_window: SimDuration,
+    pub(crate) immediate_repeat_value_basis_points: u16,
 }
 impl OperationExecutionDefinition {
     pub fn duration(&self) -> SimDuration {
@@ -292,6 +420,12 @@ impl OperationExecutionDefinition {
     pub fn capability_for_role(&self, role: RoleKind) -> Option<CapabilityKind> {
         self.difficulty.role_capabilities.get(&role).copied()
     }
+    pub fn role_capability_weight(&self) -> u8 {
+        self.difficulty.role_capability_weight
+    }
+    pub fn leader_capability_weight(&self) -> u8 {
+        self.difficulty.leader_capability_weight
+    }
     pub fn approach_difficulty_adjustment(&self, approach: OperationApproach) -> Option<i8> {
         self.difficulty
             .approach_difficulty_adjustments
@@ -300,6 +434,9 @@ impl OperationExecutionDefinition {
     }
     pub fn police_pressure_weight(&self) -> u8 {
         self.difficulty.police_pressure_weight
+    }
+    pub fn max_time_pressure(&self) -> u8 {
+        self.difficulty.max_time_pressure
     }
     pub fn variance_limit(&self) -> u8 {
         self.difficulty.variance_limit
@@ -318,6 +455,9 @@ impl OperationExecutionDefinition {
     }
     pub fn max_intelligence_age(&self) -> SimDuration {
         self.intelligence.max_useful_age
+    }
+    pub fn patrol_observation_bucket(&self) -> SimDuration {
+        self.intelligence.patrol_observation_bucket
     }
     pub fn base_exposure(&self) -> u8 {
         self.exposure.base_exposure
@@ -345,6 +485,15 @@ impl OperationExecutionDefinition {
     }
     pub fn identifying_exposure_threshold(&self) -> i16 {
         self.exposure.identifying_threshold
+    }
+    pub fn witness_reluctant_police_presence(&self) -> u8 {
+        self.exposure.witness_reluctant_police_presence
+    }
+    pub fn witness_cooperative_police_presence(&self) -> u8 {
+        self.exposure.witness_cooperative_police_presence
+    }
+    pub fn high_police_presence_narrative_threshold(&self) -> u8 {
+        self.exposure.high_police_presence_narrative_threshold
     }
     pub fn exposure_evidence_kind(&self) -> EvidenceKind {
         self.exposure.evidence_kind
@@ -385,8 +534,26 @@ impl OperationPropertyProceedsDefinition {
     pub fn partial_recovery_basis_points(self) -> u16 {
         self.partial_recovery_basis_points
     }
+    pub fn recent_take_recovery_window(self) -> SimDuration {
+        self.recent_take_recovery_window
+    }
+    pub fn immediate_repeat_value_basis_points(self) -> u16 {
+        self.immediate_repeat_value_basis_points
+    }
     pub fn liquidation_recovery_basis_points(self) -> u16 {
         self.liquidation_recovery_basis_points
+    }
+    pub fn liquidation_police_neutral_rating(self) -> u8 {
+        self.liquidation_police_neutral_rating
+    }
+    pub fn liquidation_police_adjustment_basis_points_per_point(self) -> u16 {
+        self.liquidation_police_adjustment_basis_points_per_point
+    }
+    pub fn liquidation_min_recovery_basis_points(self) -> u16 {
+        self.liquidation_min_recovery_basis_points
+    }
+    pub fn liquidation_max_recovery_basis_points(self) -> u16 {
+        self.liquidation_max_recovery_basis_points
     }
 }
 impl OperationCashProceedsDefinition {
@@ -395,6 +562,12 @@ impl OperationCashProceedsDefinition {
     }
     pub fn partial_take_basis_points(self) -> u16 {
         self.partial_take_basis_points
+    }
+    pub fn recent_take_recovery_window(self) -> SimDuration {
+        self.recent_take_recovery_window
+    }
+    pub fn immediate_repeat_value_basis_points(self) -> u16 {
+        self.immediate_repeat_value_basis_points
     }
 }
 impl OperationDefinition {
@@ -577,6 +750,43 @@ impl ExecutiveBriefDefinition {
     }
 }
 #[derive(Clone, Copy, Debug)]
+pub struct WitnessTestimonyDefinition {
+    /// Minimum confidence for Corroborating, Strong, and Direct testimony strength bands.
+    pub strength_corroborating_min_confidence: u8,
+    pub strength_strong_min_confidence: u8,
+    pub strength_direct_min_confidence: u8,
+    /// Minimum confidence for Mixed, Credible, and HighlyReliable testimony reliability bands.
+    pub reliability_mixed_min_confidence: u8,
+    pub reliability_credible_min_confidence: u8,
+    pub reliability_highly_reliable_min_confidence: u8,
+    /// Qualification-band reductions applied after confidence is classified.
+    pub reluctant_band_discount: u8,
+    pub hostile_band_discount: u8,
+}
+impl WitnessTestimonyDefinition {
+    pub fn strength_thresholds(self) -> [u8; 3] {
+        [
+            self.strength_corroborating_min_confidence,
+            self.strength_strong_min_confidence,
+            self.strength_direct_min_confidence,
+        ]
+    }
+    pub fn reliability_thresholds(self) -> [u8; 3] {
+        [
+            self.reliability_mixed_min_confidence,
+            self.reliability_credible_min_confidence,
+            self.reliability_highly_reliable_min_confidence,
+        ]
+    }
+    pub fn cooperation_band_discount(self, cooperation: WitnessCooperation) -> u8 {
+        match cooperation {
+            WitnessCooperation::Cooperative => 0,
+            WitnessCooperation::Reluctant => self.reluctant_band_discount,
+            WitnessCooperation::Hostile => self.hostile_band_discount,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
 pub struct LegalConfigSpec {
     /// How long an origin-linked investigation remains institutionally active after
     /// its last evidence/work activity before deterministic shelving.
@@ -584,12 +794,69 @@ pub struct LegalConfigSpec {
     /// How many completed interviews a case witness may sit through without producing a
     /// statement before investigators stop scheduling further futile interviews.
     pub witness_interview_attempt_limit: u8,
+    /// How witness confidence and cooperation become testimony evidence quality.
+    pub witness_testimony: WitnessTestimonyDefinition,
     /// How long after detention a detainee faces their single informant-recruitment decision.
     pub informant_decision_delay: SimDuration,
+    /// Independent qualifying evidence items required before police autonomously make an arrest.
+    pub minimum_arrest_qualifying_evidence: u8,
+    /// Baseline chance that a due detainee accepts an informant offer, before personal pressure.
+    pub informant_base_flip_chance_percent: u8,
+    /// Maximum percentage-point bonus contributed by a detainee's Safety drive at rating 100.
+    pub informant_safety_bonus_percent: u8,
+    /// Percentage-point reduction when active legal representation exists for the arrest.
+    pub represented_informant_reduction_percent: u8,
+    /// Flat fee paid when Automatic legal-support policy retains counsel.
+    pub automatic_support_retainer: Money,
     /// Maximum continuous detention before the modeled arrest-custody window ends.
     /// Charging, bail, and trial are outside the current simulation scope, so custody itself
     /// must have a bounded lifecycle rather than silently becoming permanent confinement.
     pub maximum_detention: SimDuration,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct LegalConfigDefinition {
+    pub(super) cold_case_window: SimDuration,
+    pub(super) witness_interview_attempt_limit: u8,
+    pub(super) witness_testimony: WitnessTestimonyDefinition,
+    pub(super) informant_decision_delay: SimDuration,
+    pub(super) minimum_arrest_qualifying_evidence: u8,
+    pub(super) informant_base_flip_chance_percent: u8,
+    pub(super) informant_safety_bonus_percent: u8,
+    pub(super) represented_informant_reduction_percent: u8,
+    pub(super) automatic_support_retainer: Money,
+    pub(super) maximum_detention: SimDuration,
+}
+impl LegalConfigDefinition {
+    pub fn cold_case_window(self) -> SimDuration {
+        self.cold_case_window
+    }
+    pub fn witness_interview_attempt_limit(self) -> u8 {
+        self.witness_interview_attempt_limit
+    }
+    pub fn witness_testimony(self) -> WitnessTestimonyDefinition {
+        self.witness_testimony
+    }
+    pub fn informant_decision_delay(self) -> SimDuration {
+        self.informant_decision_delay
+    }
+    pub fn minimum_arrest_qualifying_evidence(self) -> u8 {
+        self.minimum_arrest_qualifying_evidence
+    }
+    pub fn informant_base_flip_chance_percent(self) -> u8 {
+        self.informant_base_flip_chance_percent
+    }
+    pub fn informant_safety_bonus_percent(self) -> u8 {
+        self.informant_safety_bonus_percent
+    }
+    pub fn represented_informant_reduction_percent(self) -> u8 {
+        self.represented_informant_reduction_percent
+    }
+    pub fn automatic_support_retainer(self) -> Money {
+        self.automatic_support_retainer
+    }
+    pub fn maximum_detention(self) -> SimDuration {
+        self.maximum_detention
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct UpkeepConfigSpec {

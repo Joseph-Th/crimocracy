@@ -20,6 +20,7 @@ use crate::legal::{InvestigationStatus, PatrolWindow};
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationRecord, OperationStatus,
 };
+use crate::registry::Registry;
 use crate::world::{BusinessFunction, OrganizationKind, Rating};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -192,6 +193,7 @@ pub(crate) const fn is_supported_surveillance_target(target: EntityRef) -> bool 
 }
 
 pub(crate) fn decide_surveillance_intelligence(
+    registry: &Registry,
     state: &AppState,
     operation: &OperationRecord,
     outcome: OperationObjectiveOutcome,
@@ -208,7 +210,15 @@ pub(crate) fn decide_surveillance_intelligence(
     let observed_at = state.now();
     let surveiller = operation.responsible_organization();
     let snapshot = resolve_target_snapshot(state, *target, observed_at, surveiller)?;
-    let observations = build_observations(&snapshot, outcome, observed_at);
+    let bucket_minutes = u16::try_from(
+        registry
+            .get_operation(OperationKind::Surveillance)
+            .execution()
+            .patrol_observation_bucket()
+            .as_minutes(),
+    )
+    .expect("validated patrol observation bucket must fit one-day minute width");
+    let observations = build_observations(&snapshot, outcome, observed_at, bucket_minutes);
     Ok(Some(SurveillanceIntelligencePlan {
         target: *target,
         observed_at,
@@ -548,6 +558,7 @@ fn build_observations(
     snapshot: &SurveillanceTargetSnapshot,
     outcome: OperationObjectiveOutcome,
     observed_at: SimTime,
+    patrol_bucket_minutes: u16,
 ) -> Vec<SurveillanceObservation> {
     let Some((reliability, specificity)) = observation_quality(outcome) else {
         return Vec::new();
@@ -559,8 +570,8 @@ fn build_observations(
                 subject: EntityRef::Neighborhood(*id),
                 reliability,
                 specificity,
-                signal: patrol_pattern_signal(patrol, outcome),
-                summary: patrol_summary(name, patrol, outcome, observed_at),
+                signal: patrol_pattern_signal(patrol, outcome, patrol_bucket_minutes),
+                summary: patrol_summary(name, patrol, outcome, observed_at, patrol_bucket_minutes),
                 finding: format!("police activity around {name}"),
             }]
         }
@@ -577,8 +588,14 @@ fn build_observations(
                 subject: EntityRef::Neighborhood(*neighborhood),
                 reliability,
                 specificity,
-                signal: patrol_pattern_signal(patrol, outcome),
-                summary: patrol_summary(neighborhood_name, patrol, outcome, observed_at),
+                signal: patrol_pattern_signal(patrol, outcome, patrol_bucket_minutes),
+                summary: patrol_summary(
+                    neighborhood_name,
+                    patrol,
+                    outcome,
+                    observed_at,
+                    patrol_bucket_minutes,
+                ),
                 finding: format!("police activity around {neighborhood_name}"),
             }];
             if outcome == OperationObjectiveOutcome::Achieved {
@@ -706,6 +723,7 @@ fn patrol_summary(
     patrol: &PatrolPatternSnapshot,
     outcome: OperationObjectiveOutcome,
     observed_at: SimTime,
+    bucket_minutes: u16,
 ) -> String {
     if outcome == OperationObjectiveOutcome::Partial {
         let presence = patrol.current_presence.unwrap_or(patrol.baseline_presence);
@@ -724,14 +742,14 @@ fn patrol_summary(
     let windows = observed_windows
         .iter()
         .copied()
-        .map(approximate_patrol_window)
+        .map(|window| approximate_patrol_window(window, bucket_minutes))
         .collect::<Vec<_>>();
     let minute = u16::try_from(observed_at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     format!(
         "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}. Around {}, activity was {}.",
         windows.join(", "),
-        format_day_minute(rounded_half_hour(minute)),
+        format_day_minute(rounded_day_minute(minute, bucket_minutes)),
         police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
     )
 }
@@ -739,13 +757,14 @@ fn patrol_summary(
 fn patrol_pattern_signal(
     patrol: &PatrolPatternSnapshot,
     outcome: OperationObjectiveOutcome,
+    bucket_minutes: u16,
 ) -> Option<InformationSignal> {
     if outcome != OperationObjectiveOutcome::Achieved || patrol.deployments.is_empty() {
         return None;
     }
     let intervals = observed_patrol_windows(patrol)
         .into_iter()
-        .flat_map(approximate_patrol_intervals)
+        .flat_map(|window| approximate_patrol_intervals(window, bucket_minutes))
         .collect::<BTreeSet<_>>();
     (!intervals.is_empty()).then_some(InformationSignal::PatrolPattern { intervals })
 }
@@ -758,8 +777,11 @@ fn observed_patrol_windows(patrol: &PatrolPatternSnapshot) -> Vec<PatrolWindow> 
         .collect()
 }
 
-fn approximate_patrol_intervals(window: PatrolWindow) -> Vec<PatrolIntervalSignal> {
-    let Some((start, end)) = approximate_patrol_bounds(window) else {
+fn approximate_patrol_intervals(
+    window: PatrolWindow,
+    bucket_minutes: u16,
+) -> Vec<PatrolIntervalSignal> {
+    let Some((start, end)) = approximate_patrol_bounds(window, bucket_minutes) else {
         return vec![
             PatrolIntervalSignal::try_new(0, DAY_MINUTES_U16)
                 .expect("all-day patrol interval must be valid"),
@@ -783,8 +805,8 @@ fn approximate_patrol_intervals(window: PatrolWindow) -> Vec<PatrolIntervalSigna
     intervals
 }
 
-fn approximate_patrol_window(window: PatrolWindow) -> String {
-    let Some((start, end)) = approximate_patrol_bounds(window) else {
+fn approximate_patrol_window(window: PatrolWindow, bucket_minutes: u16) -> String {
+    let Some((start, end)) = approximate_patrol_bounds(window, bucket_minutes) else {
         return format!("all day ({})", police_presence_label(window.presence()));
     };
     let display_end = if end == DAY_MINUTES_U16 { 0 } else { end };
@@ -796,23 +818,23 @@ fn approximate_patrol_window(window: PatrolWindow) -> String {
     )
 }
 
-/// Expands an observed patrol window to containing half-hour boundaries. Rounding both endpoints
-/// independently to the nearest half hour can collapse a real short window to identical times;
+/// Expands an observed patrol window to containing authored observation-bucket boundaries.
+/// Rounding both endpoints independently to the nearest bucket can collapse a real short window;
 /// treating that collapse as all-day presence would turn a few observed minutes into twenty-four
 /// hours of actionable police coverage. Containing bounds preserve uncertainty without inventing
 /// coverage the observation disproves. `None` means the conservative expansion covers the full day.
-fn approximate_patrol_bounds(window: PatrolWindow) -> Option<(u16, u16)> {
-    const BUCKET_MINUTES: u32 = 30;
+fn approximate_patrol_bounds(window: PatrolWindow, bucket_minutes: u16) -> Option<(u16, u16)> {
+    let bucket_minutes = u32::from(bucket_minutes);
     let day = u32::from(DAY_MINUTES_U16);
     let start = u32::from(window.start().value());
     let end = start + u32::from(window.duration_minutes());
-    let approximate_start = start / BUCKET_MINUTES * BUCKET_MINUTES;
-    let approximate_end = end.div_ceil(BUCKET_MINUTES) * BUCKET_MINUTES;
+    let approximate_start = start / bucket_minutes * bucket_minutes;
+    let approximate_end = end.div_ceil(bucket_minutes) * bucket_minutes;
     if approximate_end - approximate_start >= day {
         return None;
     }
     let start = u16::try_from(approximate_start % day)
-        .expect("half-hour patrol start must fit minute-of-day width");
+        .expect("bucketed patrol start must fit minute-of-day width");
     let end = if approximate_end <= day {
         u16::try_from(approximate_end).expect("same-day patrol end must fit interval width")
     } else {
@@ -823,8 +845,9 @@ fn approximate_patrol_bounds(window: PatrolWindow) -> Option<(u16, u16)> {
     Some((start, end))
 }
 
-fn rounded_half_hour(minute: u16) -> u16 {
-    let rounded = (u32::from(minute) + 15) / 30 * 30;
+fn rounded_day_minute(minute: u16, bucket_minutes: u16) -> u16 {
+    let bucket = u32::from(bucket_minutes);
+    let rounded = (u32::from(minute) + bucket / 2) / bucket * bucket;
     u16::try_from(rounded % u32::from(DAY_MINUTES_U16)).expect("rounded day minute must fit u16")
 }
 

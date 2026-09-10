@@ -19,9 +19,10 @@ pub(super) fn validate_operation_definition(
     validate_intelligence(kind, &definition.execution)?;
     validate_exposure(kind, &definition.execution)?;
     validate_police_response(kind, &definition.execution)?;
-    validate_proceeds(kind, &definition.execution)?;
     validate_role_coverage(kind, definition)?;
     validate_approach_coverage(kind, definition)?;
+    validate_outcome_reachability(kind, &definition.execution)?;
+    validate_proceeds(kind, &definition.execution)?;
     Ok(())
 }
 
@@ -35,24 +36,24 @@ fn validate_difficulty(
     if execution.difficulty.base_difficulty > 100 {
         return Err(RegistryBuildError::InvalidOperationDifficulty(kind));
     }
+    if execution.difficulty.role_capability_weight > 100
+        || execution.difficulty.leader_capability_weight > 100
+        || (execution.difficulty.role_capability_weight == 0
+            && execution.difficulty.leader_capability_weight == 0)
+    {
+        return Err(RegistryBuildError::InvalidOperationAbilityWeights(kind));
+    }
     if execution.difficulty.police_pressure_weight > 100 {
         return Err(RegistryBuildError::InvalidOperationPoliceWeight(kind));
+    }
+    if !(1..=100).contains(&execution.difficulty.max_time_pressure) {
+        return Err(RegistryBuildError::InvalidOperationTimePressure(kind));
     }
     if execution.difficulty.variance_limit > 50 {
         return Err(RegistryBuildError::InvalidOperationVariance(kind));
     }
     if execution.difficulty.partial_margin >= execution.difficulty.achieved_margin {
         return Err(RegistryBuildError::InvalidOperationOutcomeMargins(kind));
-    }
-    // The runtime margin is weighted ability (0..=100) minus difficulty terms
-    // (base <= 100, police pressure <= 100, arrival penalty <= 100, intelligence
-    // reduction <= 50, approach adjustment within the bound checked below, time
-    // pressure <= 30) plus variance (-limit..=limit, <= 50), so margins outside
-    // -480..=150 make one outcome unreachable for every crew and target.
-    if !(-480..=150).contains(&execution.difficulty.partial_margin)
-        || !(-480..=150).contains(&execution.difficulty.achieved_margin)
-    {
-        return Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(kind));
     }
     if execution
         .difficulty
@@ -61,6 +62,56 @@ fn validate_difficulty(
         .any(|adjustment| !(-50..=50).contains(adjustment))
     {
         return Err(RegistryBuildError::InvalidOperationApproachAdjustment(kind));
+    }
+    Ok(())
+}
+
+/// Rejects thresholds that the operation's own authored factor ranges can never cross. This is
+/// deliberately definition-relative rather than a project-wide coarse bound: an operation with a
+/// mild base difficulty and narrow variance must not author an achieved threshold that only some
+/// entirely different, more favorable definition could theoretically reach.
+fn validate_outcome_reachability(
+    kind: OperationKind,
+    execution: &OperationExecutionDefinition,
+) -> Result<(), RegistryBuildError> {
+    let most_favorable_approach = execution
+        .difficulty
+        .approach_difficulty_adjustments
+        .values()
+        .min()
+        .copied()
+        .expect("operation approach coverage is validated before reachability");
+    let least_favorable_approach = execution
+        .difficulty
+        .approach_difficulty_adjustments
+        .values()
+        .max()
+        .copied()
+        .expect("operation approach coverage is validated before reachability");
+
+    // Best case: maximal crew ability, no police pressure/arrival or time pressure, strongest
+    // possible authored intelligence benefit, best approach, and maximal favorable variance.
+    let maximum_margin = 100_i16 - i16::from(execution.difficulty.base_difficulty)
+        + i16::from(execution.intelligence.max_difficulty_reduction)
+        - i16::from(most_favorable_approach)
+        + i16::from(execution.difficulty.variance_limit);
+
+    // Worst case: zero crew ability, maximal ambient police pressure, police arrival, worst
+    // approach, maximal time compression, no intelligence benefit, and adverse variance.
+    let minimum_margin = -i16::from(execution.difficulty.base_difficulty)
+        - i16::from(execution.difficulty.police_pressure_weight)
+        - i16::from(execution.police_response.arrival_difficulty_penalty)
+        - i16::from(least_favorable_approach)
+        - i16::from(execution.difficulty.max_time_pressure)
+        - i16::from(execution.difficulty.variance_limit);
+
+    // Achieved requires margin >= achieved; Failed requires margin < partial. If either boundary
+    // lies outside the operation's own theoretical range, that outcome is impossible regardless
+    // of runtime state.
+    if execution.difficulty.achieved_margin > maximum_margin
+        || execution.difficulty.partial_margin <= minimum_margin
+    {
+        return Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(kind));
     }
     Ok(())
 }
@@ -79,6 +130,15 @@ fn validate_intelligence(
     }
     if execution.intelligence.max_useful_age.as_minutes() == 0 {
         return Err(RegistryBuildError::InvalidOperationIntelligenceAge(kind));
+    }
+    let patrol_bucket = execution
+        .intelligence
+        .patrol_observation_bucket
+        .as_minutes();
+    if patrol_bucket == 0 || patrol_bucket > 1_440 || 1_440 % patrol_bucket != 0 {
+        return Err(RegistryBuildError::InvalidOperationPatrolObservationBucket(
+            kind,
+        ));
     }
     Ok(())
 }
@@ -101,6 +161,16 @@ fn validate_exposure(
         || execution.exposure.witnessed_threshold >= execution.exposure.identifying_threshold
     {
         return Err(RegistryBuildError::InvalidOperationExposureThresholds(kind));
+    }
+    if execution.exposure.witness_reluctant_police_presence > 100
+        || execution.exposure.witness_cooperative_police_presence > 100
+        || execution.exposure.high_police_presence_narrative_threshold > 100
+        || execution.exposure.witness_reluctant_police_presence
+            >= execution.exposure.witness_cooperative_police_presence
+    {
+        return Err(RegistryBuildError::InvalidOperationWitnessPoliceThresholds(
+            kind,
+        ));
     }
     Ok(())
 }
@@ -161,6 +231,24 @@ fn validate_proceeds(
         if !(1..=10_000).contains(&property.liquidation_recovery_basis_points) {
             return Err(RegistryBuildError::InvalidOperationPropertyLiquidationRecovery(kind));
         }
+        if property.recent_take_recovery_window.as_minutes() == 0
+            || !(1..=10_000).contains(&property.immediate_repeat_value_basis_points)
+        {
+            return Err(RegistryBuildError::InvalidOperationTakeRecovery(kind));
+        }
+        if property.liquidation_police_neutral_rating > 100
+            || property.liquidation_police_adjustment_basis_points_per_point > 100
+            || !(1..=10_000).contains(&property.liquidation_min_recovery_basis_points)
+            || !(1..=10_000).contains(&property.liquidation_max_recovery_basis_points)
+            || property.liquidation_min_recovery_basis_points
+                > property.liquidation_recovery_basis_points
+            || property.liquidation_recovery_basis_points
+                > property.liquidation_max_recovery_basis_points
+        {
+            return Err(
+                RegistryBuildError::InvalidOperationPropertyLiquidationPoliceAdjustment(kind),
+            );
+        }
     }
     if execution.property_proceeds.is_some() != kind.can_acquire_property() {
         return Err(RegistryBuildError::OperationPropertyObjectiveContractMismatch(kind));
@@ -172,6 +260,11 @@ fn validate_proceeds(
         let partial = u32::from(cash.partial_take_basis_points);
         if partial == 0 || partial > cash.business_take_basis_points {
             return Err(RegistryBuildError::InvalidOperationPartialCashTake(kind));
+        }
+        if cash.recent_take_recovery_window.as_minutes() == 0
+            || !(1..=10_000).contains(&cash.immediate_repeat_value_basis_points)
+        {
+            return Err(RegistryBuildError::InvalidOperationTakeRecovery(kind));
         }
     }
     if execution.cash_proceeds.is_some() != kind.can_take_cash() {

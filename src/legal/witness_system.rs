@@ -14,6 +14,7 @@ use crate::legal::{
     EvidenceIdentity, EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength,
     InvestigationStatus, WitnessCooperation, WitnessStatementDraft, WitnessStatementRecord,
 };
+use crate::registry::{Registry, WitnessTestimonyDefinition};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -34,6 +35,8 @@ pub enum WitnessError {
     },
     #[error("case witness {0} does not exist")]
     MissingCaseWitness(CaseWitnessId),
+    #[error("case witness {0} already has a recorded statement")]
+    WitnessAlreadyStatemented(CaseWitnessId),
     #[error("witness statement summary must not be empty")]
     EmptyStatement,
     #[error("witness statement references missing entity {0:?}")]
@@ -258,6 +261,7 @@ pub struct WitnessStatementOutcome {
 #[derive(Debug)]
 pub struct ValidatedWitnessStatement {
     draft: WitnessStatementDraft,
+    testimony: WitnessTestimonyDefinition,
     expected_witness_version: u32,
     expected_investigation_version: u32,
 }
@@ -326,8 +330,16 @@ impl ValidatedWitnessStatement {
                 },
                 assessment: EvidenceAssessment {
                     kind: EvidenceKind::WitnessTestimony,
-                    strength: resolve_witness_strength(self.draft.confidence, cooperation),
-                    reliability: resolve_witness_reliability(self.draft.confidence, cooperation),
+                    strength: resolve_witness_strength(
+                        self.testimony,
+                        self.draft.confidence,
+                        cooperation,
+                    ),
+                    reliability: resolve_witness_reliability(
+                        self.testimony,
+                        self.draft.confidence,
+                        cooperation,
+                    ),
                     admissibility: Admissibility::Unknown,
                 },
                 discovered_at: recorded_at,
@@ -355,6 +367,7 @@ impl ValidatedWitnessStatement {
 }
 
 pub fn validate_record_witness_statement(
+    registry: &Registry,
     state: &AppState,
     draft: WitnessStatementDraft,
 ) -> Result<ValidatedWitnessStatement, WitnessError> {
@@ -367,6 +380,7 @@ pub fn validate_record_witness_statement(
     ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
     Ok(ValidatedWitnessStatement {
         draft,
+        testimony: registry.legal().witness_testimony(),
         expected_witness_version: case_witness.version(),
         expected_investigation_version: investigation.version(),
     })
@@ -433,6 +447,9 @@ fn validate_statement_dependencies(
     case_witness: &CaseWitnessRecord,
     draft: &WitnessStatementDraft,
 ) -> Result<(), WitnessError> {
+    if !case_witness.statements().is_empty() {
+        return Err(WitnessError::WitnessAlreadyStatemented(case_witness.id()));
+    }
     if draft.summary.trim().is_empty() {
         return Err(WitnessError::EmptyStatement);
     }
@@ -475,47 +492,45 @@ const RELIABILITY_BANDS: [EvidenceReliability; 4] = [
     EvidenceReliability::HighlyReliable,
 ];
 
-fn confidence_strength_band(confidence: crate::world::Rating) -> usize {
-    match confidence.value() {
-        0..=34 => 0,
-        35..=59 => 1,
-        60..=84 => 2,
-        85..=100 => 3,
-        _ => unreachable!("rating values are bounded by Rating::MAX"),
-    }
+fn confidence_band(confidence: crate::world::Rating, thresholds: [u8; 3]) -> usize {
+    thresholds
+        .into_iter()
+        .filter(|minimum| confidence.value() >= *minimum)
+        .count()
 }
 
-fn confidence_reliability_band(confidence: crate::world::Rating) -> usize {
-    match confidence.value() {
-        0..=24 => 0,
-        25..=49 => 1,
-        50..=79 => 2,
-        80..=100 => 3,
-        _ => unreachable!("rating values are bounded by Rating::MAX"),
-    }
-}
-
-/// Hostile testimony loses two qualification bands, reluctant one; bands never fall below Weak.
-fn discount_band(band: usize, cooperation: WitnessCooperation) -> usize {
-    match cooperation {
-        WitnessCooperation::Cooperative => band,
-        WitnessCooperation::Reluctant => band.saturating_sub(1),
-        WitnessCooperation::Hostile => band.saturating_sub(2),
-    }
+fn discount_band(
+    definition: WitnessTestimonyDefinition,
+    band: usize,
+    cooperation: WitnessCooperation,
+) -> usize {
+    band.saturating_sub(usize::from(
+        definition.cooperation_band_discount(cooperation),
+    ))
 }
 
 pub(crate) fn resolve_witness_strength(
+    definition: WitnessTestimonyDefinition,
     confidence: crate::world::Rating,
     cooperation: WitnessCooperation,
 ) -> EvidenceStrength {
-    STRENGTH_BANDS[discount_band(confidence_strength_band(confidence), cooperation)]
+    STRENGTH_BANDS[discount_band(
+        definition,
+        confidence_band(confidence, definition.strength_thresholds()),
+        cooperation,
+    )]
 }
 
 pub(crate) fn resolve_witness_reliability(
+    definition: WitnessTestimonyDefinition,
     confidence: crate::world::Rating,
     cooperation: WitnessCooperation,
 ) -> EvidenceReliability {
-    RELIABILITY_BANDS[discount_band(confidence_reliability_band(confidence), cooperation)]
+    RELIABILITY_BANDS[discount_band(
+        definition,
+        confidence_band(confidence, definition.reliability_thresholds()),
+        cooperation,
+    )]
 }
 
 #[cfg(test)]

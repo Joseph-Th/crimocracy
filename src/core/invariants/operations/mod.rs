@@ -223,7 +223,7 @@ fn validate_authored_operation_resolution(
             },
         )?;
     if factors.variance().unsigned_abs() > execution.variance_limit()
-        || factors.time_pressure() > crate::operations::operation_execution::MAX_TIME_PRESSURE
+        || factors.time_pressure() > execution.max_time_pressure()
         || factors.approach_adjustment()
             != execution
                 .approach_difficulty_adjustment(operation.approach())

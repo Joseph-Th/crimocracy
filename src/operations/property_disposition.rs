@@ -441,8 +441,14 @@ pub(crate) fn resolve_property_liquidation_value(
     // district suppresses recovery, quiet districts improve it. The clamp keeps the effective
     // rate inside the range the ledger and reporting arithmetic are validated for.
     let police = i32::from(neighborhood.profile().institutions.police_presence.value());
-    let police_adjustment = (50 - police) * 20;
-    recovery_basis = (recovery_basis + police_adjustment).clamp(3_000, 9_000);
+    let neutral = i32::from(definition.liquidation_police_neutral_rating());
+    let adjustment_per_point =
+        i32::from(definition.liquidation_police_adjustment_basis_points_per_point());
+    let police_adjustment = (neutral - police) * adjustment_per_point;
+    recovery_basis = (recovery_basis + police_adjustment).clamp(
+        i32::from(definition.liquidation_min_recovery_basis_points()),
+        i32::from(definition.liquidation_max_recovery_basis_points()),
+    );
     let value = i128::from(estimated_value.cents())
         .checked_mul(i128::from(recovery_basis))
         .ok_or(PropertyDispositionError::ArithmeticOverflow(operation))?

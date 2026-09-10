@@ -546,6 +546,7 @@ pub(super) fn validate_recruitment_against_registry(
         )?;
         let (expected_pressure_information, expected_legal_pressure) =
             resolve_perceived_legal_pressure_at(
+                registry.information_quality(),
                 definition,
                 state,
                 attempt.candidate(),

@@ -9,15 +9,17 @@ use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, OperationKind, R
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     BusinessDisruptionSpec, BusinessEconomicsDefinition, EnterpriseEconomicsDefinition,
-    ExecutiveBriefDefinitionSpec, InvestigationWorkDefinitionSpec, LaunderingConfigSpec,
-    LegalConfigSpec, OperationCashProceedsDefinition, OperationDifficultyDefinition,
-    OperationExecutionDefinition, OperationExposureDefinition, OperationIntelligenceDefinition,
+    ExecutiveBriefDefinitionSpec, InformationQualityDefinition,
+    InvestigationInterviewOutcomeDefinition, InvestigationSourceSupportDefinition,
+    InvestigationWorkDefinitionSpec, LaunderingConfigSpec, LegalConfigSpec,
+    OperationCashProceedsDefinition, OperationDifficultyDefinition, OperationExecutionDefinition,
+    OperationExposureDefinition, OperationIntelligenceDefinition,
     OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
     RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
-    RecruitmentInformationQualityDefinition, RecruitmentRelationshipDefinition,
-    RecruitmentRelationshipSupportDefinition, RecruitmentScoringDefinition,
-    RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition, RecruitmentWeightsDefinition,
-    Registry, RegistryBuilder, ReputationConfigSpec, UpkeepConfigSpec,
+    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
+    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
+    RecruitmentWeightsDefinition, Registry, RegistryBuilder, ReputationConfigSpec,
+    UpkeepConfigSpec, WitnessTestimonyDefinition,
 };
 use crate::world::{
     ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS, ApprovalPolicy, BusinessFunction,
@@ -26,11 +28,28 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 40;
+pub const CURRENT_CONTENT_REVISION: u32 = 41;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
 const MINIMUM_POLICE_RESPONSE_DELAY_MINUTES: u32 = 3;
+const RECENT_TAKE_RECOVERY_WINDOW: SimDuration = SimDuration::from_minutes(3 * 24 * 60);
+const IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS: u16 = 5_000;
+const LIQUIDATION_POLICE_NEUTRAL_RATING: u8 = 50;
+const LIQUIDATION_POLICE_ADJUSTMENT_BASIS_POINTS_PER_POINT: u16 = 20;
+const LIQUIDATION_MIN_RECOVERY_BASIS_POINTS: u16 = 3_000;
+const LIQUIDATION_MAX_RECOVERY_BASIS_POINTS: u16 = 9_000;
+const INFORMATION_QUALITY: InformationQualityDefinition = InformationQualityDefinition {
+    unknown_reliability: 20,
+    unreliable_reliability: 10,
+    mixed_reliability: 40,
+    generally_reliable: 70,
+    direct_access: 100,
+    vague_specificity: 25,
+    general_specificity: 50,
+    specific_specificity: 75,
+    precise_specificity: 100,
+};
 
 pub fn build_registry() -> Registry {
     let mut builder = RegistryBuilder::default();
@@ -49,6 +68,9 @@ pub fn build_registry() -> Registry {
             .register_drive(kind)
             .unwrap_or_else(|error| panic!("invalid drive registry: {error}"));
     }
+    builder
+        .register_information_quality(INFORMATION_QUALITY)
+        .unwrap_or_else(|error| panic!("invalid information-quality registry: {error}"));
     register_recruitment(&mut builder);
     builder
         .register_legal(LegalConfigSpec {
@@ -59,8 +81,27 @@ pub fn build_registry() -> Registry {
             // enough for a reluctant witness to open up, few enough that a hostile one
             // cannot stall a case forever.
             witness_interview_attempt_limit: 3,
+            witness_testimony: WitnessTestimonyDefinition {
+                strength_corroborating_min_confidence: 35,
+                strength_strong_min_confidence: 60,
+                strength_direct_min_confidence: 85,
+                reliability_mixed_min_confidence: 25,
+                reliability_credible_min_confidence: 50,
+                reliability_highly_reliable_min_confidence: 80,
+                reluctant_band_discount: 1,
+                hostile_band_discount: 2,
+            },
             // One custody day before a detainee faces their informant-recruitment decision.
             informant_decision_delay: SimDuration::from_minutes(1_440),
+            // Autonomous custody requires corroboration from two independent qualifying facts.
+            minimum_arrest_qualifying_evidence: 2,
+            // A detainee starts at 25 percent cooperation risk. A maximum Safety drive adds
+            // 50 points; active counsel removes 25 points and can fully suppress the modeled
+            // custodial-pressure risk for a detainee with no Safety-driven pressure.
+            informant_base_flip_chance_percent: 25,
+            informant_safety_bonus_percent: 50,
+            represented_informant_reduction_percent: 25,
+            automatic_support_retainer: Money::from_cents(5_000),
             // Two custody days is long enough for the one-day informant decision and legal
             // support response to matter, but custody cannot become de facto permanent while
             // charging, bail, and trial remain outside the modeled foundation.
@@ -212,35 +253,6 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
                     divisor: 4,
                 },
             },
-            information_quality: RecruitmentInformationQualityDefinition {
-                unknown_reliability: crate::intelligence::reliability_quality_score(
-                    crate::intelligence::Reliability::Unknown,
-                ),
-                unreliable_reliability: crate::intelligence::reliability_quality_score(
-                    crate::intelligence::Reliability::Unreliable,
-                ),
-                mixed_reliability: crate::intelligence::reliability_quality_score(
-                    crate::intelligence::Reliability::Mixed,
-                ),
-                generally_reliable: crate::intelligence::reliability_quality_score(
-                    crate::intelligence::Reliability::GenerallyReliable,
-                ),
-                direct_access: crate::intelligence::reliability_quality_score(
-                    crate::intelligence::Reliability::DirectAccess,
-                ),
-                vague_specificity: crate::intelligence::specificity_quality_score(
-                    crate::intelligence::Specificity::Vague,
-                ),
-                general_specificity: crate::intelligence::specificity_quality_score(
-                    crate::intelligence::Specificity::General,
-                ),
-                specific_specificity: crate::intelligence::specificity_quality_score(
-                    crate::intelligence::Specificity::Specific,
-                ),
-                precise_specificity: crate::intelligence::specificity_quality_score(
-                    crate::intelligence::Specificity::Precise,
-                ),
-            },
             approach_drives: BTreeMap::from([
                 (
                     RecruitmentApproach::FinancialOpportunity,
@@ -344,6 +356,23 @@ fn register_recruitment(builder: &mut RegistryBuilder) {
 }
 
 fn register_investigation_work(builder: &mut RegistryBuilder) {
+    let source_support = InvestigationSourceSupportDefinition {
+        witness_hostile: 20,
+        witness_reluctant: 50,
+        witness_cooperative: 85,
+        evidence_weak: 20,
+        evidence_corroborating: 45,
+        evidence_strong: 70,
+        evidence_direct: 95,
+        reliability_questionable: 15,
+        reliability_mixed: 40,
+        reliability_credible: 70,
+        reliability_highly_reliable: 95,
+        admissibility_unknown: 35,
+        admissibility_inadmissible: 0,
+        admissibility_disputed: 50,
+        admissibility_admissible: 90,
+    };
     builder
         .register_investigation_work(
             InvestigationWorkKind::EvidenceReview,
@@ -354,6 +383,8 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
                 source_support_weight: 35,
                 variance_limit: 12,
                 connected_margin: 0,
+                source_support,
+                interview_outcome: None,
             },
         )
         .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
@@ -369,6 +400,14 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
                 source_support_weight: 45,
                 variance_limit: 10,
                 connected_margin: 0,
+                source_support,
+                interview_outcome: Some(InvestigationInterviewOutcomeDefinition {
+                    medium_margin: 10,
+                    high_margin: 20,
+                    low_confidence: 40,
+                    medium_confidence: 65,
+                    high_confidence: 85,
+                }),
             },
         )
         .unwrap_or_else(|error| panic!("invalid investigation work registry: {error}"));
@@ -996,8 +1035,14 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             duration: SimDuration::from_minutes(duration_minutes),
             base_difficulty,
             role_capabilities,
+            // Execution is primarily crew-role skill, with leadership contributing one quarter
+            // of the effective ability under stock content. Keep the ratio authored so balance
+            // changes do not require changing resolution code.
+            role_capability_weight: 3,
+            leader_capability_weight: 1,
             approach_difficulty_adjustments,
             police_pressure_weight,
+            max_time_pressure: 30,
             variance_limit: 12,
             achieved_margin: 5,
             partial_margin: -12,
@@ -1007,6 +1052,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             relevant_topics: relevant_operation_intelligence(kind),
             max_difficulty_reduction: 14,
             max_useful_age: SimDuration::from_minutes(10_080),
+            patrol_observation_bucket: SimDuration::from_minutes(30),
         },
         exposure: OperationExposureDefinition {
             base_exposure,
@@ -1018,6 +1064,9 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             trace_threshold: 20,
             witnessed_threshold: 45,
             identifying_threshold: 65,
+            witness_reluctant_police_presence: 30,
+            witness_cooperative_police_presence: 60,
+            high_police_presence_narrative_threshold: 65,
             evidence_kind: operation_exposure_evidence_kind(kind),
         },
         police_response: OperationPoliceResponseDefinition {
@@ -1038,17 +1087,38 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             OperationKind::Burglary => Some(OperationPropertyProceedsDefinition {
                 business_gross_basis_points: 30_000,
                 partial_recovery_basis_points: 4_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
                 liquidation_recovery_basis_points: 6_500,
+                liquidation_police_neutral_rating: LIQUIDATION_POLICE_NEUTRAL_RATING,
+                liquidation_police_adjustment_basis_points_per_point:
+                    LIQUIDATION_POLICE_ADJUSTMENT_BASIS_POINTS_PER_POINT,
+                liquidation_min_recovery_basis_points: LIQUIDATION_MIN_RECOVERY_BASIS_POINTS,
+                liquidation_max_recovery_basis_points: LIQUIDATION_MAX_RECOVERY_BASIS_POINTS,
             }),
             OperationKind::Hijacking => Some(OperationPropertyProceedsDefinition {
                 business_gross_basis_points: 25_000,
                 partial_recovery_basis_points: 3_500,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
                 liquidation_recovery_basis_points: 5_500,
+                liquidation_police_neutral_rating: LIQUIDATION_POLICE_NEUTRAL_RATING,
+                liquidation_police_adjustment_basis_points_per_point:
+                    LIQUIDATION_POLICE_ADJUSTMENT_BASIS_POINTS_PER_POINT,
+                liquidation_min_recovery_basis_points: LIQUIDATION_MIN_RECOVERY_BASIS_POINTS,
+                liquidation_max_recovery_basis_points: LIQUIDATION_MAX_RECOVERY_BASIS_POINTS,
             }),
             OperationKind::DocumentTheft => Some(OperationPropertyProceedsDefinition {
                 business_gross_basis_points: 12_500,
                 partial_recovery_basis_points: 5_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
                 liquidation_recovery_basis_points: 4_000,
+                liquidation_police_neutral_rating: LIQUIDATION_POLICE_NEUTRAL_RATING,
+                liquidation_police_adjustment_basis_points_per_point:
+                    LIQUIDATION_POLICE_ADJUSTMENT_BASIS_POINTS_PER_POINT,
+                liquidation_min_recovery_basis_points: LIQUIDATION_MIN_RECOVERY_BASIS_POINTS,
+                liquidation_max_recovery_basis_points: LIQUIDATION_MAX_RECOVERY_BASIS_POINTS,
             }),
             OperationKind::Robbery
             | OperationKind::Smuggling
@@ -1066,18 +1136,26 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             OperationKind::Robbery => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 40_000,
                 partial_take_basis_points: 8_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
             }),
             OperationKind::Intimidation => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 15_000,
                 partial_take_basis_points: 3_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
             }),
             OperationKind::GamblingEvent => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 20_000,
                 partial_take_basis_points: 4_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
             }),
             OperationKind::Smuggling => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 18_000,
                 partial_take_basis_points: 4_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
             }),
             OperationKind::Burglary
             | OperationKind::Hijacking

@@ -163,28 +163,6 @@ pub enum Specificity {
     Precise,
 }
 
-/// Canonical ordinal quality scale for intelligence reliability. Systems may combine this
-/// score differently, but the shared vocabulary has one meaning everywhere in stock content.
-pub(crate) const fn reliability_quality_score(reliability: Reliability) -> u8 {
-    match reliability {
-        Reliability::Unknown => 20,
-        Reliability::Unreliable => 10,
-        Reliability::Mixed => 40,
-        Reliability::GenerallyReliable => 70,
-        Reliability::DirectAccess => 100,
-    }
-}
-
-/// Canonical ordinal quality scale for intelligence specificity.
-pub(crate) const fn specificity_quality_score(specificity: Specificity) -> u8 {
-    match specificity {
-        Specificity::Vague => 25,
-        Specificity::General => 50,
-        Specificity::Specific => 75,
-        Specificity::Precise => 100,
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct InformationSource {
     holder: KnowledgeHolder,

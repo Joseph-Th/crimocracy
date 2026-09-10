@@ -414,16 +414,17 @@ fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
     // An immediate second score on the same target finds partially replaced stock.
     let second = authorize_follow_up(&registry, &mut state, "Repeat burglary");
     let second_plan = resolve_achieved(&registry, &mut state, second);
-    assert_eq!(
-        second_plan
-            .outcome
-            .property_proceeds_plan
-            .proceeds
-            .as_ref()
-            .expect("second take should create reduced proceeds")
-            .estimated_value()
-            .cents(),
-        28_200
+    let second_value = second_plan
+        .outcome
+        .property_proceeds_plan
+        .proceeds
+        .as_ref()
+        .expect("second take should create reduced proceeds")
+        .estimated_value()
+        .cents();
+    assert!(
+        (28_200..56_400).contains(&second_value),
+        "the target should replenish slightly during the follow-up operation, but remain depleted"
     );
     assert!(
         second_plan
@@ -433,12 +434,45 @@ fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
     );
     assert!(second_plan.narrative.summary.contains("lighter than usual"));
 
-    // After the recency window passes the target stocks back up to full value.
-    state.advance_clock(RECENT_HIT_WINDOW);
-    let third = authorize_follow_up(&registry, &mut state, "Recovered burglary");
-    let third_plan = resolve_achieved(&registry, &mut state, third);
-    assert_eq!(
+    let recovery_window = registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .property_proceeds()
+        .expect("burglary must define property proceeds")
+        .recent_take_recovery_window();
+    let mut half_recovered = state.clone();
+    let mut fully_recovered = state;
+
+    // Halfway through replenishment, both prior scores still reduce the target, but elapsed time
+    // must restore materially more value than the immediate follow-up received.
+    half_recovered.advance_clock(SimDuration::from_minutes(recovery_window.as_minutes() / 2));
+    let third = authorize_follow_up(&registry, &mut half_recovered, "Recovering burglary");
+    let third_plan = resolve_achieved(&registry, &mut half_recovered, third);
+    let third_value = third_plan
+        .outcome
+        .property_proceeds_plan
+        .proceeds
+        .as_ref()
+        .expect("partially recovered take should create proceeds")
+        .estimated_value()
+        .cents();
+    assert!(
+        third_value > second_value && third_value < 56_400,
+        "recovery must be gradual and monotonic before the authored window ends"
+    );
+    assert!(
         third_plan
+            .outcome
+            .property_proceeds_plan
+            .depleted_by_recent_take
+    );
+
+    // Once the authored recovery window has elapsed, the old scores no longer suppress value.
+    fully_recovered.advance_clock(recovery_window);
+    let fourth = authorize_follow_up(&registry, &mut fully_recovered, "Recovered burglary");
+    let fourth_plan = resolve_achieved(&registry, &mut fully_recovered, fourth);
+    assert_eq!(
+        fourth_plan
             .outcome
             .property_proceeds_plan
             .proceeds
@@ -449,14 +483,163 @@ fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
         56_400
     );
     assert!(
-        !third_plan
+        !fourth_plan
             .outcome
             .property_proceeds_plan
             .depleted_by_recent_take
     );
 
+    validate_state_against_registry(&registry, &half_recovered)
+        .expect("partially recovered take history should remain registry-valid");
+    validate_state_against_registry(&registry, &fully_recovered)
+        .expect("fully recovered take history should remain registry-valid");
+    validate_invariants(&half_recovered);
+    validate_invariants(&fully_recovered);
+}
+
+#[test]
+fn zero_value_repeat_score_does_not_create_phantom_depletion() {
+    let (registry, mut state, _police, _neighborhood, first) =
+        make_exposed_business_operation_fixture(false);
+    let organization = state
+        .operations()
+        .get_operation(first)
+        .expect("first operation should persist")
+        .responsible_organization();
+    let (business, leader, specialist) = {
+        let record = state
+            .operations()
+            .get_operation(first)
+            .expect("first operation should persist");
+        let OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("fixture operation must target business property");
+        };
+        (
+            *business,
+            record.leader(),
+            *record
+                .roles()
+                .get(&RoleKind::EntrySpecialist)
+                .expect("fixture entry specialist should persist"),
+        )
+    };
+    let recovery_window = registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .property_proceeds()
+        .expect("burglary must define property proceeds")
+        .recent_take_recovery_window();
+
+    let authorize = |state: &mut AppState, title: String| -> OperationId {
+        validate_authorize_operation(
+            &registry,
+            state,
+            OperationDraft {
+                title,
+                kind: OperationKind::Burglary,
+                responsible_organization: organization,
+                leader,
+                objective: OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(business),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([
+                    (RoleKind::Coordinator, leader),
+                    (RoleKind::EntrySpecialist, specialist),
+                ]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            },
+        )
+        .expect("repeat burglary should validate")
+        .commit(state)
+        .expect("repeat burglary should commit")
+    };
+
+    let resolve = |state: &mut AppState, operation: OperationId| -> bool {
+        run_tick(&registry, state);
+        state.advance_clock(SimDuration::from_minutes(45));
+        let plan = decide_operation_resolution(
+            &registry,
+            state,
+            operation,
+            OperationResolutionRandomness::new(12, 0),
+        )
+        .expect("repeat burglary should resolve");
+        let has_proceeds = plan.outcome.property_proceeds_plan.proceeds.is_some();
+        validate_operation_resolution_plan(&registry, state, plan)
+            .expect("repeat burglary resolution should validate")
+            .commit(state)
+            .expect("repeat burglary resolution should commit");
+        has_proceeds
+    };
+
+    run_tick(&registry, &mut state);
+    state.advance_clock(SimDuration::from_minutes(45));
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("first burglary should resolve");
+    validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("first burglary should validate")
+        .commit(&mut state)
+        .expect("first burglary should commit");
+
+    let mut zero_value_operation = None;
+    for sequence in 0..32 {
+        let operation = authorize(&mut state, format!("Depletion probe {sequence}"));
+        if !resolve(&mut state, operation) {
+            zero_value_operation = Some(operation);
+            break;
+        }
+    }
+    let zero_value_operation =
+        zero_value_operation.expect("repeated successful scores must eventually exhaust cents");
+    assert!(
+        state
+            .operations()
+            .get_operation(zero_value_operation)
+            .and_then(|record| record.resolution())
+            .is_some_and(|resolution| resolution.property_proceeds().is_none()),
+        "the exhaustion probe must be a completed tactical success with no property removed"
+    );
+
+    let next = authorize(&mut state, "Post-empty index probe".to_owned());
+    let indexed = state.operations.recent_successful_take_times(
+        business,
+        OperationKind::Burglary,
+        state.now(),
+        recovery_window,
+        next,
+    );
+    let positive_recent = state
+        .operations()
+        .operations_for_organization(organization)
+        .filter_map(|record| record.resolution())
+        .filter(|resolution| {
+            resolution.property_proceeds().is_some()
+                && state
+                    .now()
+                    .as_minutes()
+                    .saturating_sub(resolution.resolved_at().as_minutes())
+                    < u64::from(recovery_window.as_minutes())
+        })
+        .count();
+    assert_eq!(
+        indexed.len(),
+        positive_recent,
+        "zero-value tactical successes must not become phantom depletion events"
+    );
     validate_state_against_registry(&registry, &state)
-        .expect("depleted-take history should remain registry-valid");
+        .expect("zero-value take history should remain registry-valid");
     validate_invariants(&state);
 }
 

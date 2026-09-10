@@ -44,6 +44,12 @@ pub(crate) enum RegistryBuildError {
     MissingDrive(DriveKind),
     #[error("missing recruitment definition")]
     MissingRecruitment,
+    #[error("duplicate information-quality definition")]
+    DuplicateInformationQuality,
+    #[error("missing information-quality definition")]
+    MissingInformationQuality,
+    #[error("information-quality scores must be in 0..=100")]
+    InvalidInformationQuality,
     #[error("recruitment cooldown and legal-pressure age must be positive")]
     InvalidRecruitmentDuration,
     #[error("recruitment weights and membership resistance must be in 0..=100")]
@@ -52,8 +58,6 @@ pub(crate) enum RegistryBuildError {
     InvalidRecruitmentScoring,
     #[error("recruitment relationship weighting is invalid")]
     InvalidRecruitmentRelationshipWeights,
-    #[error("recruitment information quality scores must be in 0..=100")]
-    InvalidRecruitmentInformationQuality,
     #[error("recruitment must define at least one recruiter capability")]
     MissingRecruitmentCapabilities,
     #[error("recruitment approach {0:?} must define at least one motivating drive")]
@@ -82,18 +86,26 @@ pub(crate) enum RegistryBuildError {
         "investigation work {0:?} connected margin must stay inside the reachable margin space -150..=250"
     )]
     InvalidInvestigationWorkConnectedMargin(InvestigationWorkKind),
+    #[error("investigation work {0:?} source-support scores must be in 0..=100")]
+    InvalidInvestigationWorkSupportScore(InvestigationWorkKind),
+    #[error("investigation work {0:?} interview-outcome tuning does not match the work kind")]
+    InvalidInvestigationWorkInterviewOutcome(InvestigationWorkKind),
     #[error("operation {0:?} must have a positive execution duration")]
     InvalidOperationDuration(OperationKind),
     #[error("operation {0:?} base difficulty must be in 0..=100")]
     InvalidOperationDifficulty(OperationKind),
+    #[error("operation {0:?} role/leader ability weights must be in 0..=100 and not both zero")]
+    InvalidOperationAbilityWeights(OperationKind),
     #[error("operation {0:?} police pressure weight must be in 0..=100")]
     InvalidOperationPoliceWeight(OperationKind),
+    #[error("operation {0:?} maximum time pressure must be in 1..=100")]
+    InvalidOperationTimePressure(OperationKind),
     #[error("operation {0:?} variance limit must be in 0..=50")]
     InvalidOperationVariance(OperationKind),
     #[error("operation {0:?} outcome margins are ordered incorrectly")]
     InvalidOperationOutcomeMargins(OperationKind),
     #[error(
-        "operation {0:?} outcome margins must stay inside the reachable margin space -480..=150"
+        "operation {0:?} outcome margins make an outcome unreachable under its authored factors"
     )]
     InvalidOperationOutcomeMarginRange(OperationKind),
     #[error("operation {0:?} approach difficulty adjustments must be in -50..=50")]
@@ -106,12 +118,16 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationIntelligenceReduction(OperationKind),
     #[error("operation {0:?} intelligence maximum age must be positive")]
     InvalidOperationIntelligenceAge(OperationKind),
+    #[error("operation {0:?} patrol-observation bucket must be a positive divisor of one day")]
+    InvalidOperationPatrolObservationBucket(OperationKind),
     #[error("operation {0:?} exposure base and weights must be in 0..=100")]
     InvalidOperationExposureWeight(OperationKind),
     #[error("operation {0:?} exposure variance must be in 0..=50")]
     InvalidOperationExposureVariance(OperationKind),
     #[error("operation {0:?} exposure thresholds are ordered incorrectly")]
     InvalidOperationExposureThresholds(OperationKind),
+    #[error("operation {0:?} witness/police exposure thresholds are invalid")]
+    InvalidOperationWitnessPoliceThresholds(OperationKind),
     #[error("operation {0:?} police response dispatch threshold must be in 0..=100")]
     InvalidOperationResponseThreshold(OperationKind),
     #[error("operation {0:?} police response delays are invalid")]
@@ -130,6 +146,10 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationPartialPropertyRecovery(OperationKind),
     #[error("operation {0:?} property liquidation recovery must be in 1..=10000 basis points")]
     InvalidOperationPropertyLiquidationRecovery(OperationKind),
+    #[error("operation {0:?} repeat-take recovery tuning is invalid")]
+    InvalidOperationTakeRecovery(OperationKind),
+    #[error("operation {0:?} property-liquidation police adjustment tuning is invalid")]
+    InvalidOperationPropertyLiquidationPoliceAdjustment(OperationKind),
     #[error("operation {0:?} property-proceeds definition does not match its objective contract")]
     OperationPropertyObjectiveContractMismatch(OperationKind),
     #[error("operation {0:?} cash-take business multiplier must be in 1..=100000 basis points")]
@@ -187,8 +207,16 @@ pub(crate) enum RegistryBuildError {
     InvalidLegalColdWindow,
     #[error("legal witness-interview attempt limit must be positive")]
     InvalidLegalInterviewLimit,
+    #[error("legal witness-testimony confidence bands or cooperation discounts are invalid")]
+    InvalidLegalWitnessTestimony,
     #[error("legal informant decision delay must be positive")]
     InvalidLegalInformantDelay,
+    #[error("legal autonomous-arrest evidence count must be positive")]
+    InvalidLegalArrestEvidenceCount,
+    #[error("legal informant chance tuning must remain within a 0..=100 percent range")]
+    InvalidLegalInformantChance,
+    #[error("automatic legal-support retainer must be positive")]
+    InvalidLegalAutomaticSupportRetainer,
     #[error("legal maximum detention must be positive and exceed the informant decision delay")]
     InvalidLegalMaximumDetention,
     #[error("missing upkeep configuration definition")]
@@ -264,6 +292,7 @@ pub(crate) struct RegistryBuilder {
     capabilities: BTreeSet<CapabilityKind>,
     traits: BTreeSet<TraitKind>,
     drives: BTreeSet<DriveKind>,
+    information_quality: Option<InformationQualityDefinition>,
     recruitment: Option<RecruitmentDefinition>,
     policies: BTreeMap<PolicyKind, PolicyDefinition>,
     operations: BTreeMap<OperationKind, OperationDefinition>,
@@ -279,6 +308,20 @@ pub(crate) struct RegistryBuilder {
 }
 
 impl RegistryBuilder {
+    pub(crate) fn register_information_quality(
+        &mut self,
+        definition: InformationQualityDefinition,
+    ) -> Result<(), RegistryBuildError> {
+        if self.information_quality.is_some() {
+            return Err(RegistryBuildError::DuplicateInformationQuality);
+        }
+        if definition.values().into_iter().any(|score| score > 100) {
+            return Err(RegistryBuildError::InvalidInformationQuality);
+        }
+        self.information_quality = Some(definition);
+        Ok(())
+    }
+
     pub(crate) fn register_capability(
         &mut self,
         kind: CapabilityKind,
@@ -301,8 +344,43 @@ impl RegistryBuilder {
         if spec.witness_interview_attempt_limit == 0 {
             return Err(RegistryBuildError::InvalidLegalInterviewLimit);
         }
+        let [strength_corroborating, strength_strong, strength_direct] =
+            spec.witness_testimony.strength_thresholds();
+        let [
+            reliability_mixed,
+            reliability_credible,
+            reliability_highly_reliable,
+        ] = spec.witness_testimony.reliability_thresholds();
+        if strength_corroborating == 0
+            || strength_corroborating >= strength_strong
+            || strength_strong >= strength_direct
+            || strength_direct > 100
+            || reliability_mixed == 0
+            || reliability_mixed >= reliability_credible
+            || reliability_credible >= reliability_highly_reliable
+            || reliability_highly_reliable > 100
+            || spec.witness_testimony.reluctant_band_discount > 3
+            || spec.witness_testimony.hostile_band_discount > 3
+            || spec.witness_testimony.reluctant_band_discount
+                > spec.witness_testimony.hostile_band_discount
+        {
+            return Err(RegistryBuildError::InvalidLegalWitnessTestimony);
+        }
         if spec.informant_decision_delay.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidLegalInformantDelay);
+        }
+        if spec.minimum_arrest_qualifying_evidence == 0 {
+            return Err(RegistryBuildError::InvalidLegalArrestEvidenceCount);
+        }
+        if u16::from(spec.informant_base_flip_chance_percent)
+            + u16::from(spec.informant_safety_bonus_percent)
+            > 100
+            || spec.represented_informant_reduction_percent > 100
+        {
+            return Err(RegistryBuildError::InvalidLegalInformantChance);
+        }
+        if spec.automatic_support_retainer.cents() <= 0 {
+            return Err(RegistryBuildError::InvalidLegalAutomaticSupportRetainer);
         }
         if spec.maximum_detention.as_minutes() == 0
             || spec.maximum_detention <= spec.informant_decision_delay
@@ -312,7 +390,13 @@ impl RegistryBuilder {
         self.legal = Some(LegalConfigDefinition {
             cold_case_window: spec.cold_case_window,
             witness_interview_attempt_limit: spec.witness_interview_attempt_limit,
+            witness_testimony: spec.witness_testimony,
             informant_decision_delay: spec.informant_decision_delay,
+            minimum_arrest_qualifying_evidence: spec.minimum_arrest_qualifying_evidence,
+            informant_base_flip_chance_percent: spec.informant_base_flip_chance_percent,
+            informant_safety_bonus_percent: spec.informant_safety_bonus_percent,
+            represented_informant_reduction_percent: spec.represented_informant_reduction_percent,
+            automatic_support_retainer: spec.automatic_support_retainer,
             maximum_detention: spec.maximum_detention,
         });
         Ok(())
@@ -462,7 +546,6 @@ impl RegistryBuilder {
             scoring,
             recruiter_capabilities,
             relationships,
-            information_quality,
             approach_drives,
             trait_rules,
         } = spec;
@@ -549,22 +632,6 @@ impl RegistryBuilder {
         {
             return Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights);
         }
-        if [
-            information_quality.unknown_reliability,
-            information_quality.unreliable_reliability,
-            information_quality.mixed_reliability,
-            information_quality.generally_reliable,
-            information_quality.direct_access,
-            information_quality.vague_specificity,
-            information_quality.general_specificity,
-            information_quality.specific_specificity,
-            information_quality.precise_specificity,
-        ]
-        .into_iter()
-        .any(|score| score > 100)
-        {
-            return Err(RegistryBuildError::InvalidRecruitmentInformationQuality);
-        }
         for approach in ALL_RECRUITMENT_APPROACHES {
             if approach_drives
                 .get(&approach)
@@ -625,7 +692,6 @@ impl RegistryBuilder {
                     divisor: attachment_divisor,
                 },
             },
-            information_quality,
             approach_drives,
             trait_rules,
         });
@@ -665,6 +731,29 @@ impl RegistryBuilder {
                 kind,
             ));
         }
+        if spec
+            .source_support
+            .values()
+            .into_iter()
+            .any(|score| score > 100)
+        {
+            return Err(RegistryBuildError::InvalidInvestigationWorkSupportScore(
+                kind,
+            ));
+        }
+        match (kind, spec.interview_outcome) {
+            (InvestigationWorkKind::WitnessInterview, Some(interview))
+                if interview.medium_margin < interview.high_margin
+                    && (-150..=250).contains(&interview.medium_margin)
+                    && (-150..=250).contains(&interview.high_margin)
+                    && interview.low_confidence <= interview.medium_confidence
+                    && interview.medium_confidence <= interview.high_confidence
+                    && interview.high_confidence <= 100 => {}
+            (InvestigationWorkKind::EvidenceReview, None) => {}
+            _ => {
+                return Err(RegistryBuildError::InvalidInvestigationWorkInterviewOutcome(kind));
+            }
+        }
         if self
             .investigation_work
             .insert(
@@ -676,6 +765,8 @@ impl RegistryBuilder {
                     source_support_weight: spec.source_support_weight,
                     variance_limit: spec.variance_limit,
                     connected_margin: spec.connected_margin,
+                    source_support: spec.source_support,
+                    interview_outcome: spec.interview_outcome,
                 },
             )
             .is_some()
@@ -869,6 +960,9 @@ impl RegistryBuilder {
                 return Err(RegistryBuildError::MissingBusiness(kind));
             }
         }
+        let information_quality = self
+            .information_quality
+            .ok_or(RegistryBuildError::MissingInformationQuality)?;
         let recruitment = self
             .recruitment
             .ok_or(RegistryBuildError::MissingRecruitment)?;
@@ -888,6 +982,7 @@ impl RegistryBuilder {
             .ok_or(RegistryBuildError::MissingReputationConfig)?;
         Ok(Registry {
             content_revision,
+            information_quality,
             recruitment,
             policies: self.policies,
             operations: self.operations,

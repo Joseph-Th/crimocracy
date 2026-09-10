@@ -291,7 +291,7 @@ fn autonomous_arrest_excludes_questionable_material_from_corroboration() {
     .expect("questionable surveillance should persist");
 
     assert!(
-        apply_autonomous_evidence_arrests(&mut fixture.state)
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
             .expect("questionable evidence should be ignored rather than failing the pass")
             .is_empty(),
         "one reliable item plus one questionable item does not satisfy corroboration"
@@ -303,7 +303,7 @@ fn autonomous_arrest_excludes_questionable_material_from_corroboration() {
         fixture.investigation,
         fixture.suspect,
     );
-    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("two independently usable items should resolve to custody");
     assert_eq!(arrests.len(), 1);
     let arrest = fixture
@@ -330,7 +330,7 @@ fn autonomous_arrest_is_evidence_driven_not_case_origin_driven() {
         fixture.suspect,
     );
 
-    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("qualifying institution-authored evidence should resolve to custody");
     assert_eq!(arrests.len(), 1);
     let record = fixture
@@ -391,7 +391,7 @@ fn autonomous_arrest_leaves_legal_authority_cases_outside_police_custody() {
         .expect("legal-authority evidence should commit");
     }
 
-    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("non-police investigative evidence must not break the autonomous custody pass");
     assert!(arrests.is_empty());
     assert!(
@@ -971,7 +971,7 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
         fixture.investigation,
         fixture.suspect,
     );
-    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("two independent strong items should produce autonomous custody");
     assert_eq!(arrests.len(), 1);
     let first = arrests[0];
@@ -990,7 +990,7 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
         .commit(&mut fixture.state)
         .expect("release should commit");
     assert!(
-        apply_autonomous_evidence_arrests(&mut fixture.state)
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
             .expect("post-release autonomous custody pass should resolve")
             .is_empty(),
         "unchanged evidence must not create an automatic release/re-arrest loop"
@@ -1541,7 +1541,7 @@ fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
 
     // One independent item plus its own derivative is still one fact: no custody.
     assert!(
-        apply_autonomous_evidence_arrests(&mut fixture.state)
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
             .expect("autonomous arrest pass should resolve")
             .is_empty(),
         "a derived analysis must not corroborate its own source"
@@ -1549,7 +1549,7 @@ fn derived_forensic_evidence_cannot_satisfy_the_autonomous_arrest_bar_alone() {
 
     // A second INDEPENDENT strong item completes the corroboration bar and custody follows.
     let second = add_character_evidence(&mut fixture.state, fixture.police, case, fixture.suspect);
-    let arrests = apply_autonomous_evidence_arrests(&mut fixture.state)
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("autonomous arrest pass should resolve");
     assert_eq!(arrests.len(), 1);
     let record = fixture

@@ -234,7 +234,7 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
     .expect("automatic legal-support policy should validate");
-    let retained = apply_automatic_legal_support(&mut fx.state)
+    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("aggregate sponsor liquidity should fund automatic counsel");
     assert_eq!(retained.len(), 1);
     assert_eq!(
@@ -334,7 +334,7 @@ fn mandate_automatic_legal_support_respects_exhausted_budget_window() {
         .balance();
 
     assert!(
-        apply_automatic_legal_support(&mut fx.state)
+        apply_automatic_legal_support(&fx.registry, &mut fx.state)
             .expect("an exhausted budget is ordinary unavailability, not a failed legal pass")
             .is_empty()
     );
@@ -775,7 +775,7 @@ fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_
         .balance();
     fx.state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
 
-    let error = apply_automatic_legal_support(&mut fx.state)
+    let error = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect_err("automatic support must surface a canonical commit failure");
     assert!(matches!(error, LegalRepresentationError::IdExhaustion(_)));
     assert_eq!(
@@ -883,7 +883,7 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
     .commit(&mut fx.state)
     .expect("counsel detention should commit");
 
-    let retained = apply_automatic_legal_support(&mut fx.state)
+    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("automatic support should continue past an unavailable older channel");
     assert_eq!(retained.len(), 1);
     let representation = fx
@@ -941,7 +941,7 @@ fn automatic_legal_support_prefers_stronger_later_counsel() {
         "fixture must make the stronger lawyer the newer contact"
     );
 
-    let retained = apply_automatic_legal_support(&mut fx.state)
+    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("automatic support should select among viable lawyers");
     assert_eq!(retained.len(), 1);
     let representation = fx
@@ -1069,7 +1069,7 @@ fn mandate_automatic_legal_support_cannot_spend_without_legal_budget_authority()
         None,
     );
     assert!(
-        apply_automatic_legal_support(&mut fx.state)
+        apply_automatic_legal_support(&fx.registry, &mut fx.state)
             .expect("missing delegated budget is an unavailable prerequisite, not state drift")
             .is_empty()
     );
@@ -1105,7 +1105,7 @@ fn mandate_automatic_legal_support_cannot_spend_without_legal_budget_authority()
         }),
     );
     assert!(
-        apply_automatic_legal_support(&mut fx.state)
+        apply_automatic_legal_support(&fx.registry, &mut fx.state)
             .expect("non-Legal mandate scope is not legal spending authority")
             .is_empty()
     );
@@ -1564,7 +1564,7 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
 
     // The next automatic-support stage concludes the now-moot matter through the canonical
     // end path so the Legal contact becomes available again instead of staying locked.
-    let ended = apply_automatic_legal_support(&mut fixture.state)
+    let ended = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
         .expect("automatic legal support should resolve");
     assert!(ended.is_empty(), "retention must not rerun after release");
     let record = fixture
@@ -1594,7 +1594,7 @@ fn custody_sweep_never_ends_an_explicitly_retained_representation() {
         .commit(&mut fixture.state)
         .expect("defendant release should commit");
 
-    apply_automatic_legal_support(&mut fixture.state)
+    apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
         .expect("automatic legal support should resolve");
     // A directly commanded retention outlives custody: only leadership ends it.
     let record = fixture

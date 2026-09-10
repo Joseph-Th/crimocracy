@@ -594,6 +594,7 @@ pub fn validate_state_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     legal_invariants::validate_arrests_against_registry(registry, state)?;
+    legal_invariants::validate_witness_statements_against_registry(registry, state)?;
     operations::validate_operations_against_registry(registry, state)?;
     validate_opportunities_against_registry(registry, state)?;
     validate_investigation_work_against_registry(registry, state)?;

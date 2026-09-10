@@ -9,6 +9,7 @@ mod references;
 mod representation;
 
 pub(crate) use casework::validate_developed_review_evidence;
+pub(super) use casework::validate_witness_statements_against_registry;
 pub(super) use custody::validate_arrests_against_registry;
 
 use crate::core::invariants::StateValidationError;

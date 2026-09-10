@@ -60,7 +60,8 @@ use crate::*;
 /// Proves that repeated scores on one target decay through the canonical property-proceeds
 /// path. The organization learns the district's patrol rhythm through surveillance, takes the
 /// same business twice, and observes that the immediate re-score recovers only part of the
-/// first haul while a take after a rest period returns to full value. All observations are
+/// first haul while value replenishes continuously and a take after the authored recovery
+/// period returns to full value. All observations are
 /// player-visible: held-property records and after-action outcomes.
 pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
@@ -114,7 +115,7 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         target: BusinessId,
         intelligence: &BTreeSet<InformationId>,
         title: &'static str,
-    ) -> Result<i64, Box<dyn Error>> {
+    ) -> Result<(i64, SimTime), Box<dyn Error>> {
         let scheduled_for = choose_safe_start_from_patrol_signal(
             scenario.state.now(),
             patrol_signal,
@@ -150,10 +151,10 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         let proceeds = resolution
             .property_proceeds()
             .expect("achieved probe score must create held property");
-        Ok(proceeds.estimated_value().cents())
+        Ok((proceeds.estimated_value().cents(), resolution.resolved_at()))
     }
 
-    let first_take = run_take(
+    let (first_take, first_resolved_at) = run_take(
         &mut scenario,
         &mut metrics,
         &patrol_signal,
@@ -162,7 +163,7 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         &intelligence,
         "repeat-take probe first score",
     )?;
-    let second_take = run_take(
+    let (second_take, second_resolved_at) = run_take(
         &mut scenario,
         &mut metrics,
         &patrol_signal,
@@ -171,9 +172,26 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         &intelligence,
         "repeat-take probe immediate re-score",
     )?;
-    if second_take != first_take / 2 || second_take >= first_take {
+    let proceeds = registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .property_proceeds()
+        .expect("burglary must author property proceeds");
+    let recovery_window = u64::from(proceeds.recent_take_recovery_window().as_minutes());
+    let age = second_resolved_at
+        .as_minutes()
+        .saturating_sub(first_resolved_at.as_minutes())
+        .min(recovery_window);
+    let depletion_span = 10_000_u64 - u64::from(proceeds.immediate_repeat_value_basis_points());
+    let unrecovered = recovery_window.saturating_sub(age);
+    let expected_basis_points =
+        10_000_u64.saturating_sub(depletion_span.saturating_mul(unrecovered) / recovery_window);
+    let expected_second =
+        i64::try_from(i128::from(first_take) * i128::from(expected_basis_points) / 10_000_i128)
+            .expect("bounded repeat-take probe value must fit i64");
+    if second_take != expected_second || second_take >= first_take {
         return Err(format!(
-            "immediate re-score expected exactly half of the first take, observed {first_take}c then {second_take}c"
+            "immediate re-score expected authored gradual recovery to {expected_second}c, observed {first_take}c then {second_take}c"
         )
         .into());
     }
@@ -189,10 +207,11 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
         format_cents(second_take),
     );
 
-    // Let the recency window pass so the target restocks, then confirm full value returns.
-    let rest_until = scenario.state.now() + SimDuration::from_minutes(3 * 1_440);
+    // Let the authored recovery window pass so both prior hits fully age out, then confirm the
+    // target's typical contents return to full value.
+    let rest_until = scenario.state.now() + proceeds.recent_take_recovery_window();
     run_until(&mut scenario, rest_until, false, &mut metrics)?;
-    let third_take = run_take(
+    let (third_take, _) = run_take(
         &mut scenario,
         &mut metrics,
         &patrol_signal,

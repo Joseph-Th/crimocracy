@@ -599,14 +599,13 @@ pub(crate) fn apply_due_custody_releases(
 /// strength/reliability floor as the canonical arrest path. This is a
 /// deliberately conservative institutional gate — it consumes case evidence that already
 /// exists; it never generates new leads.
-const MIN_ARREST_QUALIFYING_EVIDENCE: usize = 2;
-
 /// Runs the police institution's evidence-to-custody conversion across active cases: when an
 /// identified subject has enough usable independent evidence against them,
 /// the owning authority makes the arrest through the canonical validated path. Custody preempts
 /// conflicting operation bookings and scheduled detective work through their explicit abort or
 /// cancellation lifecycles, so internal commitments cannot make an arrestable subject immune.
 pub fn apply_autonomous_evidence_arrests(
+    registry: &crate::registry::Registry,
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
     // Single scan over active cases. Case provenance controls lifecycle and information flow,
@@ -706,7 +705,9 @@ pub fn apply_autonomous_evidence_arrests(
             );
             qualifying.push(evidence.id());
         }
-        if qualifying.len() < MIN_ARREST_QUALIFYING_EVIDENCE || !has_strong {
+        if qualifying.len() < usize::from(registry.legal().minimum_arrest_qualifying_evidence())
+            || !has_strong
+        {
             continue;
         }
 

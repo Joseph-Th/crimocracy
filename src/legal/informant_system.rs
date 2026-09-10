@@ -382,13 +382,10 @@ pub(crate) const fn informant_reliability(reliability: Reliability) -> EvidenceR
 /// consumes the state-owned investigation stream. The equality below relies on the canonical
 /// tick advancing exactly one simulated minute per call (`core::simulation::run_tick`); no
 /// adapter may fast-forward across minutes.
-/// Base flip chance in percent; fear of prison (the character's Safety drive) adds up to
-/// 50 points on top.
-const BASE_FLIP_CHANCE_PERCENT: u32 = 25;
-
 /// Runs the police institution's detainee-to-informant pipeline: exactly one recruitment
 /// draw per detained criminal member, one cadence window after their arrest. Members who are
-/// not sufficiently afraid stay quiet; stronger Safety pressure makes cooperation likelier.
+/// not sufficiently afraid stay quiet; stronger Safety pressure makes cooperation likelier,
+/// while active counsel lowers the chance that custodial pressure becomes cooperation.
 pub(crate) fn apply_detainee_informant_recruitment(
     registry: &Registry,
     state: &mut AppState,
@@ -414,11 +411,11 @@ pub(crate) fn apply_detainee_informant_recruitment(
             // would need a persisted decided-marker instead.
             minutes_in_custody == u64::from(decision_delay)
         })
-        .map(|arrest| (arrest.character(), arrest.authority()))
+        .map(|arrest| (arrest.id(), arrest.character(), arrest.authority()))
         .collect();
 
     let mut candidates = Vec::new();
-    for (character, handler) in due_arrests {
+    for (arrest, character, handler) in due_arrests {
         let record = state
             .world
             .get_character(character)
@@ -442,18 +439,25 @@ pub(crate) fn apply_detainee_informant_recruitment(
         if state.legal.informant_for(character, handler).is_some() {
             continue;
         }
-        candidates.push((character, handler));
+        candidates.push((arrest, character, handler));
     }
 
     let mut recruited = Vec::new();
-    for (character, handler) in candidates {
+    for (arrest, character, handler) in candidates {
         let safety = state
             .world
             .get_character(character)
             .and_then(|record| record.drive(crate::world::DriveKind::Safety))
             .map(|rating| u32::from(rating.value()))
             .unwrap_or(0);
-        let chance = BASE_FLIP_CHANCE_PERCENT + safety / 2;
+        let chance = resolve_informant_flip_chance(
+            registry.legal(),
+            safety,
+            state
+                .legal
+                .active_representation_for_arrest(arrest)
+                .is_some(),
+        );
         // Draw speculatively so an ordinary failed flip still consumes its authored decision
         // draw, while a successful flip only publishes that advanced RNG state after the
         // establishment commits. Allocation or freshness failure therefore rejects without
@@ -471,6 +475,21 @@ pub(crate) fn apply_detainee_informant_recruitment(
         recruited.push(informant);
     }
     Ok(recruited)
+}
+
+fn resolve_informant_flip_chance(
+    legal: crate::registry::LegalConfigDefinition,
+    safety: u32,
+    represented: bool,
+) -> u32 {
+    let safety_bonus =
+        safety.saturating_mul(u32::from(legal.informant_safety_bonus_percent())) / 100;
+    let chance = u32::from(legal.informant_base_flip_chance_percent()) + safety_bonus;
+    if represented {
+        chance.saturating_sub(u32::from(legal.represented_informant_reduction_percent()))
+    } else {
+        chance
+    }
 }
 
 /// Informants disclose personally held information relevant to their handler's active

@@ -221,6 +221,7 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
     .commit(&mut fixture.state)
     .expect("case witness registration should commit");
     let outcome = validate_record_witness_statement(
+        &registry,
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
@@ -277,6 +278,21 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
             .map(|record| record.id()),
         Some(outcome.statement)
     );
+    assert_eq!(
+        validate_record_witness_statement(
+            &registry,
+            &fixture.state,
+            WitnessStatementDraft {
+                case_witness,
+                subject: EntityRef::Character(fixture.subject),
+                origin: None,
+                confidence: rating(95),
+                summary: "Mercer repeats the same identification.".to_owned(),
+            },
+        )
+        .expect_err("one case witness cannot manufacture corroboration by repeating testimony"),
+        WitnessError::WitnessAlreadyStatemented(case_witness)
+    );
 
     let mut restored = restore_save(
         &registry,
@@ -324,6 +340,7 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
     .commit(&mut restored)
     .expect("post-restore witness registration should allocate a fresh ID");
     let second_statement = validate_record_witness_statement(
+        &registry,
         &restored,
         WitnessStatementDraft {
             case_witness: second_case_witness,
@@ -347,6 +364,7 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
 
 #[test]
 fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes() {
+    let registry = build_registry();
     let mut fixture = make_fixture();
     let stale_registration = validate_register_case_witness(
         &fixture.state,
@@ -414,6 +432,7 @@ fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes
     )
     .expect("cooperation change should initially validate");
     validate_record_witness_statement(
+        &registry,
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
@@ -466,6 +485,7 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
     .commit(&mut fixture.state)
     .expect("registration should commit");
     let historical = validate_record_witness_statement(
+        &registry,
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
@@ -488,6 +508,7 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
     .expect("case suspension should commit");
 
     let statement_error = match validate_record_witness_statement(
+        &registry,
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
@@ -586,6 +607,7 @@ fn anonymous_witness_testimony_remains_valid_without_named_source() {
 
 #[test]
 fn witness_confidence_maps_to_deterministic_evidence_bands() {
+    let testimony = build_registry().legal().witness_testimony();
     for (confidence, strength) in [
         (0, EvidenceStrength::Weak),
         (34, EvidenceStrength::Weak),
@@ -597,7 +619,11 @@ fn witness_confidence_maps_to_deterministic_evidence_bands() {
         (100, EvidenceStrength::Direct),
     ] {
         assert_eq!(
-            resolve_witness_strength(rating(confidence), WitnessCooperation::Cooperative),
+            resolve_witness_strength(
+                testimony,
+                rating(confidence),
+                WitnessCooperation::Cooperative,
+            ),
             strength
         );
     }
@@ -612,7 +638,11 @@ fn witness_confidence_maps_to_deterministic_evidence_bands() {
         (100, EvidenceReliability::HighlyReliable),
     ] {
         assert_eq!(
-            resolve_witness_reliability(rating(confidence), WitnessCooperation::Cooperative),
+            resolve_witness_reliability(
+                testimony,
+                rating(confidence),
+                WitnessCooperation::Cooperative,
+            ),
             reliability
         );
     }
@@ -620,6 +650,7 @@ fn witness_confidence_maps_to_deterministic_evidence_bands() {
 
 #[test]
 fn uncooperative_witnesses_cannot_produce_top_band_testimony() {
+    let testimony = build_registry().legal().witness_testimony();
     for confidence in 0..=100 {
         let confidence = rating(confidence);
         for (cooperation, strength_cap, reliability_cap) in [
@@ -639,9 +670,9 @@ fn uncooperative_witnesses_cannot_produce_top_band_testimony() {
                 EvidenceReliability::Mixed,
             ),
         ] {
-            let strength = resolve_witness_strength(confidence, cooperation);
+            let strength = resolve_witness_strength(testimony, confidence, cooperation);
             assert!(strength <= strength_cap);
-            let reliability = resolve_witness_reliability(confidence, cooperation);
+            let reliability = resolve_witness_reliability(testimony, confidence, cooperation);
             assert!(reliability <= reliability_cap);
         }
     }

@@ -466,14 +466,11 @@ fn find_most_exposed_participant(
     })
 }
 
-/// Maximum normalized time pressure; the producer clamps to this bound and the persisted-state
-/// validator rejects factors above it, so both must reference one shared constant.
-pub(crate) const MAX_TIME_PRESSURE: u8 = 30;
-
 pub(super) fn resolve_time_pressure(
     started_at: SimTime,
     due_at: SimTime,
     base_duration: u32,
+    maximum: u8,
 ) -> u8 {
     let available = due_at.as_minutes().saturating_sub(started_at.as_minutes());
     let base = u64::from(base_duration);
@@ -481,22 +478,30 @@ pub(super) fn resolve_time_pressure(
         return 0;
     }
     let shortfall = base - available;
-    let pressure = shortfall
-        .saturating_mul(u64::from(MAX_TIME_PRESSURE))
-        .div_ceil(base);
-    u8::try_from(pressure.min(u64::from(MAX_TIME_PRESSURE)))
-        .expect("bounded time pressure must fit u8")
+    let pressure = shortfall.saturating_mul(u64::from(maximum)).div_ceil(base);
+    u8::try_from(pressure.min(u64::from(maximum))).expect("bounded time pressure must fit u8")
 }
 
-fn weighted_ability(role_average: Rating, leader_capability: Option<Rating>) -> i16 {
-    let role = i16::from(role_average.value());
+fn weighted_ability(
+    execution: &OperationExecutionDefinition,
+    role_average: Rating,
+    leader_capability: Option<Rating>,
+) -> i16 {
+    let role = u32::from(role_average.value());
     // A leader without the authored leadership capability contributes nothing to coordination
     // rather than being silently averaged up to the roster's role skill: the after-action summary
     // reports "no demonstrated capability", and the arithmetic should match.
     let leadership = leader_capability
-        .map(|rating| i16::from(rating.value()))
+        .map(|rating| u32::from(rating.value()))
         .unwrap_or(0);
-    (role * 3 + leadership) / 4
+    let role_weight = u32::from(execution.role_capability_weight());
+    let leader_weight = u32::from(execution.leader_capability_weight());
+    let total_weight = role_weight + leader_weight;
+    let weighted = role
+        .saturating_mul(role_weight)
+        .saturating_add(leadership.saturating_mul(leader_weight))
+        / total_weight;
+    i16::try_from(weighted).expect("weighted operation ability must fit i16")
 }
 
 pub(crate) fn resolve_intelligence_factors(
@@ -519,7 +524,12 @@ pub(crate) fn resolve_intelligence_factors(
             .intelligence
             .get_information(*information)
             .expect("validated operation intelligence record must exist");
-        let score = information_score(information, planning_at, max_age);
+        let score = information_score(
+            registry.information_quality(),
+            information,
+            planning_at,
+            max_age,
+        );
         best_by_topic
             .entry(information.topic())
             .and_modify(|best| *best = (*best).max(score))
@@ -557,16 +567,13 @@ pub(crate) fn resolve_intelligence_factors(
 }
 
 fn information_score(
+    quality: crate::registry::InformationQualityDefinition,
     information: &crate::intelligence::InformationRecord,
     planning_at: SimTime,
     max_age: u64,
 ) -> u8 {
-    let reliability = u32::from(crate::intelligence::reliability_quality_score(
-        information.reliability(),
-    ));
-    let specificity = u32::from(crate::intelligence::specificity_quality_score(
-        information.specificity(),
-    ));
+    let reliability = u32::from(quality.reliability_score(information.reliability()));
+    let specificity = u32::from(quality.specificity_score(information.specificity()));
     let age = planning_at
         .as_minutes()
         .saturating_sub(information.observed_at().as_minutes());
@@ -588,6 +595,7 @@ pub(crate) fn resolve_execution_margin(
     factors: OperationResolutionFactors,
 ) -> i16 {
     let ability = weighted_ability(
+        execution,
         factors.role_capability_average(),
         factors.leader_capability(),
     );

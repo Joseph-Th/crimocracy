@@ -640,6 +640,15 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
 }
 
 #[test]
+fn active_counsel_materially_reduces_detainee_flip_risk() {
+    let legal = build_registry().legal();
+    assert_eq!(resolve_informant_flip_chance(legal, 100, false), 75);
+    assert_eq!(resolve_informant_flip_chance(legal, 100, true), 50);
+    assert_eq!(resolve_informant_flip_chance(legal, 0, false), 25);
+    assert_eq!(resolve_informant_flip_chance(legal, 0, true), 0);
+}
+
+#[test]
 fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
     let registry = build_registry();
     let mut fixture = fixture();

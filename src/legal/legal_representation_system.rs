@@ -950,11 +950,6 @@ fn end_reason_label(reason: LegalRepresentationEndReason) -> &'static str {
     }
 }
 
-/// Flat retainer the organization commits when its standing policy promises automatic legal
-/// support. A flat authored fee keeps the automatic path honest: no discretionary spending
-/// is made in the organization's name beyond what the policy promises.
-const AUTOMATIC_SUPPORT_RETAINER_CENTS: i64 = 5_000;
-
 #[derive(Clone, Copy, Debug)]
 struct AutomaticLegalSupportCandidate {
     arrest: ArrestId,
@@ -976,6 +971,7 @@ struct ResolvedAutomaticLegalSupport {
 /// Organizations without those prerequisites see no action — the policy promises support, and
 /// this stage delivers it only when the pieces exist for the canonical transaction to carry it.
 pub(crate) fn apply_automatic_legal_support(
+    registry: &crate::registry::Registry,
     state: &mut AppState,
 ) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
     // Automatic support concludes when the matter it covers does: a representation this pass
@@ -999,7 +995,7 @@ pub(crate) fn apply_automatic_legal_support(
     let candidates = resolve_automatic_legal_support_candidates(state)?;
     let mut retained = Vec::new();
     for candidate in candidates {
-        let fee = Money::from_cents(AUTOMATIC_SUPPORT_RETAINER_CENTS);
+        let fee = registry.legal().automatic_support_retainer();
         let Some(payer_accounts) = resolve_automatic_support_payer_accounts(state, candidate, fee)?
         else {
             continue;

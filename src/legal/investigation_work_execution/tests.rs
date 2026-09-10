@@ -715,6 +715,7 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
     .commit(&mut fixture.state)
     .expect("case witness registration should commit");
     crate::legal::witness_system::validate_record_witness_statement(
+        &registry,
         &fixture.state,
         crate::legal::WitnessStatementDraft {
             case_witness,
