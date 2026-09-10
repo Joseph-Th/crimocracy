@@ -81,17 +81,11 @@ pub(super) fn resolve_operation_venue_entities(
             target: EntityRef::Character(target),
         } if record.kind() == OperationKind::WitnessPressure => {
             let character = EntityRef::Character(*target);
-            // A character with an organization or personally owned premises already has the
-            // ordinary world-footprint proxy. Case geography is only needed for a civilian with
-            // no modeled location of their own.
-            if !resolve_target_neighborhoods(state, vec![character]).is_empty() {
-                return vec![character];
-            }
-
-            // A civilian can be registered in several live cases, but one encounter cannot occur
-            // in several districts at once. Use the most-recent case whose cooperation this job
-            // can actually affect. If pressureability disappears while the job is in flight,
-            // retain only the most-recent foreign registration as a durable physical proxy.
+            // A witness can be registered in several live cases, but one pressure encounter
+            // cannot occur across every district where that character or their organization has
+            // assets. Anchor the venue to the most-recent case whose cooperation this job can
+            // actually affect. If pressureability disappears while the job is in flight, retain
+            // the most-recent foreign registration as a durable physical proxy.
             let pressureable =
                 pressureable_witness_targets(state, record.responsible_organization(), *target)
                     .into_iter()
@@ -130,9 +124,13 @@ pub(super) fn resolve_operation_venue_entities(
                 // occurring nowhere.
                 vec![character, EntityRef::Organization(investigation.owner())]
             } else {
-                let mut entities = vec![character];
-                entities.extend(case_neighborhoods.into_iter().map(EntityRef::Neighborhood));
-                entities
+                // Do not also return the character here. Character resolution expands through
+                // their current organization and personally owned businesses, which would
+                // reintroduce unrelated districts and defeat the case-scene anchor above.
+                case_neighborhoods
+                    .into_iter()
+                    .map(EntityRef::Neighborhood)
+                    .collect()
             }
         }
         OperationObjective::AcquireProperty { .. }

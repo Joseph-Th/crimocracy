@@ -941,6 +941,15 @@ impl ValidatedBusinessDisruption {
     }
 }
 
+pub(crate) fn resolve_business_disruption_horizon(now: SimTime, duration: SimDuration) -> SimTime {
+    let last_affected_minutes = duration
+        .as_minutes()
+        .checked_sub(1)
+        .expect("registry-validated business disruption duration must be positive");
+    now.checked_add(SimDuration::from_minutes(last_affected_minutes))
+        .unwrap_or(SimTime::from_minutes(u64::MAX))
+}
+
 pub fn validate_disrupt_business_economy(
     registry: &Registry,
     state: &AppState,
@@ -953,14 +962,13 @@ pub fn validate_disrupt_business_economy(
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(business));
     }
-    // A disruption whose authored duration extends beyond the finite simulation clock remains
-    // meaningful through the last representable minute. Clamp the effect horizon rather than
-    // rejecting an otherwise successful sabotage because part of its duration lies outside the
-    // simulation's representable future.
-    let disrupted_through = state
-        .now()
-        .checked_add(registry.business_disruption().duration())
-        .unwrap_or(SimTime::from_minutes(u64::MAX));
+    // `disrupted_through` is inclusive, so an N-minute effect beginning now ends on minute N-1.
+    // Using `now + duration` would make every sabotage one minute too long and can degrade an
+    // extra full business cycle when the erroneous endpoint lands exactly on a settlement time.
+    // If the inclusive endpoint lies beyond the finite simulation clock, clamp it to the last
+    // representable minute instead of rejecting an otherwise successful sabotage.
+    let disrupted_through =
+        resolve_business_disruption_horizon(state.now(), registry.business_disruption().duration());
     let changes_horizon = economy
         .disrupted_through()
         .is_none_or(|current| disrupted_through > current);

@@ -940,8 +940,10 @@ pub struct InvestigationRecord {
     /// opened. Surveillance of the owning authority uses this set (never the hidden evidence
     /// graph) to report whether that organization's case is still being actively worked.
     pub(super) notified_organizations: BTreeSet<OrganizationId>,
-    /// The most recent minute the case gained evidence, subjects, scheduled work, or resolved
-    /// work. Cold-case decay measures institutional inactivity from this instant.
+    /// The most recent minute the institution advanced the case through evidence, subjects,
+    /// witness registration, scheduled work, resolved work, or explicit resumption. External
+    /// witness-cooperation changes and custody-forced staffing/work cancellation do not count as
+    /// investigative activity. Cold-case decay measures institutional inactivity from this instant.
     pub(super) last_activity_at: SimTime,
     pub(super) version: u32,
 }

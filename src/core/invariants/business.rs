@@ -273,19 +273,22 @@ pub(super) fn validate_business_economies_against_registry(
             }
         }
         if let Some(disrupted_through) = economy.disrupted_through() {
-            let duration = u64::from(registry.business_disruption().duration().as_minutes());
-            // The earliest canonical disruption is one applied at establishment. Its authored
-            // duration follows the same finite-horizon rule as the mutation path: if the effect
-            // would extend beyond representable time, the stored horizon is the last minute.
-            let min_horizon = economy
-                .established_at()
-                .as_minutes()
-                .saturating_add(duration);
-            // This is an upper-bound proof for an already-persisted horizon, not a request to
-            // schedule new simulation work. Once `now + duration` exceeds the finite clock,
-            // every representable stored horizon is below that conceptual bound, so clamp the
-            // comparison ceiling rather than rejecting an otherwise valid old disruption.
-            let max_horizon = state.now().as_minutes().saturating_add(duration);
+            let duration = registry.business_disruption().duration();
+            // The mutation owner defines disruption endpoints. Reuse it here so restore
+            // validation cannot drift from the inclusive N-minute interval convention or its
+            // finite-clock clamping behavior.
+            let min_horizon =
+                crate::economy::business_economy_system::resolve_business_disruption_horizon(
+                    economy.established_at(),
+                    duration,
+                )
+                .as_minutes();
+            let max_horizon =
+                crate::economy::business_economy_system::resolve_business_disruption_horizon(
+                    state.now(),
+                    duration,
+                )
+                .as_minutes();
             let horizon = disrupted_through.as_minutes();
             if horizon < min_horizon || horizon > max_horizon {
                 return Err(StateValidationError::InvalidBusinessEconomySchedule {

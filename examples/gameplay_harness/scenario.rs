@@ -59,12 +59,12 @@ use crate::*;
 
 pub fn build_scenario(
     registry: &Registry,
-    seed: u64,
+    seeds: EvaluationSeeds,
     profile: ScenarioProfile,
 ) -> Result<Scenario<'_>, Box<dyn Error>> {
-    let mut state = AppState::new(seed);
-    let variation = FixtureVariation::from_seed(seed);
-    let timeline = ScenarioTimeline::for_scenario(registry, seed);
+    let mut state = AppState::new(seeds.world);
+    let variation = FixtureVariation::from_seed(seeds.world);
+    let timeline = ScenarioTimeline::for_policy(registry, seeds.policy);
 
     let player = insert_organization(
         registry,
@@ -112,10 +112,10 @@ pub fn build_scenario(
     )?;
     designate_player_organization(&mut state, player)?;
 
-    // Slight seed-derived jitter keeps the harness from testing one exact clock every run while
-    // preserving deterministic matched-seed comparisons.
-    let jitter_rating = ((seed >> 4) % 11) as i16 - 5; // -5..+5
-    let jitter_minutes = ((seed % 7) as i16 - 3) * 5; // -15..+15 in 5m steps
+    // Slight world-seed-derived jitter keeps the harness from testing one exact environment every
+    // run while preserving deterministic matched-world comparisons.
+    let jitter_rating = ((seeds.world >> 4) % 11) as i16 - 5; // -5..+5
+    let jitter_minutes = ((seeds.world % 7) as i16 - 3) * 5; // -15..+15 in 5m steps
     let neighborhood = insert_neighborhood(
         &mut state,
         NeighborhoodDraft {
@@ -865,7 +865,7 @@ pub fn build_scenario(
         investigation: None,
         variation,
         timeline,
-        seed,
+        seeds,
         wait_slack_minutes: operation_wait_slack_minutes(registry),
     };
     validate_harness_state(scenario.registry, &scenario.state)?;

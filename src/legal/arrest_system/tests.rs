@@ -868,6 +868,15 @@ fn custody_cancels_scheduled_investigation_work_with_arrest_provenance() {
     .expect("detective work should validate")
     .commit(&mut fixture.state)
     .expect("detective work should commit");
+    let work_case_activity_before_detention = fixture
+        .state
+        .legal()
+        .get_investigation(work_case)
+        .expect("work case should persist")
+        .last_activity_at();
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(60));
 
     let arrest_case = validate_open_investigation(
         &fixture.state,
@@ -937,6 +946,16 @@ fn custody_cancels_scheduled_investigation_work_with_arrest_provenance() {
             .active_investigations_without_lead()
             .any(|investigation| investigation == work_case),
         "detention-preempted case must be available for institutional restaffing"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(work_case)
+            .expect("detention-preempted case should persist")
+            .last_activity_at(),
+        work_case_activity_before_detention,
+        "unrelated detective custody must not manufacture fresh investigative activity"
     );
     validate_state(&fixture.state).expect("work-cancellation custody state should validate");
     validate_invariants(&fixture.state);

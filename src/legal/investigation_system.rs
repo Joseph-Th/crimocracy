@@ -197,11 +197,9 @@ impl ValidatedInvestigatorDetentionRelease {
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {
-        state.legal.release_lead_investigator_for_detention(
-            self.investigation,
-            self.investigator,
-            self.released_at,
-        );
+        state
+            .legal
+            .release_lead_investigator_for_detention(self.investigation, self.investigator);
     }
 }
 

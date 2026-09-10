@@ -63,8 +63,11 @@ use crate::*;
 /// first haul while value replenishes continuously and a take after the authored recovery
 /// period returns to full value. All observations are
 /// player-visible: held-property records and after-action outcomes.
-pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
-    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+pub fn run_repeat_take_probe(
+    registry: &Registry,
+    seeds: EvaluationSeeds,
+) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let target = scenario.target;
     let opportunity_information = scenario.opportunity_information;
 
@@ -242,8 +245,11 @@ pub fn run_repeat_take_probe(registry: &Registry, seed: u64) -> Result<(), Box<d
 /// originated through the canonical incident-intake path; the conversion itself is authored
 /// per-cycle visibility math, so the probe originates enough parallel cases to push the
 /// authored chance to certainty instead of asserting a lucky roll.
-pub fn run_vice_attention_probe(registry: &Registry, seed: u64) -> Result<(), Box<dyn Error>> {
-    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+pub fn run_vice_attention_probe(
+    registry: &Registry,
+    seeds: EvaluationSeeds,
+) -> Result<(), Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let enterprise_id = scenario.enterprise;
     let target = scenario.target;
     let neighborhood = scenario.neighborhood;
@@ -819,7 +825,7 @@ pub fn run_strategy_batch(
     registry: &Registry,
     profile: ScenarioProfile,
     samples: u64,
-    seed: u64,
+    seeds: EvaluationSeeds,
     artifact_dir: Option<&PathBuf>,
 ) -> Result<(Aggregate, Aggregate, Aggregate), Box<dyn Error>> {
     let mut rush_aggregate = Aggregate::default();
@@ -827,26 +833,26 @@ pub fn run_strategy_batch(
     let mut recon_aggregate = Aggregate::default();
     let mut artifacts_written = 0_u64;
     for offset in 0..samples {
-        let sample_seed = seed.wrapping_add(offset + 1);
+        let sample_seeds = EvaluationSeeds::new(seeds.world.wrapping_add(offset + 1), seeds.policy);
         let rush = play_session(
             registry,
             Strategy::Rush,
             profile,
-            sample_seed,
+            sample_seeds,
             SessionRunMode::Batch,
         )?;
         let press = play_session(
             registry,
             Strategy::Press,
             profile,
-            sample_seed,
+            sample_seeds,
             SessionRunMode::Batch,
         )?;
         let recon = play_session(
             registry,
             Strategy::Recon,
             profile,
-            sample_seed,
+            sample_seeds,
             SessionRunMode::Batch,
         )?;
         validate_run_metrics(&rush, true)?;
@@ -860,7 +866,7 @@ pub fn run_strategy_batch(
             // Batch runs summarize persistence instead of printing one line per file: the
             // per-run seeds and raw metrics land on disk either way.
             for metrics in [&rush, &press, &recon] {
-                if persist_run_artifact(dir, sample_seed, profile, metrics).is_ok() {
+                if persist_run_artifact(dir, sample_seeds, profile, metrics).is_ok() {
                     artifacts_written += 1;
                 }
             }
@@ -981,7 +987,7 @@ pub fn validate_branch_financial_isolation(
 
 pub fn persist_run_artifact(
     dir: &PathBuf,
-    seed: u64,
+    seeds: EvaluationSeeds,
     profile: ScenarioProfile,
     metrics: &RunMetrics,
 ) -> Result<PathBuf, Box<dyn Error>> {
@@ -991,9 +997,10 @@ pub fn persist_run_artifact(
         .map(|s| s.label().to_lowercase())
         .unwrap_or_else(|| "unknown".to_owned());
     let filename = format!(
-        "{}-{:016x}-{}-{}.json",
+        "{}-w{:016x}-p{:016x}-{}-{}.json",
         profile.label().to_lowercase().replace(' ', "-"),
-        seed,
+        seeds.world,
+        seeds.policy,
         strategy_label,
         metrics
             .variation
@@ -1002,8 +1009,10 @@ pub fn persist_run_artifact(
     );
     let path = dir.join(filename);
     let identity = serde_json::json!({
-        "seed": format!("{seed:#x}"),
-        "seed_dec": seed,
+        "world_seed": format!("{:#x}", seeds.world),
+        "world_seed_dec": seeds.world,
+        "policy_seed": format!("{:#x}", seeds.policy),
+        "policy_seed_dec": seeds.policy,
         "profile": profile.label(),
         "strategy": metrics.strategy.map(|s| s.label()),
         "variation": metrics.variation.map(|v| v.label()),
@@ -1128,9 +1137,9 @@ pub fn persist_run_artifact(
 
 pub fn run_opportunity_portfolio_probe(
     registry: &Registry,
-    seed: u64,
+    seeds: EvaluationSeeds,
 ) -> Result<(), Box<dyn Error>> {
-    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let valid_until = Some(SimTime::from_minutes(180));
     let primary_opportunity = validate_discover_operation_opportunity(
         scenario.registry,
@@ -1291,9 +1300,9 @@ pub fn run_opportunity_portfolio_probe(
 /// state and confirms that the specialist is available again.
 pub fn run_organizational_capacity_probe(
     registry: &Registry,
-    seed: u64,
+    seeds: EvaluationSeeds,
 ) -> Result<(), Box<dyn Error>> {
-    let mut scenario = build_scenario(registry, seed, ScenarioProfile::NightTrap)?;
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let first_start = scenario.timeline.initial_burglary_at;
     let target = scenario.target;
     let opportunity_information = scenario.opportunity_information;
@@ -1445,7 +1454,7 @@ pub fn run_organizational_capacity_probe(
     );
     // Approach variation probe: authorize a WitnessPressure operation with a non-Covert
     // approach to prove the harness is not hard-coded to one tactical axis.
-    let approach = match seed % 3 {
+    let approach = match seeds.policy % 3 {
         0 => OperationApproach::Deceptive,
         1 => OperationApproach::Intimidating,
         _ => OperationApproach::Covert,
@@ -1485,7 +1494,7 @@ pub fn run_organizational_capacity_probe(
     // Recruitment-approach variation: validate a non-FinancialOpportunity pitch through the
     // canonical path to prove the harness is not hard-coded to one approach. The probe uses
     // the same deterministic relationship so margin math stays registry-derived.
-    let alt_approach = match seed % 4 {
+    let alt_approach = match seeds.policy % 4 {
         0 => RecruitmentApproach::FinancialOpportunity,
         1 => RecruitmentApproach::Advancement,
         2 => RecruitmentApproach::Protection,

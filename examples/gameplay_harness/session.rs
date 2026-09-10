@@ -1,10 +1,17 @@
-//! Session flow: play_session, the second act, defector trail, and terminal-state loop helpers.
+//! Shared session orchestration, defector trail, and terminal-state loop helpers.
+//! PRESS response policy and strategy-specific second acts live in child modules.
+
+mod defector;
+mod press;
+mod second_act;
 
 use crimocracy::contacts::contact_system::{
     find_pending_disclosure_sources, validate_contact_disclosure,
 };
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{FinancialAccountId, OperationId, OrganizationId};
+use crimocracy::core::id::{
+    FinancialAccountId, InformationId, OperationId, OpportunityId, OrganizationId,
+};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::finance::finance_system::{
@@ -274,61 +281,10 @@ fn capture_witness_pressure_outcome(
     Ok(())
 }
 
-pub fn play_session(
-    registry: &Registry,
-    strategy: Strategy,
-    profile: ScenarioProfile,
-    seed: u64,
-    run_mode: SessionRunMode,
-) -> Result<RunMetrics, Box<dyn Error>> {
-    play_session_with_fixture_view(
-        registry,
-        strategy,
-        profile,
-        seed,
-        run_mode,
-        run_mode.narrative(),
-    )
-}
-
-/// `print_fixture_view` exists so a narrative comparison prints the shared authored fixture
-/// once instead of repeating it per strategy: the world is identical across matched branches.
-pub fn play_session_with_fixture_view(
-    registry: &Registry,
-    strategy: Strategy,
-    profile: ScenarioProfile,
-    seed: u64,
-    run_mode: SessionRunMode,
-    print_fixture_view: bool,
-) -> Result<RunMetrics, Box<dyn Error>> {
-    let narrative = run_mode.narrative();
-    let full_arc = run_mode.full_arc();
-    let mut scenario = build_scenario(registry, seed, profile)?;
-    let mut metrics = RunMetrics {
-        strategy: Some(strategy),
-        variation: Some(scenario.variation),
-        ..RunMetrics::default()
-    };
-    // Matched financial boundary: full sessions snapshot at two campaign days and batch
-    // sessions at one. Every branch crosses this minute before a longer consequence arc extends,
-    // so the snapshot compares identical windows instead of unequal waits.
-    let campaign_day_minutes = u64::from(
-        registry
-            .recruitment()
-            .autonomous_attempt_cadence()
-            .as_minutes(),
-    );
-    metrics.matched_financial_boundary_minute =
-        Some(campaign_day_minutes * if full_arc { 2 } else { 1 });
-
-    if narrative && print_fixture_view {
-        println!(
-            "[FIXTURE] {} authored variation selected by simulation seed.",
-            scenario.variation.label(),
-        );
-        print_starting_player_view(&scenario);
-    }
-
+fn discover_initial_opportunity(
+    scenario: &mut Scenario,
+    narrative: bool,
+) -> Result<OpportunityId, Box<dyn Error>> {
     let opportunity = validate_discover_operation_opportunity(
         scenario.registry,
         &scenario.state,
@@ -360,8 +316,21 @@ pub fn play_session_with_fixture_view(
                 .summary()
         );
     }
+    Ok(opportunity)
+}
 
-    let mut burglary_intelligence = BTreeSet::from([scenario.opportunity_information]);
+struct InitialBurglaryPlan {
+    scheduled_for: SimTime,
+    intelligence: BTreeSet<InformationId>,
+}
+
+fn prepare_initial_burglary_plan(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<InitialBurglaryPlan, Box<dyn Error>> {
+    let mut intelligence = BTreeSet::from([scenario.opportunity_information]);
     let mut learned_patrol_information = None;
     if strategy == Strategy::Recon {
         if narrative {
@@ -369,8 +338,8 @@ pub fn play_session_with_fixture_view(
                 "[DECIDE]  Order surveillance before committing the burglary. The goal is to learn venue access and police rhythm."
             );
         }
-        let surveillance = authorize_surveillance(&mut scenario)?;
-        run_until_operation_terminal(&mut scenario, surveillance, narrative, &mut metrics)?;
+        let surveillance = authorize_surveillance(scenario)?;
+        run_until_operation_terminal(scenario, surveillance, narrative, metrics)?;
         let resolution = scenario
             .state
             .operations()
@@ -401,10 +370,7 @@ pub fn play_session_with_fixture_view(
             {
                 learned_patrol_information = Some(*information);
             }
-            // Every discovered record is already organization-held and target-relevant by the
-            // surveillance contract. Carry all of it into the next plan so the harness tests
-            // the same information-selection boundary a player would use.
-            burglary_intelligence.insert(*information);
+            intelligence.insert(*information);
         }
     }
 
@@ -470,53 +436,41 @@ pub fn play_session_with_fixture_view(
         )
         .into());
     }
-    let target = scenario.target;
-    let entry_specialist = scenario.burglar;
+    Ok(InitialBurglaryPlan {
+        scheduled_for,
+        intelligence,
+    })
+}
+
+fn authorize_initial_burglary(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    opportunity: OpportunityId,
+    plan: InitialBurglaryPlan,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<OperationId, Box<dyn Error>> {
     let title = format!("{} burglary", scenario.variation.target_name());
     let burglary = authorize_burglary(
-        &mut scenario,
+        scenario,
         strategy,
-        target,
+        scenario.target,
         &title,
-        scheduled_for,
-        burglary_intelligence,
-        entry_specialist,
+        plan.scheduled_for,
+        plan.intelligence,
+        scenario.burglar,
     )?;
     validate_convert_opportunity(&scenario.state, opportunity, burglary)?
         .commit(&mut scenario.state)?;
     metrics.burglary = Some(burglary);
 
-    if narrative {
-        println!(
-            "[COMMIT]  Burglary authorized for minute {} with {:?} approach and {} planning information item(s).",
-            scheduled_for.as_minutes(),
-            scenario
-                .state
-                .operations()
-                .get_operation(burglary)
-                .expect("burglary must exist")
-                .approach(),
-            scenario
-                .state
-                .operations()
-                .get_operation(burglary)
-                .expect("burglary must exist")
-                .intelligence()
-                .len(),
-        );
-    }
-    metrics.planning_information_count = scenario
+    let record = scenario
         .state
         .operations()
         .get_operation(burglary)
-        .expect("burglary must exist")
-        .intelligence()
-        .len();
-    metrics.planning_information_topics = scenario
-        .state
-        .operations()
-        .get_operation(burglary)
-        .expect("burglary must exist")
+        .expect("burglary must exist");
+    metrics.planning_information_count = record.intelligence().len();
+    metrics.planning_information_topics = record
         .intelligence()
         .iter()
         .map(|information| {
@@ -529,10 +483,25 @@ pub fn play_session_with_fixture_view(
         })
         .collect();
     if narrative {
-        print_planning_inputs(&scenario, burglary);
+        println!(
+            "[COMMIT]  Burglary authorized for minute {} with {:?} approach and {} planning information item(s).",
+            plan.scheduled_for.as_minutes(),
+            record.approach(),
+            record.intelligence().len(),
+        );
+        print_planning_inputs(scenario, burglary);
     }
+    Ok(burglary)
+}
 
-    run_until_operation_terminal(&mut scenario, burglary, narrative, &mut metrics)?;
+fn resolve_initial_burglary(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
     metrics.burglary_terminal_minute = Some(scenario.state.now().as_minutes());
     let burglary_record = scenario
         .state
@@ -553,23 +522,21 @@ pub fn play_session_with_fixture_view(
         metrics.exposure_level = Some(resolution.exposure().level());
         metrics.investigation_created = resolution.exposure().investigation().is_some();
         metrics.evidence_count = resolution.exposure().evidence().len();
-        // The case ID itself is developer-audit-only. It may feed audit metrics below, but never
-        // action selection; the acting branch learns case existence and timing from its own
-        // LegalActivity information after this resolution is surfaced.
+        // The case ID is audit-only. Acting policy learns case existence and timing from its own
+        // LegalActivity information after the resolution is surfaced.
         scenario.investigation = resolution.exposure().investigation();
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
         metrics.property_acquired_value_cents = resolution
             .property_proceeds()
             .map(|proceeds| proceeds.estimated_value().cents());
-
         if narrative {
             let report = scenario
                 .state
                 .reports()
                 .get_report(resolution.after_action_report())
                 .expect("after-action report must persist");
-            print_report("AFTER-ACTION", report, &scenario);
+            print_report("AFTER-ACTION", report, scenario);
             if let Some(proceeds) = resolution.property_proceeds() {
                 println!(
                     "[PROCEEDS] Held property estimated at {}. This is organizational value, not liquid cash.",
@@ -592,9 +559,9 @@ pub fn play_session_with_fixture_view(
                 .reports()
                 .get_report(artifacts.report())
                 .expect("started abort must persist its after-action report");
-            print_report("ABORT REPORT", report, &scenario);
+            print_report("ABORT REPORT", report, scenario);
         }
-        if strategy == Strategy::Rush && narrative {
+        if strategy == Strategy::Rush {
             println!(
                 "[DECIDE]  The standing abort protected the crew. Walk away from {} tonight; the police rhythm there is not beaten by speed alone.",
                 scenario
@@ -607,12 +574,11 @@ pub fn play_session_with_fixture_view(
         }
     }
 
-    // A standing abort is not a wasted night: the abort artifacts carry the organization's
-    // own debrief-derived read on how the responding authority moved in this district. That
-    // record is what lets act 2 plan against the patrol rhythm without fresh surveillance or
-    // hidden-state reads.
     if metrics.aborted
-        && let Some(OperationAbortCause::PoliceArrival(_)) = metrics.abort_cause
+        && matches!(
+            metrics.abort_cause,
+            Some(OperationAbortCause::PoliceArrival(_))
+        )
     {
         let debrief_information = burglary_record
             .abort_record()
@@ -642,7 +608,15 @@ pub fn play_session_with_fixture_view(
             }
         }
     }
+    Ok(())
+}
 
+fn liquidate_initial_property(
+    scenario: &mut Scenario,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
     let acquired_property_value = scenario
         .state
         .operations()
@@ -650,63 +624,66 @@ pub fn play_session_with_fixture_view(
         .and_then(|operation| operation.resolution())
         .and_then(|resolution| resolution.property_proceeds())
         .map(|proceeds| proceeds.estimated_value());
-    if let Some(estimated_value) = acquired_property_value {
-        if narrative {
-            println!(
-                "[DECIDE]  Move the acquired property through {} rather than leave it as held inventory.",
-                scenario
-                    .state
-                    .world()
-                    .get_business(scenario.resale_venue)
-                    .expect("resale venue must persist")
-                    .name(),
-            );
-        }
-        let disposition = validate_dispose_property(
-            scenario.registry,
-            &scenario.state,
-            PropertyDispositionDraft {
-                operation: burglary,
-                venue: scenario.resale_venue,
-                cash_account: scenario.liquidation_cash,
-                settlement_account: scenario.liquidation_settlement,
-            },
-        )?
-        .commit(&mut scenario.state)?;
-        metrics.property_realized_cash_cents = Some(disposition.realized_value.cents());
-        metrics.liquidation_minute = Some(scenario.state.now().as_minutes());
-        if narrative {
-            println!(
-                "[LIQUIDATE] {} estimated property -> {} realized resale cash.",
-                format_cents(estimated_value.cents()),
-                format_cents(disposition.realized_value.cents())
-            );
-        }
-        // Resale cash is still dirty money: it cannot touch legitimate ledgers until it has
-        // passed through an owned front's books, so leadership launders it immediately.
-        if narrative {
-            let front_name = scenario
+    let Some(estimated_value) = acquired_property_value else {
+        return Ok(());
+    };
+    if narrative {
+        println!(
+            "[DECIDE]  Move the acquired property through {} rather than leave it as held inventory.",
+            scenario
                 .state
                 .world()
-                .get_business(scenario.front)
-                .expect("laundering front must persist")
-                .name()
-                .to_owned();
-            println!(
-                "[DECIDE]  Dirty cash buys nothing legitimate. Run the resale proceeds through {front_name}'s books."
-            );
-        }
-        let realized_cents = disposition.realized_value.cents();
-        let treasury_account = scenario.liquidation_cash;
-        launder_through_front(
-            &mut scenario,
-            narrative,
-            &mut metrics,
-            treasury_account,
-            realized_cents,
-        )?;
+                .get_business(scenario.resale_venue)
+                .expect("resale venue must persist")
+                .name(),
+        );
     }
+    let disposition = validate_dispose_property(
+        scenario.registry,
+        &scenario.state,
+        PropertyDispositionDraft {
+            operation: burglary,
+            venue: scenario.resale_venue,
+            cash_account: scenario.liquidation_cash,
+            settlement_account: scenario.liquidation_settlement,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.property_realized_cash_cents = Some(disposition.realized_value.cents());
+    metrics.liquidation_minute = Some(scenario.state.now().as_minutes());
+    if narrative {
+        println!(
+            "[LIQUIDATE] {} estimated property -> {} realized resale cash.",
+            format_cents(estimated_value.cents()),
+            format_cents(disposition.realized_value.cents())
+        );
+        let front_name = scenario
+            .state
+            .world()
+            .get_business(scenario.front)
+            .expect("laundering front must persist")
+            .name()
+            .to_owned();
+        println!(
+            "[DECIDE]  Dirty cash buys nothing legitimate. Run the resale proceeds through {front_name}'s books."
+        );
+    }
+    launder_through_front(
+        scenario,
+        narrative,
+        metrics,
+        scenario.liquidation_cash,
+        disposition.realized_value.cents(),
+    )?;
+    Ok(())
+}
 
+fn capture_initial_case_observation(
+    scenario: &Scenario,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     let player_case_information = scenario
         .state
         .intelligence()
@@ -722,13 +699,8 @@ pub fn play_session_with_fixture_view(
         .map(|information| information.observed_at().as_minutes())
         .min();
     if narrative {
-        print_player_knowledge_gap(&scenario, burglary);
+        print_player_knowledge_gap(scenario, burglary);
     }
-
-    // Audit facts about the witness chain, captured from production records the way every
-    // other audit metric is: whether the case named its on-scene witness at intake. Acting
-    // policy never reads this - the organization only knows the job "was witnessed" from its
-    // own after-action report.
     if let Some(investigation) = scenario.investigation {
         metrics.case_witness_registered = scenario
             .state
@@ -737,677 +709,131 @@ pub fn play_session_with_fixture_view(
             .next()
             .is_some();
     }
-    // Whether an institutional interview ever connected into recorded testimony is captured
-    // after the whole arc below; here it only starts as false so batch runs still report the
-    // chain honestly when no narrative beat runs.
+}
 
-    // The Press answer to a witnessed job is not only patience: leadership leans once on the
-    // shop's owner - public knowledge who that is. Leadership does not send the follow-up
-    // immediately after the failed score. If organization-held information contains a typed
-    // patrol pattern, that pattern selects the timing; otherwise the harness uses a bounded
-    // treatment delay without narrating it as knowledge. The follow-up carries its own exposure
-    // risk like any street work.
-    let mut pending_witness_pressure: Option<OperationId> = None;
-    if strategy == Strategy::Press
-        && metrics.player_legal_activity_information > 0
-        && matches!(
-            metrics.exposure_level,
-            Some(
-                crimocracy::operations::OperationExposureLevel::Witnessed
-                    | crimocracy::operations::OperationExposureLevel::Identifying
-            )
-        )
-    {
-        let witness_name = match scenario
+fn capture_campaign_audit_metrics(scenario: &Scenario, metrics: &mut RunMetrics) {
+    metrics.rival_home_enterprises =
+        resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)
+            .expect("home-district influence should resolve")
+            .standings
+            .into_iter()
+            .filter(|standing| standing.organization != scenario.player)
+            .map(|standing| standing.active_enterprises)
+            .sum();
+    if let Some(expansion) = metrics.expansion_enterprise {
+        let (net, heat) = scenario
             .state
-            .world()
-            .get_business(scenario.target)
-            .expect("target business must persist")
-            .owner()
-        {
-            crimocracy::world::BusinessOwner::Character(owner) => scenario
-                .state
-                .world()
-                .get_character(owner)
-                .map(|record| record.name().to_owned())
-                .unwrap_or_else(|| "the owner".to_owned()),
-            crimocracy::world::BusinessOwner::Independent
-            | crimocracy::world::BusinessOwner::Organization(_) => "the owner".to_owned(),
-        };
-        if narrative {
-            println!(
-                "[DECIDE]  The after-action says the job was witnessed. Everyone knows who keeps {}: do not follow the failed score immediately, then send Carlo with one quiet word and accept that the follow-up carries its own exposure risk.",
-                scenario
-                    .state
-                    .world()
-                    .get_business(scenario.target)
-                    .expect("target business must persist")
-                    .name(),
-            );
-        }
-        // The lull anchor is player-visible reasoning: the crew's own field report places the
-        // heavy enforcement in the small hours, so leadership schedules the quiet word inside
-        // the first morning gap after the case opened and still before an institutional
-        // interview would typically be worked. When the crew's debrief produced a patrol
-        // report, use the same patrol-aware window selection RECON uses; otherwise fall
-        // back to a bounded evaluation-owned offset.
-        let case_open_minute = metrics
-            .case_open_minute
-            .expect("witness-pressure arc requires the surfaced case-open minute");
-        let debrief_patrol_pattern = metrics
-            .debrief_police_activity_information
-            .iter()
-            .copied()
-            .find(|information| {
-                scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .is_some_and(|record| {
-                        matches!(
-                            record.signal(),
-                            Some(InformationSignal::PatrolPattern { .. })
-                        )
-                    })
-            });
-        // Fallback: any organization-held police-activity observation that actually carries a
-        // dependable recurring pattern. A debrief saying only "police were active at that hour"
-        // is useful planning information, but it is not enough to manufacture a daily schedule.
-        let police_activity_information = debrief_patrol_pattern.or_else(|| {
-            scenario
-                .state
-                .intelligence()
-                .information_for_holder_by_topic(
-                    KnowledgeHolder::Organization(scenario.player),
-                    InformationTopic::PoliceActivity,
-                )
-                .find(|information| {
-                    matches!(
-                        information.signal(),
-                        Some(InformationSignal::PatrolPattern { .. })
-                    )
-                })
-                .map(|information| information.id())
-        });
-        let pressure_at = if let Some(information) = police_activity_information {
-            let patrol_signal = scenario
-                .state
-                .intelligence()
-                .get_information(information)
-                .and_then(|record| record.signal())
-                .cloned()
-                .expect("selected police-activity information must retain patrol semantics");
-            let duration = scenario
-                .registry
-                .get_operation(OperationKind::WitnessPressure)
-                .execution()
-                .duration();
-            // Witness interviews typically land 2-3h after intake; fit the word inside the
-            // first quiet window after opening but before the authority can interview.
-            let latest_start = SimTime::from_minutes(case_open_minute + 180);
-            choose_safe_start_from_patrol_signal(
-                SimTime::from_minutes(case_open_minute),
-                &patrol_signal,
-                duration,
-                SimDuration::from_minutes(30),
-                latest_start,
-            )
-            .unwrap_or_else(|_| {
-                let delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
-                SimTime::from_minutes(case_open_minute + delay)
+            .enterprises()
+            .cycles_for(expansion)
+            .try_fold((Money::ZERO, Money::ZERO), |(net, heat), cycle| {
+                Some((
+                    net.checked_add(cycle.net_cash())?,
+                    heat.checked_add(cycle.investigation_heat())?,
+                ))
             })
-        } else {
-            let delay = 50 + bounded_policy_choice(scenario.seed, 0xA11CE, 30);
-            SimTime::from_minutes(case_open_minute + delay)
-        };
-        if narrative && police_activity_information.is_some() {
-            println!(
-                "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
-                format_minute_of_day(pressure_at.as_minutes())
-            );
-        }
-        let witness = scenario.target_owner;
-        pending_witness_pressure = Some(authorize_witness_pressure(
-            &mut scenario,
-            witness,
-            &format!("Quiet word to {witness_name}"),
-            pressure_at,
-        )?);
+            .expect("expansion enterprise totals must fit money range");
+        metrics.expansion_net_cents = Some(net.cents());
+        metrics.expansion_heat_cents = Some(heat.cents());
     }
-
-    // The Press branch exercises a real player follow-up: the organization uses only the
-    // surfaced legal-activity report and the crew's field report to authorize counter-surveillance
-    // of the precinct itself. The investigation's evidence, lead, and internal ID stay hidden; the
-    // follow-up reads only whether the authority is still visibly developing the known case.
-    if strategy == Strategy::Press
-        && metrics.player_legal_activity_information > 0
-        && metrics.player_police_activity_information > 0
-    {
-        let neighborhood_name = scenario
+    if let Some(investigation) = scenario.investigation {
+        let interview_ran = scenario
             .state
-            .world()
-            .get_neighborhood(scenario.neighborhood)
-            .expect("counter-surveillance neighborhood must persist")
-            .name()
-            .to_owned();
-        let police_name = scenario
-            .state
-            .world()
-            .get_organization(scenario.police)
-            .expect("police organization must persist")
-            .name()
-            .to_owned();
-        let case_open_minute = metrics
-            .case_open_minute
-            .expect("press consequence arc requires the surfaced case-open minute");
-        let cold_window_for_heat_check =
-            scenario.registry.legal().cold_case_window().as_minutes() as u64;
-        // Heat check lands well inside the authored cold window (about 1/36th of it, bounded
-        // to [30,90] minutes) so the read always precedes any possible shelf no matter how
-        // authors tune the window.
-        let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
-        let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay);
-        if narrative {
-            println!(
-                "[DECIDE]  A case is open and the crew's field report is back. Hold back on further street work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
-            );
-            println!(
-                "[DECIDE]  Watch {police_name} itself at {}, {} minutes after the case opened, to read whether detectives are still actively working the matter.",
-                format_minute_of_day(heat_check_at.as_minutes()),
-                heat_check_delay
-            );
-        }
-        metrics.counterintelligence_scheduled_at = Some(heat_check_at.as_minutes());
-        let counterintelligence_title = format!("{police_name} case-heat check");
-        let police = scenario.police;
-        let counterintelligence = authorize_surveillance_target(
-            &mut scenario,
-            EntityRef::Organization(police),
-            &counterintelligence_title,
-            heat_check_at,
-        )?;
-        run_until_operation_terminal(&mut scenario, counterintelligence, narrative, &mut metrics)?;
-        // The quiet word was scheduled into the same morning gap and is already terminal by
-        // the time the precinct watch closes; capture here so its narration stays
-        // chronological with the rest of the night.
-        if let Some(pressure) = pending_witness_pressure.take() {
-            capture_witness_pressure_outcome(&mut scenario, pressure, narrative, &mut metrics)?;
-        }
-        let operation = scenario
-            .state
-            .operations()
-            .get_operation(counterintelligence)
-            .expect("counterintelligence operation must persist");
-        if let Some(resolution) = operation.resolution() {
-            metrics.counterintelligence_outcome = Some(resolution.objective_outcome());
-            metrics.counterintelligence_information = resolution.discovered_information().len();
-            metrics.followup_case_active = observe_authority_case_sightline(&scenario, resolution);
-        }
-        if narrative {
-            match metrics.followup_case_active {
-                Some(true) => println!(
-                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Keep the district dark."
-                ),
-                Some(false) => println!(
-                    "[VERIFY]  No active case machinery around {police_name}; the matter appears shelved."
-                ),
-                None => println!(
-                    "[VERIFY]  The check did not produce a dependable read on the case's activity."
-                ),
-            }
-        }
-        // The narrative session stands down but does not go deaf: once per campaign day the
-        // organization asks its precinct contact what the institution knows. The lead
-        // detective's own knowledge is production state - recorded when he took the case and
-        // refreshed when the authority shelves it - so each new development arrives as a fresh,
-        // disclosable record through the canonical channel. Batch sessions observe one day and
-        // stop while the case is still hot, keeping the matched financial window intact.
-        if full_arc {
-            let case_open_minute = metrics
-                .case_open_minute
-                .expect("press consequence arc requires the surfaced case-open minute");
-            let cold_case_window = scenario.registry.legal().cold_case_window();
-            // The shelf cannot land before the authored inactivity window plus the initial
-            // evidence review that extends the case's activity instant; start daily polling
-            // from there and keep polling until the channel carries the shelved read.
-            let longest_work = scenario
-                .registry
-                .get_investigation_work(InvestigationWorkKind::EvidenceReview)
-                .duration();
-            let poll_at = SimTime::from_minutes(
-                case_open_minute
-                    + u64::from(cold_case_window.as_minutes())
-                    + u64::from(longest_work.as_minutes()),
-            );
-            // PRESS notices the reopened second score at the same canonical minute every narrative
-            // branch does, while it is still standing down. The branch then deliberately schedules
-            // nothing on it: the discipline that protects the open case is also an opportunity cost.
-            if !metrics.second_opportunity_discovered {
-                let discovery_at = scenario.timeline.second_opportunity_discovery_at;
-                if scenario.state.now() < discovery_at {
-                    run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
-                }
-                discover_second_opportunity(&mut scenario, narrative, &mut metrics)?;
-                if narrative {
-                    println!(
-                        "[DECIDE]  The second score is real, but {police_name} is still developing the case. Leadership holds the district dark and takes nothing; the opportunity will be allowed to lapse."
-                    );
-                }
-            }
-            // Once the matched observation window has closed, standing down no longer means
-            // sitting on idle capital. Each day the organization launders the racket's take
-            // through its front's books, and as soon as those accounted funds cover the
-            // venue's authored price it buys the independent harbor club outright through
-            // the canonical acquisition path - dirty money cannot buy legitimacy, so the
-            // clean-money war chest gates the diversification. Owning the venue is what
-            // lets the delegated expansion establish a second racket there, outside Central
-            // Precinct's jurisdiction. Real agency during the wait, not a time skip.
-            let matched_boundary = SimTime::from_minutes(
-                metrics
-                    .matched_financial_boundary_minute
-                    .expect("narrative sessions always record their matched financial boundary"),
-            );
-            if scenario.state.now() < matched_boundary {
-                run_until(&mut scenario, matched_boundary, narrative, &mut metrics)?;
-            }
-            if narrative {
-                println!(
-                    "[DECIDE]  Standing down does not mean standing still: build clean money day by day, then buy the harbor club and open a second book the home case cannot touch."
-                );
-            }
-            // Bounded daily loop: the authored cold-case decay guarantees a deterministic
-            // shelf, and laundering accumulates accounted funds at the front's authored
-            // pace, so both waits terminate. Every campaign day launders the racket's till
-            // (keeping a working-capital floor) and retries the purchase once the books can
-            // cover it; the precinct channel is only asked once the shelf could have landed.
-            // A till authored as concealed cash stays exactly that: hidden money cannot
-            // route through the front's ledgers without exposing it, so the beat leaves
-            // it parked and launders only what sits in street cash. Narration follows
-            // report discipline: full detail on the first beat and on every change, a
-            // one-line heartbeat otherwise.
-            let mut laundry_days = 0_u32;
-            let mut last_absorbed: Option<i64> = None;
-            let mut final_purchase_beat = false;
-            let mut day_at = scenario.state.now();
-            // The books decide the shape of the wait: a street-cash till can be swept day by
-            // day toward the second-district purchase, while a concealed till cannot route
-            // through a front's ledgers at all, so that world stands down on survival alone.
-            // The float's kind is fixed at establishment, so one read settles it.
-            let canal_float_kind_street = scenario
-                .state
-                .finance()
-                .get_account(
-                    scenario
-                        .state
-                        .enterprises()
-                        .get_enterprise(scenario.enterprise)
-                        .expect("canal enterprise must persist")
-                        .cash_account(),
-                )
-                .is_some_and(|account| {
-                    account.kind() == crimocracy::finance::AccountKind::StreetCash
-                });
-            let till_concealed = !canal_float_kind_street;
-            metrics.enterprise_till_concealed = Some(till_concealed);
-            if narrative && till_concealed {
-                println!(
-                    "[DECIDE]  The racket's till sits in concealed cash, and hidden money cannot touch {}'s ledgers without exposing it. With no clean money to build on, leadership holds to one job this arc: outlast the case.",
-                    scenario
-                        .state
-                        .world()
-                        .get_business(scenario.front)
-                        .expect("laundering front must persist")
-                        .name(),
-                );
-            }
-            for _ in 0..40 {
-                if scenario.state.now() < day_at {
-                    run_until(&mut scenario, day_at, narrative, &mut metrics)?;
-                }
-                let canal_float = scenario
-                    .state
-                    .enterprises()
-                    .get_enterprise(scenario.enterprise)
-                    .expect("canal enterprise must persist")
-                    .cash_account();
-                let first_laundry = laundry_days == 0;
-                if !till_concealed {
-                    if metrics.front_acquired && !metrics.expansion_established {
-                        // Harbor venue owned but book still needs float: capitalize before
-                        // the daily sweep so fresh enterprise income is not drained first.
-                        // Without this ordering the same till funded both laundering and
-                        // capitalization and the new book always starved with $0.00.
-                        establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-                        let launderable = scenario
-                            .state
-                            .finance()
-                            .get_account(canal_float)
-                            .map(|account| account.balance().cents())
-                            .unwrap_or_default()
-                            .max(0);
-                        let mut day_absorbed: Option<i64> = None;
-                        if launderable > 0
-                            && let Some(gross) = launder_through_front(
-                                &mut scenario,
-                                false,
-                                &mut metrics,
-                                canal_float,
-                                launderable,
-                            )?
-                        {
-                            day_absorbed = Some(gross);
-                        }
-                        laundry_days += 1;
-                        if narrative && day_absorbed != last_absorbed {
-                            match day_absorbed {
-                                Some(gross) => println!(
-                                    "[LAUNDER] The front's daily absorbable volume moved to {}.",
-                                    format_cents(gross)
-                                ),
-                                None => println!(
-                                    "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
-                                ),
-                            }
-                        }
-                        last_absorbed = day_absorbed;
-                    } else {
-                        // Sweep the racket's street-cash float each day after the day-boundary
-                        // simulation pass has already settled any due payroll. Payroll can draw
-                        // from any organization-owned liquid cash, including this float, so the
-                        // sweep only launders the balance that actually remains. A concealed till
-                        // cannot route through a front's ledgers at all, which is why concealed-
-                        // till worlds stand down on survival alone.
-                        if narrative && first_laundry {
-                            println!(
-                                "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
-                            );
-                        }
-                        let launderable = scenario
-                            .state
-                            .finance()
-                            .get_account(canal_float)
-                            .map(|account| account.balance().cents())
-                            .unwrap_or_default()
-                            .max(0);
-                        let mut day_absorbed: Option<i64> = None;
-                        if launderable > 0
-                            && let Some(gross) = launder_through_front(
-                                &mut scenario,
-                                narrative && first_laundry,
-                                &mut metrics,
-                                canal_float,
-                                launderable,
-                            )?
-                        {
-                            day_absorbed = Some(gross);
-                        }
-                        laundry_days += 1;
-                        if narrative && !first_laundry && day_absorbed != last_absorbed {
-                            match day_absorbed {
-                                Some(gross) => println!(
-                                    "[LAUNDER] The front's daily absorbable volume moved to {}.",
-                                    format_cents(gross)
-                                ),
-                                None => println!(
-                                    "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
-                                ),
-                            }
-                        }
-                        last_absorbed = day_absorbed;
-                        // The diversification purchase: gated on accounted funds by production
-                        // validation, so a street-till world simply retries each day until the books
-                        // qualify. Once the venue is owned, the priority branch above retries
-                        // capitalization before future sweeps.
-                        if !metrics.front_acquired
-                            && acquire_harbor_front(&mut scenario, narrative, &mut metrics)?
-                        {
-                            establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-                            if metrics.expansion_established && narrative {
-                                println!(
-                                    "[DECIDE]  Standing down does not mean going deaf: once a day, {police_name}-channel asks only - has anything moved on the case?"
-                                );
-                            }
-                        }
-                    }
-                } else if metrics.front_acquired && !metrics.expansion_established {
-                    // Concealed-till worlds never acquire, but keep retry for completeness.
-                    establish_harbor_expansion(&mut scenario, narrative, &mut metrics)?;
-                }
-                // The precinct channel is only asked once the shelf could have landed; before
-                // that there is nothing fresh for it to say.
-                let read = if scenario.state.now() >= poll_at {
-                    read_police_contact(
-                        &mut scenario,
-                        EntityRef::Operation(burglary),
-                        narrative,
-                        &mut metrics,
-                    )?
-                } else {
-                    None
-                };
-                match &read {
-                    Some((false, _)) => {
-                        metrics.cold_case_confirmed = Some(true);
-                        if narrative {
-                            println!(
-                                "[CONSEQUENCE RESOLVED] The channel confirms the precinct shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
-                            );
-                        }
-                    }
-                    Some((true, _)) => {}
-                    None => {}
-                }
-                // Daily heartbeat while the wait continues: throttled to every other day
-                // or when the channel produced a fresh read, so the standing-down does not
-                // spam the narrative with identical lines. Concealed-till worlds have no
-                // laundry counter, so their pulse keys on the wait itself.
-                let should_heartbeat = narrative
-                    && (laundry_days > 1 || till_concealed)
-                    && metrics.cold_case_confirmed.is_none()
-                    && (read.is_some() || laundry_days.is_multiple_of(2));
-                if should_heartbeat {
-                    let accounted = scenario
-                        .state
-                        .finance()
-                        .get_account(scenario.accounted_funds)
-                        .expect("accounted-funds account must persist")
-                        .balance();
-                    let channel_line = match &read {
-                        Some((true, _)) => {
-                            "the channel still reads the case as actively developing"
-                        }
-                        Some((false, _)) => "the channel confirms the case has cooled",
-                        None if scenario.state.now() < poll_at => {
-                            "the channel cannot yet know - the case cannot have shelved"
-                        }
-                        _ => "the channel has nothing fresh to share yet",
-                    };
-                    println!(
-                        "[WAIT] {}: {}; {} laundry day(s) so far, accounted books at {}.",
-                        stamp(scenario.state.now().as_minutes()),
-                        channel_line,
-                        laundry_days,
-                        format_cents(accounted.cents()),
-                    );
-                }
-                // Once the channel carries the cooled read, one more beat gives the books a
-                // final chance to clear the price; if they never could, the arc honestly
-                // ends in survival instead of grinding wages into shortfall.
-                if metrics.cold_case_confirmed == Some(true) {
-                    if metrics.front_acquired || till_concealed {
-                        break;
-                    }
-                    if final_purchase_beat {
-                        if narrative {
-                            println!(
-                                "[DECIDE]  The case is cooled but the books never carried the price; diversification waits for another season."
-                            );
-                        }
-                        break;
-                    }
-                    final_purchase_beat = true;
-                }
-                day_at = day_at
-                    + SimDuration::from_minutes(
-                        u32::try_from(campaign_day_minutes)
-                            .expect("authored campaign day must fit the duration type"),
-                    );
-            }
-            if narrative && metrics.cold_case_confirmed.is_none() {
-                println!(
-                    "[VERIFY]  The channel never produced a dependable read on the case's activity."
-                );
-            }
-            // The diversified book must prove itself as live economy, not a paper
-            // establishment: keep the world running until the second racket has settled
-            // real cycles before the final financial view.
-            if metrics.front_acquired
-                && let Some(expansion) = metrics.expansion_enterprise
-            {
-                for _ in 0..10 {
-                    let settled_cycles = scenario.state.enterprises().cycles_for(expansion).count();
-                    if settled_cycles >= 2 {
-                        break;
-                    }
-                    let next_day = scenario.state.now()
-                        + SimDuration::from_minutes(
-                            u32::try_from(campaign_day_minutes)
-                                .expect("authored campaign day must fit the duration type"),
-                        );
-                    run_until(&mut scenario, next_day, narrative, &mut metrics)?;
-                }
-            }
-        }
-    }
-    // The quiet word resolved during the same advance of the clock; capture its consequence
-    // from production records whether or not the narrative polling loop above ran.
-    if let Some(pressure) = pending_witness_pressure.take() {
-        capture_witness_pressure_outcome(&mut scenario, pressure, narrative, &mut metrics)?;
-    }
-
-    {
-        // The authored autonomous-recruitment cadence defines the rivals' campaign day. Sessions
-        // observe a whole number of those days so financial windows stay matched while session
-        // timing tracks the authored content instead of hard-coded minutes.
-        let campaign_day_minutes = u64::from(
-            scenario
-                .registry
-                .recruitment()
-                .autonomous_attempt_cadence()
-                .as_minutes(),
-        );
-        let observation_end = if full_arc {
-            SimTime::from_minutes(campaign_day_minutes * 2)
-        } else {
-            SimTime::from_minutes(campaign_day_minutes)
-        };
-        // The rival autonomous-recruitment cadence fires once per campaign day. Narrative sessions
-        // pause just past the first day boundary so an accepted defection is observable, let the
-        // organization run its own defector watch, then finish the observation window.
-        let recruitment_boundary = SimTime::from_minutes(campaign_day_minutes + 1);
-        if full_arc && observation_end > recruitment_boundary {
-            run_until(&mut scenario, recruitment_boundary, narrative, &mut metrics)?;
-        } else {
-            run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
-        }
-        // All narrative branches notice the reopened second score at the same canonical minute and
-        // then each branch either works it (RUSH rebuild, RECON re-recon) or deliberately lets it
-        // lapse as the price of standing down (PRESS, which already discovered it during the
-        // cold-case wait above). Batch sessions keep the single-act window for performance.
-        if full_arc && !metrics.second_opportunity_discovered {
-            let discovery_at = scenario.timeline.second_opportunity_discovery_at;
-            if scenario.state.now() < discovery_at {
-                run_until(&mut scenario, discovery_at, narrative, &mut metrics)?;
-            }
-            discover_second_opportunity(&mut scenario, narrative, &mut metrics)?;
-        }
-        if full_arc && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
-            run_defector_trail(&mut scenario, narrative, &mut metrics)?;
-        }
-        // The trail's answer invites one more player move: a personal re-approach to the
-        // defector through the canonical executive recruitment path. Its outcome is production
-        // scoring, not authoring, and a refusal leaks the approach to the rival.
-        if full_arc && metrics.defector_trail_confirmed.is_some() {
-            run_win_back_attempt(&mut scenario, narrative, &mut metrics)?;
-        }
-        if full_arc {
-            run_second_act(&mut scenario, strategy, narrative, &mut metrics)?;
-        }
-        if scenario.state.now() < observation_end {
-            run_until(&mut scenario, observation_end, narrative, &mut metrics)?;
-        }
-        let financials = resolve_financial_view(&scenario, &metrics)?;
-        let mut financials = financials;
-        financials.payroll_paid_cents = metrics.payroll_paid_cents;
-        financials.payroll_short_cents = metrics.payroll_short_cents;
-        metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
-        metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
-        // Raw audit evidence of delegated rival growth: active rackets each non-player
-        // organization operates in the home district, derived through the canonical
-        // territory-influence surface (acting policy never reads this).
-        metrics.rival_home_enterprises =
-            resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)
-                .expect("home-district influence should resolve")
-                .standings
-                .into_iter()
-                .filter(|standing| standing.organization != scenario.player)
-                .map(|standing| standing.active_enterprises)
-                .sum();
-        if let Some(expansion) = metrics.expansion_enterprise {
-            let (net, heat) = scenario
-                .state
-                .enterprises()
-                .cycles_for(expansion)
-                .try_fold((Money::ZERO, Money::ZERO), |(net, heat), cycle| {
-                    Some((
-                        net.checked_add(cycle.net_cash())?,
-                        heat.checked_add(cycle.investigation_heat())?,
-                    ))
-                })
-                .expect("expansion enterprise totals must fit money range");
-            metrics.expansion_net_cents = Some(net.cents());
-            metrics.expansion_heat_cents = Some(heat.cents());
-        }
-        // Audit evidence for the witness chain: whether any institutional interview against
-        // the session's case connected into recorded witness testimony.
-        if let Some(investigation) = scenario.investigation {
-            let interview_ran = scenario
+            .legal()
+            .work_for_investigation(investigation)
+            .any(|work| work.kind() == InvestigationWorkKind::WitnessInterview);
+        metrics.witness_testimony_produced = interview_ran
+            && scenario
                 .state
                 .legal()
-                .work_for_investigation(investigation)
-                .any(|work| work.kind() == InvestigationWorkKind::WitnessInterview);
-            metrics.witness_testimony_produced = interview_ran
-                && scenario
-                    .state
-                    .legal()
-                    .get_investigation(investigation)
-                    .is_some_and(|case| {
-                        case.evidence().iter().any(|evidence_id| {
-                            scenario
-                                .state
-                                .legal()
-                                .get_evidence(*evidence_id)
-                                .is_some_and(|evidence| {
-                                    evidence.kind()
-                                        == crimocracy::legal::EvidenceKind::WitnessTestimony
-                                })
-                        })
-                    });
-        }
-        if narrative {
-            print_organization_closing_view(&scenario, &metrics);
-            print_second_act_recap(&scenario, strategy, &metrics);
-            print_financial_view(&scenario, financials);
-            print_executive_briefs(
-                scenario
-                    .state
-                    .reports()
-                    .reports_for(scenario.player)
-                    .filter(|report| report.kind() == ReportKind::ExecutiveBrief),
-            );
-        }
+                .get_investigation(investigation)
+                .is_some_and(|case| {
+                    case.evidence().iter().any(|evidence_id| {
+                        scenario
+                            .state
+                            .legal()
+                            .get_evidence(*evidence_id)
+                            .is_some_and(|evidence| {
+                                evidence.kind() == crimocracy::legal::EvidenceKind::WitnessTestimony
+                            })
+                    })
+                });
+    }
+}
+
+fn run_post_burglary_campaign(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    burglary: OperationId,
+    full_arc: bool,
+    narrative: bool,
+    campaign_day_minutes: u64,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    if strategy == Strategy::Press {
+        press::run_press_response(
+            scenario,
+            burglary,
+            full_arc,
+            narrative,
+            campaign_day_minutes,
+            metrics,
+        )?;
     }
 
+    let observation_end = if full_arc {
+        SimTime::from_minutes(campaign_day_minutes * 2)
+    } else {
+        SimTime::from_minutes(campaign_day_minutes)
+    };
+    let recruitment_boundary = SimTime::from_minutes(campaign_day_minutes + 1);
+    if full_arc && observation_end > recruitment_boundary {
+        run_until(scenario, recruitment_boundary, narrative, metrics)?;
+    } else {
+        run_until(scenario, observation_end, narrative, metrics)?;
+    }
+
+    if full_arc && !metrics.second_opportunity_discovered {
+        let discovery_at = scenario.timeline.second_opportunity_discovery_at;
+        if scenario.state.now() < discovery_at {
+            run_until(scenario, discovery_at, narrative, metrics)?;
+        }
+        discover_second_opportunity(scenario, narrative, metrics)?;
+    }
+    if full_arc && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
+        defector::run_defector_trail(scenario, narrative, metrics)?;
+    }
+    if full_arc && metrics.defector_trail_confirmed.is_some() {
+        defector::run_win_back_attempt(scenario, narrative, metrics)?;
+    }
+    if full_arc {
+        second_act::run_second_act(scenario, strategy, narrative, metrics)?;
+    }
+    if scenario.state.now() < observation_end {
+        run_until(scenario, observation_end, narrative, metrics)?;
+    }
+
+    let mut financials = resolve_financial_view(scenario, metrics)?;
+    financials.payroll_paid_cents = metrics.payroll_paid_cents;
+    financials.payroll_short_cents = metrics.payroll_short_cents;
+    metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
+    metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
+    capture_campaign_audit_metrics(scenario, metrics);
+    if narrative {
+        print_organization_closing_view(scenario, metrics);
+        print_second_act_recap(scenario, strategy, metrics);
+        print_financial_view(scenario, financials);
+        print_executive_briefs(
+            scenario
+                .state
+                .reports()
+                .reports_for(scenario.player)
+                .filter(|report| report.kind() == ReportKind::ExecutiveBrief),
+        );
+    }
+    Ok(())
+}
+
+fn capture_final_session_summary(scenario: &Scenario, metrics: &mut RunMetrics) {
     metrics.player_report_count = scenario
         .state
         .reports()
@@ -1431,360 +857,89 @@ pub fn play_session_with_fixture_view(
             })
             .expect("organization accounted-funds total must fit money range"),
     );
+}
+
+pub fn play_session(
+    registry: &Registry,
+    strategy: Strategy,
+    profile: ScenarioProfile,
+    seeds: EvaluationSeeds,
+    run_mode: SessionRunMode,
+) -> Result<RunMetrics, Box<dyn Error>> {
+    play_session_with_fixture_view(
+        registry,
+        strategy,
+        profile,
+        seeds,
+        run_mode,
+        run_mode.narrative(),
+    )
+}
+
+/// `print_fixture_view` exists so a narrative comparison prints the shared authored fixture
+/// once instead of repeating it per strategy: the world is identical across matched branches.
+pub fn play_session_with_fixture_view(
+    registry: &Registry,
+    strategy: Strategy,
+    profile: ScenarioProfile,
+    seeds: EvaluationSeeds,
+    run_mode: SessionRunMode,
+    print_fixture_view: bool,
+) -> Result<RunMetrics, Box<dyn Error>> {
+    let narrative = run_mode.narrative();
+    let full_arc = run_mode.full_arc();
+    let mut scenario = build_scenario(registry, seeds, profile)?;
+    let mut metrics = RunMetrics {
+        strategy: Some(strategy),
+        variation: Some(scenario.variation),
+        ..RunMetrics::default()
+    };
+    // Matched financial boundary: full sessions snapshot at two campaign days and batch
+    // sessions at one. Every branch crosses this minute before a longer consequence arc extends,
+    // so the snapshot compares identical windows instead of unequal waits.
+    let campaign_day_minutes = u64::from(
+        registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes(),
+    );
+    metrics.matched_financial_boundary_minute =
+        Some(campaign_day_minutes * if full_arc { 2 } else { 1 });
+
+    if narrative && print_fixture_view {
+        println!(
+            "[FIXTURE] {} authored variation selected by world seed.",
+            scenario.variation.label(),
+        );
+        print_starting_player_view(&scenario);
+    }
+
+    let opportunity = discover_initial_opportunity(&mut scenario, narrative)?;
+    let plan = prepare_initial_burglary_plan(&mut scenario, strategy, narrative, &mut metrics)?;
+    let burglary = authorize_initial_burglary(
+        &mut scenario,
+        strategy,
+        opportunity,
+        plan,
+        narrative,
+        &mut metrics,
+    )?;
+    resolve_initial_burglary(&mut scenario, strategy, burglary, narrative, &mut metrics)?;
+    liquidate_initial_property(&mut scenario, burglary, narrative, &mut metrics)?;
+    capture_initial_case_observation(&scenario, burglary, narrative, &mut metrics);
+
+    run_post_burglary_campaign(
+        &mut scenario,
+        strategy,
+        burglary,
+        full_arc,
+        narrative,
+        campaign_day_minutes,
+        &mut metrics,
+    )?;
+    capture_final_session_summary(&scenario, &mut metrics);
 
     Ok(metrics)
-}
-
-/// Executes the narrative act-2 beat per branch. RUSH rebuilds the crew and moves the second
-/// score away from the overnight hour its own debrief identified as hot; RECON re-invests in
-/// planning and works inside a fresh patrol-safe window; PRESS deliberately takes nothing and
-/// lets the discovered opportunity lapse.
-pub fn run_second_act(
-    scenario: &mut Scenario,
-    strategy: Strategy,
-    narrative: bool,
-    metrics: &mut RunMetrics,
-) -> Result<(), Box<dyn Error>> {
-    let Some(opportunity) = metrics.second_opportunity else {
-        return Err("act 2 cannot run before the second opportunity is discovered".into());
-    };
-    let alternate_target = scenario.alternate_target;
-    let neighborhood_name = scenario
-        .state
-        .world()
-        .get_neighborhood(scenario.neighborhood)
-        .expect("neighborhood must persist")
-        .name()
-        .to_owned();
-
-    match strategy {
-        Strategy::Rush => {
-            let replacement = recruit_replacement(scenario, narrative, metrics)?;
-            let scheduled_for = scenario.timeline.rush_second_act_at;
-            let title = format!(
-                "{} second-score burglary",
-                scenario.variation.alternate_target_name()
-            );
-            // The rebuilt crew plans from the original street observation plus what the
-            // debrief taught the organization about the district's police response.
-            let mut intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
-            intelligence.extend(metrics.debrief_police_activity_information.iter().copied());
-            metrics.second_act_planning_topics = intelligence
-                .iter()
-                .map(|information| {
-                    scenario
-                        .state
-                        .intelligence()
-                        .get_information(*information)
-                        .expect("second-score planning information must persist")
-                        .topic()
-                })
-                .collect();
-            if narrative {
-                println!(
-                    "[DECIDE]  Rebuild is in hand. Shift the second score on {} to {}, away from the overnight hour the crew now knows drew a response. Carry that debriefed police read into the rebuilt crew's plan rather than pretending it revealed a full patrol schedule.",
-                    scenario.variation.alternate_target_name(),
-                    format_minute_of_day(scheduled_for.as_minutes()),
-                );
-            }
-            let burglary = authorize_burglary(
-                scenario,
-                Strategy::Rush,
-                alternate_target,
-                &title,
-                scheduled_for,
-                intelligence,
-                replacement,
-            )?;
-            validate_convert_opportunity(&scenario.state, opportunity, burglary)?
-                .commit(&mut scenario.state)?;
-            metrics.second_burglary = Some(burglary);
-            run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
-            record_second_act_burglary_terminal(scenario, burglary, metrics);
-            liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
-        }
-        Strategy::Recon => {
-            let title = format!(
-                "{} second-score surveillance",
-                scenario.variation.alternate_target_name()
-            );
-            if narrative {
-                println!(
-                    "[DECIDE]  Re-invest in planning: run fresh surveillance on {} before committing the second score, and pick the protected window from the new report.",
-                    scenario.variation.alternate_target_name()
-                );
-            }
-            let recon = authorize_surveillance_target(
-                scenario,
-                EntityRef::Business(alternate_target),
-                &title,
-                scenario.timeline.recon_second_act_surveillance_at,
-            )?;
-            run_until_operation_terminal(scenario, recon, narrative, metrics)?;
-            let resolution = scenario
-                .state
-                .operations()
-                .get_operation(recon)
-                .expect("second-score surveillance must persist")
-                .resolution()
-                .expect("completed second-score surveillance must have a resolution");
-            let discovered_information = resolution.discovered_information().clone();
-            metrics.second_act_recon_information = discovered_information.len();
-            // Casing carries risk both ways: if the surveillance itself drew a police case, the
-            // organization knows it only through its own LegalActivity record. This visible
-            // signal, never the hidden investigation id on the resolution, governs whether the
-            // cautious branch asks its institutional contact before authorizing another crime.
-            metrics.self_heat_case_opened = scenario
-                .state
-                .intelligence()
-                .information_for_holder_by_topic(
-                    KnowledgeHolder::Organization(scenario.player),
-                    InformationTopic::LegalActivity,
-                )
-                .any(|information| information.subject() == EntityRef::Operation(recon));
-            let mut burglary_intelligence =
-                BTreeSet::from([scenario.alternate_opportunity_information]);
-            let mut learned_patrol_information = None;
-            for information in &discovered_information {
-                let record = scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .expect("second-score surveillance information must persist");
-                if narrative {
-                    println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
-                        record.summary()
-                    );
-                }
-                if record.topic() == InformationTopic::PoliceActivity
-                    && matches!(
-                        record.signal(),
-                        Some(InformationSignal::PatrolPattern { .. })
-                    )
-                {
-                    learned_patrol_information = Some(*information);
-                }
-                burglary_intelligence.insert(*information);
-            }
-            // Close self-inflicted heat before committing the next operation. The production
-            // after-action told leadership a case exists, so RECON asks its standing contact what
-            // the precinct is doing. A confirmed hot case, or an inconclusive channel read, means
-            // the cautious branch stands down and lets the opportunity expire. Only an explicit
-            // shelved read clears a known case for further work.
-            if metrics.self_heat_case_opened {
-                let police_name = scenario
-                    .state
-                    .world()
-                    .get_organization(scenario.police)
-                    .expect("police organization must persist")
-                    .name()
-                    .to_owned();
-                if narrative {
-                    println!(
-                        "[DECIDE]  The after-action on our own casing says it drew a case. Before another job touches {neighborhood_name}, leadership uses its channel inside {police_name}."
-                    );
-                }
-                metrics.self_heat_case_active =
-                    read_police_contact(scenario, EntityRef::Operation(recon), narrative, metrics)?
-                        .map(|(sightline, _)| sightline);
-                match metrics.self_heat_case_active {
-                    Some(false) => {
-                        if narrative {
-                            println!(
-                                "[VERIFY]  The channel says {police_name} has already shelved the casing case. RECON can keep evaluating the score from the information it gathered."
-                            );
-                        }
-                    }
-                    Some(true) => {
-                        if narrative {
-                            println!(
-                                "[VERIFY]  Detectives are actively developing the case our casing opened. RECON stands down; the second score will lapse rather than compound fresh heat."
-                            );
-                        }
-                        return Ok(());
-                    }
-                    None => {
-                        if narrative {
-                            println!(
-                                "[VERIFY]  The channel gave no dependable read on the casing case. RECON treats uncertainty as risk and stands down; the second score will lapse."
-                            );
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-            let patrol_information = learned_patrol_information.ok_or(
-                "second-score recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
-            )?;
-            let patrol_record = scenario
-                .state
-                .intelligence()
-                .get_information(patrol_information)
-                .expect("second-score patrol-pattern information must persist");
-            let patrol_signal = patrol_record
-                .signal()
-                .cloned()
-                .ok_or("second-score patrol-pattern information lost its typed semantics")?;
-            let duration = scenario
-                .registry
-                .get_operation(OperationKind::Burglary)
-                .execution()
-                .duration();
-            let scheduled_for = choose_safe_start_from_patrol_signal(
-                scenario.state.now(),
-                &patrol_signal,
-                duration,
-                SimDuration::from_minutes(60),
-                scenario.timeline.second_opportunity_valid_until,
-            )?;
-            if narrative {
-                let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
-                println!(
-                    "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
-                    patrol_record.summary(),
-                    windows,
-                    duration.as_minutes(),
-                    scheduled_for.as_minutes(),
-                    format_minute_of_day(scheduled_for.as_minutes())
-                );
-            }
-            let title = format!(
-                "{} second-score burglary",
-                scenario.variation.alternate_target_name()
-            );
-            let burglary = authorize_burglary(
-                scenario,
-                Strategy::Recon,
-                alternate_target,
-                &title,
-                scheduled_for,
-                burglary_intelligence,
-                scenario.burglar,
-            )?;
-            metrics.second_act_planning_topics = scenario
-                .state
-                .operations()
-                .get_operation(burglary)
-                .expect("second-score burglary must remain queryable")
-                .intelligence()
-                .iter()
-                .map(|information| {
-                    scenario
-                        .state
-                        .intelligence()
-                        .get_information(*information)
-                        .expect("second-score planning information must persist")
-                        .topic()
-                })
-                .collect();
-            validate_convert_opportunity(&scenario.state, opportunity, burglary)?
-                .commit(&mut scenario.state)?;
-            metrics.second_burglary = Some(burglary);
-            run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
-            record_second_act_burglary_terminal(scenario, burglary, metrics);
-            liquidate_second_act_property(scenario, burglary, narrative, metrics)?;
-        }
-        Strategy::Press => {
-            // PRESS already discovered the second score during the cold-case wait and deliberately
-            // scheduled nothing on it. The lapse is a standing-down cost, narrated when the
-            // opportunity expired and confirmed here from the public lifecycle record.
-            if metrics.second_opportunity_expired {
-                if narrative {
-                    println!(
-                        "[DECIDE]  Standing down has a price: the second score on {} lapsed without action while the case stayed protected. The discipline that outlasted the investigation also gave up real value.",
-                        scenario.variation.alternate_target_name()
-                    );
-                }
-            } else if narrative {
-                println!(
-                    "[DECIDE]  The second score is still on the table, but {neighborhood_name} stays dark until leadership confirms the case is shelved."
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn record_second_act_burglary_terminal(
-    scenario: &Scenario,
-    burglary: OperationId,
-    metrics: &mut RunMetrics,
-) {
-    metrics.second_burglary_terminal_minute = Some(scenario.state.now().as_minutes());
-    let record = scenario
-        .state
-        .operations()
-        .get_operation(burglary)
-        .expect("second-score burglary must remain queryable");
-    metrics.second_burglary_aborted = record.status() == OperationStatus::Aborted;
-    if let Some(resolution) = record.resolution() {
-        metrics.second_burglary_outcome = Some(resolution.objective_outcome());
-        metrics.second_act_property_acquired_value_cents = resolution
-            .property_proceeds()
-            .map(|proceeds| proceeds.estimated_value().cents());
-    }
-}
-
-pub fn liquidate_second_act_property(
-    scenario: &mut Scenario,
-    burglary: OperationId,
-    narrative: bool,
-    metrics: &mut RunMetrics,
-) -> Result<(), Box<dyn Error>> {
-    let Some(estimated_value) = scenario
-        .state
-        .operations()
-        .get_operation(burglary)
-        .and_then(|operation| operation.resolution())
-        .and_then(|resolution| resolution.property_proceeds())
-        .map(|proceeds| proceeds.estimated_value())
-    else {
-        return Ok(());
-    };
-    let venue_name = scenario
-        .state
-        .world()
-        .get_business(scenario.resale_venue)
-        .expect("resale venue must persist")
-        .name()
-        .to_owned();
-    if narrative {
-        println!(
-            "[DECIDE]  Move the second-score property through {venue_name} rather than leave it as held inventory."
-        );
-    }
-    let disposition = validate_dispose_property(
-        scenario.registry,
-        &scenario.state,
-        PropertyDispositionDraft {
-            operation: burglary,
-            venue: scenario.resale_venue,
-            cash_account: scenario.liquidation_cash,
-            settlement_account: scenario.liquidation_settlement,
-        },
-    )?
-    .commit(&mut scenario.state)?;
-    metrics.second_act_property_realized_cash_cents = Some(disposition.realized_value.cents());
-    if narrative {
-        println!(
-            "[LIQUIDATE] {} estimated property -> {} realized resale cash.",
-            format_cents(estimated_value.cents()),
-            format_cents(disposition.realized_value.cents())
-        );
-    }
-    // Same money discipline as the first score: resale cash goes through the front's books
-    // before the organization treats it as spendable value.
-    launder_through_front(
-        scenario,
-        narrative,
-        metrics,
-        scenario.liquidation_cash,
-        disposition.realized_value.cents(),
-    )?;
-    Ok(())
 }
 
 pub fn capture_terminal_status(
@@ -1896,278 +1051,5 @@ pub fn maybe_capture_matched_financials(
     let view = resolve_financial_view(scenario, metrics)?;
     metrics.matched_legitimate_net_cents = Some(view.legitimate_net_cents);
     metrics.matched_enterprise_net_cents = Some(view.enterprise_net_cents);
-    Ok(())
-}
-
-/// Player-earned counter-intelligence after an accepted defection: the organization watches every
-/// known rival through canonical surveillance to confirm where the departed member resurfaces. The
-/// departure report deliberately never names the recruiting organization; this follow-up is the
-/// player-visible channel that closes the knowledge loop without any hidden-state reads.
-pub fn run_defector_trail(
-    scenario: &mut Scenario,
-    narrative: bool,
-    metrics: &mut RunMetrics,
-) -> Result<(), Box<dyn Error>> {
-    let Some(defector) = metrics.defector else {
-        return Ok(());
-    };
-    let defector_name = scenario
-        .state
-        .world()
-        .get_character(defector)
-        .expect("departed character must persist")
-        .name()
-        .to_owned();
-    let player_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.player)
-        .expect("player organization must persist")
-        .name()
-        .to_owned();
-    if narrative {
-        let departed_at = metrics
-            .defection_minute
-            .map(|minute| format!(" at minute {minute}"))
-            .unwrap_or_default();
-        println!(
-            "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces."
-        );
-    }
-    // The fixture has two named rivals; watch each one through the player's own surveillance.
-    // The starting choice rotates by seed so the evidence exercises both orders; at most one
-    // rival is the true destination, so the trail confirms where the member landed while still
-    // showing absence everywhere else through the same canonical channel.
-    let known_rivals = [scenario.rival, scenario.second_rival];
-    let start_index = bounded_policy_choice(scenario.seed, 0x0DEF, 2) as usize;
-    let watch_order = [known_rivals[start_index], known_rivals[1 - start_index]];
-    if narrative {
-        let first_watched = scenario
-            .state
-            .world()
-            .get_organization(watch_order[0])
-            .expect("first watched rival must persist")
-            .name()
-            .to_owned();
-        println!("[DECIDE]  Start the watch with {first_watched}.");
-    }
-    let mut resurfaced_at: Option<OrganizationId> = None;
-    for rival in watch_order {
-        let rival_name = scenario
-            .state
-            .world()
-            .get_organization(rival)
-            .expect("known rival must persist")
-            .name()
-            .to_owned();
-        let title = format!("{rival_name} personnel watch");
-        let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
-        let operation = authorize_surveillance_target(
-            scenario,
-            EntityRef::Organization(rival),
-            &title,
-            scheduled_for,
-        )?;
-        run_until_operation_terminal(scenario, operation, narrative, metrics)?;
-        let resolution = scenario
-            .state
-            .operations()
-            .get_operation(operation)
-            .expect("personnel watch must persist")
-            .resolution()
-            .expect("completed personnel watch must have a resolution");
-        let found = resolution
-            .discovered_information()
-            .iter()
-            .any(|information| {
-                scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .is_some_and(|record| {
-                        record.topic() == InformationTopic::Personnel
-                            && record.subject() == EntityRef::Organization(rival)
-                            && matches!(
-                                record.signal(),
-                                Some(InformationSignal::PersonnelPresence { characters })
-                                    if characters.contains(&defector)
-                            )
-                    })
-            });
-        if found {
-            resurfaced_at = Some(rival);
-        }
-        if narrative {
-            for information in resolution.discovered_information() {
-                let record = scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .expect("personnel-watch information must persist");
-                if record.topic() == InformationTopic::Personnel
-                    && record.subject() == EntityRef::Organization(rival)
-                {
-                    println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
-                        record.summary()
-                    );
-                }
-            }
-            if found {
-                println!(
-                    "[VERIFY DEFECTOR] {defector_name} now appears among {rival_name}'s recurring personnel."
-                );
-            } else {
-                println!(
-                    "[VERIFY DEFECTOR] {rival_name}'s watch shows {defector_name} is not working there."
-                );
-            }
-        }
-    }
-    metrics.defector_trail_confirmed = Some(resurfaced_at.is_some());
-    if narrative {
-        match resurfaced_at {
-            Some(rival) => {
-                let rival_name = scenario
-                    .state
-                    .world()
-                    .get_organization(rival)
-                    .expect("confirmed rival must persist")
-                    .name()
-                    .to_owned();
-                println!(
-                    "[VERIFY DEFECTOR] {defector_name} resurfaces among {rival_name}'s personnel. {player_name} confirmed through its own surveillance where its former member landed."
-                );
-            }
-            None => println!(
-                "[VERIFY DEFECTOR] None of the watched rivals showed {defector_name}; the personnel watch did not directly confirm where the member landed."
-            ),
-        }
-    }
-    Ok(())
-}
-
-/// The player's answer to a confirmed defector: one personal re-approach through the canonical
-/// executive recruitment path. Nothing here reads hidden state - the pitch resolves through the
-/// same production scoring the rival's poaching used (recruiter bond versus fresh attachment to
-/// the new organization, plus membership resistance). A refusal carries a real intelligence cost:
-/// production rules deliver a loyalty report to the rival naming our recruiter, so reaching out
-/// tells the rival its poach succeeded and who came asking.
-pub fn run_win_back_attempt(
-    scenario: &mut Scenario,
-    narrative: bool,
-    metrics: &mut RunMetrics,
-) -> Result<(), Box<dyn Error>> {
-    let Some(defector) = metrics.defector else {
-        return Ok(());
-    };
-    let defector_name = scenario
-        .state
-        .world()
-        .get_character(defector)
-        .expect("departed character must persist")
-        .name()
-        .to_owned();
-    let boss_name = scenario
-        .state
-        .world()
-        .get_character(scenario.boss)
-        .expect("boss must persist")
-        .name()
-        .to_owned();
-    let player_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.player)
-        .expect("player organization must persist")
-        .name()
-        .to_owned();
-    let rival_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.rival)
-        .expect("rival organization must persist")
-        .name()
-        .to_owned();
-    // The pitch's approach is evaluation-owned variation derived from the run seed: both
-    // executive channels are live production vocabulary, and the contract accepts either
-    // outcome, so rotating the approach exercises more of the scoring surface organically.
-    let approach = match bounded_policy_choice(scenario.seed, 0x5EED, 2) {
-        0 => RecruitmentApproach::PersonalAppeal,
-        _ => RecruitmentApproach::FinancialOpportunity,
-    };
-    if narrative {
-        println!(
-            "[DECIDE]  {boss_name} makes one {approach:?} pitch to {defector_name}: come home to {player_name}."
-        );
-    }
-    let attempt = validate_recruitment_attempt(
-        scenario.registry,
-        &scenario.state,
-        RecruitmentDraft {
-            target_organization: scenario.player,
-            recruiter: scenario.boss,
-            candidate: defector,
-            approach,
-        },
-    )?
-    .commit(&mut scenario.state)?;
-    let record = scenario
-        .state
-        .recruitment()
-        .get_attempt(attempt)
-        .expect("committed win-back attempt must be queryable");
-    let accepted = record.outcome() == RecruitmentOutcome::Accepted;
-    metrics.win_back_attempted = true;
-    metrics.win_back_accepted = Some(accepted);
-    metrics.win_back_margin = Some(record.margin());
-    if narrative {
-        println!(
-            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance.",
-            record.approach(),
-            rival_name,
-        );
-    }
-    if accepted {
-        let membership = scenario
-            .state
-            .world()
-            .get_character(defector)
-            .expect("defector must persist")
-            .organization();
-        debug_assert_eq!(
-            membership,
-            Some(scenario.player),
-            "an accepted win-back must move membership back through the canonical reassignment"
-        );
-        if narrative {
-            println!(
-                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again - and both organizations now know exactly how much his loyalty is worth."
-            );
-        }
-        return Ok(());
-    }
-    // Refusal cost is retained as audit/contract evidence because the rival receives the
-    // production loyalty report. It is deliberately not narrated to the player organization,
-    // which has no channel proving what the rival learned.
-    let leaked = record
-        .member_report()
-        .and_then(|report| scenario.state.reports().get_report(report))
-        .is_some_and(|report| {
-            report.recipient() == scenario.rival
-                && report.kind() == ReportKind::AfterAction
-                && report.entries().len() == 1
-                && report.entries()[0]
-                    .entities
-                    .contains(&EntityRef::Character(scenario.boss))
-        });
-    metrics.win_back_refusal_leaked_to_rival = Some(leaked);
-    if narrative {
-        println!(
-            "[WIN BACK]  {defector_name} stayed with {rival_name}. The re-approach failed and membership did not move."
-        );
-    }
     Ok(())
 }

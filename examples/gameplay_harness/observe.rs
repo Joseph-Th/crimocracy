@@ -20,6 +20,29 @@ pub fn observe_tick(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
+    observe_staffing_and_payroll(scenario, outcome, narrative, metrics);
+    observe_enterprise_evidence(scenario, outcome, metrics);
+    narrate_started_operations(scenario, outcome, narrative);
+    observe_cold_case_and_opportunity_cost(scenario, outcome, narrative, metrics);
+    observe_burglary_police_response(scenario, outcome, metrics);
+    resolve_decision_requests(scenario, outcome, narrative, metrics)?;
+    transfer_press_police_observations(scenario, outcome, narrative, metrics)?;
+    observe_recruitment(scenario, outcome, narrative, metrics);
+    observe_investigation_and_arrests(scenario, outcome, narrative, metrics);
+    narrate_resolutions_and_enterprise_cycles(scenario, outcome, narrative);
+
+    if tick_changed_observable_state(outcome) {
+        validate_harness_state(scenario.registry, &scenario.state)?;
+    }
+    Ok(())
+}
+
+fn observe_staffing_and_payroll(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     if !outcome.staffed_investigations.is_empty() {
         metrics.session_case_staffed = true;
     }
@@ -66,6 +89,13 @@ pub fn observe_tick(
             );
         }
     }
+}
+
+fn observe_enterprise_evidence(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    metrics: &mut RunMetrics,
+) {
     // Vice-attention evidence is counted for every session regardless of narration: sustained
     // district casework converting into an inquiry on a player-owned racket is a core
     // consequence-loop signal, and batch aggregates track how often it lands.
@@ -86,32 +116,43 @@ pub fn observe_tick(
             metrics.vice_inquiries_drawn += 1;
         }
     }
-    if narrative {
-        for operation in &outcome.started_operations {
-            let record = scenario
+}
+
+fn narrate_started_operations(scenario: &Scenario, outcome: &TickOutcome, narrative: bool) {
+    if !narrative {
+        return;
+    }
+    for operation in &outcome.started_operations {
+        let record = scenario
+            .state
+            .operations()
+            .get_operation(*operation)
+            .expect("started operation must exist");
+        println!(
+            "[START]   {}: {} started.",
+            stamp(outcome.now.as_minutes()),
+            record.title()
+        );
+        if let Some(response) = record.police_response() {
+            let response = scenario
                 .state
-                .operations()
-                .get_operation(*operation)
-                .expect("started operation must exist");
+                .legal()
+                .get_police_response(response)
+                .expect("dispatched response must persist");
             println!(
-                "[START]   {}: {} started.",
-                stamp(outcome.now.as_minutes()),
-                record.title()
+                "          Police response dispatched; estimated arrival minute {} based on local deployment.",
+                response.arrival_due_at().as_minutes()
             );
-            if let Some(response) = record.police_response() {
-                let response = scenario
-                    .state
-                    .legal()
-                    .get_police_response(response)
-                    .expect("dispatched response must persist");
-                println!(
-                    "          Police response dispatched; estimated arrival minute {} based on local deployment.",
-                    response.arrival_due_at().as_minutes()
-                );
-            }
         }
     }
+}
 
+fn observe_cold_case_and_opportunity_cost(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     // A cold-case shelf or closure is an institutional beat, not player-visible news. Capture it
     // only as contract evidence; the narrative waits until the organization learns the change
     // through its own surveillance/contact channels.
@@ -138,7 +179,13 @@ pub fn observe_tick(
             );
         }
     }
+}
 
+fn observe_burglary_police_response(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    metrics: &mut RunMetrics,
+) {
     for operation in &outcome.started_operations {
         if Some(*operation) == metrics.burglary {
             metrics.police_dispatched = scenario
@@ -165,7 +212,14 @@ pub fn observe_tick(
             metrics.police_arrived |= outcome.arrived_police_responses.contains(&response);
         }
     }
+}
 
+fn resolve_decision_requests(
+    scenario: &mut Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
     for request in &outcome.decision_requests {
         metrics.decision_requests += 1;
         let decision = scenario
@@ -205,7 +259,15 @@ pub fn observe_tick(
         )?
         .commit(&mut scenario.state)?;
     }
+    Ok(())
+}
 
+fn transfer_press_police_observations(
+    scenario: &mut Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
     // Press is the branch where the leader chooses to continue after police arrival. The
     // response also creates direct observations for the participating people; report those
     // observations through the canonical transfer path so the player-facing organization view
@@ -250,7 +312,15 @@ pub fn observe_tick(
             }
         }
     }
+    Ok(())
+}
 
+fn observe_recruitment(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     metrics.autonomous_recruitment_attempts = metrics
         .autonomous_recruitment_attempts
         .saturating_add(u32::try_from(outcome.recruitment_attempts.len()).unwrap_or(u32::MAX));
@@ -300,7 +370,14 @@ pub fn observe_tick(
             }
         }
     }
+}
 
+fn observe_investigation_and_arrests(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     metrics.investigation_work_scheduled = metrics.investigation_work_scheduled.saturating_add(
         u32::try_from(outcome.scheduled_investigation_work.len()).unwrap_or(u32::MAX),
     );
@@ -346,117 +423,131 @@ pub fn observe_tick(
             );
         }
     }
+}
 
-    if narrative {
-        for operation in &outcome.resolved_operations {
-            let record = scenario
-                .state
-                .operations()
-                .get_operation(*operation)
-                .expect("resolved operation must persist");
-            let resolution = record
-                .resolution()
-                .expect("resolved operation must have result");
-            println!(
-                "[RESULT]  {}: {} -> {:?}, exposure {:?}.",
-                stamp(outcome.now.as_minutes()),
-                record.title(),
-                resolution.objective_outcome(),
-                resolution.exposure().level(),
-            );
+fn narrate_resolutions_and_enterprise_cycles(
+    scenario: &Scenario,
+    outcome: &TickOutcome,
+    narrative: bool,
+) {
+    if !narrative {
+        return;
+    }
+
+    for operation in &outcome.resolved_operations {
+        let record = scenario
+            .state
+            .operations()
+            .get_operation(*operation)
+            .expect("resolved operation must persist");
+        let resolution = record
+            .resolution()
+            .expect("resolved operation must have result");
+        println!(
+            "[RESULT]  {}: {} -> {:?}, exposure {:?}.",
+            stamp(outcome.now.as_minutes()),
+            record.title(),
+            resolution.objective_outcome(),
+            resolution.exposure().level(),
+        );
+    }
+
+    narrate_routine_cycle_summary(scenario, outcome);
+    narrate_notable_enterprise_cycles(scenario, outcome);
+}
+
+fn narrate_routine_cycle_summary(scenario: &Scenario, outcome: &TickOutcome) {
+    if outcome.business_cycles.is_empty()
+        && outcome.enterprise_cycles.is_empty()
+        && outcome.executive_brief.is_none()
+    {
+        return;
+    }
+
+    // Routine world beats stay quiet unless something above routine attention happened:
+    // repeating identical all-quiet lines every simulated day buries the actual story beats.
+    // Notable cycle reports print below; brief contents appear in the closing recap.
+    let player_notable_cycle = outcome.enterprise_cycles.iter().any(|cycle_id| {
+        scenario
+            .state
+            .enterprises()
+            .get_cycle(*cycle_id)
+            .is_some_and(|cycle| {
+                cycle.attention() == AttentionClass::Notable
+                    && scenario
+                        .state
+                        .enterprises()
+                        .get_enterprise(cycle.enterprise())
+                        .is_some_and(|record| record.organization() == scenario.player)
+            })
+    });
+    let brief_deserves_attention = outcome
+        .executive_brief
+        .and_then(|report| scenario.state.reports().get_report(report))
+        .is_some_and(|report| {
+            report
+                .entries()
+                .iter()
+                .any(|entry| !matches!(entry.attention, AttentionClass::Routine))
+        });
+    if player_notable_cycle || brief_deserves_attention {
+        println!(
+            "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s); daily brief delivered.",
+            stamp(outcome.now.as_minutes()),
+            outcome.business_cycles.len(),
+            outcome.enterprise_cycles.len(),
+        );
+    }
+}
+
+fn narrate_notable_enterprise_cycles(scenario: &Scenario, outcome: &TickOutcome) {
+    // A notable cycle carries its manager's report as organization-held information; the
+    // narrative surfaces it so heat-driven cost pressure is legible when it happens. Only this
+    // organization's cycles are player-visible: another organization's manager report is
+    // information they hold, not something our leadership can read.
+    for cycle_id in &outcome.enterprise_cycles {
+        let cycle = scenario
+            .state
+            .enterprises()
+            .get_cycle(*cycle_id)
+            .expect("settled enterprise cycle must persist");
+        if cycle.attention() != AttentionClass::Notable {
+            continue;
         }
-        if !outcome.business_cycles.is_empty()
-            || !outcome.enterprise_cycles.is_empty()
-            || outcome.executive_brief.is_some()
-        {
-            // Routine world beats stay quiet unless something above routine attention
-            // happened: repeating identical all-quiet lines every simulated day buries the
-            // actual story beats. Notable cycle reports print below; brief contents appear in
-            // the closing recap.
-            let player_notable_cycle = outcome.enterprise_cycles.iter().any(|cycle_id| {
-                scenario
-                    .state
-                    .enterprises()
-                    .get_cycle(*cycle_id)
-                    .is_some_and(|cycle| {
-                        cycle.attention() == AttentionClass::Notable
-                            && scenario
-                                .state
-                                .enterprises()
-                                .get_enterprise(cycle.enterprise())
-                                .is_some_and(|record| record.organization() == scenario.player)
-                    })
-            });
-            let brief_deserves_attention = outcome
-                .executive_brief
-                .and_then(|report| scenario.state.reports().get_report(report))
-                .is_some_and(|report| {
-                    report
-                        .entries()
-                        .iter()
-                        .any(|entry| !matches!(entry.attention, AttentionClass::Routine))
-                });
-            if player_notable_cycle || brief_deserves_attention {
-                println!(
-                    "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s); daily brief delivered.",
-                    stamp(outcome.now.as_minutes()),
-                    outcome.business_cycles.len(),
-                    outcome.enterprise_cycles.len(),
-                );
-            }
+        let owns_cycle = scenario
+            .state
+            .enterprises()
+            .get_enterprise(cycle.enterprise())
+            .is_some_and(|record| record.organization() == scenario.player);
+        if !owns_cycle {
+            continue;
         }
-        // A notable cycle carries its manager's report as organization-held information; the
-        // narrative surfaces it so heat-driven cost pressure is legible when it happens. Only
-        // this organization's cycles are player-visible: another organization's manager report
-        // is information they hold, not something our leadership can read.
-        for cycle_id in &outcome.enterprise_cycles {
-            let cycle = scenario
+        let summary = cycle
+            .information()
+            .and_then(|information| scenario.state.intelligence().get_information(information))
+            .map(|record| record.summary().to_owned())
+            .unwrap_or_else(|| "cycle report missing".to_owned());
+        println!(
+            "[ENTERPRISE] {}: {}",
+            stamp(outcome.now.as_minutes()),
+            summary,
+        );
+        // The inquiry itself is organization-held legal knowledge with its own provenance: the
+        // racket now has a dedicated case, and the organization knows that much only.
+        if let Some(vice_information) = cycle.vice_information() {
+            let vice_summary = scenario
                 .state
-                .enterprises()
-                .get_cycle(*cycle_id)
-                .expect("settled enterprise cycle must persist");
-            if cycle.attention() != AttentionClass::Notable {
-                continue;
-            }
-            let owns_cycle = scenario
-                .state
-                .enterprises()
-                .get_enterprise(cycle.enterprise())
-                .is_some_and(|record| record.organization() == scenario.player);
-            if !owns_cycle {
-                continue;
-            }
-            let summary = cycle
-                .information()
-                .and_then(|information| scenario.state.intelligence().get_information(information))
+                .intelligence()
+                .get_information(vice_information)
                 .map(|record| record.summary().to_owned())
-                .unwrap_or_else(|| "cycle report missing".to_owned());
+                .unwrap_or_else(|| "vice-inquiry knowledge missing".to_owned());
             println!(
-                "[ENTERPRISE] {}: {}",
+                "[VICE HEAT]  {}: {}",
                 stamp(outcome.now.as_minutes()),
-                summary,
+                vice_summary,
             );
-            // The inquiry itself is organization-held legal knowledge with its own provenance:
-            // the racket now has a dedicated case, and the organization knows that much only.
-            if let Some(vice_information) = cycle.vice_information() {
-                let vice_summary = scenario
-                    .state
-                    .intelligence()
-                    .get_information(vice_information)
-                    .map(|record| record.summary().to_owned())
-                    .unwrap_or_else(|| "vice-inquiry knowledge missing".to_owned());
-                println!(
-                    "[VICE HEAT]  {}: {}",
-                    stamp(outcome.now.as_minutes()),
-                    vice_summary,
-                );
-            }
         }
     }
-    if tick_changed_observable_state(outcome) {
-        validate_harness_state(scenario.registry, &scenario.state)?;
-    }
-    Ok(())
 }
 
 /// True when the tick produced any transaction a player could observe or that persists state.

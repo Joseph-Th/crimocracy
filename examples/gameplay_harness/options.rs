@@ -13,10 +13,10 @@ pub fn split_flag_value(arg: &str) -> Option<(&str, &str)> {
     }
 }
 
-pub fn parse_seed_value(raw: &str) -> Result<u64, HarnessCliError> {
+pub fn parse_seed_value(flag: &'static str, raw: &str) -> Result<u64, HarnessCliError> {
     let value = raw.to_owned();
     let invalid = || HarnessCliError::InvalidValue {
-        flag: "--seed",
+        flag,
         value: value.clone(),
     };
     // Accepted forms are exactly `0x[hex]` or all-decimal digits; anything else is a typo
@@ -36,7 +36,8 @@ pub fn parse_options(
     let mut arguments = arguments.into_iter();
     let mut mode = HarnessMode::Smoke;
     let mut samples = DEFAULT_BATCH_SAMPLES;
-    let mut seed = DEFAULT_SEED;
+    let mut world_seed = DEFAULT_WORLD_SEED;
+    let mut policy_seed = DEFAULT_POLICY_SEED;
     let mut strategy = None;
     let mut strategy_was_passed = false;
     let mut samples_were_explicit = false;
@@ -76,12 +77,23 @@ pub fn parse_options(
                     return Err(HarnessCliError::SampleCountOutOfRange { value: samples });
                 }
             }
-            "--seed" => {
+            "--world-seed" => {
                 let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
                 if value.is_empty() {
-                    return Err(HarnessCliError::MissingValue { flag: "--seed" });
+                    return Err(HarnessCliError::MissingValue {
+                        flag: "--world-seed",
+                    });
                 }
-                seed = parse_seed_value(&value)?;
+                world_seed = parse_seed_value("--world-seed", &value)?;
+            }
+            "--policy-seed" => {
+                let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
+                if value.is_empty() {
+                    return Err(HarnessCliError::MissingValue {
+                        flag: "--policy-seed",
+                    });
+                }
+                policy_seed = parse_seed_value("--policy-seed", &value)?;
             }
             "--strategy" => {
                 let value = inline_value.unwrap_or_else(|| arguments.next().unwrap_or_default());
@@ -96,12 +108,6 @@ pub fn parse_options(
                 if value.is_empty() {
                     return Err(HarnessCliError::MissingValue {
                         flag: "--artifact-dir",
-                    });
-                }
-                if value.is_empty() {
-                    return Err(HarnessCliError::InvalidValue {
-                        flag: "--artifact-dir",
-                        value: value.clone(),
                     });
                 }
                 artifact_dir = Some(PathBuf::from(value));
@@ -127,7 +133,8 @@ pub fn parse_options(
     Ok(Some(HarnessOptions {
         mode,
         samples,
-        seed,
+        world_seed,
+        policy_seed,
         strategy,
         artifact_dir,
     }))
@@ -135,11 +142,14 @@ pub fn parse_options(
 
 pub fn print_usage() {
     println!(
-        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--seed HEX|DEC] [--artifact-dir DIR]"
+        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--world-seed HEX|DEC] [--policy-seed HEX|DEC] [--artifact-dir DIR]"
     );
     println!("  smoke  Fast canonical-path check for the local gate and iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
-    println!("         --seed accepts 0xHEX or decimal; --flag=value form also supported.");
+    println!(
+        "         --world-seed controls fixture/simulation variation; --policy-seed controls evaluation-owned choices."
+    );
+    println!("         Both seed flags accept 0xHEX or decimal; --flag=value is supported.");
     println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
     println!(
         "         --artifact-dir writes per-run JSON artifacts (default: target/harness-runs/)."

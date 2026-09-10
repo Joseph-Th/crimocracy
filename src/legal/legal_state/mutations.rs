@@ -249,13 +249,13 @@ impl LegalState {
         );
         self.set_investigation_activity(investigation_id, activity_at);
     }
-    /// Updates witness cooperation and resets the case's cold-case inactivity clock:
-    /// cooperation directly drives future interview support scoring.
+    /// Updates witness cooperation without manufacturing institutional case activity. Cooperation
+    /// changes can be caused externally (for example by intimidation), so they invalidate
+    /// case-dependent plans through the investigation version but do not refresh `last_activity_at`.
     pub(crate) fn set_witness_cooperation(
         &mut self,
         case_witness: CaseWitnessId,
         cooperation: WitnessCooperation,
-        activity_at: SimTime,
     ) {
         let investigation_id = {
             let record = self
@@ -271,7 +271,6 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before witness cooperation commit");
         investigation.version = advance_version_preflighted(investigation.version);
-        self.set_investigation_activity(investigation_id, activity_at);
     }
     pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
         let id = record.id();
@@ -409,12 +408,14 @@ impl LegalState {
         self.set_investigation_activity(investigation_id, resolved_at);
     }
 
+    /// Cancels scheduled work while preserving the case's inactivity clock. Detention is an
+    /// external availability event, not investigative progress; the investigation version still
+    /// advances so every case-dependent plan observes the staffing/work change.
     pub(crate) fn set_investigation_work_cancellation(
         &mut self,
         id: InvestigationWorkId,
         cancellation: InvestigationWorkCancellation,
     ) {
-        let cancelled_at = cancellation.cancelled_at();
         let (due_at, focus_key) = {
             let record = self
                 .investigation_work
@@ -448,7 +449,6 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before work cancellation");
         investigation.version = advance_version_preflighted(investigation.version);
-        self.set_investigation_activity(investigation_id, cancelled_at);
     }
     pub(crate) fn set_investigation_status(
         &mut self,
@@ -583,7 +583,6 @@ impl LegalState {
         &mut self,
         investigation_id: InvestigationId,
         investigator: CharacterId,
-        at: SimTime,
     ) {
         let record = self
             .investigations
@@ -615,7 +614,6 @@ impl LegalState {
             .investigations
             .active_without_lead
             .insert(investigation_id);
-        self.set_investigation_activity(investigation_id, at);
     }
     pub(crate) fn set_jurisdiction(
         &mut self,

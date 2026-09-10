@@ -6,7 +6,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::legal::investigation_system::{
     InvestigationTransition, validate_add_evidence, validate_open_investigation,
     validate_transition_investigation,
@@ -153,6 +153,47 @@ fn make_fixture() -> WitnessFixture {
         witness,
         subject,
     }
+}
+
+#[test]
+fn external_witness_cooperation_change_does_not_refresh_police_case_activity() {
+    let mut fixture = make_fixture();
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness registration should commit");
+    let activity_before = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist")
+        .last_activity_at();
+
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    validate_set_witness_cooperation(&fixture.state, case_witness, WitnessCooperation::Reluctant)
+        .expect("external cooperation degradation should validate")
+        .commit(&mut fixture.state)
+        .expect("external cooperation degradation should commit");
+
+    let investigation = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("investigation should persist after witness change");
+    assert_eq!(
+        investigation.last_activity_at(),
+        activity_before,
+        "a witness-side change must not reset the police institution's inactivity clock"
+    );
+    validate_state(&fixture.state).expect("witness-side cooperation change should remain valid");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

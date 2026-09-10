@@ -220,7 +220,7 @@ impl ValidatedWitnessCooperation {
         self.ensure_current(state)?;
         state
             .legal
-            .set_witness_cooperation(self.case_witness, self.cooperation, state.now());
+            .set_witness_cooperation(self.case_witness, self.cooperation);
         Ok(())
     }
 }

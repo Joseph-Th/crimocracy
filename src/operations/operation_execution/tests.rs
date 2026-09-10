@@ -3797,7 +3797,7 @@ fn operation_case_geography_does_not_follow_later_organization_assets() {
 }
 
 #[test]
-fn independent_witness_pressure_uses_case_geography_for_police_risk() {
+fn witness_pressure_prefers_case_geography_over_character_organization_footprint() {
     let registry = build_registry();
     let mut state = AppState::new(0x517A_7E13);
     let crew = insert_organization(
@@ -3974,6 +3974,48 @@ fn independent_witness_pressure_uses_case_geography_for_police_risk() {
         alert.neighborhood(),
         Some(newer_neighborhood),
         "one civilian encounter must use the latest pressureable case geography instead of inheriting the strongest police presence across every live witness case"
+    );
+
+    // Joining an organization with an unrelated asset in the older, higher-police district must
+    // not teleport the already-authored witness encounter to that organization's strongest-risk
+    // premises. The active witness case is the causal reason for the pressure operation and
+    // remains the venue proxy for members and civilians alike.
+    let rival = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Unrelated Rival Outfit".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Unrelated Rival Premises".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([BusinessFunction::CashIntensive]),
+            neighborhood,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .expect("rival premises should validate");
+    validate_reassign_character(&state, witness, Some(rival), None)
+        .expect("witness should be able to join the rival organization")
+        .commit(&mut state)
+        .expect("witness reassignment should commit");
+
+    let member_alert = resolve_operation_police_alert_context(
+        &registry,
+        &state,
+        pressure,
+        SimTime::from_minutes(1),
+    );
+    assert_eq!(
+        member_alert.neighborhood(),
+        Some(newer_neighborhood),
+        "witness membership must not replace case geography with an unrelated organization-wide footprint"
     );
     validate_state(&state).expect("civilian witness venue attribution should stay valid");
     validate_invariants(&state);

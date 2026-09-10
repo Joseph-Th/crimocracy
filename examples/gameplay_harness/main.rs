@@ -10,8 +10,8 @@
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
 //! Timeline anchors are derived from the authored registry (operation duration, autonomous
 //! recruitment cadence, and cold-case window) so session timing tracks the game instead of a
-//! second hard-coded ruleset. Batch runs vary the simulation seed; each seed rotates the fixture
-//! and bounded policy timing while matched branches stay on the same scenario timeline.
+//! second hard-coded ruleset. World/simulation and evaluation-policy seeds are independent; scenario
+//! sensitivity varies the world while matched branches keep one fixed policy treatment.
 
 mod contracts;
 mod model;
@@ -43,15 +43,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     match options.mode {
-        HarnessMode::Smoke => run_smoke(options.seed, options.strategy),
+        HarnessMode::Smoke => run_smoke(
+            EvaluationSeeds::new(options.world_seed, options.policy_seed),
+            options.strategy,
+        ),
         HarnessMode::Full => run_full(options),
     }
 }
 
-fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<dyn Error>> {
+fn run_smoke(
+    seeds: EvaluationSeeds,
+    selected_strategy: Option<Strategy>,
+) -> Result<(), Box<dyn Error>> {
     let registry = build_registry();
     println!("CRIMOCRACY GAMEPLAY HARNESS");
-    println!("mode: smoke | seed {seed:#x}");
+    println!(
+        "mode: smoke | world seed {:#x} | policy seed {:#x}",
+        seeds.world, seeds.policy
+    );
     let contract = match selected_strategy {
         Some(strategy) => format!(
             "contract: {} canonical strategy path (legal foundation skipped)",
@@ -75,7 +84,7 @@ fn run_smoke(seed: u64, selected_strategy: Option<Strategy>) -> Result<(), Box<d
             &registry,
             strategy,
             ScenarioProfile::NightTrap,
-            seed,
+            seeds,
             SessionRunMode::Batch,
         )?;
         validate_run_metrics(&metrics, false)?;
@@ -142,7 +151,8 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     let HarnessOptions {
         mode,
         samples,
-        seed,
+        world_seed,
+        policy_seed,
         strategy,
         artifact_dir,
     } = options;
@@ -163,17 +173,19 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         "Observation windows: full sessions capture the shared financial comparison at two simulated days; consequence arcs may continue beyond that boundary when player policy keeps waiting. Matched batches run for one day to keep sensitivity evidence bounded.\n"
     );
     println!(
-        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent seeds so every authored fixture variation gets exercised; matched branches inside one seed share one world.\n"
+        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent world seeds so every authored fixture variation gets exercised while policy seed {policy_seed:#x} stays fixed; matched branches inside one world share one treatment.\n"
     );
 
-    let mut narrative_sets: Vec<(u64, RunMetrics, RunMetrics, RunMetrics)> =
+    let mut narrative_sets: Vec<(EvaluationSeeds, RunMetrics, RunMetrics, RunMetrics)> =
         Vec::with_capacity(NARRATIVE_SEED_ROTATION as usize);
     for offset in 0..NARRATIVE_SEED_ROTATION {
-        let narrative_seed = seed.wrapping_add(offset);
+        let narrative_seeds = EvaluationSeeds::new(world_seed.wrapping_add(offset), policy_seed);
         let deep_readout = offset == 0;
         println!(
-            "\n=== NARRATIVE COMPARISON SET {} of {NARRATIVE_SEED_ROTATION}: seed {narrative_seed:#x} ===",
-            offset + 1
+            "\n=== NARRATIVE COMPARISON SET {} of {NARRATIVE_SEED_ROTATION}: world {:#x}, policy {:#x} ===",
+            offset + 1,
+            narrative_seeds.world,
+            narrative_seeds.policy,
         );
         if deep_readout {
             println!("\n--- CONTROLLED SESSION: RUSH ---");
@@ -182,7 +194,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             &registry,
             Strategy::Rush,
             ScenarioProfile::NightTrap,
-            narrative_seed,
+            narrative_seeds,
             if deep_readout {
                 SessionRunMode::FullNarrative
             } else {
@@ -196,7 +208,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             &registry,
             Strategy::Press,
             ScenarioProfile::NightTrap,
-            narrative_seed,
+            narrative_seeds,
             if deep_readout {
                 SessionRunMode::FullNarrative
             } else {
@@ -211,7 +223,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             &registry,
             Strategy::Recon,
             ScenarioProfile::NightTrap,
-            narrative_seed,
+            narrative_seeds,
             if deep_readout {
                 SessionRunMode::FullNarrative
             } else {
@@ -226,12 +238,14 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         }
 
         println!(
-            "\n--- {} (seed {narrative_seed:#x}) ---",
+            "\n--- {} (world seed {:#x}, policy seed {:#x}) ---",
             if deep_readout {
                 "SAME-SCENARIO DIAGNOSTIC METRICS"
             } else {
                 "ROTATED-VARIATION SUMMARY"
-            }
+            },
+            narrative_seeds.world,
+            narrative_seeds.policy,
         );
         validate_run_metrics(&rush, true)?;
         validate_run_metrics(&press, true)?;
@@ -273,43 +287,44 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                 );
             }
         }
-        narrative_sets.push((narrative_seed, rush, press, recon));
+        narrative_sets.push((narrative_seeds, rush, press, recon));
     }
 
-    let (_, rush, press, recon) = narrative_sets
+    let (primary_seeds, rush, press, recon) = narrative_sets
         .first()
         .expect("at least one narrative set must run");
+    let primary_seeds = *primary_seeds;
     let rush = rush.clone();
     let press = press.clone();
     let recon = recon.clone();
 
     println!("\n--- VICE HEAT PROBE ---");
     // Reaching the readout proves the vice-attention chain: the probe fails the run otherwise.
-    run_vice_attention_probe(&registry, seed)?;
+    run_vice_attention_probe(&registry, primary_seeds)?;
     print_experience_readout(&rush, &press, &recon, true);
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
-    run_opportunity_portfolio_probe(&registry, seed)?;
+    run_opportunity_portfolio_probe(&registry, primary_seeds)?;
 
     println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
-    run_organizational_capacity_probe(&registry, seed)?;
+    run_organizational_capacity_probe(&registry, primary_seeds)?;
 
     println!("\n--- REPEAT-TAKE PROBE ---");
-    run_repeat_take_probe(&registry, seed)?;
+    run_repeat_take_probe(&registry, primary_seeds)?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;
 
-    println!("\n--- NIGHT-TRAP BATCH ({samples} seeds per strategy) ---");
-    println!("[BATCH] Running matched seeds for NIGHT TRAP...");
+    println!("\n--- NIGHT-TRAP BATCH ({samples} world seeds per strategy) ---");
+    println!("[BATCH] Running matched world seeds with policy {policy_seed:#x} for NIGHT TRAP...");
     let (rush_aggregate, press_aggregate, recon_aggregate) = run_strategy_batch(
         &registry,
         ScenarioProfile::NightTrap,
         samples,
-        seed,
+        EvaluationSeeds::new(world_seed, policy_seed),
         Some(&artifact_dir),
     )?;
-    println!("[BATCH PASS] NIGHT TRAP matched-seed checks passed.");
+    println!("[BATCH PASS] NIGHT TRAP matched-world checks passed.");
     rush_aggregate.print("RUSH");
     press_aggregate.print("PRESS");
     recon_aggregate.print("RECON");
@@ -323,18 +338,28 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         recon_aggregate.police_arrived,
     );
 
-    println!("\n--- SCENARIO SENSITIVITY ({samples} seeds per strategy/profile) ---");
+    println!(
+        "\n--- SCENARIO SENSITIVITY ({samples} world seeds per strategy/profile, fixed policy {policy_seed:#x}) ---"
+    );
     for profile in ScenarioProfile::SENSITIVITY_SET {
-        println!("[BATCH] Running matched seeds for {}...", profile.label());
-        let (rush, press, recon) =
-            run_strategy_batch(&registry, profile, samples, seed, Some(&artifact_dir))?;
+        println!(
+            "[BATCH] Running matched world seeds for {}...",
+            profile.label()
+        );
+        let (rush, press, recon) = run_strategy_batch(
+            &registry,
+            profile,
+            samples,
+            EvaluationSeeds::new(world_seed, policy_seed),
+            Some(&artifact_dir),
+        )?;
         println!("\n[{}]", profile.label());
         rush.print("RUSH");
         press.print("PRESS");
         recon.print("RECON");
         print_convergence_observation(profile, &rush, &press, &recon);
         println!(
-            "[BATCH PASS] {} matched-seed checks passed.",
+            "[BATCH PASS] {} matched-world checks passed.",
             profile.label()
         );
     }
@@ -342,11 +367,14 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     // Persist per-run seeds and raw metrics beneath aggregate diagnostics.
     // Full mode always writes artifacts; the directory defaults to target/harness-runs.
     println!("\n--- ARTIFACTS ---");
-    let narrative_runs = [(&rush, seed), (&press, seed), (&recon, seed)];
-    for (metrics, run_seed) in narrative_runs {
-        if let Ok(path) =
-            persist_run_artifact(&artifact_dir, run_seed, ScenarioProfile::NightTrap, metrics)
-        {
+    let narrative_runs = [&rush, &press, &recon];
+    for metrics in narrative_runs {
+        if let Ok(path) = persist_run_artifact(
+            &artifact_dir,
+            primary_seeds,
+            ScenarioProfile::NightTrap,
+            metrics,
+        ) {
             println!("[ARTIFACT] wrote {}", path.display());
         }
     }
@@ -355,12 +383,17 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(&artifact_dir)?;
         let summary = serde_json::json!({
             "mode": "full",
-            "seed": format!("{seed:#x}"),
+            "world_seed": format!("{world_seed:#x}"),
+            "world_seed_dec": world_seed,
+            "policy_seed": format!("{policy_seed:#x}"),
+            "policy_seed_dec": policy_seed,
             "samples": samples,
             "elapsed_secs": wall_start.elapsed().as_secs_f64(),
-            "note": "per-run JSON files retain per-run seeds and raw metrics beneath derived findings"
+            "note": "scenario-sensitivity samples vary world/simulation seed while the evaluation-policy seed remains fixed; per-run JSON retains both"
         });
-        let path = artifact_dir.join(format!("summary-{seed:#x}.json"));
+        let path = artifact_dir.join(format!(
+            "summary-w{world_seed:016x}-p{policy_seed:016x}.json"
+        ));
         fs::write(&path, serde_json::to_string_pretty(&summary)?)?;
         println!("[ARTIFACT] wrote {}", path.display());
     }
@@ -376,11 +409,12 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEED, FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode,
-        HarnessOptions, NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline,
-        SessionRunMode, Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal,
-        parse_options, patrol_intervals_from_signal, play_session, run_opportunity_portfolio_probe,
-        run_smoke, run_vice_attention_probe, validate_batch_strategy_coverage,
+        DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds, FixtureVariation,
+        HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
+        NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
+        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, parse_options,
+        patrol_intervals_from_signal, play_session, run_opportunity_portfolio_probe, run_smoke,
+        run_vice_attention_probe, validate_batch_strategy_coverage,
         validate_branch_financial_isolation, validate_press_witness_counterplay,
         validate_second_act_evidence,
     };
@@ -408,7 +442,7 @@ mod tests {
                 &registry,
                 strategy,
                 ScenarioProfile::NightTrap,
-                DEFAULT_SEED,
+                EvaluationSeeds::defaults(),
                 SessionRunMode::FullNarrative,
             )
             .expect("full narrative session should complete");
@@ -416,7 +450,7 @@ mod tests {
                 &registry,
                 strategy,
                 ScenarioProfile::NightTrap,
-                DEFAULT_SEED,
+                EvaluationSeeds::defaults(),
                 SessionRunMode::FullQuiet,
             )
             .expect("full quiet session should complete");
@@ -428,11 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_explicit_smoke_mode_and_hex_seed() {
+    fn parses_explicit_smoke_mode_and_independent_hex_seeds() {
         let options = parse_options(
-            ["--mode", "smoke", "--samples", "1", "--seed", "0x2a"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "--mode",
+                "smoke",
+                "--samples",
+                "1",
+                "--world-seed",
+                "0x2a",
+                "--policy-seed",
+                "0x2b",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         )
         .expect("valid harness arguments should parse")
         .expect("non-help arguments should request a run");
@@ -442,7 +485,8 @@ mod tests {
             HarnessOptions {
                 mode: HarnessMode::Smoke,
                 samples: 1,
-                seed: 42,
+                world_seed: 42,
+                policy_seed: 43,
                 strategy: None,
                 artifact_dir: None,
             }
@@ -451,11 +495,23 @@ mod tests {
 
     #[test]
     fn accepts_uppercase_hex_prefix() {
-        let options = parse_options(["--seed", "0X2A"].into_iter().map(str::to_owned))
+        let options = parse_options(["--world-seed", "0X2A"].into_iter().map(str::to_owned))
             .expect("uppercase hexadecimal prefixes should parse")
             .expect("non-help arguments should request a run");
 
-        assert_eq!(options.seed, 42);
+        assert_eq!(options.world_seed, 42);
+    }
+
+    #[test]
+    fn rejects_ambiguous_legacy_seed_flag() {
+        let error = parse_options(["--seed", "42"].into_iter().map(str::to_owned)).expect_err(
+            "the removed single-seed surface must not silently conflate world and policy",
+        );
+
+        assert!(matches!(
+            error,
+            HarnessCliError::UnsupportedArgument { argument } if argument == "--seed"
+        ));
     }
 
     #[test]
@@ -491,7 +547,8 @@ mod tests {
 
         assert_eq!(options.mode, HarnessMode::Smoke);
         assert_eq!(options.samples, 1);
-        assert_eq!(options.seed, DEFAULT_SEED);
+        assert_eq!(options.world_seed, DEFAULT_WORLD_SEED);
+        assert_eq!(options.policy_seed, DEFAULT_POLICY_SEED);
     }
 
     #[test]
@@ -621,13 +678,13 @@ mod tests {
 
     #[test]
     fn portfolio_probe_requires_explicit_opportunity_prioritization() {
-        run_opportunity_portfolio_probe(&crimocracy::build_registry(), DEFAULT_SEED)
+        run_opportunity_portfolio_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
             .expect("portfolio probe should preserve selected and expired opportunities");
     }
 
     #[test]
     fn vice_heat_probe_proves_clean_districts_stay_clean_and_casework_converts() {
-        run_vice_attention_probe(&crimocracy::build_registry(), DEFAULT_SEED)
+        run_vice_attention_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
             .expect("vice-attention probe should prove the sustained-casework conversion chain");
     }
 
@@ -655,7 +712,7 @@ mod tests {
     #[test]
     fn narrative_seed_rotation_covers_every_authored_variation() {
         let variations: std::collections::BTreeSet<_> = (0..NARRATIVE_SEED_ROTATION)
-            .map(|offset| FixtureVariation::from_seed(DEFAULT_SEED.wrapping_add(offset)))
+            .map(|offset| FixtureVariation::from_seed(DEFAULT_WORLD_SEED.wrapping_add(offset)))
             .collect();
         assert_eq!(
             variations.len() as u64,
@@ -665,25 +722,25 @@ mod tests {
     }
 
     #[test]
-    fn policy_choice_avalanches_across_adjacent_seeds_and_salts() {
-        // Adjacent seeds must not replay one decision sequence: over a window of eight
-        // seeds both binary outcomes must appear, and different salts must not agree.
+    fn policy_choice_avalanches_across_adjacent_policy_seeds_and_salts() {
+        // Adjacent policy seeds must not replay one decision sequence: over a window of eight
+        // values both binary outcomes must appear, and different salts must not agree.
         let outcomes: Vec<u64> = (0..8)
-            .map(|offset| bounded_policy_choice(DEFAULT_SEED + offset, 0x5EED, 2))
+            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x5EED, 2))
             .collect();
         assert!(outcomes.contains(&0) && outcomes.contains(&1));
         let other_salt: Vec<u64> = (0..8)
-            .map(|offset| bounded_policy_choice(DEFAULT_SEED + offset, 0x0DEF, 2))
+            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x0DEF, 2))
             .collect();
         assert_ne!(outcomes, other_salt);
     }
 
     #[test]
-    fn scenario_timeline_is_seed_varied_and_registry_anchored() {
+    fn scenario_timeline_is_policy_seed_varied_and_registry_anchored() {
         let registry = crimocracy::build_registry();
-        let first = ScenarioTimeline::for_scenario(&registry, 0);
-        let matched = ScenarioTimeline::for_scenario(&registry, 0);
-        let varied = ScenarioTimeline::for_scenario(&registry, 3);
+        let first = ScenarioTimeline::for_policy(&registry, 0);
+        let matched = ScenarioTimeline::for_policy(&registry, 0);
+        let varied = ScenarioTimeline::for_policy(&registry, 3);
         let burglary_duration = registry
             .get_operation(crimocracy::operations::OperationKind::Burglary)
             .execution()
@@ -702,6 +759,24 @@ mod tests {
         assert!(
             first.recon_second_act_surveillance_at > first.second_opportunity_discovery_at,
             "fresh recon must follow the player-visible opportunity discovery"
+        );
+    }
+
+    #[test]
+    fn world_seed_variation_does_not_change_fixed_policy_timeline() {
+        let registry = crimocracy::build_registry();
+        let first = EvaluationSeeds::new(0, 7);
+        let second = EvaluationSeeds::new(1, 7);
+
+        assert_ne!(
+            FixtureVariation::from_seed(first.world),
+            FixtureVariation::from_seed(second.world),
+            "world sensitivity must actually perturb the authored fixture"
+        );
+        assert_eq!(
+            ScenarioTimeline::for_policy(&registry, first.policy),
+            ScenarioTimeline::for_policy(&registry, second.policy),
+            "holding policy seed fixed must hold evaluation timing fixed while world varies"
         );
     }
 
@@ -950,7 +1025,7 @@ mod tests {
     #[test]
     #[ignore = "controlled smoke contract runs in its focused local gate lane"]
     fn smoke_mode_covers_canonical_paths() {
-        run_smoke(DEFAULT_SEED, None)
+        run_smoke(EvaluationSeeds::defaults(), None)
             .expect("smoke harness should pass its canonical-path contract");
     }
 }

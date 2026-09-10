@@ -20,21 +20,46 @@ use std::path::PathBuf;
 
 pub const DEFAULT_BATCH_SAMPLES: u64 = 3;
 pub const MAX_BATCH_SAMPLES: u64 = 64;
-pub const DEFAULT_SEED: u64 = 0x1933_0514;
+pub const DEFAULT_WORLD_SEED: u64 = 0x1933_0514;
+/// Independent evaluation-policy stream. The baseline value intentionally matches the historical
+/// default world seed so the primary treatment keeps its established choices while world-seed
+/// sweeps can now vary environment/simulation state without silently varying policy as well.
+pub const DEFAULT_POLICY_SEED: u64 = 0x1933_0514;
 pub const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
-/// Narrative comparisons rotate across this many adjacent seeds, covering every authored
-/// fixture variation while matched branches inside one seed still share one world.
+/// Narrative comparisons rotate across this many adjacent world seeds, covering every authored
+/// fixture variation while the policy seed remains fixed across the comparison.
 pub const NARRATIVE_SEED_ROTATION: u64 = 3;
+
+/// Explicit seed channels for behavior evaluation. `world` determines fixture variation and the
+/// simulation RNG streams; `policy` determines only evaluation-owned timing/choice variation.
+/// Keeping them in one typed value prevents a scenario-sensitivity sweep from accidentally
+/// perturbing the acting policy at the same time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvaluationSeeds {
+    pub world: u64,
+    pub policy: u64,
+}
+
+impl EvaluationSeeds {
+    pub const fn new(world: u64, policy: u64) -> Self {
+        Self { world, policy }
+    }
+
+    pub const fn defaults() -> Self {
+        Self::new(DEFAULT_WORLD_SEED, DEFAULT_POLICY_SEED)
+    }
+}
 
 /// Bounded deterministic policy choice for evaluation-owned variation. This is not a game
 /// rule: it keeps controlled treatments from replaying one exact decision sequence forever
-/// while staying fully determined by the run seed. The splitmix-style finalizer avalanches
-/// all bits, so adjacent seeds diverge in every choice rather than only in high bits.
-pub fn bounded_policy_choice(seed: u64, salt: u64, choices: u64) -> u64 {
+/// while staying fully determined by the explicit policy seed. The splitmix-style finalizer
+/// avalanches all bits, so adjacent policy seeds diverge in every choice rather than only in high
+/// bits.
+pub fn bounded_policy_choice(policy_seed: u64, salt: u64, choices: u64) -> u64 {
     if choices == 0 {
         return 0;
     }
-    let mut mixed = seed
+    let mut mixed = policy_seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(salt.wrapping_mul(0xD1B5_4A32_D192_ED03));
     mixed ^= mixed >> 30;
@@ -104,7 +129,8 @@ impl HarnessMode {
 pub struct HarnessOptions {
     pub mode: HarnessMode,
     pub samples: u64,
-    pub seed: u64,
+    pub world_seed: u64,
+    pub policy_seed: u64,
     pub strategy: Option<Strategy>,
     pub artifact_dir: Option<PathBuf>,
 }
@@ -467,8 +493,8 @@ impl ScenarioProfile {
 
 /// Evaluation-owned policy timing anchored to authored runtime values. These are not additional
 /// game rules: they describe when this controlled treatment chooses to act. Matched strategy
-/// branches receive the same timeline, while the seed-derived offsets keep batch runs from
-/// replaying one exact clock sequence forever.
+/// branches receive the same timeline. Policy timing has its own explicit seed channel so world
+/// sensitivity can vary fixture/simulation state while this treatment remains fixed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScenarioTimeline {
     pub initial_burglary_at: SimTime,
@@ -480,7 +506,7 @@ pub struct ScenarioTimeline {
 }
 
 impl ScenarioTimeline {
-    pub fn for_scenario(registry: &Registry, seed: u64) -> Self {
+    pub fn for_policy(registry: &Registry, policy_seed: u64) -> Self {
         let campaign_day_minutes = u64::from(
             registry
                 .recruitment()
@@ -494,8 +520,8 @@ impl ScenarioTimeline {
                 .duration()
                 .as_minutes(),
         );
-        let policy_variant = (seed / 3) % 5;
-        let initial_burglary_at = 120 + 10 * (seed % 5);
+        let policy_variant = (policy_seed / 3) % 5;
+        let initial_burglary_at = 120 + 10 * (policy_seed % 5);
         let initial_opportunity_window =
             (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60));
         let second_opportunity_discovery_at = campaign_day_minutes
@@ -574,9 +600,9 @@ pub struct Scenario<'registry> {
     pub investigation: Option<crimocracy::core::id::InvestigationId>,
     pub variation: FixtureVariation,
     pub timeline: ScenarioTimeline,
-    /// The run seed this scenario was built from: evaluation-owned policy variation (timing
-    /// offsets, approach choices, watch order) derives from it, never from hidden game state.
-    pub seed: u64,
+    /// Explicit evaluation seed channels. World/simulation randomness and acting-policy
+    /// variation are independent so sensitivity claims can hold either one fixed.
+    pub seeds: EvaluationSeeds,
     /// Registry-derived slack for the terminal-wait guard: the longest authored operation
     /// duration, so the guard tracks content instead of a hard-coded constant.
     pub wait_slack_minutes: u32,

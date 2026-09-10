@@ -415,7 +415,10 @@ fn restore_rejects_disruption_horizon_beyond_any_possible_current_hit() {
         .economy()
         .get_business_economy(fixture.business)
         .expect("disrupted economy should persist");
-    let legitimate_horizon = fixture.state.now() + registry.business_disruption().duration();
+    let legitimate_horizon = resolve_business_disruption_horizon(
+        fixture.state.now(),
+        registry.business_disruption().duration(),
+    );
     assert_eq!(record.disrupted_through(), Some(legitimate_horizon));
     let mut corrupted = business_economy_wire(record);
     corrupted.disrupted_through = Some(legitimate_horizon + SimDuration::ONE_MINUTE);
@@ -1393,7 +1396,10 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
 
     let disruption = validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
         .expect("disruption should validate against an active economy");
-    let horizon = fixture.state.now() + registry.business_disruption().duration();
+    let horizon = resolve_business_disruption_horizon(
+        fixture.state.now(),
+        registry.business_disruption().duration(),
+    );
     disruption
         .commit(&mut fixture.state)
         .expect("disruption should commit");
@@ -1404,6 +1410,14 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
         .expect("disrupted economy should exist");
     assert_eq!(economy.disrupted_through(), Some(horizon));
     assert!(economy.is_disrupted(fixture.state.now()));
+    assert!(
+        economy.is_disrupted(horizon),
+        "inclusive horizon must remain the final affected minute"
+    );
+    assert!(
+        !economy.is_disrupted(horizon + SimDuration::ONE_MINUTE),
+        "authored duration must not leak into an extra endpoint minute"
+    );
 
     // The undisrupted gross for this neighborhood profile, computed through the same
     // production math so content tuning cannot break the contract spuriously.
@@ -1444,15 +1458,16 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
         .commit(&mut fixture.state)
         .expect("disrupted cycle should commit");
 
-    // After the horizon passes the same business earns normal gross again.
+    // The next daily settlement is exactly one minute after the inclusive disruption horizon.
+    // It must recover rather than suffering a third degraded cycle from an off-by-one endpoint.
     fixture
         .state
-        .advance_clock(SimDuration::from_minutes(1_441));
+        .advance_clock(SimDuration::from_minutes(1_440));
     let recovered_plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
-        .expect("due cycle after the horizon should recover");
+        .expect("due cycle immediately after the horizon should recover");
     assert_eq!(
         recovered_plan.economics.gross_revenue, normal_gross,
-        "cycle after the horizon must earn undisrupted gross"
+        "cycle immediately after the horizon must earn undisrupted gross"
     );
     validate_invariants(&fixture.state);
 }
@@ -1463,7 +1478,10 @@ fn repeated_sabotage_extends_but_never_shortens_the_disruption_horizon() {
     let mut fixture = make_business_economy_fixture();
     establish_business_economy(&registry, &mut fixture);
 
-    let first_horizon = fixture.state.now() + registry.business_disruption().duration();
+    let first_horizon = resolve_business_disruption_horizon(
+        fixture.state.now(),
+        registry.business_disruption().duration(),
+    );
     validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
         .expect("first disruption should validate")
         .commit(&mut fixture.state)
@@ -1471,7 +1489,10 @@ fn repeated_sabotage_extends_but_never_shortens_the_disruption_horizon() {
 
     // A second hit inside the first horizon pushes the horizon later from the new instant.
     fixture.state.advance_clock(SimDuration::from_minutes(600));
-    let second_horizon = fixture.state.now() + registry.business_disruption().duration();
+    let second_horizon = resolve_business_disruption_horizon(
+        fixture.state.now(),
+        registry.business_disruption().duration(),
+    );
     assert!(second_horizon > first_horizon);
     validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
         .expect("second disruption should validate")
