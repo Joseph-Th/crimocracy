@@ -160,43 +160,47 @@ pub(crate) fn resolve_recruitment_margin(
     // from a target being "wanted", which would otherwise reward poaching the
     // most-investigated characters with money alone.
     let legal_weight = if approach == RecruitmentApproach::Protection {
-        i16::from(weights.perceived_legal_pressure)
+        i32::from(weights.perceived_legal_pressure)
     } else {
         0
     };
-    let score = definition.base_willingness()
+    // Accumulate wider than the persisted margin. Registry validation proves the complete final
+    // expression fits i16, but a large positive trait adjustment can temporarily put the score
+    // above i16::MAX before the acceptance threshold is subtracted.
+    let score = i32::from(definition.base_willingness())
         + weighted(
             factors.recruiter_influence(),
-            i16::from(weights.recruiter_influence),
+            i32::from(weights.recruiter_influence),
         )
         + weighted(
             factors.drive_alignment(),
-            i16::from(weights.drive_alignment),
+            i32::from(weights.drive_alignment),
         )
         + weighted(
             factors.relationship_support(),
-            i16::from(weights.relationship_support),
+            i32::from(weights.relationship_support),
         )
         + weighted(
             factors.incumbent_resentment(),
-            i16::from(weights.incumbent_resentment),
+            i32::from(weights.incumbent_resentment),
         )
         + weighted(factors.perceived_legal_pressure(), legal_weight)
         + weighted(
             factors.organization_competence(),
-            i16::from(weights.organization_competence),
+            i32::from(weights.organization_competence),
         )
         - weighted(
             factors.incumbent_attachment(),
-            i16::from(weights.incumbent_attachment),
+            i32::from(weights.incumbent_attachment),
         )
-        - i16::from(factors.membership_resistance())
-        + factors.trait_adjustment();
-    score - definition.acceptance_score()
+        - i32::from(factors.membership_resistance())
+        + i32::from(factors.trait_adjustment());
+    let margin = score - i32::from(definition.acceptance_score());
+    i16::try_from(margin).expect("validated authored recruitment margin must fit i16")
 }
 
-fn weighted(value: u8, weight: i16) -> i16 {
-    i16::from(value) * weight / 100
+fn weighted(value: u8, weight: i32) -> i32 {
+    i32::from(value) * weight / 100
 }
 
 pub(crate) fn resolve_recruitment_outcome(margin: i16) -> RecruitmentOutcome {

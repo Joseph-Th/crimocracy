@@ -4,7 +4,9 @@ use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::id::MandateId;
-use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::invariants::{
+    validate_invariants, validate_state, validate_state_against_registry,
+};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::validate_record_information;
@@ -13,14 +15,17 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::operation_abort::validate_authority_abort_operation;
+use crate::operations::operation_execution::{
+    OperationResolutionRandomness, decide_operation_resolution, validate_operation_resolution_plan,
+};
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationApproach, OperationDraft, OperationKind,
-    OperationObjective, OperationObjectiveKind, RoleKind,
+    OperationObjective, OperationObjectiveBlocker, OperationObjectiveKind, RoleKind,
 };
 use crate::reports::ReportKind;
 use crate::world::world_system::{
     insert_business, insert_character, insert_neighborhood, insert_organization,
-    validate_reassign_character,
+    validate_reassign_character, validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
@@ -101,6 +106,7 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
             functions: BTreeSet::from([
                 BusinessFunction::CashIntensive,
                 BusinessFunction::CustomerAccess,
+                BusinessFunction::MeetingSpace,
             ]),
             neighborhood,
             owner: BusinessOwner::Independent,
@@ -182,6 +188,272 @@ fn due_authorized_operations_preserve_start_chronology_before_id_order() {
         vec![earlier_due_higher_id, later_due_lower_id],
         "an older scheduled start must run before a later-due lower operation ID"
     );
+    validate_invariants(&state);
+}
+
+#[test]
+fn gambling_event_requires_sponsor_control_and_a_real_gambling_venue() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(foreign_business) = target else {
+        panic!("unexpected fixture target {target:?}");
+    };
+    let scheduled_for = state.now();
+    let draft_for = |business| OperationDraft {
+        title: "Back-room card night".to_owned(),
+        kind: OperationKind::GamblingEvent,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::ObtainCash {
+            target: EntityRef::Business(business),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for,
+    };
+
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, draft_for(foreign_business))
+            .expect_err("a gambling event cannot claim house proceeds from a foreign venue"),
+        OperationError::TargetBusinessNotSponsorOwned {
+            business: foreign_business,
+        }
+    );
+
+    let neighborhood = state
+        .world()
+        .get_business(foreign_business)
+        .expect("fixture business should exist")
+        .neighborhood();
+    let inadequate = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Bare Cash Office".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("owned non-venue business should persist");
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, draft_for(inadequate))
+            .expect_err("cash handling and customers without meeting space are not a venue"),
+        OperationError::TargetBusinessMissingFunction {
+            business: inadequate,
+            function: BusinessFunction::MeetingSpace,
+        }
+    );
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
+fn gambling_event_fails_if_the_sponsor_loses_the_venue_before_payout() {
+    let (registry, mut state, organization, _leader, target) = make_test_operation_state();
+    let EntityRef::Business(fixture_business) = target else {
+        panic!("unexpected fixture target {target:?}");
+    };
+    let neighborhood = state
+        .world()
+        .get_business(fixture_business)
+        .expect("fixture business should exist")
+        .neighborhood();
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Gambling Manager".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                crate::world::CapabilityKind::Management,
+                Rating::try_new(100).expect("fixture rating should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("gambling manager should validate");
+    let venue = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Transient Gambling Venue".to_owned(),
+            kind: BusinessKind::Nightclub,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::MeetingSpace,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("gambling venue should validate");
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Venue control regression".to_owned(),
+            kind: OperationKind::GamblingEvent,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(venue),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("controlled gambling venue should authorize")
+    .commit(&mut state)
+    .expect("controlled gambling venue should commit");
+
+    let tick = crate::core::simulation::run_tick(&registry, &mut state);
+    assert_eq!(tick.started_operations, vec![operation]);
+    validate_transfer_business_ownership(&state, venue, BusinessOwner::Independent)
+        .expect("an operation target does not freeze world ownership")
+        .commit(&mut state)
+        .expect("venue transfer should commit");
+    let due_at = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution_due_at())
+        .expect("started gambling event should have a resolution time");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture duration must fit SimDuration"),
+    ));
+    let variance = i8::try_from(
+        registry
+            .get_operation(OperationKind::GamblingEvent)
+            .execution()
+            .variance_limit(),
+    )
+    .expect("authored variance must fit i8");
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(variance, 0),
+    )
+    .expect("due gambling event should decide despite venue ownership drift");
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("venue-loss failure should validate")
+        .commit(&mut state)
+        .expect("venue-loss failure should commit");
+
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("failed gambling event should persist its resolution");
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
+    );
+    assert!(resolution.cash_proceeds().is_none());
+    let after_action = state
+        .intelligence()
+        .get_information(resolution.after_action_information())
+        .expect("failed gambling event should report its cause");
+    assert!(
+        after_action
+            .summary()
+            .contains("left the sponsoring organization's control")
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("venue-loss operation should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("venue-loss operation should save"),
+    )
+    .expect("venue-loss operation should restore");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn gambling_event_allows_an_organization_owned_venue() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(target_business) = target else {
+        panic!("unexpected fixture target {target:?}");
+    };
+    let neighborhood = state
+        .world()
+        .get_business(target_business)
+        .expect("fixture business should exist")
+        .neighborhood();
+    let venue = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Organization Gambling Venue".to_owned(),
+            kind: BusinessKind::Nightclub,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::MeetingSpace,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("owned gambling venue should validate");
+
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Back-room card night".to_owned(),
+            kind: OperationKind::GamblingEvent,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(venue),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("a gambling event may use the sponsor's own venue")
+    .commit(&mut state)
+    .expect("owned-venue gambling event should commit");
+
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("gambling operation should persist")
+            .objective(),
+        &OperationObjective::ObtainCash {
+            target: EntityRef::Business(venue),
+        }
+    );
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("gambling operation should persist");
+    assert_eq!(
+        crate::operations::operation_objective::resolve_objective_blocker(&state, record),
+        None,
+        "owning the gambling venue must not become an execution-time objective blocker"
+    );
+    validate_state(&state).expect("owned-venue gambling operation must remain valid");
     validate_invariants(&state);
 }
 

@@ -7,6 +7,7 @@
 mod builder;
 mod definitions;
 mod operation_validation;
+mod recruitment_validation;
 
 pub use definitions::*;
 
@@ -113,7 +114,7 @@ mod tests {
     use crate::finance::Money;
     use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, RoleKind};
     use crate::recruitment::RecruitmentApproach;
-    use crate::world::{BusinessFunction, CapabilityKind, DriveKind, TraitKind};
+    use crate::world::{ALL_TRAIT_KINDS, BusinessFunction, CapabilityKind, DriveKind, TraitKind};
     use std::collections::BTreeSet;
 
     fn burglary_operation_parts() -> (
@@ -128,6 +129,20 @@ mod tests {
             definition.required_roles().clone(),
             definition.execution().clone(),
         )
+    }
+
+    fn investigation_work_spec(kind: InvestigationWorkKind) -> InvestigationWorkDefinitionSpec {
+        let registry = build_registry();
+        let definition = registry.get_investigation_work(kind);
+        InvestigationWorkDefinitionSpec {
+            duration: definition.duration(),
+            base_difficulty: definition.base_difficulty(),
+            source_support_weight: definition.source_support_weight(),
+            variance_limit: definition.variance_limit(),
+            connected_margin: definition.connected_margin(),
+            source_support: definition.source_support(),
+            interview_outcome: definition.interview_outcome(),
+        }
     }
 
     fn information_quality_spec() -> InformationQualityDefinition {
@@ -373,6 +388,105 @@ mod tests {
     }
 
     #[test]
+    fn upkeep_definition_rejects_unrepresentable_payroll_and_out_of_rail_resentment() {
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_upkeep(UpkeepConfigSpec {
+                per_member_daily: Money::from_cents(i64::MAX),
+                shortfall_resentment: 10,
+            }),
+            Err(RegistryBuildError::InvalidUpkeepArithmeticRange)
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_upkeep(UpkeepConfigSpec {
+                per_member_daily: Money::from_cents(1_000),
+                shortfall_resentment: 101,
+            }),
+            Err(RegistryBuildError::InvalidUpkeepResentment)
+        ));
+    }
+
+    #[test]
+    fn operation_proceeds_arithmetic_is_safe_regardless_of_registration_order() {
+        let registry = build_registry();
+        let business_kind = crate::world::BusinessKind::Retail;
+        let mut business = registry.get_business(business_kind).economics().clone();
+        business.base_gross = Money::from_cents(i64::MAX / 2);
+        business.wealth_revenue_per_point = Money::ZERO;
+        business.commerce_revenue_per_point = Money::ZERO;
+        business.gross_variance_basis_points = 0;
+        business.notable_variance_basis_points = 0;
+
+        let operation_kind = OperationKind::Robbery;
+        let operation = registry.get_operation(operation_kind);
+
+        let mut business_first = RegistryBuilder::default();
+        business_first
+            .register_business(business_kind, business.clone())
+            .expect("large business is individually representable before operation authorship");
+        assert!(matches!(
+            business_first.register_operation(
+                operation_kind,
+                "Robbery",
+                operation.supported_approaches().clone(),
+                operation.required_roles().clone(),
+                operation.execution().clone(),
+            ),
+            Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(kind))
+                if kind == operation_kind
+        ));
+
+        let mut operation_first = RegistryBuilder::default();
+        operation_first
+            .register_operation(
+                operation_kind,
+                "Robbery",
+                operation.supported_approaches().clone(),
+                operation.required_roles().clone(),
+                operation.execution().clone(),
+            )
+            .expect("operation is individually representable before business authorship");
+        assert!(matches!(
+            operation_first.register_business(business_kind, business),
+            Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(kind))
+                if kind == operation_kind
+        ));
+    }
+
+    #[test]
+    fn economic_definitions_reject_values_that_can_overflow_normal_settlement() {
+        let registry = build_registry();
+
+        let business_kind = crate::world::BusinessKind::Retail;
+        let mut business = registry.get_business(business_kind).economics().clone();
+        business.wealth_revenue_per_point = Money::from_cents(i64::MAX);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_business(business_kind, business),
+            Err(RegistryBuildError::BusinessEconomicArithmeticOutOfRange(kind))
+                if kind == business_kind
+        ));
+
+        let enterprise_kind = EnterpriseKind::AlcoholDistribution;
+        let definition = registry.get_enterprise(enterprise_kind);
+        let mut enterprise = definition.economics().clone();
+        enterprise.support_surcharge_per_business = Money::from_cents(i64::MAX);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_enterprise(
+                enterprise_kind,
+                enterprise,
+                definition.required_business_functions().clone(),
+                definition.required_network_functions().clone(),
+            ),
+            Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(kind))
+                if kind == enterprise_kind
+        ));
+    }
+
+    #[test]
     fn authored_alcohol_distribution_requires_concrete_commercial_network() {
         let registry = build_registry();
         let definition = registry.get_enterprise(EnterpriseKind::AlcoholDistribution);
@@ -550,6 +664,141 @@ mod tests {
     }
 
     #[test]
+    fn operation_definition_rejects_inert_role_weight_and_unreachable_deadline_failure() {
+        let (approaches, _roles, mut inert_role_weight) = burglary_operation_parts();
+        inert_role_weight.difficulty.role_capabilities.clear();
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                BTreeSet::new(),
+                inert_role_weight,
+            ),
+            Err(RegistryBuildError::InvalidOperationAbilityWeights(
+                OperationKind::Burglary
+            ))
+        ));
+
+        let (_, roles, mut compressed) = burglary_operation_parts();
+        compressed.difficulty.duration = SimDuration::from_minutes(10);
+        compressed.difficulty.base_difficulty = 0;
+        compressed.difficulty.police_pressure_weight = 0;
+        compressed.difficulty.max_time_pressure = 100;
+        compressed.difficulty.variance_limit = 0;
+        compressed.difficulty.partial_margin = -10;
+        compressed.difficulty.achieved_margin = 5;
+        for adjustment in compressed
+            .difficulty
+            .approach_difficulty_adjustments
+            .values_mut()
+        {
+            *adjustment = 0;
+        }
+        compressed.police_response.base_response_delay = SimDuration::from_minutes(1);
+        compressed.police_response.minimum_response_delay = SimDuration::from_minutes(1);
+        compressed.police_response.patrol_reduction_minutes = 0;
+        compressed.police_response.entry_offset = Some(SimDuration::from_minutes(8));
+        compressed.police_response.arrival_difficulty_penalty = 0;
+        // A legal deadline must be later than minute 8, so minute 9 is the tightest possible
+        // completion. Runtime pressure is therefore only 10, making Failed (< -10) unreachable.
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                compressed,
+            ),
+            Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(
+                OperationKind::Burglary
+            ))
+        ));
+    }
+
+    #[test]
+    fn operation_definition_rejects_exposure_thresholds_its_own_factors_cannot_reach() {
+        let (approaches, roles, execution) = burglary_operation_parts();
+
+        let mut impossible_identification = execution.clone();
+        impossible_identification.exposure.identifying_threshold = 200;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                impossible_identification,
+            ),
+            Err(RegistryBuildError::InvalidOperationExposureThresholdRange(
+                OperationKind::Burglary
+            ))
+        ));
+
+        let mut impossible_clean_escape = execution;
+        impossible_clean_escape.exposure.trace_threshold = -100;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                impossible_clean_escape,
+            ),
+            Err(RegistryBuildError::InvalidOperationExposureThresholdRange(
+                OperationKind::Burglary
+            ))
+        ));
+    }
+
+    #[test]
+    fn operation_definition_rejects_unreachable_police_dispatch_threshold() {
+        let (approaches, roles, mut execution) = burglary_operation_parts();
+        execution.police_response.dispatch_threshold = 100;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                execution,
+            ),
+            Err(RegistryBuildError::InvalidOperationResponseThresholdRange(
+                OperationKind::Burglary
+            ))
+        ));
+    }
+
+    #[test]
+    fn operation_definition_rejects_response_that_cannot_arrive_before_resolution() {
+        let (approaches, roles, mut execution) = burglary_operation_parts();
+        let impossible_delay = execution.difficulty.duration.as_minutes() + 1;
+        execution.police_response.base_response_delay = SimDuration::from_minutes(impossible_delay);
+        execution.police_response.minimum_response_delay =
+            SimDuration::from_minutes(impossible_delay);
+        execution.police_response.patrol_reduction_minutes = 0;
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches,
+                roles,
+                execution,
+            ),
+            Err(RegistryBuildError::InvalidOperationResponseDelay(
+                OperationKind::Burglary
+            ))
+        ));
+    }
+
+    #[test]
     fn operation_definition_rejects_empty_or_inert_approach_authorship() {
         let (approaches, roles, execution) = burglary_operation_parts();
 
@@ -627,6 +876,27 @@ mod tests {
             })
         ));
 
+        let mut excessive_exposure_adjustment = execution.clone();
+        excessive_exposure_adjustment
+            .exposure
+            .approach_adjustments
+            .insert(missing_approach, 51);
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Burglary,
+                "Burglary",
+                approaches.clone(),
+                roles.clone(),
+                excessive_exposure_adjustment,
+            ),
+            Err(
+                RegistryBuildError::InvalidOperationExposureApproachAdjustment(
+                    OperationKind::Burglary
+                )
+            )
+        ));
+
         let mut exposure_extra = execution;
         exposure_extra
             .exposure
@@ -647,6 +917,34 @@ mod tests {
                     approach: OperationApproach::Violent,
                 }
             )
+        ));
+    }
+
+    #[test]
+    fn operation_definition_rejects_partial_cash_take_above_full_outcome_fraction() {
+        let registry = crate::build_registry();
+        let definition = registry.get_operation(OperationKind::Robbery);
+        let approaches = definition.supported_approaches().clone();
+        let roles = definition.required_roles().clone();
+        let mut execution = definition.execution().clone();
+        execution
+            .cash_proceeds
+            .as_mut()
+            .expect("robbery must author cash proceeds")
+            .partial_take_basis_points = 10_001;
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_operation(
+                OperationKind::Robbery,
+                "Robbery",
+                approaches,
+                roles,
+                execution,
+            ),
+            Err(RegistryBuildError::InvalidOperationPartialCashTake(
+                OperationKind::Robbery
+            ))
         ));
     }
 
@@ -727,6 +1025,154 @@ mod tests {
         assert!(matches!(
             builder.register_recruitment(spec),
             Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights)
+        ));
+    }
+
+    #[test]
+    fn recruitment_definition_rejects_duplicate_and_non_incumbent_threshold_trait_rules() {
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.trait_rules.push(spec.trait_rules[0]);
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::DuplicateRecruitmentTraitRule(
+                TraitKind::Ambitious
+            ))
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        let mut spec = recruitment_spec();
+        spec.trait_rules[0].minimum_incumbent_resentment = Some(0);
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::InvalidRecruitmentTraitRule(
+                TraitKind::Ambitious
+            ))
+        ));
+    }
+
+    #[test]
+    fn recruitment_definition_rejects_predetermined_outcomes() {
+        let mut builder = RegistryBuilder::default();
+        let mut always_refuses = recruitment_spec();
+        always_refuses.scoring.base_willingness = 0;
+        always_refuses.scoring.acceptance_score = 100;
+        always_refuses.scoring.weights = RecruitmentWeightsDefinition {
+            recruiter_influence: 0,
+            drive_alignment: 0,
+            relationship_support: 0,
+            incumbent_resentment: 0,
+            perceived_legal_pressure: 0,
+            incumbent_attachment: 0,
+            organization_competence: 0,
+        };
+        always_refuses.trait_rules.clear();
+        assert!(matches!(
+            builder.register_recruitment(always_refuses),
+            Err(RegistryBuildError::InvalidRecruitmentOutcomeRange(
+                RecruitmentApproach::FinancialOpportunity
+            ))
+        ));
+
+        let mut builder = RegistryBuilder::default();
+        let mut always_accepts = recruitment_spec();
+        always_accepts.scoring.base_willingness = 100;
+        always_accepts.scoring.acceptance_score = 0;
+        always_accepts.scoring.existing_membership_resistance = 0;
+        always_accepts.scoring.weights.incumbent_attachment = 0;
+        always_accepts.trait_rules.clear();
+        assert!(matches!(
+            builder.register_recruitment(always_accepts),
+            Err(RegistryBuildError::InvalidRecruitmentOutcomeRange(
+                RecruitmentApproach::FinancialOpportunity
+            ))
+        ));
+    }
+
+    #[test]
+    fn recruitment_definition_rejects_margin_arithmetic_overflow() {
+        let mut spec = recruitment_spec();
+        spec.trait_rules.clear();
+        // 655 distinct thresholded +50 rules total 32,750, still inside the trait accumulator's
+        // i16 range. Combined with ordinary positive recruitment factors they would overflow the
+        // persisted i16 margin unless the registry checks the whole scoring expression.
+        let mut remaining = 655_usize;
+        for trait_kind in ALL_TRAIT_KINDS {
+            for threshold in 1..=100_u8 {
+                if remaining == 0 {
+                    break;
+                }
+                spec.trait_rules.push(RecruitmentTraitRuleDefinition {
+                    trait_kind,
+                    approach: Some(RecruitmentApproach::FinancialOpportunity),
+                    minimum_incumbent_resentment: Some(threshold),
+                    adjustment: 50,
+                });
+                remaining -= 1;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            remaining, 0,
+            "fixture must author the intended trait-rule volume"
+        );
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_recruitment(spec),
+            Err(RegistryBuildError::InvalidRecruitmentArithmeticRange)
+        ));
+    }
+
+    #[test]
+    fn investigation_work_definition_rejects_unreachable_resolution_branches() {
+        let mut always_develops = investigation_work_spec(InvestigationWorkKind::EvidenceReview);
+        // Weak/questionable/inadmissible support averages 11. With the authored 35% support
+        // weight, difficulty 45, and variance 12, -54 is the exact minimum reachable margin.
+        // Because resolution uses >=, setting the threshold there kills Inconclusive entirely.
+        always_develops.connected_margin = -54;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_investigation_work(
+                InvestigationWorkKind::EvidenceReview,
+                always_develops
+            ),
+            Err(RegistryBuildError::InvalidInvestigationWorkConnectedMargin(
+                InvestigationWorkKind::EvidenceReview
+            ))
+        ));
+
+        let mut never_develops = investigation_work_spec(InvestigationWorkKind::EvidenceReview);
+        never_develops.connected_margin = 100;
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder
+                .register_investigation_work(InvestigationWorkKind::EvidenceReview, never_develops),
+            Err(RegistryBuildError::InvalidInvestigationWorkConnectedMargin(
+                InvestigationWorkKind::EvidenceReview
+            ))
+        ));
+    }
+
+    #[test]
+    fn witness_interview_definition_requires_distinct_reachable_confidence_bands() {
+        let mut spec = investigation_work_spec(InvestigationWorkKind::WitnessInterview);
+        let outcome = spec
+            .interview_outcome
+            .as_mut()
+            .expect("witness interview must author confidence bands");
+        outcome.medium_confidence = outcome.low_confidence;
+
+        let mut builder = RegistryBuilder::default();
+        assert!(matches!(
+            builder.register_investigation_work(InvestigationWorkKind::WitnessInterview, spec),
+            Err(
+                RegistryBuildError::InvalidInvestigationWorkInterviewOutcome(
+                    InvestigationWorkKind::WitnessInterview
+                )
+            )
         ));
     }
 }

@@ -57,7 +57,20 @@ impl LegalState {
 
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.indexes = LegalIndexes::default();
+        self.rebuild_investigation_indexes();
+        self.rebuild_evidence_indexes();
+        self.rebuild_witness_indexes();
+        self.rebuild_informant_indexes();
+        self.rebuild_investigation_work_indexes();
+        self.rebuild_jurisdiction_indexes();
+        self.rebuild_patrol_indexes();
+        self.rebuild_police_response_indexes();
+        self.rebuild_arrest_indexes();
+        self.rebuild_representation_indexes();
+        self.rebuild_prosecution_indexes();
+    }
 
+    fn rebuild_investigation_indexes(&mut self) {
         for investigation in self.investigations.values() {
             let id = investigation.id();
             self.indexes
@@ -95,6 +108,9 @@ impl LegalState {
                 }
             }
         }
+    }
+
+    fn rebuild_evidence_indexes(&mut self) {
         for evidence in self.evidence.values() {
             for source in evidence.derived_from() {
                 self.indexes
@@ -105,6 +121,9 @@ impl LegalState {
                     .insert(evidence.id());
             }
         }
+    }
+
+    fn rebuild_witness_indexes(&mut self) {
         for witness in self.case_witnesses.values() {
             self.indexes
                 .witnesses
@@ -129,6 +148,9 @@ impl LegalState {
                 .witness_statement_by_evidence
                 .insert(statement.evidence(), statement.id());
         }
+    }
+
+    fn rebuild_informant_indexes(&mut self) {
         for informant in self.informants.values() {
             self.indexes
                 .informants
@@ -144,6 +166,9 @@ impl LegalState {
                     disclosure.id(),
                 );
         }
+    }
+
+    fn rebuild_investigation_work_indexes(&mut self) {
         for work in self.investigation_work.values() {
             let id = work.id();
             self.indexes
@@ -171,6 +196,9 @@ impl LegalState {
                     .insert((work.investigation(), work.kind(), work.focus()), id);
             }
         }
+    }
+
+    fn rebuild_jurisdiction_indexes(&mut self) {
         for jurisdiction in self.jurisdictions.values() {
             let Some(current) = jurisdiction.revisions().last() else {
                 continue;
@@ -184,6 +212,9 @@ impl LegalState {
                     .insert(jurisdiction.organization());
             }
         }
+    }
+
+    fn rebuild_patrol_indexes(&mut self) {
         for patrol in self.patrol_deployments.values() {
             let Some(current) = patrol.revisions().last() else {
                 continue;
@@ -207,6 +238,9 @@ impl LegalState {
                     .insert(patrol.id());
             }
         }
+    }
+
+    fn rebuild_police_response_indexes(&mut self) {
         for response in self.police_responses.values() {
             self.indexes
                 .police_responses
@@ -221,6 +255,9 @@ impl LegalState {
                     .insert(response.id());
             }
         }
+    }
+
+    fn rebuild_arrest_indexes(&mut self) {
         for arrest in self.arrests.values() {
             self.indexes
                 .arrests
@@ -236,6 +273,9 @@ impl LegalState {
                 self.indexes.arrests.detained.insert(arrest.id());
             }
         }
+    }
+
+    fn rebuild_representation_indexes(&mut self) {
         for representation in self.legal_representations.values() {
             if representation.status() == LegalRepresentationStatus::Active {
                 self.indexes
@@ -256,6 +296,9 @@ impl LegalState {
                 }
             }
         }
+    }
+
+    fn rebuild_prosecution_indexes(&mut self) {
         for case in self.prosecution_cases.values() {
             if case.status() == ProsecutionCaseStatus::Reviewing {
                 self.indexes

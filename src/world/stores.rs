@@ -432,6 +432,39 @@ impl WorldState {
             .max_by_key(|change| (change.changed_at(), change.resulting_business_version()))
             .map(BusinessOwnershipChangeRecord::new_owner)
     }
+
+    /// Returns whether `owner` could have held, and definitely held, the business at one
+    /// simulation timestamp. Ownership changes are ordered among themselves by business version,
+    /// but cross-domain events sharing the same minute have no persisted sub-minute order. The
+    /// possible owners at that instant are therefore the owner immediately before the minute plus
+    /// every owner produced by a change during that minute.
+    pub(crate) fn business_owner_evidence_at(
+        &self,
+        business: BusinessId,
+        owner: BusinessOwner,
+        at: SimTime,
+    ) -> (bool, bool) {
+        let mut owner_before = None;
+        let mut same_time_owners = Vec::new();
+        for change in self.business_ownership_history(business) {
+            if change.changed_at() < at {
+                owner_before = Some(change.new_owner());
+            } else if change.changed_at() == at {
+                same_time_owners.push(change.new_owner());
+            } else {
+                break;
+            }
+        }
+        let could_be_owner = owner_before == Some(owner) || same_time_owners.contains(&owner);
+        let definitely_owner = if let Some(owner_before) = owner_before {
+            owner_before == owner && same_time_owners.iter().all(|candidate| *candidate == owner)
+        } else {
+            !same_time_owners.is_empty()
+                && same_time_owners.iter().all(|candidate| *candidate == owner)
+        };
+        (could_be_owner, definitely_owner)
+    }
+
     pub fn has_business_owner_during(
         &self,
         business: BusinessId,

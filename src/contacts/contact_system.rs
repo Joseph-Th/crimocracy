@@ -218,12 +218,12 @@ pub fn validate_establish_contact(
     let handler_to_contact = state
         .social
         .get_relationship(draft.handler, draft.contact)
-        .filter(|relationship| has_relationship_basis(relationship.dimensions()))
+        .filter(|relationship| has_contact_relationship_basis(relationship.dimensions()))
         .map(build_contact_relationship_snapshot);
     let contact_to_handler = state
         .social
         .get_relationship(draft.contact, draft.handler)
-        .filter(|relationship| has_relationship_basis(relationship.dimensions()))
+        .filter(|relationship| has_contact_relationship_basis(relationship.dimensions()))
         .map(build_contact_relationship_snapshot);
     if handler_to_contact.is_none() && contact_to_handler.is_none() {
         return Err(ContactError::NoRelationship {
@@ -696,14 +696,17 @@ fn validate_time(state: &AppState, expected: SimTime) -> Result<(), ContactError
         .map_err(|(expected, found)| ContactError::StaleTime { expected, found })
 }
 
-fn has_relationship_basis(dimensions: RelationshipDimensions) -> bool {
+/// Whether a social edge contains a dimension that can practically sustain an institutional
+/// channel. Resentment can coexist with a usable relationship but cannot create access by itself;
+/// a person merely disliking the handler is not an insider source. Fear remains valid because a
+/// coerced channel is still mechanically coherent in the current relationship model.
+pub(crate) fn has_contact_relationship_basis(dimensions: RelationshipDimensions) -> bool {
     [
         dimensions.trust,
         dimensions.respect,
         dimensions.fear,
         dimensions.affection,
         dimensions.dependence,
-        dimensions.resentment,
         dimensions.debt,
     ]
     .into_iter()

@@ -4,7 +4,7 @@ mod objective_validation;
 
 use objective_validation::validate_operation_objective;
 pub(crate) use objective_validation::{
-    is_information_subject_relevant, is_valid_operation_objective,
+    is_actionable_opportunity_target, is_information_subject_relevant, is_valid_operation_objective,
 };
 
 use crate::core::entity::{EntityRef, is_entity_present};
@@ -171,6 +171,15 @@ pub enum OperationError {
     SelfTargetedBusiness {
         business: crate::core::id::BusinessId,
     },
+    #[error("business {business} is not owned by the sponsoring organization")]
+    TargetBusinessNotSponsorOwned {
+        business: crate::core::id::BusinessId,
+    },
+    #[error("business {business} lacks required operation function {function:?}")]
+    TargetBusinessMissingFunction {
+        business: crate::core::id::BusinessId,
+        function: crate::world::BusinessFunction,
+    },
     #[error("operation {0} does not exist")]
     MissingOperation(OperationId),
     #[error("operation {operation} cannot begin before {earliest_start:?}")]
@@ -330,6 +339,7 @@ impl<'registry> ValidatedOperation<'registry> {
         // exists at commit.
         validate_extraction_custody_current(state, &self.draft.objective, self.extraction_arrest)?;
         validate_operation_objective(
+            self.registry,
             state,
             self.draft.kind,
             self.draft.responsible_organization,
@@ -450,6 +460,7 @@ pub fn validate_authorize_operation<'registry>(
         }
     })?;
     validate_operation_objective(
+        registry,
         state,
         draft.kind,
         draft.responsible_organization,

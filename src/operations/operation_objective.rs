@@ -9,8 +9,8 @@ use crate::core::id::{CaseWitnessId, CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::legal::{InvestigationStatus, WitnessCooperation};
 use crate::operations::{
-    OperationKind, OperationObjective, OperationObjectiveBlocker, OperationObjectiveOutcome,
-    OperationRecord,
+    OperationBusinessTargetOwnership, OperationKind, OperationObjective, OperationObjectiveBlocker,
+    OperationObjectiveOutcome, OperationRecord,
 };
 use crate::world::BusinessOwner;
 
@@ -38,16 +38,17 @@ pub(crate) fn resolve_objective_blocker(
     match operation.objective() {
         OperationObjective::AcquireProperty {
             target: EntityRef::Business(business),
-        }
-        | OperationObjective::ObtainCash {
+        } => business_target_ownership_mismatch(state, operation, *business)
+            .then_some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch),
+        OperationObjective::ObtainCash {
             target: EntityRef::Business(business),
-        } => sponsor_owns_business(state, operation.responsible_organization(), *business)
-            .then_some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness),
+        } => business_target_ownership_mismatch(state, operation, *business)
+            .then_some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch),
         OperationObjective::DisruptBusiness {
             target: EntityRef::Business(business),
         } => {
-            if sponsor_owns_business(state, operation.responsible_organization(), *business) {
-                Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+            if business_target_ownership_mismatch(state, operation, *business) {
+                Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
             } else if !state
                 .economy
                 .get_business_economy(*business)
@@ -83,9 +84,17 @@ pub(crate) fn resolve_objective_blocker(
     }
 }
 
-pub(crate) const fn blocker_clause(blocker: OperationObjectiveBlocker) -> &'static str {
+pub(crate) fn blocker_clause(
+    kind: OperationKind,
+    blocker: OperationObjectiveBlocker,
+) -> &'static str {
     match blocker {
-        OperationObjectiveBlocker::SponsorOwnsTargetBusiness => {
+        OperationObjectiveBlocker::TargetBusinessOwnershipMismatch
+            if kind == OperationKind::GamblingEvent =>
+        {
+            "The gambling venue left the sponsoring organization's control before the event could pay out, so there was no authorized house operation left to run."
+        }
+        OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             "The target came under the sponsoring organization's ownership before the crew reached the objective, so taking or damaging it would have meant hitting its own assets."
         }
         OperationObjectiveBlocker::TargetEconomyInactive => {
@@ -156,14 +165,23 @@ fn active_foreign_case(
         })
 }
 
-fn sponsor_owns_business(
+fn business_target_ownership_mismatch(
     state: &AppState,
-    responsible_organization: OrganizationId,
+    operation: &OperationRecord,
     business: crate::core::id::BusinessId,
 ) -> bool {
-    state.world.get_business(business).is_some_and(|record| {
-        record.owner() == BusinessOwner::Organization(responsible_organization)
-    })
+    let Some(record) = state.world.get_business(business) else {
+        return false;
+    };
+    let sponsor = BusinessOwner::Organization(operation.responsible_organization());
+    match operation
+        .kind()
+        .business_target_ownership()
+        .expect("business-target operation must define intrinsic ownership semantics")
+    {
+        OperationBusinessTargetOwnership::Foreign => record.owner() == sponsor,
+        OperationBusinessTargetOwnership::SponsorOwned => record.owner() != sponsor,
+    }
 }
 
 /// Exhaustiveness canary used by registry/state validation when checking persisted blockers.
@@ -172,16 +190,19 @@ pub(crate) fn blocker_matches_objective(
     blocker: OperationObjectiveBlocker,
 ) -> bool {
     match blocker {
-        OperationObjectiveBlocker::SponsorOwnsTargetBusiness => matches!(
-            operation.objective(),
-            OperationObjective::AcquireProperty {
-                target: EntityRef::Business(_)
-            } | OperationObjective::ObtainCash {
-                target: EntityRef::Business(_)
-            } | OperationObjective::DisruptBusiness {
-                target: EntityRef::Business(_)
-            }
-        ),
+        OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
+            operation.kind().business_target_ownership().is_some()
+                && matches!(
+                    operation.objective(),
+                    OperationObjective::AcquireProperty {
+                        target: EntityRef::Business(_)
+                    } | OperationObjective::ObtainCash {
+                        target: EntityRef::Business(_)
+                    } | OperationObjective::DisruptBusiness {
+                        target: EntityRef::Business(_)
+                    }
+                )
+        }
         OperationObjectiveBlocker::TargetEconomyInactive => matches!(
             (operation.kind(), operation.objective()),
             (

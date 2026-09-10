@@ -6,11 +6,11 @@ pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors,
     resolve_investigation_target_neighborhoods, resolve_objective_outcome,
-    resolve_operation_police_alert_context,
+    resolve_operation_police_alert_context, resolve_time_pressure,
 };
 use resolution_factors::{
     resolve_exposure_plan, resolve_operation_venue_entities, resolve_role_capability_average,
-    resolve_target_police_interval_snapshot, resolve_time_pressure,
+    resolve_target_police_interval_snapshot,
 };
 
 use crate::core::attention::AttentionClass;
@@ -427,7 +427,7 @@ pub(crate) fn decide_operation_resolution(
     }
     if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
-        summary.push_str(&held_cash_clause(proceeds.amount().cents()));
+        summary.push_str(&held_cash_clause(record.kind(), proceeds.amount().cents()));
     }
     if cash_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
         summary.push(' ');
@@ -440,7 +440,7 @@ pub(crate) fn decide_operation_resolution(
     }
     if let Some(blocker) = objective_blocker {
         summary.push(' ');
-        summary.push_str(blocker_clause(blocker));
+        summary.push_str(blocker_clause(record.kind(), blocker));
     }
     if objective_outcome != OperationObjectiveOutcome::Failed
         && matches!(

@@ -42,20 +42,90 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
+    /// One canonical objective family per operation kind. Target shape and current practical
+    /// actionability are validated separately, but consumers such as opportunity discovery must
+    /// not maintain their own parallel kind-to-objective table.
+    pub(crate) const fn objective_kind(self) -> OperationObjectiveKind {
+        match self {
+            Self::Burglary | Self::Hijacking | Self::DocumentTheft => {
+                OperationObjectiveKind::AcquireProperty
+            }
+            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent => {
+                OperationObjectiveKind::ObtainCash
+            }
+            Self::Surveillance => OperationObjectiveKind::GatherInformation,
+            Self::WitnessPressure => OperationObjectiveKind::Frighten,
+            Self::Extraction => OperationObjectiveKind::FreeDetainee,
+            Self::Sabotage | Self::Arson => OperationObjectiveKind::DisruptBusiness,
+        }
+    }
+
+    /// Builds this kind's sole objective family around a candidate entity. Extraction is the one
+    /// objective whose target is stored as a typed character id, so a non-character cannot even
+    /// form a candidate objective. Shape validation remains centralized in
+    /// `is_valid_operation_objective`.
+    pub(crate) fn objective_for_target(self, target: EntityRef) -> Option<OperationObjective> {
+        Some(match self.objective_kind() {
+            OperationObjectiveKind::AcquireProperty => {
+                OperationObjective::AcquireProperty { target }
+            }
+            OperationObjectiveKind::ObtainCash => OperationObjective::ObtainCash { target },
+            OperationObjectiveKind::Frighten => OperationObjective::Frighten { target },
+            OperationObjectiveKind::GatherInformation => {
+                OperationObjective::GatherInformation { target }
+            }
+            OperationObjectiveKind::FreeDetainee => {
+                let EntityRef::Character(target) = target else {
+                    return None;
+                };
+                OperationObjective::FreeDetainee { target }
+            }
+            OperationObjectiveKind::DisruptBusiness => {
+                OperationObjective::DisruptBusiness { target }
+            }
+        })
+    }
+
     /// Whether this kind has an authored property-proceeds effect and therefore may
     /// authorize a property-acquisition objective.
     pub(crate) const fn can_acquire_property(self) -> bool {
-        matches!(self, Self::Burglary | Self::Hijacking | Self::DocumentTheft)
+        matches!(
+            self.objective_kind(),
+            OperationObjectiveKind::AcquireProperty
+        )
     }
 
     /// Whether this kind has an authored cash-proceeds effect and therefore may
     /// authorize a cash-acquisition objective.
     pub(crate) const fn can_take_cash(self) -> bool {
-        matches!(
-            self,
-            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent
-        )
+        matches!(self.objective_kind(), OperationObjectiveKind::ObtainCash)
     }
+
+    /// Intrinsic ownership relationship between the sponsor and a business objective target.
+    /// This is operation semantics, not balance tuning: gambling is a hosted house event, while
+    /// take/disruption operations act against a counterparty's property.
+    pub(crate) const fn business_target_ownership(
+        self,
+    ) -> Option<OperationBusinessTargetOwnership> {
+        match self {
+            Self::GamblingEvent => Some(OperationBusinessTargetOwnership::SponsorOwned),
+            Self::Burglary
+            | Self::Robbery
+            | Self::Hijacking
+            | Self::Smuggling
+            | Self::Intimidation
+            | Self::DocumentTheft
+            | Self::Sabotage
+            | Self::Arson => Some(OperationBusinessTargetOwnership::Foreign),
+            Self::Surveillance | Self::WitnessPressure | Self::Extraction => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OperationBusinessTargetOwnership {
+    Foreign,
+    SponsorOwned,
 }
 
 pub const ALL_OPERATION_KINDS: [OperationKind; 12] = [
@@ -165,8 +235,10 @@ impl OperationObjective {
         }
     }
 
-    /// The business whose stock or ready cash this objective takes value out of, if any.
-    /// The economics owner decides replenishment independently per operation kind.
+    /// The business whose gross potential sizes a take-like objective, if any. Theft and
+    /// collection kinds use it as the depleted counterparty; gambling uses it as the venue whose
+    /// customer throughput sizes the house take. The economics owner decides replenishment
+    /// independently per operation kind.
     pub(crate) fn taken_business(&self) -> Option<BusinessId> {
         let target = match self {
             Self::AcquireProperty { target } | Self::ObtainCash { target } => target,
@@ -316,7 +388,7 @@ pub enum OperationObjectiveOutcome {
 /// reason from whatever the target looks like now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationObjectiveBlocker {
-    SponsorOwnsTargetBusiness,
+    TargetBusinessOwnershipMismatch,
     TargetEconomyInactive,
     NoPressureableWitnessCase,
     ExtractionCustodyEnded,
@@ -430,9 +502,9 @@ impl OperationPropertyProceedsRecord {
     }
 }
 
-/// Cash taken directly by a completed operation. Unlike held property, cash needs no
-/// resale venue; it is deposited into an organization account through the canonical
-/// cash-disposition command.
+/// Cash proceeds from a completed operation. Depending on operation kind this may be stolen cash,
+/// a protection collection, delivery payment, or gambling house take. Unlike held property, cash
+/// needs no resale venue; it is deposited through the canonical cash-disposition command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationCashProceedsRecord {
     target: EntityRef,

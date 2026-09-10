@@ -9,6 +9,7 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::KnowledgeHolder;
+use crate::operations::operation_system::is_actionable_opportunity_target;
 use crate::operations::{OperationKind, OperationStatus};
 use crate::opportunities::{
     OperationOpportunityContext, OperationOpportunityDraft, OpportunityRecord, OpportunityStatus,
@@ -37,6 +38,8 @@ pub enum OpportunityError {
     InvalidOrganizationKind(OrganizationId),
     #[error("operation opportunity must reference at least one target entity")]
     MissingTargets,
+    #[error("operation opportunity has no target currently actionable by {0:?}")]
+    NoActionableTarget(OperationKind),
     #[error("opportunity target entity {0:?} does not exist")]
     MissingTarget(EntityRef),
     #[error("operation opportunity must have at least one source-information record")]
@@ -158,13 +161,14 @@ pub enum OpportunityError {
     VersionCapacity(#[from] VersionCapacityError),
 }
 
-pub struct ValidatedOpportunityDiscovery {
+pub struct ValidatedOpportunityDiscovery<'registry> {
     draft: OperationOpportunityDraft,
     discovered_at: SimTime,
     report: ValidatedReport,
+    registry: &'registry Registry,
 }
 
-impl ValidatedOpportunityDiscovery {
+impl ValidatedOpportunityDiscovery<'_> {
     pub fn commit(self, state: &mut AppState) -> Result<OpportunityId, OpportunityError> {
         state
             .ids
@@ -175,7 +179,7 @@ impl ValidatedOpportunityDiscovery {
                 found: state.now(),
             });
         }
-        validate_discovery_state(state, &self.draft, self.discovered_at)?;
+        validate_discovery_state(self.registry, state, &self.draft, self.discovered_at)?;
         let report = self
             .report
             .commit(state)
@@ -203,14 +207,14 @@ impl ValidatedOpportunityDiscovery {
     }
 }
 
-pub fn validate_discover_operation_opportunity(
-    registry: &Registry,
+pub fn validate_discover_operation_opportunity<'registry>(
+    registry: &'registry Registry,
     state: &AppState,
     draft: OperationOpportunityDraft,
-) -> Result<ValidatedOpportunityDiscovery, OpportunityError> {
+) -> Result<ValidatedOpportunityDiscovery<'registry>, OpportunityError> {
     let discovered_at = state.now();
     let definition = registry.get_operation(draft.operation_kind);
-    validate_discovery_state(state, &draft, discovered_at)?;
+    validate_discovery_state(registry, state, &draft, discovered_at)?;
 
     let mut entities = draft.targets.clone();
     entities.insert(EntityRef::Organization(draft.organization));
@@ -234,6 +238,7 @@ pub fn validate_discover_operation_opportunity(
         draft,
         discovered_at,
         report,
+        registry,
     })
 }
 
@@ -253,6 +258,7 @@ pub(crate) fn expiry_report_summary(summary: &str) -> String {
 }
 
 fn validate_discovery_state(
+    registry: &Registry,
     state: &AppState,
     draft: &OperationOpportunityDraft,
     discovered_at: SimTime,
@@ -276,6 +282,21 @@ fn validate_discovery_state(
         if !is_entity_present(state, *target) {
             return Err(OpportunityError::MissingTarget(*target));
         }
+    }
+    // A discovery may include contextual entities such as a watchman alongside the business the
+    // crew would actually hit, but at least one covered target must be executable by this exact
+    // operation kind right now. Otherwise the system persists an opportunity the player can never
+    // convert through the canonical operation path.
+    if !draft.targets.iter().any(|target| {
+        is_actionable_opportunity_target(
+            registry,
+            state,
+            draft.organization,
+            draft.operation_kind,
+            *target,
+        )
+    }) {
+        return Err(OpportunityError::NoActionableTarget(draft.operation_kind));
     }
     if draft.source_information.is_empty() {
         return Err(OpportunityError::MissingSourceInformation);

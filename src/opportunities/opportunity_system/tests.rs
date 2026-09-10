@@ -19,6 +19,7 @@ use crate::operations::{OperationApproach, OperationDraft, OperationObjective, R
 use crate::opportunities::OpportunityResolution;
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_organization,
+    validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
@@ -307,6 +308,121 @@ fn discovery_requires_organization_knowledge_and_creates_a_provenance_report() {
             .contains(&EntityRef::Business(fixture.business))
     );
     validate_state(&fixture.state).expect("discovered opportunity state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn discovery_rejects_an_operation_kind_with_no_actionable_target() {
+    let mut fixture = make_fixture();
+    let contextual = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Character(fixture.leader),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "The watchman follows a predictable route.".to_owned(),
+        },
+    )
+    .expect("context information should validate")
+    .commit(&mut fixture.state)
+    .expect("context information should commit");
+
+    let error = match validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Character(fixture.leader)]),
+            source_information: BTreeSet::from([contextual]),
+            summary: "The watchman himself is supposedly a burglary target.".to_owned(),
+            valid_until: Some(SimTime::from_minutes(120)),
+        },
+    ) {
+        Ok(_) => panic!("burglary discovery needs at least one business it can actually target"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        OpportunityError::NoActionableTarget(OperationKind::Burglary)
+    );
+    assert_eq!(fixture.state.opportunities().opportunities().count(), 0);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn discovery_commit_rechecks_that_an_actionable_gambling_venue_is_still_controlled() {
+    let mut fixture = make_fixture();
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .expect("fixture business should exist")
+        .neighborhood();
+    let venue = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Opportunity Card Room".to_owned(),
+            kind: BusinessKind::Nightclub,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .expect("controlled gambling venue should validate");
+    let source = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Business(venue),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The controlled card room can host a private gambling night.".to_owned(),
+        },
+    )
+    .expect("venue information should validate")
+    .commit(&mut fixture.state)
+    .expect("venue information should commit");
+    let discovery = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::GamblingEvent,
+            targets: BTreeSet::from([EntityRef::Business(venue)]),
+            source_information: BTreeSet::from([source]),
+            summary: "A private card night is viable while the crew controls the venue.".to_owned(),
+            valid_until: Some(SimTime::from_minutes(120)),
+        },
+    )
+    .expect("controlled venue should support a gambling opportunity");
+
+    validate_transfer_business_ownership(&fixture.state, venue, BusinessOwner::Independent)
+        .expect("venue may leave organization control before discovery commit")
+        .commit(&mut fixture.state)
+        .expect("venue transfer should commit");
+    let error = discovery
+        .commit(&mut fixture.state)
+        .expect_err("discovery must not persist after its only actionable venue becomes foreign");
+    assert_eq!(
+        error,
+        OpportunityError::NoActionableTarget(OperationKind::GamblingEvent)
+    );
+    assert_eq!(fixture.state.opportunities().opportunities().count(), 0);
     validate_invariants(&fixture.state);
 }
 

@@ -615,21 +615,6 @@ fn validate_source_evidence(
     Ok(())
 }
 
-pub(crate) fn resolve_work_difficulty(
-    definition: &InvestigationWorkDefinition,
-    source_evidence_count: u8,
-) -> u8 {
-    let additional_count = source_evidence_count.saturating_sub(2);
-    let additional = u16::from(additional_count)
-        .saturating_mul(u16::from(definition.additional_source_difficulty()));
-    u8::try_from(
-        u16::from(definition.base_difficulty())
-            .saturating_add(additional)
-            .min(100),
-    )
-    .expect("clamped investigation difficulty must fit u8")
-}
-
 pub(crate) fn resolve_work_factors_and_margin(
     definition: &InvestigationWorkDefinition,
     state: &AppState,
@@ -647,7 +632,7 @@ pub(crate) fn resolve_work_factors_and_margin(
     let source_support = resolve_source_support(definition, state, work)?;
     let source_evidence_count = u8::try_from(work.source_evidence().len())
         .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
-    let difficulty = resolve_work_difficulty(definition, source_evidence_count);
+    let difficulty = definition.base_difficulty();
     let factors = InvestigationWorkFactors {
         investigation_capability,
         source_support,
@@ -697,7 +682,7 @@ pub(crate) fn validate_historical_work_factors(
         ))?;
     let source_evidence_count = u8::try_from(work.source_evidence().len())
         .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
-    let expected_difficulty = resolve_work_difficulty(definition, source_evidence_count);
+    let expected_difficulty = definition.base_difficulty();
     let support_valid = match work.kind() {
         InvestigationWorkKind::EvidenceReview => {
             factors.source_support() == resolve_source_support(definition, state, work)?

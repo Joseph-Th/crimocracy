@@ -174,7 +174,6 @@ impl RecruitmentDefinition {
 pub struct InvestigationWorkDefinition {
     pub(crate) duration: SimDuration,
     pub(crate) base_difficulty: u8,
-    pub(crate) additional_source_difficulty: u8,
     pub(crate) source_support_weight: u8,
     pub(crate) variance_limit: u8,
     pub(crate) connected_margin: i16,
@@ -185,7 +184,6 @@ pub struct InvestigationWorkDefinition {
 pub struct InvestigationWorkDefinitionSpec {
     pub duration: SimDuration,
     pub base_difficulty: u8,
-    pub additional_source_difficulty: u8,
     pub source_support_weight: u8,
     pub variance_limit: u8,
     pub connected_margin: i16,
@@ -288,9 +286,6 @@ impl InvestigationWorkDefinition {
     pub fn base_difficulty(&self) -> u8 {
         self.base_difficulty
     }
-    pub fn additional_source_difficulty(&self) -> u8 {
-        self.additional_source_difficulty
-    }
     pub fn source_support_weight(&self) -> u8 {
         self.source_support_weight
     }
@@ -327,11 +322,16 @@ pub struct OperationDefinition {
 pub struct OperationExecutionDefinition {
     pub(crate) difficulty: OperationDifficultyDefinition,
     pub(crate) leader_capability: CapabilityKind,
+    pub(crate) business_target: Option<OperationBusinessTargetDefinition>,
     pub(crate) intelligence: OperationIntelligenceDefinition,
     pub(crate) exposure: OperationExposureDefinition,
     pub(crate) police_response: OperationPoliceResponseDefinition,
     pub(crate) property_proceeds: Option<OperationPropertyProceedsDefinition>,
     pub(crate) cash_proceeds: Option<OperationCashProceedsDefinition>,
+}
+#[derive(Clone, Debug)]
+pub struct OperationBusinessTargetDefinition {
+    pub(crate) required_functions: BTreeSet<BusinessFunction>,
 }
 #[derive(Clone, Debug)]
 pub struct OperationDifficultyDefinition {
@@ -416,6 +416,9 @@ impl OperationExecutionDefinition {
     }
     pub fn leader_capability(&self) -> CapabilityKind {
         self.leader_capability
+    }
+    pub fn business_target(&self) -> Option<&OperationBusinessTargetDefinition> {
+        self.business_target.as_ref()
     }
     pub fn capability_for_role(&self, role: RoleKind) -> Option<CapabilityKind> {
         self.difficulty.role_capabilities.get(&role).copied()
@@ -525,6 +528,11 @@ impl OperationExecutionDefinition {
 
     pub fn cash_proceeds(&self) -> Option<OperationCashProceedsDefinition> {
         self.cash_proceeds
+    }
+}
+impl OperationBusinessTargetDefinition {
+    pub fn required_functions(&self) -> &BTreeSet<BusinessFunction> {
+        &self.required_functions
     }
 }
 impl OperationPropertyProceedsDefinition {

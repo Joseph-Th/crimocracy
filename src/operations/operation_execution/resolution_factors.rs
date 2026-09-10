@@ -466,7 +466,7 @@ fn find_most_exposed_participant(
     })
 }
 
-pub(super) fn resolve_time_pressure(
+pub(crate) fn resolve_time_pressure(
     started_at: SimTime,
     due_at: SimTime,
     base_duration: u32,

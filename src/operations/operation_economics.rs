@@ -268,13 +268,39 @@ pub(crate) fn held_property_clause(est_value_cents: i64) -> String {
     )
 }
 
-/// Historical after-action phrasing for cash taken by an operation. A later deposit remains a
-/// separate financial event rather than requiring this historical report to be rewritten.
-pub(crate) fn held_cash_clause(cents: i64) -> String {
-    format!(
-        "The crew took {} in cash and held it for later deposit.",
-        crate::finance::helpers::format_money_cents(cents)
-    )
+/// Historical after-action phrasing for direct cash proceeds. The economic event differs by
+/// operation kind even though every result enters the same held-cash disposition lifecycle.
+/// A later deposit remains a separate financial event rather than requiring history rewriting.
+pub(crate) fn held_cash_clause(kind: OperationKind, cents: i64) -> String {
+    let amount = crate::finance::helpers::format_money_cents(cents);
+    match kind {
+        OperationKind::Robbery => {
+            format!("The crew took {amount} in cash from the target and held it for later deposit.")
+        }
+        OperationKind::Intimidation => {
+            format!(
+                "The collection brought in {amount} in cash, and the crew held it for later deposit."
+            )
+        }
+        OperationKind::Smuggling => {
+            format!("The delivery paid {amount} in cash, and the crew held it for later deposit.")
+        }
+        OperationKind::GamblingEvent => {
+            format!(
+                "The event cleared {amount} in cash for the house, and the crew held it for later deposit."
+            )
+        }
+        OperationKind::Burglary
+        | OperationKind::Hijacking
+        | OperationKind::DocumentTheft
+        | OperationKind::Surveillance
+        | OperationKind::WitnessPressure
+        | OperationKind::Extraction
+        | OperationKind::Sabotage
+        | OperationKind::Arson => {
+            unreachable!("operation kind has no authored cash proceeds")
+        }
+    }
 }
 
 /// After-action phrasing for same-kind recency depletion. Different proceeds models represent

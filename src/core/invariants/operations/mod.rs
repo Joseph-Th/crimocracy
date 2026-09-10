@@ -35,9 +35,9 @@ use crate::operations::surveillance_integration::{
     is_supported_surveillance_target, is_valid_persisted_surveillance_information,
 };
 use crate::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationConstraint, OperationContingency,
-    OperationKind, OperationObjective, OperationObjectiveBlocker, OperationObjectiveOutcome,
-    OperationRecord, OperationStatus,
+    OperationAbortCause, OperationAbortPhase, OperationBusinessTargetOwnership,
+    OperationConstraint, OperationContingency, OperationKind, OperationObjective,
+    OperationObjectiveBlocker, OperationObjectiveOutcome, OperationRecord, OperationStatus,
 };
 use crate::registry::{OperationDefinition, OperationExecutionDefinition, Registry};
 use crate::reports::ReportKind;
@@ -143,6 +143,7 @@ fn validate_authored_operation_plan(
                 .is_some()
         })
     });
+    let business_target_is_valid = authored_business_target_is_valid(state, operation, execution);
     if !definition
         .supported_approaches()
         .contains(&operation.approach())
@@ -173,10 +174,66 @@ fn validate_authored_operation_plan(
         || !deadline_window_is_valid
         || !before_start_deadline_abort_is_valid
         || !police_response_matches_authorship
+        || !business_target_is_valid
     {
         return Err(invalid_operation_definition(operation));
     }
     Ok(())
+}
+
+fn authored_business_target_is_valid(
+    state: &AppState,
+    operation: &OperationRecord,
+    execution: &OperationExecutionDefinition,
+) -> bool {
+    let business = match operation.objective() {
+        OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        }
+        | OperationObjective::ObtainCash {
+            target: EntityRef::Business(business),
+        }
+        | OperationObjective::DisruptBusiness {
+            target: EntityRef::Business(business),
+        } => *business,
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::FreeDetainee { .. }
+        | OperationObjective::DisruptBusiness { .. } => {
+            return execution.business_target().is_none();
+        }
+    };
+    let Some(requirement) = execution.business_target() else {
+        return false;
+    };
+    let Some(record) = state.world.get_business(business) else {
+        return false;
+    };
+    if !requirement
+        .required_functions()
+        .iter()
+        .all(|function| record.has_function(*function))
+    {
+        return false;
+    }
+    let (could_be_owned, definitely_owned) = state.world.business_owner_evidence_at(
+        business,
+        crate::world::BusinessOwner::Organization(operation.responsible_organization()),
+        operation.authorized_at(),
+    );
+    match operation
+        .kind()
+        .business_target_ownership()
+        .expect("business-target operation kind must define ownership semantics")
+    {
+        // Same-minute transfer ordering is not persisted. For a foreign target it is enough that
+        // sponsor ownership was not certain for the whole timestamp; for a sponsor-hosted venue,
+        // sponsor ownership must have been possible at some point in that timestamp.
+        OperationBusinessTargetOwnership::Foreign => !definitely_owned,
+        OperationBusinessTargetOwnership::SponsorOwned => could_be_owned,
+    }
 }
 
 fn validate_authored_operation_resolution(
@@ -269,10 +326,9 @@ fn validate_resolution_objective_context(
         }
         | OperationObjective::DisruptBusiness {
             target: EntityRef::Business(business),
-        } => Some(resolve_sponsor_ownership_evidence(
-            state,
+        } => Some(state.world.business_owner_evidence_at(
             *business,
-            operation.responsible_organization(),
+            crate::world::BusinessOwner::Organization(operation.responsible_organization()),
             resolution.resolved_at(),
         )),
         OperationObjective::AcquireProperty { .. }
@@ -283,9 +339,18 @@ fn validate_resolution_objective_context(
         | OperationObjective::DisruptBusiness { .. } => None,
     };
     if base_expected_outcome != OperationObjectiveOutcome::Failed
-        && sponsor_ownership_evidence.is_some_and(|(_, definitely_owned)| definitely_owned)
+        && sponsor_ownership_evidence.is_some_and(|(could_be_owned, definitely_owned)| {
+            match operation
+                .kind()
+                .business_target_ownership()
+                .expect("persisted business-target operation kind must define ownership semantics")
+            {
+                OperationBusinessTargetOwnership::Foreign => definitely_owned,
+                OperationBusinessTargetOwnership::SponsorOwned => !could_be_owned,
+            }
+        })
         && resolution.objective_blocker()
-            != Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+            != Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
     {
         return Err(invalid());
     }
@@ -296,8 +361,18 @@ fn validate_resolution_objective_context(
             return Err(invalid());
         }
         match blocker {
-            OperationObjectiveBlocker::SponsorOwnsTargetBusiness => {
-                if !sponsor_ownership_evidence.is_some_and(|(could_be_owned, _)| could_be_owned) {
+            OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
+                let possible_mismatch = sponsor_ownership_evidence.is_some_and(
+                    |(could_be_owned, definitely_owned)| {
+                        match operation.kind().business_target_ownership().expect(
+                            "persisted business-target operation kind must define ownership semantics",
+                        ) {
+                            OperationBusinessTargetOwnership::Foreign => could_be_owned,
+                            OperationBusinessTargetOwnership::SponsorOwned => !definitely_owned,
+                        }
+                    },
+                );
+                if !possible_mismatch {
                     return Err(invalid());
                 }
             }
@@ -354,38 +429,6 @@ fn validate_resolution_objective_context(
         }
     }
     Ok(())
-}
-
-/// Whether the sponsor could have owned, and definitely owned, `business` at a resolution
-/// timestamp. Ownership changes are ordered among themselves by business version, but the model
-/// intentionally does not invent an ordering between those changes and an operation resolution
-/// carrying the same minute. The possible owners are therefore the owner immediately before that
-/// timestamp plus every owner produced by a change at the timestamp.
-fn resolve_sponsor_ownership_evidence(
-    state: &AppState,
-    business: crate::core::id::BusinessId,
-    sponsor: crate::core::id::OrganizationId,
-    resolved_at: SimTime,
-) -> (bool, bool) {
-    let sponsor = crate::world::BusinessOwner::Organization(sponsor);
-    let mut owner_before = None;
-    let mut same_time_owners = Vec::new();
-    for change in state.world.business_ownership_history(business) {
-        if change.changed_at() < resolved_at {
-            owner_before = Some(change.new_owner());
-        } else if change.changed_at() == resolved_at {
-            same_time_owners.push(change.new_owner());
-        } else {
-            break;
-        }
-    }
-    let could_be_owned = owner_before == Some(sponsor) || same_time_owners.contains(&sponsor);
-    let definitely_owned = if let Some(owner_before) = owner_before {
-        owner_before == sponsor && same_time_owners.iter().all(|owner| *owner == sponsor)
-    } else {
-        !same_time_owners.is_empty() && same_time_owners.iter().all(|owner| *owner == sponsor)
-    };
-    (could_be_owned, definitely_owned)
 }
 
 fn validate_authored_property_disposition(

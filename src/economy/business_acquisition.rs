@@ -11,7 +11,7 @@
 //!
 //! Commit composes three canonical paths in one validated step: world ownership
 //! transfer, business-economy establishment when the target has never operated (or
-//! resumption when chronic losses left its books suspended), and a balanced ledger
+//! restart under the new owner when books already exist), and a balanced ledger
 //! payment. Every fallible condition is validated before any mutation; the records
 //! constructed during commit reference freshly reserved accounts whose kinds and owners
 //! are guaranteed by construction.
@@ -141,14 +141,11 @@ impl ValidatedBusinessAcquisition {
             BusinessOwner::Organization(self.organization),
         )?;
         let existing_economy = state.economy.get_business_economy(self.business);
-        // The establishment/resumption decisions follow live state, not the validation-time
-        // snapshot: whether the target has never operated or sits suspended is re-derived
-        // here so a token held across someone else's establishment adopts the existing books
-        // instead of colliding, and a suspension that lifted in between is not re-applied.
+        // The establishment/restart decision follows live state, not the validation-time
+        // snapshot: a token held across someone else's establishment adopts those books instead
+        // of colliding. Every existing economy restarts from the title-transfer instant so the
+        // buyer cannot inherit a nearly due seller cycle or the seller's chronic-loss streak.
         let establish_now = existing_economy.is_none();
-        let resumes_suspended = existing_economy.as_ref().is_some_and(|economy| {
-            economy.status() == crate::economy::BusinessOperatingStatus::Suspended
-        });
 
         // ---- Phase 2: plan fresh books and pre-validate every remaining leg. ---------
         // Fresh account IDs are predicted without consuming allocator state. The payment token
@@ -213,8 +210,8 @@ impl ValidatedBusinessAcquisition {
                 ),
             )?
         };
-        let resume = if resumes_suspended {
-            Some(business_economy_system::validate_acquisition_resume(
+        let restart = if existing_economy.is_some() {
+            Some(business_economy_system::validate_acquisition_restart(
                 state,
                 self.business,
                 self.economy_cycle_duration,
@@ -261,10 +258,10 @@ impl ValidatedBusinessAcquisition {
             .expect("a payment pre-validated against untouched account versions must commit");
         if let Some(establishment) = establishment {
             establishment.commit_after_preflight(state);
-        } else if let Some(resume) = resume {
-            resume
+        } else if let Some(restart) = restart {
+            restart
                 .commit(state)
-                .expect("prevalidated acquisition resume must remain current during commit");
+                .expect("prevalidated acquisition restart must remain current during commit");
         }
         announcement
             .commit(state)
@@ -395,11 +392,9 @@ pub fn validate_acquire_business(
         draft.business,
         BusinessOwner::Organization(draft.organization),
     )?;
-    // Suspended books do not block a purchase: chronic losses suspend an independent
-    // business automatically, and with no organizational counterparty to resume them the
-    // books would otherwise stay dead forever. Acquisition changes the responsible owner,
-    // so commit resumes suspended books right after the ownership transfer without treating
-    // the seller's purchase consideration as operating capital.
+    // Existing books do not block a purchase. Acquisition changes the responsible owner, so
+    // commit restarts the cycle after ownership transfer: suspended books reopen, active books
+    // re-anchor their next settlement, and neither state inherits the seller's loss streak.
     Ok(ValidatedBusinessAcquisition {
         economy_cycle_duration: registry
             .get_business(business_record.kind())
@@ -419,6 +414,7 @@ mod tests {
     use crate::build_registry;
     use crate::core::id::IdKind;
     use crate::core::invariants::{validate_invariants, validate_state};
+    use crate::core::time::SimDuration;
     use crate::finance::finance_system::insert_account;
     use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
     use crate::world::{
@@ -554,6 +550,40 @@ mod tests {
         }
     }
 
+    fn establish_existing_independent_economy(
+        fixture: &mut AcquisitionFixture,
+    ) -> (FinancialAccountId, FinancialAccountId) {
+        let operating = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(fixture.business),
+                kind: AccountKind::LegitimateOperating,
+            },
+        )
+        .expect("existing operating account should validate");
+        let settlement = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(fixture.business),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .expect("existing settlement account should validate");
+        business_economy_system::validate_establish_business_economy(
+            &fixture.registry,
+            &fixture.state,
+            BusinessEconomyDraft {
+                business: fixture.business,
+                operating_account: operating,
+                settlement_account: settlement,
+            },
+        )
+        .expect("independent economy should validate")
+        .commit(&mut fixture.state)
+        .expect("independent economy should commit");
+        (operating, settlement)
+    }
+
     #[test]
     fn acquisition_buys_an_independent_business_without_returning_price_to_operating_cash() {
         let mut fixture = make_independent_fixture();
@@ -634,6 +664,72 @@ mod tests {
                 .contains("Pier Nine Social Club")
         );
 
+        validate_invariants(&fixture.state);
+    }
+
+    #[test]
+    fn acquisition_reanchors_an_active_sellers_cycle_to_the_purchase_time() {
+        let mut fixture = make_independent_fixture();
+        establish_existing_independent_economy(&mut fixture);
+        let cycle_duration = fixture
+            .registry
+            .get_business(BusinessKind::Hospitality)
+            .economics()
+            .cycle();
+        let seller_due_at = fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .and_then(|economy| economy.next_cycle_at())
+            .expect("active seller economy should have a due time");
+        fixture.state.advance_clock(SimDuration::from_minutes(
+            cycle_duration
+                .as_minutes()
+                .checked_sub(1)
+                .expect("positive cycle leaves a minute before settlement"),
+        ));
+        assert_eq!(
+            seller_due_at,
+            fixture.state.now() + SimDuration::ONE_MINUTE,
+            "fixture must buy immediately before the seller's old settlement"
+        );
+        let price = hospitality_price(&fixture);
+        fund_accounted_from_street(&mut fixture, price.cents());
+
+        validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+        )
+        .expect("active independent business should remain purchasable")
+        .commit(&mut fixture.state)
+        .expect("active-business acquisition should commit");
+
+        let economy = fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("buyer should retain the existing books");
+        assert_eq!(
+            economy.status(),
+            crate::economy::BusinessOperatingStatus::Active
+        );
+        assert_eq!(economy.loss_streak_anchor(), Some(fixture.state.now()));
+        assert_eq!(
+            economy.next_cycle_at(),
+            Some(fixture.state.now() + cycle_duration),
+            "the buyer earns a fresh full cycle instead of inheriting the seller's nearly due one"
+        );
+        fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+        assert!(
+            fixture
+                .state
+                .economy()
+                .due_at_or_before(fixture.state.now())
+                .is_empty(),
+            "the seller's pre-purchase settlement instant must no longer trigger for the buyer"
+        );
+        validate_state(&fixture.state).expect("reanchored acquisition should remain valid");
         validate_invariants(&fixture.state);
     }
 

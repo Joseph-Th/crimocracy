@@ -12,14 +12,14 @@ use crate::registry::{
     ExecutiveBriefDefinitionSpec, InformationQualityDefinition,
     InvestigationInterviewOutcomeDefinition, InvestigationSourceSupportDefinition,
     InvestigationWorkDefinitionSpec, LaunderingConfigSpec, LegalConfigSpec,
-    OperationCashProceedsDefinition, OperationDifficultyDefinition, OperationExecutionDefinition,
-    OperationExposureDefinition, OperationIntelligenceDefinition,
-    OperationPoliceResponseDefinition, OperationPropertyProceedsDefinition,
-    RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
-    RecruitmentRelationshipDefinition, RecruitmentRelationshipSupportDefinition,
-    RecruitmentScoringDefinition, RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition,
-    RecruitmentWeightsDefinition, Registry, RegistryBuilder, ReputationConfigSpec,
-    UpkeepConfigSpec, WitnessTestimonyDefinition,
+    OperationBusinessTargetDefinition, OperationCashProceedsDefinition,
+    OperationDifficultyDefinition, OperationExecutionDefinition, OperationExposureDefinition,
+    OperationIntelligenceDefinition, OperationPoliceResponseDefinition,
+    OperationPropertyProceedsDefinition, RecruitmentDefinitionSpec,
+    RecruitmentIncumbentRelationshipDefinition, RecruitmentRelationshipDefinition,
+    RecruitmentRelationshipSupportDefinition, RecruitmentScoringDefinition,
+    RecruitmentTimingDefinition, RecruitmentTraitRuleDefinition, RecruitmentWeightsDefinition,
+    Registry, RegistryBuilder, ReputationConfigSpec, UpkeepConfigSpec, WitnessTestimonyDefinition,
 };
 use crate::world::{
     ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS, ApprovalPolicy, BusinessFunction,
@@ -28,7 +28,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 42;
+pub const CURRENT_CONTENT_REVISION: u32 = 43;
 
 /// Authored floor for police response arrival delays; the patrol-reduction window is the
 /// remainder above this minimum so a full-presence response arrives at exactly the floor.
@@ -137,6 +137,14 @@ pub fn build_registry() -> Registry {
     builder
         .build(CURRENT_CONTENT_REVISION)
         .unwrap_or_else(|error| panic!("invalid content registry: {error}"))
+}
+
+fn gambling_venue_functions() -> BTreeSet<BusinessFunction> {
+    BTreeSet::from([
+        BusinessFunction::CashIntensive,
+        BusinessFunction::MeetingSpace,
+        BusinessFunction::CustomerAccess,
+    ])
 }
 
 fn register_business_disruption(builder: &mut RegistryBuilder) {
@@ -379,7 +387,6 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(180),
                 base_difficulty: 45,
-                additional_source_difficulty: 0,
                 source_support_weight: 35,
                 variance_limit: 12,
                 connected_margin: 0,
@@ -396,7 +403,6 @@ fn register_investigation_work(builder: &mut RegistryBuilder) {
             InvestigationWorkDefinitionSpec {
                 duration: SimDuration::from_minutes(120),
                 base_difficulty: 30,
-                additional_source_difficulty: 0,
                 source_support_weight: 45,
                 variance_limit: 10,
                 connected_margin: 0,
@@ -591,11 +597,7 @@ fn register_enterprises(builder: &mut RegistryBuilder) {
                 notable_variance_basis_points: 900,
                 losing_cycles_before_suspension: 3,
             },
-            BTreeSet::from([
-                BusinessFunction::CashIntensive,
-                BusinessFunction::MeetingSpace,
-                BusinessFunction::CustomerAccess,
-            ]),
+            gambling_venue_functions(),
             BTreeSet::new(),
         ),
         (
@@ -1048,6 +1050,24 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             partial_margin: -12,
         },
         leader_capability,
+        business_target: match kind {
+            OperationKind::GamblingEvent => Some(OperationBusinessTargetDefinition {
+                required_functions: gambling_venue_functions(),
+            }),
+            OperationKind::Burglary
+            | OperationKind::Robbery
+            | OperationKind::Hijacking
+            | OperationKind::Smuggling
+            | OperationKind::Intimidation
+            | OperationKind::DocumentTheft
+            | OperationKind::Sabotage
+            | OperationKind::Arson => Some(OperationBusinessTargetDefinition {
+                required_functions: BTreeSet::new(),
+            }),
+            OperationKind::Surveillance
+            | OperationKind::WitnessPressure
+            | OperationKind::Extraction => None,
+        },
         intelligence: OperationIntelligenceDefinition {
             relevant_topics: relevant_operation_intelligence(kind),
             max_difficulty_reduction: 14,

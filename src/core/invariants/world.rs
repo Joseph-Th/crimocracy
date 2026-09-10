@@ -669,7 +669,9 @@ fn contact_relationship_basis_is_valid(
         snapshot.from() == from
             && snapshot.to() == to
             && snapshot.version() > 0
-            && relationship_dimensions_have_basis(snapshot.dimensions())
+            && crate::contacts::contact_system::has_contact_relationship_basis(
+                snapshot.dimensions(),
+            )
     };
     let forward =
         handler_to_contact.is_some_and(|snapshot| valid_snapshot(snapshot, handler, contact));
@@ -678,18 +680,4 @@ fn contact_relationship_basis_is_valid(
     (forward || reverse)
         && handler_to_contact.is_none_or(|snapshot| valid_snapshot(snapshot, handler, contact))
         && contact_to_handler.is_none_or(|snapshot| valid_snapshot(snapshot, contact, handler))
-}
-
-fn relationship_dimensions_have_basis(dimensions: crate::social::RelationshipDimensions) -> bool {
-    [
-        dimensions.trust,
-        dimensions.respect,
-        dimensions.fear,
-        dimensions.affection,
-        dimensions.dependence,
-        dimensions.resentment,
-        dimensions.debt,
-    ]
-    .into_iter()
-    .any(|level| level.value() > 0)
 }

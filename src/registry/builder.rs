@@ -7,7 +7,7 @@ use crate::core::attention::AttentionClass;
 use crate::enterprises::{ALL_ENTERPRISE_KINDS, EnterpriseKind};
 use crate::legal::{ALL_INVESTIGATION_WORK_KINDS, InvestigationWorkKind};
 use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind};
-use crate::recruitment::{ALL_RECRUITMENT_APPROACHES, RecruitmentApproach};
+use crate::recruitment::RecruitmentApproach;
 use crate::world::{
     ALL_BUSINESS_KINDS, ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_POLICY_KINDS, ALL_TRAIT_KINDS,
     BusinessFunction, BusinessKind, CapabilityKind, DriveKind, PolicyKind, PolicySetting,
@@ -64,8 +64,14 @@ pub(crate) enum RegistryBuildError {
     MissingRecruitmentApproachDrives(RecruitmentApproach),
     #[error("recruitment trait rule for {0:?} is outside supported bounds")]
     InvalidRecruitmentTraitRule(TraitKind),
+    #[error("recruitment contains a duplicate semantic trait rule for {0:?}")]
+    DuplicateRecruitmentTraitRule(TraitKind),
     #[error("combined recruitment trait adjustments exceed supported arithmetic bounds")]
     InvalidRecruitmentTraitAdjustmentTotal,
+    #[error("recruitment scoring can overflow its persisted margin range")]
+    InvalidRecruitmentArithmeticRange,
+    #[error("recruitment approach {0:?} makes either acceptance or refusal unreachable")]
+    InvalidRecruitmentOutcomeRange(RecruitmentApproach),
     #[error("missing policy definition: {0:?}")]
     MissingPolicy(PolicyKind),
     #[error("missing operation definition: {0:?}")]
@@ -76,15 +82,13 @@ pub(crate) enum RegistryBuildError {
     MissingInvestigationWork(InvestigationWorkKind),
     #[error("investigation work {0:?} must have a positive duration")]
     InvalidInvestigationWorkDuration(InvestigationWorkKind),
-    #[error("investigation work {0:?} difficulty values must be in 0..=100")]
+    #[error("investigation work {0:?} base difficulty must be in 0..=100")]
     InvalidInvestigationWorkDifficulty(InvestigationWorkKind),
     #[error("investigation work {0:?} source-support weight must be in 0..=100")]
     InvalidInvestigationWorkSupportWeight(InvestigationWorkKind),
     #[error("investigation work {0:?} variance must be in 0..=50")]
     InvalidInvestigationWorkVariance(InvestigationWorkKind),
-    #[error(
-        "investigation work {0:?} connected margin must stay inside the reachable margin space -150..=250"
-    )]
+    #[error("investigation work {0:?} connected margin makes an outcome unreachable")]
     InvalidInvestigationWorkConnectedMargin(InvestigationWorkKind),
     #[error("investigation work {0:?} source-support scores must be in 0..=100")]
     InvalidInvestigationWorkSupportScore(InvestigationWorkKind),
@@ -108,6 +112,8 @@ pub(crate) enum RegistryBuildError {
         "operation {0:?} outcome margins make an outcome unreachable under its authored factors"
     )]
     InvalidOperationOutcomeMarginRange(OperationKind),
+    #[error("operation {0:?} business-target definition does not match its objective contract")]
+    InvalidOperationBusinessTarget(OperationKind),
     #[error("operation {0:?} approach difficulty adjustments must be in -50..=50")]
     InvalidOperationApproachAdjustment(OperationKind),
     #[error("operation {0:?} must support at least one approach")]
@@ -124,12 +130,20 @@ pub(crate) enum RegistryBuildError {
     InvalidOperationExposureWeight(OperationKind),
     #[error("operation {0:?} exposure variance must be in 0..=50")]
     InvalidOperationExposureVariance(OperationKind),
+    #[error("operation {0:?} exposure approach adjustments must be in -50..=50")]
+    InvalidOperationExposureApproachAdjustment(OperationKind),
     #[error("operation {0:?} exposure thresholds are ordered incorrectly")]
     InvalidOperationExposureThresholds(OperationKind),
+    #[error(
+        "operation {0:?} exposure thresholds make either no exposure or identifying exposure unreachable"
+    )]
+    InvalidOperationExposureThresholdRange(OperationKind),
     #[error("operation {0:?} witness/police exposure thresholds are invalid")]
     InvalidOperationWitnessPoliceThresholds(OperationKind),
     #[error("operation {0:?} police response dispatch threshold must be in 0..=100")]
     InvalidOperationResponseThreshold(OperationKind),
+    #[error("operation {0:?} police response dispatch threshold is unreachable")]
+    InvalidOperationResponseThresholdRange(OperationKind),
     #[error("operation {0:?} police response delays are invalid")]
     InvalidOperationResponseDelay(OperationKind),
     #[error("operation {0:?} patrol response reduction exceeds the authored delay range")]
@@ -154,10 +168,12 @@ pub(crate) enum RegistryBuildError {
     OperationPropertyObjectiveContractMismatch(OperationKind),
     #[error("operation {0:?} cash-take business multiplier must be in 1..=100000 basis points")]
     InvalidOperationCashTakeMultiplier(OperationKind),
-    #[error("operation {0:?} partial cash take must be nonzero and no greater than the full take")]
+    #[error("operation {0:?} partial cash take must be in 1..=10000 basis points")]
     InvalidOperationPartialCashTake(OperationKind),
     #[error("operation {0:?} cash-proceeds definition does not match its objective contract")]
     OperationCashObjectiveContractMismatch(OperationKind),
+    #[error("operation {0:?} proceeds can overflow against a valid registered business gross")]
+    OperationProceedsArithmeticOutOfRange(OperationKind),
     #[error("operation {operation:?} has no capability mapping for required role {role:?}")]
     MissingOperationRoleCapability {
         operation: OperationKind,
@@ -225,7 +241,9 @@ pub(crate) enum RegistryBuildError {
     DuplicateUpkeepConfig,
     #[error("upkeep per-member daily wage must be positive")]
     InvalidUpkeepWage,
-    #[error("upkeep shortfall resentment increment must be positive")]
+    #[error("upkeep per-member wage can overflow a full persistent-character payroll")]
+    InvalidUpkeepArithmeticRange,
+    #[error("upkeep shortfall resentment increment must be in 1..=100")]
     InvalidUpkeepResentment,
     #[error("duplicate business disruption definition")]
     DuplicateBusinessDisruption,
@@ -265,6 +283,8 @@ pub(crate) enum RegistryBuildError {
     InvalidBusinessCycle(BusinessKind),
     #[error("business {0:?} contains a negative authored economic value")]
     NegativeBusinessEconomicValue(BusinessKind),
+    #[error("business {0:?} authored economics can overflow production settlement arithmetic")]
+    BusinessEconomicArithmeticOutOfRange(BusinessKind),
     #[error("business {0:?} gross variance exceeds 5000 basis points")]
     BusinessVarianceOutOfRange(BusinessKind),
     #[error("business {0:?} notable variance threshold exceeds its variance range")]
@@ -277,6 +297,8 @@ pub(crate) enum RegistryBuildError {
     InvalidEnterpriseCycle(EnterpriseKind),
     #[error("enterprise {0:?} contains a negative authored economic value")]
     NegativeEnterpriseEconomicValue(EnterpriseKind),
+    #[error("enterprise {0:?} authored economics can overflow production settlement arithmetic")]
+    EnterpriseEconomicArithmeticOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} gross variance exceeds 5000 basis points")]
     EnterpriseVarianceOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} notable variance threshold exceeds its variance range")]
@@ -285,6 +307,92 @@ pub(crate) enum RegistryBuildError {
     EnterpriseSuspensionThresholdOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} vice-attention basis points must be in 0..=10000")]
     EnterpriseViceAttentionOutOfRange(EnterpriseKind),
+}
+
+/// Registry-time proof that a nonnegative gross composition remains representable after its
+/// largest authored positive variance. Runtime uses checked `Money` arithmetic because state is
+/// still an external input, but authored values themselves must never be able to make a normal
+/// settlement fail.
+fn maximum_varied_gross_fits_i64(
+    base_cents: i64,
+    per_point_cents: &[i64],
+    variance_basis_points: u16,
+) -> bool {
+    let mut gross = i128::from(base_cents);
+    for per_point in per_point_cents {
+        gross += i128::from(*per_point) * 100;
+    }
+    let factor = 10_000_i128 + i128::from(variance_basis_points);
+    let varied = (gross * factor + 5_000) / 10_000;
+    varied <= i128::from(i64::MAX)
+}
+
+fn maximum_business_gross_cents(economics: &BusinessEconomicsDefinition) -> i128 {
+    i128::from(economics.base_gross.cents())
+        + i128::from(economics.wealth_revenue_per_point.cents()) * 100
+        + i128::from(economics.commerce_revenue_per_point.cents()) * 100
+}
+
+fn operation_proceeds_fit_business_gross(
+    definition: &OperationDefinition,
+    economics: &BusinessEconomicsDefinition,
+) -> bool {
+    let multiplier = definition
+        .execution()
+        .property_proceeds()
+        .map(OperationPropertyProceedsDefinition::business_gross_basis_points)
+        .or_else(|| {
+            definition
+                .execution()
+                .cash_proceeds()
+                .map(OperationCashProceedsDefinition::business_take_basis_points)
+        });
+    let Some(multiplier) = multiplier else {
+        return true;
+    };
+    maximum_business_gross_cents(economics) * i128::from(multiplier) / 10_000
+        <= i128::from(i64::MAX)
+}
+
+fn business_economics_fit_production_arithmetic(economics: &BusinessEconomicsDefinition) -> bool {
+    if !maximum_varied_gross_fits_i64(
+        economics.base_gross.cents(),
+        &[
+            economics.wealth_revenue_per_point.cents(),
+            economics.commerce_revenue_per_point.cents(),
+        ],
+        economics.gross_variance_basis_points,
+    ) {
+        return false;
+    }
+    let maximum_operating_cost = i128::from(economics.base_operating_cost.cents())
+        + i128::from(economics.police_cost_per_point.cents()) * 100;
+    maximum_operating_cost <= i128::from(i64::MAX)
+}
+
+fn enterprise_economics_fit_production_arithmetic(
+    economics: &EnterpriseEconomicsDefinition,
+) -> bool {
+    if !maximum_varied_gross_fits_i64(
+        economics.base_gross.cents(),
+        &[
+            economics.demand_revenue_per_point.cents(),
+            economics.commerce_revenue_per_point.cents(),
+            economics.wealth_revenue_per_point.cents(),
+            economics.management_revenue_per_point.cents(),
+        ],
+        economics.gross_variance_basis_points,
+    ) {
+        return false;
+    }
+    // Both supporting businesses and active investigations are keyed by persistent u32 IDs, so
+    // u32::MAX is a conservative upper bound for either unique count in one enterprise cycle.
+    let maximum_count = i128::from(u32::MAX);
+    let maximum_operating_cost = i128::from(economics.base_operating_cost.cents())
+        + i128::from(economics.police_cost_per_point.cents()) * 100
+        + i128::from(economics.support_surcharge_per_business.cents()) * maximum_count
+        + i128::from(economics.heat_surcharge_per_active_case.cents()) * maximum_count;
+    maximum_operating_cost <= i128::from(i64::MAX)
 }
 
 #[derive(Default)]
@@ -411,7 +519,10 @@ impl RegistryBuilder {
         if spec.per_member_daily.cents() <= 0 {
             return Err(RegistryBuildError::InvalidUpkeepWage);
         }
-        if spec.shortfall_resentment == 0 {
+        if i128::from(spec.per_member_daily.cents()) * i128::from(u32::MAX) > i128::from(i64::MAX) {
+            return Err(RegistryBuildError::InvalidUpkeepArithmeticRange);
+        }
+        if !(1..=crate::social::RelationshipLevel::MAX_VALUE).contains(&spec.shortfall_resentment) {
             return Err(RegistryBuildError::InvalidUpkeepResentment);
         }
         self.upkeep = Some(UpkeepConfigDefinition {
@@ -541,159 +652,14 @@ impl RegistryBuilder {
         if self.recruitment.is_some() {
             return Err(RegistryBuildError::DuplicateRecruitment);
         }
-        let RecruitmentDefinitionSpec {
-            timing,
-            scoring,
-            recruiter_capabilities,
-            relationships,
-            approach_drives,
-            trait_rules,
-        } = spec;
-        let RecruitmentTimingDefinition {
-            cooldown,
-            autonomous_attempt_cadence,
-            perceived_legal_pressure_max_age,
-        } = timing;
-        let RecruitmentScoringDefinition {
-            base_willingness,
-            acceptance_score,
-            existing_membership_resistance,
-            charismatic_recruiter_bonus,
-            weights,
-        } = scoring;
-        let RecruitmentRelationshipDefinition {
-            recruiter_support,
-            incumbent_attachment,
-        } = relationships;
-        let RecruitmentRelationshipSupportDefinition {
-            trust_weight: support_trust_weight,
-            respect_weight: support_respect_weight,
-            affection_weight: support_affection_weight,
-            debt_weight: support_debt_weight,
-            divisor: support_divisor,
-            fear_penalty_weight,
-            fear_penalty_divisor,
-        } = recruiter_support;
-        let RecruitmentIncumbentRelationshipDefinition {
-            trust_weight: attachment_trust_weight,
-            respect_weight: attachment_respect_weight,
-            affection_weight: attachment_affection_weight,
-            dependence_weight: attachment_dependence_weight,
-            divisor: attachment_divisor,
-        } = incumbent_attachment;
-        if cooldown.as_minutes() == 0
-            || autonomous_attempt_cadence.as_minutes() == 0
-            || perceived_legal_pressure_max_age.as_minutes() == 0
-        {
-            return Err(RegistryBuildError::InvalidRecruitmentDuration);
-        }
-        if [
-            weights.recruiter_influence,
-            weights.drive_alignment,
-            weights.relationship_support,
-            weights.incumbent_resentment,
-            weights.perceived_legal_pressure,
-            weights.incumbent_attachment,
-            weights.organization_competence,
-            existing_membership_resistance,
-            charismatic_recruiter_bonus,
-        ]
-        .into_iter()
-        .any(|value| value > 100)
-        {
-            return Err(RegistryBuildError::InvalidRecruitmentWeight);
-        }
-        // The residual scoring constants participate in the same bounded 0..=100 margin space as
-        // every other recruitment input; an out-of-range willingness or acceptance score would
-        // silently skew margins relative to the calibrated capability/relationship/pressure terms.
-        if !(0..=100).contains(&base_willingness) || !(0..=100).contains(&acceptance_score) {
-            return Err(RegistryBuildError::InvalidRecruitmentScoring);
-        }
-        if recruiter_capabilities.is_empty() {
-            return Err(RegistryBuildError::MissingRecruitmentCapabilities);
-        }
-        let support_weight_total = u16::from(support_trust_weight)
-            + u16::from(support_respect_weight)
-            + u16::from(support_affection_weight)
-            + u16::from(support_debt_weight);
-        let attachment_weight_total = u16::from(attachment_trust_weight)
-            + u16::from(attachment_respect_weight)
-            + u16::from(attachment_affection_weight)
-            + u16::from(attachment_dependence_weight);
-        if support_divisor == 0
-            || fear_penalty_divisor == 0
-            || attachment_divisor == 0
-            || support_weight_total == 0
-            || attachment_weight_total == 0
-            || support_weight_total.saturating_mul(100) / u16::from(support_divisor) > 100
-            || attachment_weight_total.saturating_mul(100) / u16::from(attachment_divisor) > 100
-            || u16::from(fear_penalty_weight).saturating_mul(100) / u16::from(fear_penalty_divisor)
-                > 100
-        {
-            return Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights);
-        }
-        for approach in ALL_RECRUITMENT_APPROACHES {
-            if approach_drives
-                .get(&approach)
-                .is_none_or(BTreeSet::is_empty)
-            {
-                return Err(RegistryBuildError::MissingRecruitmentApproachDrives(
-                    approach,
-                ));
-            }
-        }
-        let mut maximum_absolute_trait_adjustment = 0_i32;
-        for rule in &trait_rules {
-            if rule
-                .minimum_incumbent_resentment
-                .is_some_and(|minimum| minimum > 100)
-                || !(-50..=50).contains(&rule.adjustment)
-            {
-                return Err(RegistryBuildError::InvalidRecruitmentTraitRule(
-                    rule.trait_kind,
-                ));
-            }
-            maximum_absolute_trait_adjustment = maximum_absolute_trait_adjustment
-                .checked_add(i32::from(rule.adjustment).abs())
-                .ok_or(RegistryBuildError::InvalidRecruitmentTraitAdjustmentTotal)?;
-        }
-        if maximum_absolute_trait_adjustment > i32::from(i16::MAX) {
-            return Err(RegistryBuildError::InvalidRecruitmentTraitAdjustmentTotal);
-        }
+        super::recruitment_validation::validate_recruitment_definition(&spec)?;
         self.recruitment = Some(RecruitmentDefinition {
-            timing: RecruitmentTimingDefinition {
-                cooldown,
-                autonomous_attempt_cadence,
-                perceived_legal_pressure_max_age,
-            },
-            scoring: RecruitmentScoringDefinition {
-                base_willingness,
-                acceptance_score,
-                existing_membership_resistance,
-                charismatic_recruiter_bonus,
-                weights,
-            },
-            recruiter_capabilities,
-            relationships: RecruitmentRelationshipDefinition {
-                recruiter_support: RecruitmentRelationshipSupportDefinition {
-                    trust_weight: support_trust_weight,
-                    respect_weight: support_respect_weight,
-                    affection_weight: support_affection_weight,
-                    debt_weight: support_debt_weight,
-                    divisor: support_divisor,
-                    fear_penalty_weight,
-                    fear_penalty_divisor,
-                },
-                incumbent_attachment: RecruitmentIncumbentRelationshipDefinition {
-                    trust_weight: attachment_trust_weight,
-                    respect_weight: attachment_respect_weight,
-                    affection_weight: attachment_affection_weight,
-                    dependence_weight: attachment_dependence_weight,
-                    divisor: attachment_divisor,
-                },
-            },
-            approach_drives,
-            trait_rules,
+            timing: spec.timing,
+            scoring: spec.scoring,
+            recruiter_capabilities: spec.recruiter_capabilities,
+            relationships: spec.relationships,
+            approach_drives: spec.approach_drives,
+            trait_rules: spec.trait_rules,
         });
         Ok(())
     }
@@ -711,7 +677,7 @@ impl RegistryBuilder {
         if spec.duration.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidInvestigationWorkDuration(kind));
         }
-        if spec.base_difficulty > 100 || spec.additional_source_difficulty > 100 {
+        if spec.base_difficulty > 100 {
             return Err(RegistryBuildError::InvalidInvestigationWorkDifficulty(kind));
         }
         if spec.source_support_weight > 100 {
@@ -721,15 +687,6 @@ impl RegistryBuilder {
         }
         if spec.variance_limit > 50 {
             return Err(RegistryBuildError::InvalidInvestigationWorkVariance(kind));
-        }
-        // The runtime margin is capability (0..=100) + support adjustment
-        // (0..=weight, weight validated <= 100) + variance (-limit..=limit, <= 50)
-        // - difficulty (0..=100), so a connected margin outside -150..=250 can never
-        // separate outcomes: every review would resolve identically forever.
-        if !(-150..=250).contains(&spec.connected_margin) {
-            return Err(RegistryBuildError::InvalidInvestigationWorkConnectedMargin(
-                kind,
-            ));
         }
         if spec
             .source_support
@@ -741,13 +698,79 @@ impl RegistryBuilder {
                 kind,
             ));
         }
+        let (minimum_support, maximum_support) = match kind {
+            InvestigationWorkKind::WitnessInterview => {
+                let values = [
+                    spec.source_support.witness_hostile,
+                    spec.source_support.witness_reluctant,
+                    spec.source_support.witness_cooperative,
+                ];
+                (
+                    *values
+                        .iter()
+                        .min()
+                        .expect("fixed witness support set is nonempty"),
+                    *values
+                        .iter()
+                        .max()
+                        .expect("fixed witness support set is nonempty"),
+                )
+            }
+            InvestigationWorkKind::EvidenceReview => {
+                let strength = [
+                    spec.source_support.evidence_weak,
+                    spec.source_support.evidence_corroborating,
+                    spec.source_support.evidence_strong,
+                    spec.source_support.evidence_direct,
+                ];
+                let reliability = [
+                    spec.source_support.reliability_questionable,
+                    spec.source_support.reliability_mixed,
+                    spec.source_support.reliability_credible,
+                    spec.source_support.reliability_highly_reliable,
+                ];
+                let admissibility = [
+                    spec.source_support.admissibility_unknown,
+                    spec.source_support.admissibility_inadmissible,
+                    spec.source_support.admissibility_disputed,
+                    spec.source_support.admissibility_admissible,
+                ];
+                let minimum = (u16::from(*strength.iter().min().expect("fixed strength set"))
+                    + u16::from(*reliability.iter().min().expect("fixed reliability set"))
+                    + u16::from(*admissibility.iter().min().expect("fixed admissibility set")))
+                    / 3;
+                let maximum = (u16::from(*strength.iter().max().expect("fixed strength set"))
+                    + u16::from(*reliability.iter().max().expect("fixed reliability set"))
+                    + u16::from(*admissibility.iter().max().expect("fixed admissibility set")))
+                    / 3;
+                (
+                    u8::try_from(minimum).expect("averaged bounded support fits u8"),
+                    u8::try_from(maximum).expect("averaged bounded support fits u8"),
+                )
+            }
+        };
+        let support_weight = i16::from(spec.source_support_weight);
+        let minimum_margin = i16::from(minimum_support) * support_weight / 100
+            - i16::from(spec.base_difficulty)
+            - i16::from(spec.variance_limit);
+        let maximum_margin = 100 + i16::from(maximum_support) * support_weight / 100
+            - i16::from(spec.base_difficulty)
+            + i16::from(spec.variance_limit);
+        // Resolution uses margin >= connected_margin. The threshold must therefore sit strictly
+        // above the lowest reachable margin and no higher than the maximum, otherwise one branch
+        // is dead for this exact authored work definition.
+        if spec.connected_margin <= minimum_margin || spec.connected_margin > maximum_margin {
+            return Err(RegistryBuildError::InvalidInvestigationWorkConnectedMargin(
+                kind,
+            ));
+        }
         match (kind, spec.interview_outcome) {
             (InvestigationWorkKind::WitnessInterview, Some(interview))
-                if interview.medium_margin < interview.high_margin
-                    && (-150..=250).contains(&interview.medium_margin)
-                    && (-150..=250).contains(&interview.high_margin)
-                    && interview.low_confidence <= interview.medium_confidence
-                    && interview.medium_confidence <= interview.high_confidence
+                if spec.connected_margin < interview.medium_margin
+                    && interview.medium_margin < interview.high_margin
+                    && interview.high_margin <= maximum_margin
+                    && interview.low_confidence < interview.medium_confidence
+                    && interview.medium_confidence < interview.high_confidence
                     && interview.high_confidence <= 100 => {}
             (InvestigationWorkKind::EvidenceReview, None) => {}
             _ => {
@@ -761,7 +784,6 @@ impl RegistryBuilder {
                 InvestigationWorkDefinition {
                     duration: spec.duration,
                     base_difficulty: spec.base_difficulty,
-                    additional_source_difficulty: spec.additional_source_difficulty,
                     source_support_weight: spec.source_support_weight,
                     variance_limit: spec.variance_limit,
                     connected_margin: spec.connected_margin,
@@ -813,6 +835,13 @@ impl RegistryBuilder {
             execution,
         };
         super::operation_validation::validate_operation_definition(kind, &definition)?;
+        if self.businesses.values().any(|business| {
+            !operation_proceeds_fit_business_gross(&definition, business.economics())
+        }) {
+            return Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(
+                kind,
+            ));
+        }
         if self.operations.insert(kind, definition).is_some() {
             return Err(RegistryBuildError::DuplicateOperation(kind));
         }
@@ -843,6 +872,11 @@ impl RegistryBuilder {
         ];
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeEnterpriseEconomicValue(kind));
+        }
+        if !enterprise_economics_fit_production_arithmetic(&economics) {
+            return Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(
+                kind,
+            ));
         }
         if economics.gross_variance_basis_points > 5_000 {
             return Err(RegistryBuildError::EnterpriseVarianceOutOfRange(kind));
@@ -895,6 +929,18 @@ impl RegistryBuilder {
         ];
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeBusinessEconomicValue(kind));
+        }
+        if !business_economics_fit_production_arithmetic(&economics) {
+            return Err(RegistryBuildError::BusinessEconomicArithmeticOutOfRange(
+                kind,
+            ));
+        }
+        if let Some(operation) = self.operations.iter().find_map(|(operation, definition)| {
+            (!operation_proceeds_fit_business_gross(definition, &economics)).then_some(*operation)
+        }) {
+            return Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(
+                operation,
+            ));
         }
         if economics.acquisition_cost.cents() <= 0 {
             return Err(RegistryBuildError::InvalidBusinessAcquisitionCost(kind));

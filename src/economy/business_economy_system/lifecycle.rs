@@ -9,6 +9,7 @@ use super::*;
 enum BusinessEconomyStatusChange {
     Suspend,
     Resume,
+    Restart,
 }
 
 pub struct ValidatedBusinessEconomyStatusChange {
@@ -35,7 +36,10 @@ impl ValidatedBusinessEconomyStatusChange {
             });
         }
         ensure_version_can_advance(economy.version(), "business economy")?;
-        if self.change == BusinessEconomyStatusChange::Resume {
+        if matches!(
+            self.change,
+            BusinessEconomyStatusChange::Resume | BusinessEconomyStatusChange::Restart
+        ) {
             validate_business(state, self.business)?;
             validate_accounts(
                 state,
@@ -47,7 +51,9 @@ impl ValidatedBusinessEconomyStatusChange {
         }
         let status = match self.change {
             BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
-            BusinessEconomyStatusChange::Resume => BusinessOperatingStatus::Active,
+            BusinessEconomyStatusChange::Resume | BusinessEconomyStatusChange::Restart => {
+                BusinessOperatingStatus::Active
+            }
         };
         let next_cycle_at = self
             .cycle_duration
@@ -58,9 +64,13 @@ impl ValidatedBusinessEconomyStatusChange {
                     .ok_or(BusinessEconomyError::SimulationTimeOverflow)
             })
             .transpose()?;
-        // Resuming restarts the chronic-loss grace window at the actual resume instant.
-        let loss_streak_anchor =
-            (self.change == BusinessEconomyStatusChange::Resume).then_some(state.now());
+        // Resuming or restarting under a new owner begins a fresh chronic-loss grace window at
+        // the actual lifecycle instant. The new owner does not inherit the seller's loss streak.
+        let loss_streak_anchor = matches!(
+            self.change,
+            BusinessEconomyStatusChange::Resume | BusinessEconomyStatusChange::Restart
+        )
+        .then_some(state.now());
         state
             .economy
             .set_status(self.business, status, next_cycle_at, loss_streak_anchor);
@@ -104,15 +114,38 @@ pub fn validate_resume_business_economy(
     validate_resume_with_cycle_duration(state, business, cycle_duration)
 }
 
-/// Acquisition composition hook: validates a suspended economy before the acquisition mutates
-/// ownership or money. The returned canonical status token can then commit after those controlled
-/// mutations without introducing a new validation path.
-pub(crate) fn validate_acquisition_resume(
+/// Acquisition composition hook: every existing economy restarts its cycle when title changes.
+/// This prevents a buyer from acquiring just before the seller's scheduled settlement and
+/// receiving an entire pre-purchase cycle. Suspended books also become active through the same
+/// canonical lifecycle owner. The token commits only after acquisition's controlled mutations.
+pub(crate) fn validate_acquisition_restart(
     state: &AppState,
     business: BusinessId,
     cycle_duration: SimDuration,
 ) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    validate_resume_with_cycle_duration(state, business, cycle_duration)
+    let _business_record = validate_business(state, business)?;
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    validate_accounts(
+        state,
+        business,
+        economy.operating_account(),
+        economy.settlement_account(),
+        Some(business),
+    )?;
+    ensure_version_can_advance(economy.version(), "business economy")?;
+    state
+        .now()
+        .checked_add(cycle_duration)
+        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    Ok(ValidatedBusinessEconomyStatusChange {
+        business,
+        expected_version: economy.version(),
+        change: BusinessEconomyStatusChange::Restart,
+        cycle_duration: Some(cycle_duration),
+    })
 }
 
 fn validate_resume_with_cycle_duration(

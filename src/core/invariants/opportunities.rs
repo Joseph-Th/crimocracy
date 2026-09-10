@@ -7,6 +7,7 @@ use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::OperationExposureLevel;
+use crate::operations::operation_system::is_valid_operation_objective;
 use crate::opportunities::{OpportunityRecord, OpportunityResolution};
 use crate::reports::{ReportKind, ReportRecord};
 use crate::world::OrganizationKind;
@@ -60,10 +61,18 @@ fn validate_opportunity_targets(
     state: &AppState,
     opportunity: &OpportunityRecord,
 ) -> Result<(), StateValidationError> {
+    let kind = opportunity.context().operation_kind();
+    let mut has_compatible_target = false;
     for target in opportunity.context().targets() {
         if !is_entity_present(state, *target) {
             return Err(invalid_opportunity(opportunity));
         }
+        has_compatible_target |= kind
+            .objective_for_target(*target)
+            .is_some_and(|objective| is_valid_operation_objective(kind, &objective));
+    }
+    if !has_compatible_target {
+        return Err(invalid_opportunity(opportunity));
     }
     Ok(())
 }

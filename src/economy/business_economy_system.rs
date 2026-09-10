@@ -2,7 +2,7 @@
 
 mod lifecycle;
 
-pub(crate) use lifecycle::validate_acquisition_resume;
+pub(crate) use lifecycle::validate_acquisition_restart;
 pub use lifecycle::{
     ValidatedBusinessEconomyStatusChange, validate_resume_business_economy,
     validate_suspend_business_economy,

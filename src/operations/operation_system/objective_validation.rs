@@ -9,8 +9,10 @@ use crate::operations::operation_objective::{
     has_active_foreign_witness_case, has_pressureable_witness_case,
 };
 use crate::operations::{
-    ACTIVE_ASSIGNMENT_STATUSES, OperationKind, OperationObjective, OperationObjectiveKind,
+    ACTIVE_ASSIGNMENT_STATUSES, OperationBusinessTargetOwnership, OperationKind,
+    OperationObjective, OperationObjectiveKind,
 };
+use crate::registry::Registry;
 use crate::world::BusinessOwner;
 
 pub(crate) fn is_information_subject_relevant(
@@ -64,28 +66,39 @@ pub(crate) fn is_valid_operation_objective(
     kind: OperationKind,
     objective: &OperationObjective,
 ) -> bool {
-    match objective {
-        OperationObjective::AcquireProperty { target } => {
-            kind.can_acquire_property() && matches!(target, EntityRef::Business(_))
-        }
-        OperationObjective::GatherInformation { target } => {
-            kind == OperationKind::Surveillance
-                && crate::operations::surveillance_integration::is_supported_surveillance_target(
-                    *target,
-                )
-        }
-        OperationObjective::ObtainCash { target } => {
-            kind.can_take_cash() && matches!(target, EntityRef::Business(_))
-        }
-        OperationObjective::Frighten { target } => {
-            kind == OperationKind::WitnessPressure && matches!(target, EntityRef::Character(_))
-        }
-        OperationObjective::FreeDetainee { .. } => kind == OperationKind::Extraction,
-        OperationObjective::DisruptBusiness { target } => {
-            matches!(kind, OperationKind::Sabotage | OperationKind::Arson)
-                && matches!(target, EntityRef::Business(_))
-        }
+    if kind.objective_kind() != objective.kind() {
+        return false;
     }
+    match objective {
+        OperationObjective::AcquireProperty { target } => matches!(target, EntityRef::Business(_)),
+        OperationObjective::GatherInformation { target } => {
+            crate::operations::surveillance_integration::is_supported_surveillance_target(*target)
+        }
+        OperationObjective::ObtainCash { target }
+        | OperationObjective::DisruptBusiness { target } => {
+            matches!(target, EntityRef::Business(_))
+        }
+        OperationObjective::Frighten { target } => matches!(target, EntityRef::Character(_)),
+        OperationObjective::FreeDetainee { .. } => true,
+    }
+}
+
+/// Opportunity discovery uses the exact current operation target contract without needing crew,
+/// approach, scheduling, or intelligence details that do not exist until an operation is planned.
+/// Contextual opportunity targets may fail this predicate; the opportunity owner requires only one
+/// currently actionable target in the discovered set.
+pub(crate) fn is_actionable_opportunity_target(
+    registry: &Registry,
+    state: &AppState,
+    responsible_organization: OrganizationId,
+    kind: OperationKind,
+    target: EntityRef,
+) -> bool {
+    let Some(objective) = kind.objective_for_target(target) else {
+        return false;
+    };
+    validate_operation_objective(registry, state, kind, responsible_organization, &objective)
+        .is_ok()
 }
 
 // Field actions may reference concrete world subjects and locations, never control-plane
@@ -95,14 +108,22 @@ pub(crate) fn is_valid_operation_objective(
 // contract: their concrete world subjects must still be actionable when the operation is
 // authorized.
 fn validate_active_field_objective_targets(
+    registry: &Registry,
     state: &AppState,
     responsible_organization: OrganizationId,
+    kind: OperationKind,
     objective: &OperationObjective,
 ) -> Result<(), OperationError> {
     match objective {
         OperationObjective::ObtainCash { target } => {
             validate_active_field_objective_target(state, *target)?;
-            reject_self_owned_target(state, responsible_organization, *target)
+            validate_business_target_requirement(
+                registry,
+                state,
+                responsible_organization,
+                kind,
+                *target,
+            )
         }
         // Witness pressure is only meaningful against a character who is actually a named
         // witness on an active case run by another authority; anything else would resolve
@@ -131,7 +152,13 @@ fn validate_active_field_objective_targets(
                 return Ok(());
             };
             validate_active_field_objective_target(state, *target)?;
-            reject_self_owned_target(state, responsible_organization, *target)
+            validate_business_target_requirement(
+                registry,
+                state,
+                responsible_organization,
+                kind,
+                *target,
+            )
         }
         OperationObjective::GatherInformation { .. } => Ok(()),
         // Sabotage targets a business whose premises the crew must physically reach, and one
@@ -139,7 +166,13 @@ fn validate_active_field_objective_targets(
         // no modeled effect, so authorization rejects it up front.
         OperationObjective::DisruptBusiness { target } => {
             validate_active_field_objective_target(state, *target)?;
-            reject_self_owned_target(state, responsible_organization, *target)?;
+            validate_business_target_requirement(
+                registry,
+                state,
+                responsible_organization,
+                kind,
+                *target,
+            )?;
             let EntityRef::Business(business) = *target else {
                 return Err(OperationError::InvalidObjectiveTarget {
                     objective: objective.kind(),
@@ -197,22 +230,51 @@ fn find_non_terminal_extraction_targeting(
         .min()
 }
 
-/// Rejects take/disrupt objectives aimed at a business the sponsoring organization owns.
-fn reject_self_owned_target(
+/// Applies the operation definition's one authoritative business-target contract. Ownership and
+/// venue capability are checked together so authorization cannot satisfy one half of the target
+/// semantics while bypassing the other.
+fn validate_business_target_requirement(
+    registry: &Registry,
     state: &AppState,
     organization: OrganizationId,
+    kind: OperationKind,
     target: EntityRef,
 ) -> Result<(), OperationError> {
     let EntityRef::Business(business) = target else {
         return Ok(());
     };
-    let owner = state
+    let record = state
         .world
         .get_business(business)
-        .ok_or(OperationError::MissingEntity(target))?
-        .owner();
-    if owner == BusinessOwner::Organization(organization) {
-        return Err(OperationError::SelfTargetedBusiness { business });
+        .ok_or(OperationError::MissingEntity(target))?;
+    let requirement = registry
+        .get_operation(kind)
+        .execution()
+        .business_target()
+        .expect("business-target operation kind must retain its validated target definition");
+    let sponsor = BusinessOwner::Organization(organization);
+    match kind
+        .business_target_ownership()
+        .expect("business-target operation kind must define intrinsic ownership semantics")
+    {
+        OperationBusinessTargetOwnership::Foreign if record.owner() == sponsor => {
+            return Err(OperationError::SelfTargetedBusiness { business });
+        }
+        OperationBusinessTargetOwnership::SponsorOwned if record.owner() != sponsor => {
+            return Err(OperationError::TargetBusinessNotSponsorOwned { business });
+        }
+        OperationBusinessTargetOwnership::Foreign
+        | OperationBusinessTargetOwnership::SponsorOwned => {}
+    }
+    if let Some(function) = requirement
+        .required_functions()
+        .iter()
+        .find(|function| !record.has_function(**function))
+    {
+        return Err(OperationError::TargetBusinessMissingFunction {
+            business,
+            function: *function,
+        });
     }
     Ok(())
 }
@@ -274,6 +336,7 @@ fn validate_active_field_objective_target(
 }
 
 pub(super) fn validate_operation_objective(
+    registry: &Registry,
     state: &AppState,
     kind: OperationKind,
     responsible_organization: OrganizationId,
@@ -324,5 +387,11 @@ pub(super) fn validate_operation_objective(
             objective: objective.kind(),
         });
     }
-    validate_active_field_objective_targets(state, responsible_organization, objective)
+    validate_active_field_objective_targets(
+        registry,
+        state,
+        responsible_organization,
+        kind,
+        objective,
+    )
 }

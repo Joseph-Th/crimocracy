@@ -883,7 +883,7 @@ fn operation_does_not_take_from_business_acquired_by_its_sponsor_mid_execution()
     .expect("due burglary should decide even after target ownership changes");
     assert_eq!(
         plan.outcome.objective_blocker,
-        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+        Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
     );
     assert_eq!(
         plan.outcome.objective_outcome,
@@ -902,7 +902,7 @@ fn operation_does_not_take_from_business_acquired_by_its_sponsor_mid_execution()
         .expect("blocked burglary should persist its resolution");
     assert_eq!(
         resolution.objective_blocker(),
-        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+        Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
     );
     assert!(resolution.property_proceeds().is_none());
     let after_action = state
@@ -933,7 +933,7 @@ fn operation_does_not_take_from_business_acquired_by_its_sponsor_mid_execution()
             .get_operation(operation)
             .and_then(|record| record.resolution())
             .and_then(|resolution| resolution.objective_blocker()),
-        Some(OperationObjectiveBlocker::SponsorOwnsTargetBusiness)
+        Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
     );
     validate_invariants(&restored);
 }

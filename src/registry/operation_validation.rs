@@ -21,8 +21,31 @@ pub(super) fn validate_operation_definition(
     validate_police_response(kind, &definition.execution)?;
     validate_role_coverage(kind, definition)?;
     validate_approach_coverage(kind, definition)?;
+    validate_business_target(kind, &definition.execution)?;
     validate_outcome_reachability(kind, &definition.execution)?;
+    validate_exposure_reachability(kind, &definition.execution)?;
     validate_proceeds(kind, &definition.execution)?;
+    Ok(())
+}
+
+fn validate_business_target(
+    kind: OperationKind,
+    execution: &OperationExecutionDefinition,
+) -> Result<(), RegistryBuildError> {
+    let business_target_kind = kind.business_target_ownership().is_some();
+    let Some(target) = execution.business_target.as_ref() else {
+        return if business_target_kind {
+            Err(RegistryBuildError::InvalidOperationBusinessTarget(kind))
+        } else {
+            Ok(())
+        };
+    };
+    if !business_target_kind {
+        return Err(RegistryBuildError::InvalidOperationBusinessTarget(kind));
+    }
+    if kind == OperationKind::GamblingEvent && target.required_functions.is_empty() {
+        return Err(RegistryBuildError::InvalidOperationBusinessTarget(kind));
+    }
     Ok(())
 }
 
@@ -40,6 +63,8 @@ fn validate_difficulty(
         || execution.difficulty.leader_capability_weight > 100
         || (execution.difficulty.role_capability_weight == 0
             && execution.difficulty.leader_capability_weight == 0)
+        || (execution.difficulty.role_capability_weight > 0
+            && execution.difficulty.role_capabilities.is_empty())
     {
         return Err(RegistryBuildError::InvalidOperationAbilityWeights(kind));
     }
@@ -96,14 +121,25 @@ fn validate_outcome_reachability(
         - i16::from(most_favorable_approach)
         + i16::from(execution.difficulty.variance_limit);
 
-    // Worst case: zero crew ability, maximal ambient police pressure, police arrival, worst
-    // approach, maximal time compression, no intelligence benefit, and adverse variance.
-    let minimum_margin = -i16::from(execution.difficulty.base_difficulty)
+    // Worst case must respect deadline/response chronology. A completion deadline must leave at
+    // least one executable minute after entry. If police also arrives, the operation cannot
+    // resolve before the fastest possible response. Compare both reachable scenarios instead of
+    // summing independently maximal penalties that cannot necessarily coexist.
+    let no_response_time_pressure = maximum_reachable_time_pressure(execution, None);
+    let fastest_response =
+        crate::operations::police_response_integration::resolve_police_arrival_delay(
+            execution, 100,
+        );
+    let response_time_pressure = maximum_reachable_time_pressure(execution, Some(fastest_response));
+    let common_minimum = -i16::from(execution.difficulty.base_difficulty)
         - i16::from(execution.difficulty.police_pressure_weight)
-        - i16::from(execution.police_response.arrival_difficulty_penalty)
         - i16::from(least_favorable_approach)
-        - i16::from(execution.difficulty.max_time_pressure)
         - i16::from(execution.difficulty.variance_limit);
+    let minimum_without_response = common_minimum - i16::from(no_response_time_pressure);
+    let minimum_with_response = common_minimum
+        - i16::from(execution.police_response.arrival_difficulty_penalty)
+        - i16::from(response_time_pressure);
+    let minimum_margin = minimum_without_response.min(minimum_with_response);
 
     // Achieved requires margin >= achieved; Failed requires margin < partial. If either boundary
     // lies outside the operation's own theoretical range, that outcome is impossible regardless
@@ -114,6 +150,29 @@ fn validate_outcome_reachability(
         return Err(RegistryBuildError::InvalidOperationOutcomeMarginRange(kind));
     }
     Ok(())
+}
+
+/// Maximum authored time pressure a legal deadline can produce. `minimum_available` optionally
+/// adds another event that must occur before resolution, such as the fastest police arrival.
+fn maximum_reachable_time_pressure(
+    execution: &OperationExecutionDefinition,
+    minimum_available: Option<u32>,
+) -> u8 {
+    let duration = execution.difficulty.duration.as_minutes();
+    let entry_offset = execution
+        .police_response
+        .entry_offset
+        .map_or(0, |offset| offset.as_minutes());
+    let minimum_executable_window = entry_offset.saturating_add(1);
+    let available = minimum_available
+        .unwrap_or(0)
+        .max(minimum_executable_window);
+    crate::operations::operation_execution::resolve_time_pressure(
+        crate::core::time::SimTime::ZERO,
+        crate::core::time::SimTime::from_minutes(u64::from(available)),
+        duration,
+        execution.difficulty.max_time_pressure,
+    )
 }
 
 fn validate_intelligence(
@@ -157,6 +216,14 @@ fn validate_exposure(
     if execution.exposure.variance_limit > 50 {
         return Err(RegistryBuildError::InvalidOperationExposureVariance(kind));
     }
+    if execution
+        .exposure
+        .approach_adjustments
+        .values()
+        .any(|adjustment| !(-50..=50).contains(adjustment))
+    {
+        return Err(RegistryBuildError::InvalidOperationExposureApproachAdjustment(kind));
+    }
     if execution.exposure.trace_threshold >= execution.exposure.witnessed_threshold
         || execution.exposure.witnessed_threshold >= execution.exposure.identifying_threshold
     {
@@ -169,6 +236,66 @@ fn validate_exposure(
             >= execution.exposure.witness_cooperative_police_presence
     {
         return Err(RegistryBuildError::InvalidOperationWitnessPoliceThresholds(
+            kind,
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects exposure bands and response thresholds that the operation's own authored score
+/// factors can never cross. A definition that can never produce either a clean escape or an
+/// identifying exposure has dead outcome content; an unreachable dispatch threshold likewise
+/// makes the entire authored police-response path inert.
+fn validate_exposure_reachability(
+    kind: OperationKind,
+    execution: &OperationExecutionDefinition,
+) -> Result<(), RegistryBuildError> {
+    let quietest_approach = execution
+        .exposure
+        .approach_adjustments
+        .values()
+        .min()
+        .copied()
+        .expect("operation approach coverage is validated before exposure reachability");
+    let loudest_approach = execution
+        .exposure
+        .approach_adjustments
+        .values()
+        .max()
+        .copied()
+        .expect("operation approach coverage is validated before exposure reachability");
+
+    // Best concealment: no observable police presence or arrived response, maximal stealth and
+    // intelligence mitigation, the quietest approach, and maximal favorable exposure variance.
+    let minimum_score = i16::from(execution.exposure.base_exposure) + i16::from(quietest_approach)
+        - i16::from(execution.exposure.stealth_mitigation_weight)
+        - i16::from(execution.exposure.intelligence_mitigation_weight)
+        - i16::from(execution.exposure.variance_limit);
+
+    // Worst exposure: maximal police observation, an arrived response, no stealth or intelligence
+    // mitigation, the loudest approach, and maximal adverse exposure variance.
+    let maximum_score = i16::from(execution.exposure.base_exposure)
+        + i16::from(execution.exposure.police_observation_weight)
+        + i16::from(execution.police_response.arrival_exposure_penalty)
+        + i16::from(loudest_approach)
+        + i16::from(execution.exposure.variance_limit);
+
+    if execution.exposure.trace_threshold <= minimum_score
+        || execution.exposure.identifying_threshold > maximum_score
+    {
+        return Err(RegistryBuildError::InvalidOperationExposureThresholdRange(
+            kind,
+        ));
+    }
+
+    // Dispatch is decided at operation start before a response exists and with no resolution
+    // variance. If this threshold exceeds that alert score's own maximum, response timing and
+    // arrival penalties are unreachable authored content.
+    let maximum_alert_score = i16::from(execution.exposure.base_exposure)
+        + i16::from(execution.exposure.police_observation_weight)
+        + i16::from(loudest_approach);
+    if execution.police_response.dispatch_threshold > maximum_alert_score {
+        return Err(RegistryBuildError::InvalidOperationResponseThresholdRange(
             kind,
         ));
     }
@@ -194,6 +321,16 @@ fn validate_police_response(
         > base_delay.saturating_sub(minimum_delay)
     {
         return Err(RegistryBuildError::InvalidOperationResponseReduction(kind));
+    }
+    // Arrival penalties and police-arrival contingencies are authored behavior, not decorative
+    // fields. At maximal patrol presence the deterministic delay reaches its minimum theoretical
+    // value; that fastest response must still be able to arrive by the operation's resolution.
+    let earliest_delay =
+        crate::operations::police_response_integration::resolve_police_arrival_delay(
+            execution, 100,
+        );
+    if earliest_delay > execution.difficulty.duration.as_minutes() {
+        return Err(RegistryBuildError::InvalidOperationResponseDelay(kind));
     }
     if execution
         .police_response
@@ -257,8 +394,7 @@ fn validate_proceeds(
         if !(1..=100_000).contains(&cash.business_take_basis_points) {
             return Err(RegistryBuildError::InvalidOperationCashTakeMultiplier(kind));
         }
-        let partial = u32::from(cash.partial_take_basis_points);
-        if partial == 0 || partial > cash.business_take_basis_points {
+        if !(1..=10_000).contains(&cash.partial_take_basis_points) {
             return Err(RegistryBuildError::InvalidOperationPartialCashTake(kind));
         }
         if cash.recent_take_recovery_window.as_minutes() == 0

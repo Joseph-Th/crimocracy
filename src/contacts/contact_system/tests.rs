@@ -28,6 +28,52 @@ struct ContactFixture {
     source: CharacterId,
 }
 
+fn resentment_only_relationship() -> RelationshipDimensions {
+    RelationshipDimensions {
+        trust: level(0),
+        respect: level(0),
+        fear: level(0),
+        affection: level(0),
+        dependence: level(0),
+        resentment: level(80),
+        debt: level(0),
+    }
+}
+
+#[test]
+fn resentment_alone_does_not_create_an_institutional_contact_channel() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    validate_set_relationship(
+        &fixture.state,
+        fixture.handler,
+        fixture.source,
+        resentment_only_relationship(),
+    )
+    .expect("resentment-only relationship revision should be structurally valid")
+    .commit(&mut fixture.state)
+    .expect("resentment-only relationship should persist as social history");
+
+    let error = validate_establish_contact(
+        &fixture.state,
+        InstitutionalContactDraft {
+            sponsor: fixture.sponsor,
+            handler: fixture.handler,
+            contact: fixture.source,
+        },
+    )
+    .expect_err("dislike alone cannot provide an institutional information channel");
+    assert_eq!(
+        error,
+        ContactError::NoRelationship {
+            handler: fixture.handler,
+            contact: fixture.source,
+        }
+    );
+    assert_eq!(fixture.state.contacts().contacts().count(), 0);
+    validate_state(&fixture.state).expect("resentment-only social state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
 #[derive(Clone, Serialize)]
 struct ContactPartiesWire {
     sponsor: OrganizationId,
