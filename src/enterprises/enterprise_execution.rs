@@ -782,7 +782,6 @@ pub struct ValidatedEnterpriseCycle {
     plan: EnterpriseCyclePlan,
     ledger: Option<ValidatedLedgerTransaction>,
     information: Option<ValidatedInformation>,
-    vice_information: Option<ValidatedInformation>,
     incident: Option<crate::legal::investigation_system::ValidatedIncidentIntake>,
 }
 
@@ -866,9 +865,6 @@ impl ValidatedEnterpriseCycle {
             budget.push((IdKind::LedgerTransaction, 1));
         }
         if self.information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
-        if self.vice_information.is_some() {
             budget.push((IdKind::Information, 1));
         }
         if let Some(incident) = &self.incident {
@@ -964,22 +960,12 @@ impl ValidatedEnterpriseCycle {
                 .commit(state)
                 .expect("enterprise-cycle information ID was preflighted before mutation")
         });
-        let vice_information = self.vice_information.map(|vice_information| {
-            vice_information
-                .commit(state)
-                .expect("enterprise vice-information ID was preflighted before mutation")
-        });
         let vice_investigation = self.incident.map(|incident| {
             incident
                 .commit(state)
                 .expect("preflighted enterprise vice intake must remain current during settlement")
                 .investigation
         });
-        debug_assert_eq!(
-            vice_information.is_some(),
-            vice_investigation.is_some(),
-            "a drawn vice inquiry always carries its organization-facing knowledge"
-        );
         let cycle_id = state
             .ids
             .next_enterprise_cycle()
@@ -1005,7 +991,6 @@ impl ValidatedEnterpriseCycle {
                 provenance: super::EnterpriseCycleProvenance {
                     transaction,
                     information,
-                    vice_information,
                 },
             },
             self.plan.snapshot.next_cycle_at,
@@ -1155,45 +1140,10 @@ pub fn validate_enterprise_cycle_plan(
             unreachable!("enterprise cycle plans only produce routine or notable attention")
         }
     };
-    // A drawn vice inquiry surfaces as organization-held legal knowledge through the same
-    // provenance-bearing path an operation exposure uses: the organization knows a case
-    // exists, never what the case holds.
-    let vice_information = match &plan.vice_incident {
-        Some(incident_draft) => {
-            let intake_authority = incident_draft.owner;
-            let intake_authority_name = state
-                .world
-                .get_organization(intake_authority)
-                .ok_or(EnterpriseError::InvalidOrganization(intake_authority))?
-                .name()
-                .to_owned();
-            Some(validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Organization(record.organization()),
-                    source_kind: InformationSourceKind::AfterAction,
-                    topic: crate::intelligence::InformationTopic::LegalActivity,
-                    source_entity: Some(EntityRef::Character(record.manager())),
-                    subject: EntityRef::Enterprise(record.id()),
-                    observed_at: plan.snapshot.occurred_at,
-                    reliability: Reliability::DirectAccess,
-                    specificity: Specificity::Specific,
-                    summary: format!(
-                        "Sustained police activity around {} has drawn a vice inquiry onto the racket at {}. The organization does not know the case's evidence, lead, or detective work beyond what {} shares.",
-                        resolve_enterprise_district_name(state, record),
-                        resolve_enterprise_location_name(state, record),
-                        intake_authority_name,
-                    ),
-                },
-            )?)
-        }
-        None => None,
-    };
     Ok(ValidatedEnterpriseCycle {
         plan,
         ledger,
         information,
-        vice_information,
         incident,
     })
 }
@@ -1539,7 +1489,7 @@ fn build_cycle_report_summary(
     };
     let vice = if drew_vice_attention {
         format!(
-            " Vice officers were noticed watching {}; expect the district's attention to keep finding this racket while a case stays open.",
+            " Vice officers were noticed watching {}; district enforcement attention is focusing on this racket.",
             resolve_enterprise_location_name(state, record),
         )
     } else {
@@ -1669,7 +1619,7 @@ pub(crate) fn is_enterprise_vice_evidence(
     evidence: &crate::legal::EvidenceRecord,
     enterprise: EnterpriseId,
 ) -> bool {
-    let Some(record) = state.enterprises.get_enterprise(enterprise) else {
+    let Some(_record) = state.enterprises.get_enterprise(enterprise) else {
         return false;
     };
     state
@@ -1679,9 +1629,6 @@ pub(crate) fn is_enterprise_vice_evidence(
         && investigation
             .subjects()
             .contains(&EntityRef::Enterprise(enterprise))
-        && investigation
-            .notified_organizations()
-            .contains(&record.organization())
         && evidence.investigation() == investigation.id()
         && evidence.custodian() == investigation.owner()
         && evidence.subject() == EntityRef::Enterprise(enterprise)
@@ -1719,7 +1666,6 @@ fn build_vice_incident_draft(
             discovered_at,
         }],
         origin: Some(EntityRef::Enterprise(enterprise)),
-        notified_organizations: BTreeSet::from([record.organization()]),
         witness: None,
     }
 }

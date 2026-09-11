@@ -1,3 +1,5 @@
+//! Territory-influence derivation, scope, and deterministic ordering tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::id::{FinancialAccountId, MandateId};

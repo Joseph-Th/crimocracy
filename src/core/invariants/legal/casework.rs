@@ -19,8 +19,15 @@ use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_investigations(state: &AppState) -> Result<(), StateValidationError> {
+    let mut active_leads = BTreeSet::new();
     for investigation in state.legal.investigations() {
         validate_investigation(state, investigation)?;
+        if investigation.status() == InvestigationStatus::Active
+            && let Some(investigator) = investigation.lead_investigator()
+            && !active_leads.insert(investigator)
+        {
+            return Err(invalid_investigation_staffing(investigation));
+        }
     }
 
     Ok(())
@@ -33,8 +40,7 @@ fn validate_investigation(
     validate_investigation_definition(investigation)?;
     validate_investigation_owner(state, investigation)?;
     validate_investigation_chronology(state, investigation)?;
-    validate_investigation_origin_visibility(state, investigation)?;
-    validate_notified_organizations(state, investigation)?;
+    validate_investigation_origin(state, investigation)?;
     validate_investigation_staffing(state, investigation)?;
     validate_investigation_subjects(state, investigation)
 }
@@ -92,43 +98,17 @@ fn validate_investigation_chronology(
     Ok(())
 }
 
-fn validate_investigation_origin_visibility(
+fn validate_investigation_origin(
     state: &AppState,
     investigation: &InvestigationRecord,
 ) -> Result<(), StateValidationError> {
     let Some(origin) = investigation.origin() else {
-        if !investigation.notified_organizations().is_empty() {
-            return Err(invalid_investigation_activity(investigation));
-        }
         return Ok(());
     };
-    let responsible_organization =
-        crate::legal::investigation_system::case_origin_responsible_organization(state, origin)
-            .ok_or_else(|| invalid_investigation_activity(investigation))?;
-    if investigation.notified_organizations().is_empty()
-        || !investigation
-            .notified_organizations()
-            .contains(&responsible_organization)
+    if crate::legal::investigation_system::case_origin_responsible_organization(state, origin)
+        .is_none()
     {
         return Err(invalid_investigation_activity(investigation));
-    }
-    Ok(())
-}
-
-fn validate_notified_organizations(
-    state: &AppState,
-    investigation: &InvestigationRecord,
-) -> Result<(), StateValidationError> {
-    for notified in investigation.notified_organizations() {
-        let organization = state
-            .world
-            .get_organization(*notified)
-            .ok_or_else(|| invalid_investigation_activity(investigation))?;
-        if !crate::legal::investigation_system::is_valid_case_notification_organization_kind(
-            organization.kind(),
-        ) {
-            return Err(invalid_investigation_activity(investigation));
-        }
     }
     Ok(())
 }
@@ -148,22 +128,24 @@ fn validate_investigation_staffing(
     let Some(investigator) = investigation.lead_investigator() else {
         return Ok(());
     };
+    if investigation.status() != InvestigationStatus::Active {
+        return Err(invalid_investigation_staffing(investigation));
+    }
     let character = state
         .world
         .get_character(investigator)
         .ok_or_else(|| invalid_investigation_staffing(investigation))?;
-    if investigation.status() == InvestigationStatus::Active
-        && (character.organization() != Some(investigation.owner())
-            || character
-                .capability(CapabilityKind::Investigation)
-                .is_none()
-            || state
-                .legal
-                .active_arrest_for_character(investigator)
-                .is_some()
-            || investigation
-                .subjects()
-                .contains(&EntityRef::Character(investigator)))
+    if character.organization() != Some(investigation.owner())
+        || character
+            .capability(CapabilityKind::Investigation)
+            .is_none()
+        || state
+            .legal
+            .active_arrest_for_character(investigator)
+            .is_some()
+        || investigation
+            .subjects()
+            .contains(&EntityRef::Character(investigator))
     {
         return Err(invalid_investigation_staffing(investigation));
     }

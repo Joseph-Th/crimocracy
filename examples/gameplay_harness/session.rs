@@ -678,10 +678,9 @@ fn liquidate_initial_property(
     Ok(())
 }
 
-fn capture_initial_case_observation(
+fn refresh_player_case_information(
     scenario: &Scenario,
     burglary: OperationId,
-    narrative: bool,
     metrics: &mut RunMetrics,
 ) {
     let player_case_information = scenario
@@ -698,6 +697,14 @@ fn capture_initial_case_observation(
         .iter()
         .map(|information| information.observed_at().as_minutes())
         .min();
+}
+
+fn capture_initial_case_diagnostics(
+    scenario: &Scenario,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) {
     if narrative {
         print_player_knowledge_gap(scenario, burglary);
     }
@@ -926,7 +933,7 @@ pub fn play_session_with_fixture_view(
     )?;
     resolve_initial_burglary(&mut scenario, strategy, burglary, narrative, &mut metrics)?;
     liquidate_initial_property(&mut scenario, burglary, narrative, &mut metrics)?;
-    capture_initial_case_observation(&scenario, burglary, narrative, &mut metrics);
+    capture_initial_case_diagnostics(&scenario, burglary, narrative, &mut metrics);
 
     run_post_burglary_campaign(
         &mut scenario,

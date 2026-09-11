@@ -12,11 +12,9 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::history::HistoryEventKind;
 use crate::intelligence::{
-    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
 };
 use crate::operations::operation_economics::{resolve_cash_proceeds, resolve_property_proceeds};
-use crate::operations::operation_execution::write_legal_activity_summary;
 use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
@@ -28,6 +26,7 @@ use crate::operations::operation_objective::{
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
     resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
+    resolve_operation_booking_window, resolve_operation_booking_window_at,
     resolve_operation_earliest_start, try_resolve_operation_earliest_start,
 };
 use crate::operations::police_response_integration::resolve_police_arrival_delay;
@@ -42,7 +41,7 @@ use crate::operations::{
 };
 use crate::registry::{OperationDefinition, OperationExecutionDefinition, Registry};
 use crate::reports::ReportKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The started/due instant pair every in-progress abort arm re-derives: an operation that
 /// never truly began cannot carry an in-progress abort record.
@@ -65,7 +64,95 @@ pub(super) fn validate_operations_against_registry(
     for operation in state.operations.operations() {
         validate_operation_against_registry(registry, state, operation)?;
     }
+    validate_active_participant_bookings(registry, state)?;
     Ok(())
+}
+
+fn validate_active_participant_bookings(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    let mut by_participant: BTreeMap<_, Vec<&OperationRecord>> = BTreeMap::new();
+    for operation in state.operations.operations().filter(|operation| {
+        !matches!(
+            operation.status(),
+            OperationStatus::Completed | OperationStatus::Aborted
+        )
+    }) {
+        for participant in operation.participants() {
+            by_participant
+                .entry(participant)
+                .or_default()
+                .push(operation);
+        }
+    }
+    for (participant, operations) in by_participant {
+        for (index, first) in operations.iter().enumerate() {
+            for second in &operations[index + 1..] {
+                let Some((first_start, first_end)) =
+                    resolve_operation_booking_window(registry, first, state.now())
+                else {
+                    continue;
+                };
+                let Some((second_start, second_end)) =
+                    resolve_operation_booking_window(registry, second, state.now())
+                else {
+                    continue;
+                };
+                if !(first_start < second_end && second_start < first_end) {
+                    continue;
+                }
+                // A decision pause may legitimately grow into a booking that was non-overlapping
+                // when authorized. Prove that historical fact instead of trusting the current
+                // status pair: otherwise a forged AwaitingDecision flag could hide an overlap that
+                // canonical authorization would always have rejected.
+                let pause_overlap =
+                    matches!(
+                        (first.status(), second.status()),
+                        (
+                            OperationStatus::AwaitingDecision,
+                            OperationStatus::Authorized
+                        ) | (
+                            OperationStatus::Authorized,
+                            OperationStatus::AwaitingDecision
+                        )
+                    ) && bookings_were_disjoint_at_later_authorization(registry, first, second);
+                if pause_overlap {
+                    continue;
+                }
+                return Err(StateValidationError::ActiveOperationParticipantOverlap {
+                    participant,
+                    first: first.id(),
+                    second: second.id(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bookings_were_disjoint_at_later_authorization(
+    registry: &Registry,
+    first: &OperationRecord,
+    second: &OperationRecord,
+) -> bool {
+    let (later, earlier) =
+        if (first.authorized_at(), first.id()) > (second.authorized_at(), second.id()) {
+            (first, second)
+        } else {
+            (second, first)
+        };
+    let at = later.authorized_at();
+    let Some((later_start, later_end)) = resolve_operation_booking_window_at(registry, later, at)
+    else {
+        return false;
+    };
+    let Some((earlier_start, earlier_end)) =
+        resolve_operation_booking_window_at(registry, earlier, at)
+    else {
+        return false;
+    };
+    !(later_start < earlier_end && earlier_start < later_end)
 }
 
 fn validate_operation_against_registry(
@@ -564,7 +651,6 @@ fn resolve_completion_deadline(operation: &OperationRecord) -> Option<SimTime> {
 #[derive(Default)]
 struct OperationInvariantContext {
     after_action_information: BTreeSet<InformationId>,
-    legal_activity_information: BTreeSet<InformationId>,
     discovered_information: BTreeSet<InformationId>,
     after_action_reports: BTreeSet<crate::core::id::ReportId>,
     history_events: BTreeSet<crate::core::id::HistoryEventId>,
@@ -926,7 +1012,6 @@ fn validate_completed_operation(
         &mut context.text,
     )?;
     validate_completion_after_action(state, operation, resolution, context)?;
-    validate_completion_legal_activity(state, operation, resolution, context)?;
     validate_completion_history(state, operation, resolution, context)?;
     validate_operation_discoveries(
         state,
@@ -1030,69 +1115,6 @@ fn validate_completion_after_action(
         })
     {
         return Err(StateValidationError::InvalidOperationAfterActionReport {
-            operation: operation.id(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_completion_legal_activity(
-    state: &AppState,
-    operation: &OperationRecord,
-    resolution: &crate::operations::OperationResolutionRecord,
-    context: &mut OperationInvariantContext,
-) -> Result<(), StateValidationError> {
-    let Some(information_id) = resolution.legal_activity_information() else {
-        if resolution.exposure().investigation().is_some() {
-            return Err(StateValidationError::InvalidOperationLegalActivity {
-                operation: operation.id(),
-            });
-        }
-        return Ok(());
-    };
-    let investigation_id = resolution.exposure().investigation().ok_or(
-        StateValidationError::InvalidOperationLegalActivity {
-            operation: operation.id(),
-        },
-    )?;
-    let investigation = state.legal.get_investigation(investigation_id).ok_or(
-        StateValidationError::InvalidOperationLegalActivity {
-            operation: operation.id(),
-        },
-    )?;
-    let information = state.intelligence.get_information(information_id).ok_or(
-        StateValidationError::InvalidOperationLegalActivity {
-            operation: operation.id(),
-        },
-    )?;
-    if !context.legal_activity_information.insert(information_id)
-        || information.holder()
-            != KnowledgeHolder::Organization(operation.responsible_organization())
-        || information.source_kind() != InformationSourceKind::AfterAction
-        || information.topic() != InformationTopic::LegalActivity
-        || information.source_entity() != Some(EntityRef::Character(operation.leader()))
-        || information.subject() != EntityRef::Operation(operation.id())
-        || information.observed_at() != resolution.resolved_at()
-        || information.recorded_at() != resolution.resolved_at()
-        || information.reliability() != Reliability::GenerallyReliable
-        || information.specificity() != Specificity::Specific
-    {
-        return Err(StateValidationError::InvalidOperationLegalActivity {
-            operation: operation.id(),
-        });
-    }
-    let authority_name = state
-        .world
-        .get_organization(investigation.owner())
-        .ok_or(StateValidationError::InvalidOperationLegalActivity {
-            operation: operation.id(),
-        })?
-        .name();
-    context.text.clear();
-    write_legal_activity_summary(&mut context.text, operation.title(), authority_name)
-        .expect("String buffer writes are infallible");
-    if information.summary() != context.text.as_str() {
-        return Err(StateValidationError::InvalidOperationLegalActivity {
             operation: operation.id(),
         });
     }

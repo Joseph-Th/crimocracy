@@ -949,10 +949,6 @@ pub struct InvestigationRecord {
     /// deterministic cold-case decay; institution-authored cases keep their own lifecycle
     /// until an explicit transition.
     pub(super) origin: Option<EntityRef>,
-    /// Organizations that were surfaced the case-open legal-activity knowledge when the case was
-    /// opened. Surveillance of the owning authority uses this set (never the hidden evidence
-    /// graph) to report whether that organization's case is still being actively worked.
-    pub(super) notified_organizations: BTreeSet<OrganizationId>,
     /// The most recent minute the institution advanced the case through evidence, subjects,
     /// witness registration, scheduled work, resolved work, or explicit resumption. External
     /// witness-cooperation changes and custody-forced staffing/work cancellation do not count as
@@ -991,9 +987,6 @@ impl InvestigationRecord {
     }
     pub fn origin(&self) -> Option<EntityRef> {
         self.origin
-    }
-    pub fn notified_organizations(&self) -> &BTreeSet<OrganizationId> {
-        &self.notified_organizations
     }
     pub fn last_activity_at(&self) -> SimTime {
         self.last_activity_at
@@ -1578,10 +1571,6 @@ pub struct IncidentIntakeDraft {
     /// The entity whose exposure or notoriety opened this case; only originated incidents carry
     /// this link so cold-case decay never touches institution-authored casework.
     pub origin: Option<EntityRef>,
-    /// Organizations surfaced the case-open legal-activity knowledge at intake; the owning
-    /// authority and later surveillance read only this set to decide what is visible about the
-    /// case, never the hidden evidence or investigation internals.
-    pub notified_organizations: BTreeSet<OrganizationId>,
     /// A named witness registered with the case at intake (for example an identifiable
     /// business owner who saw the incident). Anonymous testimony remains ordinary evidence.
     pub witness: Option<IncidentWitnessDraft>,

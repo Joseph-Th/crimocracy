@@ -1,42 +1,8 @@
-//! Deterministic operation after-action and legal-activity narrative rendering.
+//! Deterministic operation after-action narrative rendering.
 
 use super::OperationResolutionFactors;
-use crate::core::id::OrganizationId;
-use crate::core::state::AppState;
-use crate::operations::{OperationExposureLevel, OperationObjectiveOutcome, OperationRecord};
+use crate::operations::{OperationExposureLevel, OperationObjectiveOutcome};
 use crate::world::QualitativeBand;
-
-/// Renders the canonical legal-activity summary text. One template source: the commit path
-/// builds its persisted copy from this writer and the per-tick invariant pass re-renders the
-/// text into a reused buffer, so the two can never drift while staying allocation-free on
-/// the validation side.
-pub(crate) fn write_legal_activity_summary(
-    out: &mut impl std::fmt::Write,
-    operation_title: &str,
-    authority_name: &str,
-) -> std::fmt::Result {
-    write!(
-        out,
-        "The exposure from {operation_title} produced a police investigation opened by {authority_name}. \
-         The organization does not know the case's evidence, lead, or detective work."
-    )
-}
-
-pub(super) fn build_legal_activity_summary(
-    state: &AppState,
-    operation: &OperationRecord,
-    authority: OrganizationId,
-) -> String {
-    let authority_name = state
-        .world
-        .get_organization(authority)
-        .expect("validated incident authority must exist")
-        .name();
-    let mut summary = String::new();
-    write_legal_activity_summary(&mut summary, operation.title(), authority_name)
-        .expect("String buffer writes are infallible");
-    summary
-}
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
 /// outcome and the factors that actually moved it. Neutral lines (normal execution window, no

@@ -905,7 +905,6 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(incident)),
-            notified_organizations: BTreeSet::from([fixture.crew]),
             witness: None,
         },
     )
@@ -1036,7 +1035,7 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
 }
 
 #[test]
-fn resumed_case_notification_grants_new_organization_authority_sightline() {
+fn resumed_case_does_not_grant_unrelated_organization_authority_sightline() {
     let mut fixture = fixture(100, false);
     let police = fixture.police;
     let business = fixture.business;
@@ -1059,7 +1058,6 @@ fn resumed_case_notification_grants_new_organization_authority_sightline() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(incident)),
-            notified_organizations: BTreeSet::from([fixture.crew]),
             witness: None,
         },
     )
@@ -1115,7 +1113,6 @@ fn resumed_case_notification_grants_new_organization_authority_sightline() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(incident)),
-            notified_organizations: BTreeSet::from([fixture.crew, second_crew]),
             witness: None,
         },
     )
@@ -1154,15 +1151,18 @@ fn resumed_case_notification_grants_new_organization_authority_sightline() {
         observation.holder(),
         KnowledgeHolder::Organization(second_crew)
     );
-    assert_eq!(observation.topic(), InformationTopic::LegalActivity);
+    assert_eq!(observation.topic(), InformationTopic::Personnel);
     assert_eq!(observation.subject(), EntityRef::Organization(police));
-    assert_eq!(
-        observation.signal(),
-        Some(&InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    assert!(
+        !matches!(
+            observation.signal(),
+            Some(InformationSignal::CaseActivity(_))
+        ),
+        "another organization cannot inherit case visibility merely because a shelf was resumed"
     );
 
     validate_state(&fixture.state)
-        .expect("resumed notification sightline should remain structurally valid");
+        .expect("resumed unrelated-case sightline should remain structurally valid");
     validate_invariants(&fixture.state);
 }
 
@@ -1308,8 +1308,8 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
         .expect("no-sightline police-org surveillance state should validate");
     validate_invariants(&fixture.state);
 
-    // A case notified to the crew only after the resolution must not retroactively invalidate
-    // the honestly-produced observation: the signature set was frozen on the resolution.
+    // A case originating from the crew only after the resolution must not retroactively
+    // invalidate the honestly-produced observation: the signature set was frozen on resolution.
     let intake = crate::legal::investigation_system::validate_incident_intake(
         &fixture.state,
         crate::legal::IncidentIntakeDraft {
@@ -1326,7 +1326,6 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(operation)),
-            notified_organizations: BTreeSet::from([fixture.crew]),
             witness: None,
         },
     )
@@ -1335,11 +1334,11 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
     .expect("later incident intake should commit");
     let _ = intake.investigation;
     validate_state(&fixture.state)
-        .expect("notification after surveillance must not invalidate persisted signatures");
+        .expect("later case creation must not invalidate persisted surveillance signatures");
     validate_invariants(&fixture.state);
 
     let envelope = build_save(&fixture.registry, &fixture.state)
-        .expect("typed personnel surveillance should save after later notification");
+        .expect("typed personnel surveillance should save after later case creation");
     let bytes = bincode::serialize(&envelope).expect("typed personnel save should serialize");
     let decoded: SaveEnvelope =
         bincode::deserialize(&bytes).expect("typed personnel save should deserialize");

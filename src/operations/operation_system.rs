@@ -528,6 +528,40 @@ pub fn validate_authorize_operation<'registry>(
     })
 }
 
+/// Begin-time availability is stricter than authorization-time interval projection. A future
+/// follow-up may be authorized exactly at another operation's projected end because the earlier
+/// decision might be resolved before that boundary. Once the follow-up actually tries to begin,
+/// however, any still-pending operation decision remains an active personnel commitment even when
+/// its unshifted half-open window ends exactly at this minute.
+fn find_busy_participant_for_begin(
+    registry: &Registry,
+    state: &AppState,
+    participants: &BTreeSet<CharacterId>,
+    operation: OperationId,
+    requested_start: SimTime,
+    requested_end: SimTime,
+) -> Option<(CharacterId, OperationId)> {
+    find_busy_participant_in_window(
+        registry,
+        state,
+        participants,
+        Some(operation),
+        requested_start,
+        requested_end,
+    )
+    .or_else(|| {
+        participants.iter().find_map(|participant| {
+            state
+                .operations
+                .active_operations_for_participant(*participant)
+                .find(|other| {
+                    other.id() != operation && other.status() == OperationStatus::AwaitingDecision
+                })
+                .map(|other| (*participant, other.id()))
+        })
+    })
+}
+
 /// Validates the operation's required seats and participant availability while collecting the
 /// version pins consumed by the authorization token. Keeping this as one concern prevents the
 /// public authorization path from interleaving roster validation with plan semantics.
@@ -1016,6 +1050,69 @@ fn projected_operation_window(
     Some((start, end))
 }
 
+/// Effective participant-booking window for any non-terminal operation. Authorized work uses
+/// its guaranteed first executable minute plus authored/deadline-bounded duration; started work
+/// uses the persisted runtime window, with an unresolved decision pause projected through `now`.
+/// This is the single booking projection shared by runtime admission and restore validation.
+pub(crate) fn resolve_operation_booking_window(
+    registry: &Registry,
+    operation: &OperationRecord,
+    now: SimTime,
+) -> Option<(SimTime, SimTime)> {
+    if let Some(window) = projected_operation_window(operation, now) {
+        return Some(window);
+    }
+    if operation.status() != OperationStatus::Authorized {
+        return None;
+    }
+    Some(projected_authorized_operation_window(
+        registry,
+        operation.authorized_at(),
+        operation.kind(),
+        operation.scheduled_for(),
+        operation.constraints(),
+    ))
+}
+
+/// Reconstructs the booking window visible at a historical instant for a currently non-terminal
+/// operation. This is used only for persistence validation: when an overlap exists now because a
+/// decision pause grew, the later authorization must still have observed a non-overlapping pair.
+pub(crate) fn resolve_operation_booking_window_at(
+    registry: &Registry,
+    operation: &OperationRecord,
+    at: SimTime,
+) -> Option<(SimTime, SimTime)> {
+    if operation.status() == OperationStatus::Authorized
+        || operation
+            .started_at()
+            .is_none_or(|started_at| at < started_at)
+    {
+        return Some(projected_authorized_operation_window(
+            registry,
+            operation.authorized_at(),
+            operation.kind(),
+            operation.scheduled_for(),
+            operation.constraints(),
+        ));
+    }
+    if matches!(
+        operation.status(),
+        OperationStatus::Completed | OperationStatus::Aborted
+    ) {
+        return None;
+    }
+    let start = operation.started_at()?;
+    let mut end = operation.resolution_due_at()?;
+    if operation.status() == OperationStatus::AwaitingDecision
+        && let Some(paused_at) = operation.awaiting_decision_since()
+        && paused_at <= at
+    {
+        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
+            .unwrap_or(SimTime::from_minutes(u64::MAX));
+    }
+    Some((start, end))
+}
+
 fn has_overlapping_operation_window(
     registry: &Registry,
     existing: &OperationRecord,
@@ -1023,26 +1120,11 @@ fn has_overlapping_operation_window(
     requested_start: SimTime,
     requested_end: SimTime,
 ) -> bool {
-    if matches!(
-        existing.status(),
-        OperationStatus::Completed | OperationStatus::Aborted
-    ) {
+    let Some((existing_start, existing_end)) =
+        resolve_operation_booking_window(registry, existing, now)
+    else {
         return false;
-    }
-    if let Some((existing_start, existing_end)) = projected_operation_window(existing, now) {
-        return requested_start < existing_end && existing_start < requested_end;
-    }
-    // Authorized and not yet begun: use the same next-tick start rule and deadline clamp as
-    // the requested operation. Otherwise a current-minute authorization can appear to finish
-    // one minute before it can actually finish, while a deadline-constrained authorization can
-    // reserve crew after it is guaranteed to resolve.
-    let (existing_start, existing_end) = projected_authorized_operation_window(
-        registry,
-        existing.authorized_at(),
-        existing.kind(),
-        existing.scheduled_for(),
-        existing.constraints(),
-    );
+    };
     requested_start < existing_end && existing_start < requested_end
 }
 
@@ -1328,11 +1410,11 @@ pub(crate) fn validate_begin_operation(
             });
         }
     }
-    if let Some((character, conflicting_operation)) = find_busy_participant_in_window(
+    if let Some((character, conflicting_operation)) = find_busy_participant_for_begin(
         registry,
         state,
         &participants,
-        Some(operation),
+        operation,
         state.now(),
         resolution_due_at,
     ) {

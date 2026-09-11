@@ -40,15 +40,12 @@ impl LegalState {
         );
     }
 
-    /// Extends an existing investigation with the full context of a later validated incident:
-    /// declared subjects remain indexed even while some fresh evidence is still weak, and every
-    /// explicit external notification recipient retains the same case-visibility sightline they
-    /// would have received if the incident had opened a new file.
-    pub(crate) fn extend_investigation_incident_context(
+    /// Extends an existing investigation with the subject matter of a later validated incident.
+    /// Declared subjects remain indexed even while some fresh evidence is still weak.
+    pub(crate) fn extend_investigation_incident_subjects(
         &mut self,
         investigation_id: InvestigationId,
         subjects: BTreeSet<EntityRef>,
-        notified_organizations: BTreeSet<OrganizationId>,
     ) {
         let mut added = Vec::new();
         {
@@ -63,11 +60,7 @@ impl LegalState {
                     added.push(subject);
                 }
             }
-            let mut notifications_changed = false;
-            for organization in notified_organizations {
-                notifications_changed |= investigation.notified_organizations.insert(organization);
-            }
-            if !declared_changed && !notifications_changed {
+            if !declared_changed {
                 return;
             }
             investigation.version = advance_version_preflighted(investigation.version);

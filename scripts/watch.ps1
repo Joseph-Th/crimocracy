@@ -52,12 +52,10 @@ $cargoArgs = if ($Filter) {
     @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
 }
 
-# Warm-cache reference (no file changed): check 0.06s / test 0.11s.
-# The per-run timing printed below tells you whether a lane paid a rebuild.
+# Each run prints its measured elapsed time without inferring cache or rebuild state.
 $laneIsCheck = $Check
 
 function Invoke-Lane {
-    $env:CARGO_INCREMENTAL = "0"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $output = & cargo @cargoArgs 2>&1 | Out-String
     $exit = $LASTEXITCODE
@@ -129,11 +127,6 @@ try {
                 $lines = $lines[0..59] + @("  ... ($($lines.Count - 60) more lines; re-run with cargo test -- --nocapture)")
             }
             Write-Host ($lines -join "`n") -ForegroundColor DarkGray
-        } elseif ($result.Exit -eq 0 -and $result.Seconds -gt 3) {
-            Write-Host "  (rebuild: $($result.Seconds)s -- file change triggered recompile)" -ForegroundColor DarkGray
-        } elseif ($result.Exit -eq 0) {
-            # Warm cache hit — confirm the lane is fast.
-            Write-Host "  (warm cache)" -ForegroundColor DarkGray
         }
 
         if ($Clear) { Clear-Host }

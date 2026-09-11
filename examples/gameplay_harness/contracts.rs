@@ -111,7 +111,7 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 None
             } else {
                 Some(
-                    "police-arrival decision, surfaced field/legal information, and a counter-surveillance follow-up that reads whether the case is still active",
+                    "police-arrival decision, crew field information, police-contact case disclosure, and a counter-surveillance follow-up that reads whether the case is still active",
                 )
             }
         }
@@ -158,7 +158,23 @@ pub fn validate_strategy_evidence(
         {
             validate_night_trap_evidence(metrics)
         }
-        Strategy::Press if metrics.police_arrived => validate_night_trap_evidence(metrics),
+        // A response arrival or hidden institutional intake is not itself player-visible proof
+        // of a case. PRESS asks its contact only after witnessed/identifying exposure gives
+        // leadership a legitimate reason to ask, so require the full case-followup chain only
+        // when that same information boundary was crossed.
+        Strategy::Press
+            if metrics.police_arrived
+                && metrics.investigation_created
+                && matches!(
+                    metrics.exposure_level,
+                    Some(
+                        crimocracy::operations::OperationExposureLevel::Witnessed
+                            | crimocracy::operations::OperationExposureLevel::Identifying
+                    )
+                ) =>
+        {
+            validate_night_trap_evidence(metrics)
+        }
         Strategy::Recon => validate_night_trap_evidence(metrics),
         Strategy::Rush | Strategy::Press => Ok(()),
     }

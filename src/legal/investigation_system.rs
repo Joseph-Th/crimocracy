@@ -107,17 +107,6 @@ pub enum InvestigationError {
     },
     #[error("entity {0:?} cannot originate a case")]
     InvalidCaseOrigin(EntityRef),
-    #[error("organization {0} cannot be recorded as an external case notification recipient")]
-    InvalidNotifiedOrganization(OrganizationId),
-    #[error("case notifications require an operation or enterprise origin")]
-    NotificationsRequireCaseOrigin,
-    #[error(
-        "case origin {origin:?} belongs to organization {organization}, which must be included among the notified organizations"
-    )]
-    OriginOrganizationNotNotified {
-        origin: EntityRef,
-        organization: OrganizationId,
-    },
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]
     ForensicAnalysisRequiresInvestigationWork,
     #[error(
@@ -248,7 +237,6 @@ impl ValidatedInvestigation {
             evidence: Default::default(),
             opened_at: state.now(),
             origin: None,
-            notified_organizations: Default::default(),
             last_activity_at: state.now(),
             version: 1,
         });
@@ -1021,13 +1009,7 @@ impl ValidatedIncidentIntake {
                 .subjects
                 .difference(record.declared_subjects())
                 .next()
-                .is_some()
-                || self
-                    .draft
-                    .notified_organizations
-                    .difference(record.notified_organizations())
-                    .next()
-                    .is_some();
+                .is_some();
             let advances = self
                 .evidence_count()?
                 .checked_add(u32::from(self.draft.witness.is_some()))
@@ -1060,7 +1042,6 @@ impl ValidatedIncidentIntake {
         // The draft is consumed by this commit, so its subject set moves into the record
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);
-        let notified_organizations = std::mem::take(&mut self.draft.notified_organizations);
         let investigation = match self.resuming {
             Some((shelf, _)) => {
                 // Canonical resume: revalidates the lifecycle gate and refreshes the lead's
@@ -1071,16 +1052,9 @@ impl ValidatedIncidentIntake {
                 // the same semantic boundary on continuation instead of making weak-but-valid
                 // non-character subject matter disappear merely because this incident found a
                 // resumable shelf.
-                // Continuation carries the full incident visibility contract forward. A shelf
-                // can be resumed by a later incident with overlapping subject matter even when
-                // that incident came from another organization; dropping the new notification
-                // recipient here would make canonical authority surveillance forget that the
-                // organization was explicitly told about the continued case.
-                state.legal.extend_investigation_incident_context(
-                    shelf,
-                    subjects,
-                    notified_organizations,
-                );
+                state
+                    .legal
+                    .extend_investigation_incident_subjects(shelf, subjects);
                 shelf
             }
             None => {
@@ -1099,7 +1073,6 @@ impl ValidatedIncidentIntake {
                     evidence: Default::default(),
                     opened_at: state.now(),
                     origin: self.draft.origin,
-                    notified_organizations,
                     last_activity_at: state.now(),
                     version: 1,
                 });
@@ -1234,32 +1207,6 @@ fn validate_incident_intake_dependencies(
             return Err(InvestigationError::MissingEntity(origin));
         }
     }
-    for organization in &draft.notified_organizations {
-        let record = state.world.get_organization(*organization).ok_or(
-            InvestigationError::MissingEntity(EntityRef::Organization(*organization)),
-        )?;
-        if !is_valid_case_notification_organization_kind(record.kind()) {
-            return Err(InvestigationError::InvalidNotifiedOrganization(
-                *organization,
-            ));
-        }
-    }
-    match draft.origin {
-        Some(origin) => {
-            let organization = case_origin_responsible_organization(state, origin)
-                .expect("validated case origin must resolve its responsible organization");
-            if !draft.notified_organizations.contains(&organization) {
-                return Err(InvestigationError::OriginOrganizationNotNotified {
-                    origin,
-                    organization,
-                });
-            }
-        }
-        None if !draft.notified_organizations.is_empty() => {
-            return Err(InvestigationError::NotificationsRequireCaseOrigin);
-        }
-        None => {}
-    }
     if let Some(witness) = &draft.witness {
         state
             .world
@@ -1369,22 +1316,6 @@ pub(crate) fn case_origin_responsible_organization(
         | EntityRef::DecisionRequest(_)
         | EntityRef::Mandate(_) => None,
     }
-}
-
-/// Originated case visibility belongs only to external organizations that can legitimately be
-/// told about enforcement attention. Legal institutions own or work cases through their own
-/// canonical records; recording them as an external notification recipient would fabricate the
-/// same visibility channel that criminal/civic organizations later consume through surveillance.
-pub(crate) const fn is_valid_case_notification_organization_kind(kind: OrganizationKind) -> bool {
-    matches!(
-        kind,
-        OrganizationKind::Criminal
-            | OrganizationKind::Political
-            | OrganizationKind::Press
-            | OrganizationKind::Labor
-            | OrganizationKind::Civic
-            | OrganizationKind::Commercial
-    )
 }
 
 #[cfg(test)]

@@ -532,21 +532,6 @@ fn narrate_notable_enterprise_cycles(scenario: &Scenario, outcome: &TickOutcome)
             stamp(outcome.now.as_minutes()),
             summary,
         );
-        // The inquiry itself is organization-held legal knowledge with its own provenance: the
-        // racket now has a dedicated case, and the organization knows that much only.
-        if let Some(vice_information) = cycle.vice_information() {
-            let vice_summary = scenario
-                .state
-                .intelligence()
-                .get_information(vice_information)
-                .map(|record| record.summary().to_owned())
-                .unwrap_or_else(|| "vice-inquiry knowledge missing".to_owned());
-            println!(
-                "[VICE HEAT]  {}: {}",
-                stamp(outcome.now.as_minutes()),
-                vice_summary,
-            );
-        }
     }
 }
 

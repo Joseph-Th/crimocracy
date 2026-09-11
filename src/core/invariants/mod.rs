@@ -107,6 +107,14 @@ pub enum StateValidationError {
         operation: OperationId,
         participant: CharacterId,
     },
+    #[error(
+        "active operations {first} and {second} have overlapping bookings for participant {participant}"
+    )]
+    ActiveOperationParticipantOverlap {
+        participant: CharacterId,
+        first: OperationId,
+        second: OperationId,
+    },
     #[error("operation {operation} has invalid execution lifecycle state")]
     InvalidOperationRuntime { operation: OperationId },
     #[error("completed operation {operation} has an invalid after-action information link")]
@@ -119,8 +127,6 @@ pub enum StateValidationError {
     InvalidOperationHistory { operation: OperationId },
     #[error("completed operation {operation} has invalid discovered-information provenance")]
     InvalidOperationDiscovery { operation: OperationId },
-    #[error("completed operation {operation} has invalid player legal-activity information")]
-    InvalidOperationLegalActivity { operation: OperationId },
     #[error("operation {operation} is incompatible with its authored definition")]
     InvalidOperationDefinition { operation: OperationId },
     #[error("operation {operation} has invalid persisted exposure or legal consequences")]
@@ -260,6 +266,13 @@ pub enum StateValidationError {
         report: ReportId,
         decision: DecisionRequestId,
     },
+    #[error(
+        "report {report} references decision {decision} that had not been requested when the report was generated"
+    )]
+    ReportDecisionUnavailableAtGeneration {
+        report: ReportId,
+        decision: DecisionRequestId,
+    },
     #[error("report {report} references decision {decision} belonging to another recipient")]
     ReportDecisionRecipientMismatch {
         report: ReportId,
@@ -306,6 +319,13 @@ pub enum StateValidationError {
     InvalidEnterpriseAuthority { enterprise: EnterpriseId },
     #[error("enterprise {enterprise} has invalid location state")]
     InvalidEnterpriseLocation { enterprise: EnterpriseId },
+    #[error(
+        "enterprise {enterprise} duplicates non-retired kind/location slot held by enterprise {existing}"
+    )]
+    DuplicateEnterpriseLocation {
+        enterprise: EnterpriseId,
+        existing: EnterpriseId,
+    },
     #[error("enterprise {enterprise} has invalid financial account configuration")]
     InvalidEnterpriseAccounts { enterprise: EnterpriseId },
     #[error("enterprise {enterprise} has invalid lifecycle scheduling state")]

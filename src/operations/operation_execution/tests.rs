@@ -2363,6 +2363,8 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
             .status(),
         OperationStatus::AwaitingDecision
     );
+    validate_state_against_registry(&registry, &state)
+        .expect("pause growth after authorization is a valid temporary booking overlap");
 
     let deadline_cleanup = run_tick(&registry, &mut state);
     assert_eq!(deadline_cleanup.now, SimTime::from_minutes(7));

@@ -2019,7 +2019,6 @@ fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(operation)),
-            notified_organizations: BTreeSet::from([crew]),
             witness: None,
         },
     )

@@ -1,3 +1,5 @@
+//! Persistence round-trip, corruption, and current-schema rejection tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;

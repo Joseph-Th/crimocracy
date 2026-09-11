@@ -5,9 +5,9 @@ use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::id::MandateId;
 use crate::core::invariants::{
-    validate_invariants, validate_state, validate_state_against_registry,
+    StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimTime;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
@@ -863,6 +863,76 @@ fn operation_allows_non_overlapping_future_assignment() {
     validate_authorize_operation(&registry, &state, later)
         .expect("a future operation at the prior operation's real end should validate");
     validate_invariants(&state);
+}
+
+#[test]
+fn restore_rejects_overlapping_active_operation_bookings() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let first = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("first operation should validate")
+    .commit(&mut state)
+    .expect("first operation should commit");
+    let duration = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .duration();
+    let first_end = SimTime::from_minutes(1) + duration;
+    let mut later = make_test_draft(organization, leader, target);
+    later.scheduled_for = first_end;
+    let second = validate_authorize_operation(&registry, &state, later)
+        .expect("back-to-back operation should validate")
+        .commit(&mut state)
+        .expect("back-to-back operation should commit");
+    validate_state_against_registry(&registry, &state)
+        .expect("canonical back-to-back bookings should remain registry-valid");
+
+    let original = state
+        .operations()
+        .get_operation(second)
+        .expect("second operation should persist")
+        .clone();
+    let mut replacement = original.clone();
+    replacement.command.scheduled_for = SimTime::from_minutes(u64::from(duration.as_minutes()));
+    let original_bytes = bincode::serialize(&original).expect("operation record should serialize");
+    let replacement_bytes =
+        bincode::serialize(&replacement).expect("replacement operation should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "fixed-width schedule corruption must preserve the record wire size"
+    );
+    let envelope = build_save(&registry, &state).expect("canonical fixture should save");
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "the second operation record must occur exactly once in the save"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    let corrupted: SaveEnvelope =
+        bincode::deserialize(&envelope_bytes).expect("same-layout corruption should decode");
+
+    let error = restore_save(&registry, corrupted)
+        .expect_err("restore must reject an overlapping active booking");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::ActiveOperationParticipantOverlap {
+            participant: leader,
+            first,
+            second,
+        }),
+        "restore must reject an overlapping active booking that canonical authorization cannot create"
+    );
 }
 
 #[test]

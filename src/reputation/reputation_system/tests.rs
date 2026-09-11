@@ -1,3 +1,5 @@
+//! Reputation consequence, decay, clamping, and reporting tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;

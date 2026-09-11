@@ -334,7 +334,6 @@ fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
         },
         "Unreported district inquiry",
         EntityRef::Neighborhood(neighborhood),
-        BTreeSet::from([other_crew]),
     );
     assert_eq!(
         fixture
@@ -1264,7 +1263,6 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
                     discovered_at: fixture.state.now(),
                 }],
                 origin: Some(EntityRef::Enterprise(enterprise)),
-                notified_organizations: BTreeSet::from([fixture.organization]),
                 witness: None,
             },
         )

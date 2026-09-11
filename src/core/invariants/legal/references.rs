@@ -74,7 +74,10 @@ fn validate_report_sources(
             },
         )?;
         let is_available = match information_record.holder() {
-            KnowledgeHolder::Organization(organization) => organization == report.recipient(),
+            KnowledgeHolder::Organization(organization) => {
+                organization == report.recipient()
+                    && information_record.recorded_at() <= report.generated_at()
+            }
             KnowledgeHolder::Character(_) => false,
         };
         if !is_available {
@@ -101,6 +104,14 @@ fn validate_report_decision(
             decision,
         },
     )?;
+    if decision_record.requested_at() > report.generated_at() {
+        return Err(
+            StateValidationError::ReportDecisionUnavailableAtGeneration {
+                report: report.id(),
+                decision,
+            },
+        );
+    }
     if decision_record.recipient() != report.recipient() {
         return Err(StateValidationError::ReportDecisionRecipientMismatch {
             report: report.id(),

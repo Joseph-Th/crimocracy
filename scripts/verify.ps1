@@ -2,14 +2,8 @@
 #
 # Design: cheapest proof first, warm caches reused, fail-fast.
 #
-# Warm cache (no file changed):          fmt 0.6s  check 0.06s  test 0.11s  full gate 2-3s
-# After touching one lib file:           check 6s   test 12s    full gate 15-20s
-# Cold (cargo clean):                    ~60-90s (dominated by rustc)
-#
-# Incremental is slower for [profile.dev] but faster for the single-binary
-# [profile.harness]; the pin is scoped per stage: dev stages force
-# CARGO_INCREMENTAL=0, harness stages clear it so the profile governs.
-# See Cargo.toml for measured profile tuning and alternatives that lost.
+# Cargo profiles own cache and incremental behavior. This gate deliberately does not override
+# CARGO_INCREMENTAL, so focused and repeated local runs can reuse the repository's normal cache.
 #
 # Stages (full gate, in order, fail-fast):
 #   1. cargo fmt --check
@@ -23,11 +17,11 @@
 # driver hash. Clippy is last: you get test signal even if lint fails.
 #
 # Lanes:
-#   .\scripts\verify.cmd                  full gate (before push)
-#   .\scripts\verify.cmd -Fast            fmt + lib tests --skip soak  (~0.7s warm)
-#   .\scripts\verify.cmd -Fast -Harness   fmt + smoke contract only    (~0.7s warm)
-#   .\scripts\verify.cmd -Check           type-check only, no tests     (~0.06s warm)
-#   .\scripts\verify.cmd -Fast -Filter X  fmt + matching lib tests      (~0.5s warm)
+#   .\scripts\verify.cmd                  broad gate for contracts that require it
+#   .\scripts\verify.cmd -Fast            fmt + lib tests --skip soak
+#   .\scripts\verify.cmd -Fast -Harness   fmt + smoke contract only
+#   .\scripts\verify.cmd -Check           type-check only, no tests
+#   .\scripts\verify.cmd -Fast -Filter X  fmt + matching lib tests
 #   cargo check-fast / test-fast / harness  even more targeted, via .cargo aliases
 #
 # Flags: -Jobs N  cap cargo parallelism  |  -NoClippy -NoFmt  skip known-passing
@@ -109,10 +103,8 @@ function Invoke-CargoStage {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [bool]$AllowJobs = $true,
-        [switch]$HarnessProfile,
         [switch]$ShowOutputOnPass
     )
-    if ($HarnessProfile) { Clear-DevIncrementalPin } else { Set-DevIncrementalPin }
     $displayName = if ($Name.Length -gt 28) { $Name.Substring(0, 28) } else { $Name.PadRight(28) }
     Write-Host "  $displayName " -NoNewline -ForegroundColor Cyan
     $cargoArgs = $Arguments
@@ -202,11 +194,6 @@ function Skip-Stage {
     $script:GateStagesSkipped++
 }
 
-# ── incremental pin scoping ──────────────────────────────────────────────────
-
-function Set-DevIncrementalPin { $env:CARGO_INCREMENTAL = "0" }
-function Clear-DevIncrementalPin { Remove-Item Env:\CARGO_INCREMENTAL -ErrorAction SilentlyContinue }
-
 # ── bookkeeping ──────────────────────────────────────────────────────────────
 
 $script:GateStagesPassed = 0
@@ -271,7 +258,7 @@ if ($Fast) {
         Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -ShowOutputOnPass:$Detail
         $gate.Stop()
         Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
-        Write-Host "  next: cargo test-focused <filter>  |  .\scripts\verify.cmd  (full gate before push)" -ForegroundColor DarkGray
+        Write-Host "  broader gate is required only for persistence, invariants, cross-domain work, or verification infrastructure" -ForegroundColor DarkGray
         exit 0
     }
 
@@ -291,7 +278,7 @@ if ($Fast) {
         Write-Host "  stages: $table" -ForegroundColor DarkGray
     }
     Write-Host "FAST PASS ($totalSec`s)  $lane" -ForegroundColor Green
-    Write-Host "  next: .\scripts\verify.cmd  (full gate before push)  |  cargo soak  (if you touched invariants/persistence)" -ForegroundColor DarkGray
+    Write-Host "  broader gate is required only when the changed contract needs it; soak remains explicit stress evidence" -ForegroundColor DarkGray
     exit 0
 }
 
@@ -317,10 +304,8 @@ Assert-SmokeContractSelectable
 Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
 
 # Full mode exercises every narrative, probe, and cross-branch contract that
-# smoke skips; a single sample costs ~5s and has caught drift that smoke did
-# not. Runs on [profile.harness] (opt-level 1, incremental = true): after a
-# lib edit the incremental cache cuts the rebuild from ~75s to ~10-20s.
-Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1") -HarnessProfile
+# smoke skips. Runs on [profile.harness], which has a separate incremental cache from dev.
+Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1")
 
 if ($NoClippy) {
     Skip-Stage -Name "clippy (lib+harness)" -Reason "--NoClippy"

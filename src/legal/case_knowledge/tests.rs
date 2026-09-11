@@ -168,7 +168,6 @@ fn open_operation_case(state: &mut AppState) -> InvestigationId {
                 discovered_at: state.now(),
             }],
             origin: Some(EntityRef::Operation(origin)),
-            notified_organizations: BTreeSet::from([criminal]),
             witness: None,
         },
     )

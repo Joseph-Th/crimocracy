@@ -52,6 +52,8 @@ pub struct TickOutcome {
     pub now: SimTime,
     pub started_operations: Vec<OperationId>,
     pub arrived_police_responses: Vec<PoliceResponseId>,
+    /// Every decision request raised this tick, regardless of owning subsystem. The outcome
+    /// preserves whether this player-owned attention event requests an adapter pause.
     pub decision_requests: Vec<DecisionRequestOutcome>,
     pub resolved_operations: Vec<OperationId>,
     pub staffed_investigations: Vec<(InvestigationId, CharacterId)>,
@@ -68,9 +70,6 @@ pub struct TickOutcome {
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
-    /// Approval requests raised this tick by RequireApproval managers. Player-organization
-    /// requests stay pending on the decision surface; others resolved within the pass.
-    pub recruitment_approval_requests: Vec<crate::core::id::DecisionRequestId>,
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
@@ -94,7 +93,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     .expect("valid state should release custody that reached the authored maximum");
     // Phase order is the contract: bounded custody release first; opportunity expiry next so its
     // durable lifecycle report is available to every remaining same-minute consumer; then
-    // operations (start, deadline aborts, police arrivals, resolution), legal institutional work
+    // operations (police arrivals, starts, overdue cleanup, resolution), legal institutional work
     // (staffing, detective work, new custody, representation, informants, cold decay), economy
     // cycles (businesses, enterprises), then the day-boundary governance cluster: payroll,
     // reputation (decay before current consequences), recruitment, delegated expansion (which
@@ -102,7 +101,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // above.
     let expired_opportunities = apply_opportunity_expiry(registry, state)
         .expect("valid state should expire every due opportunity atomically");
-    let (started_operations, arrived_police_responses, decision_requests, resolved_operations) =
+    let (started_operations, arrived_police_responses, mut decision_requests, resolved_operations) =
         run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
@@ -165,7 +164,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     let recruitment = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
-    let recruitment_approval_requests = recruitment.approval_requests;
+    decision_requests.extend(recruitment.approval_requests);
     // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
     // minute governs with its current roster, and after reputation so a vice hit this minute can
     // make the organization keep its head down immediately. Selection consumes
@@ -199,7 +198,6 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         enterprise_cycles,
         payrolls,
         recruitment_attempts,
-        recruitment_approval_requests,
         autonomous_enterprises,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay.suspended,
@@ -208,9 +206,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     }
 }
 
-/// Starts due authorized operations, aborts missed deadlines (through the pending decision when
-/// one exists), processes due police-response arrivals, and resolves due in-progress operations
-/// with pre-drawn deterministic variance.
+/// Processes due police-response arrivals, starts due authorized operations, aborts missed
+/// deadlines (through the pending decision when one exists), and resolves due in-progress
+/// operations with pre-drawn deterministic variance.
 fn run_operations_phase(
     registry: &Registry,
     state: &mut AppState,
@@ -220,6 +218,17 @@ fn run_operations_phase(
     Vec<DecisionRequestOutcome>,
     Vec<OperationId>,
 ) {
+    // Process responses that were dispatched on earlier ticks before admitting new work.
+    // Authorization deliberately allows exact back-to-back participant windows. A response
+    // arriving on that boundary can turn the earlier operation into an unresolved commitment;
+    // that state must be visible to begin-time participant validation before the follow-up starts.
+    // Newly started operations cannot add another due arrival here because registry validation
+    // requires every police-response delay to be strictly positive.
+    let police_response_outcome = apply_due_police_response_arrivals(state)
+        .expect("due police responses must commit through canonical arrival processing");
+    let arrived_police_responses = police_response_outcome.arrived;
+    let decision_requests = police_response_outcome.decisions;
+
     let due_authorized = find_due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
     for operation in due_authorized {
@@ -247,6 +256,9 @@ fn run_operations_phase(
             }
         }
     }
+    // Preserve the established retry boundary: a follow-up that was blocked at begin time by a
+    // still-paused operation does not immediately retry merely because overdue cleanup releases
+    // the participant later in this same phase. It remains Authorized until the next tick.
     for operation in find_due_operations_with_missed_deadlines(state) {
         let record = state
             .operations()
@@ -271,10 +283,6 @@ fn run_operations_phase(
                 .expect("an overdue in-progress operation must abort atomically");
         }
     }
-    let police_response_outcome = apply_due_police_response_arrivals(state)
-        .expect("due police responses must commit through canonical arrival processing");
-    let arrived_police_responses = police_response_outcome.arrived;
-    let decision_requests = police_response_outcome.decisions;
     let due_operations = find_due_in_progress_operations(state);
     let mut resolved_operations = Vec::with_capacity(due_operations.len());
     for operation in due_operations {
@@ -533,6 +541,30 @@ pub(crate) fn draw_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_registry;
+    use crate::core::entity::EntityRef;
+    use crate::core::invariants::{validate_invariants, validate_state};
+    use crate::legal::JurisdictionDraft;
+    use crate::legal::jurisdiction_system::validate_set_jurisdiction;
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{
+        OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
+        OperationKind, OperationObjective, OperationStatus, RoleKind,
+    };
+    use crate::world::world_system::{
+        insert_business, insert_character, insert_neighborhood, insert_organization,
+    };
+    use crate::world::{
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CapabilityKind, CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+        Rating,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn test_rating(value: u8) -> Rating {
+        Rating::try_new(value).expect("simulation test rating must be valid")
+    }
 
     #[test]
     fn domain_random_streams_do_not_cross_contaminate_unrelated_simulation_work() {
@@ -557,5 +589,191 @@ mod tests {
                 draw_signed_variance(operation_heavy.investigation_rng_mut(), 12)
             );
         }
+    }
+
+    #[test]
+    fn same_minute_police_arrival_blocks_back_to_back_participant_start() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB0A0_DA7A);
+        let crew = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Boundary Crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("crew should validate");
+        let police = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Boundary Precinct".to_owned(),
+                kind: OrganizationKind::LawEnforcement,
+            },
+        )
+        .expect("police organization should validate");
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Boundary Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: test_rating(50),
+                        commercial_activity: test_rating(50),
+                        illicit_demand: test_rating(50),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: test_rating(100),
+                    },
+                },
+            },
+        )
+        .expect("neighborhood should validate");
+        validate_set_jurisdiction(
+            &state,
+            JurisdictionDraft {
+                organization: police,
+                neighborhoods: BTreeSet::from([neighborhood]),
+                case_intake_priority: test_rating(80),
+            },
+        )
+        .expect("jurisdiction should validate")
+        .commit(&mut state)
+        .expect("jurisdiction should commit");
+
+        let leader = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Boundary Leader".to_owned(),
+                organization: Some(crew),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Management, test_rating(75)),
+                    (CapabilityKind::Intimidation, test_rating(75)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("leader should validate");
+        let target = insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: "Boundary Store".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood,
+                owner: BusinessOwner::Independent,
+            },
+        )
+        .expect("target business should validate");
+
+        let first = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Boundary collection".to_owned(),
+                kind: OperationKind::Intimidation,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
+                },
+                approach: OperationApproach::Intimidating,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: vec![OperationConstraint::CompleteBy(SimTime::from_minutes(4))],
+                contingencies: vec![OperationContingency::RequestDecisionOnPoliceArrival],
+                scheduled_for: SimTime::ZERO,
+            },
+        )
+        .expect("first boundary operation should validate")
+        .commit(&mut state)
+        .expect("first boundary operation should commit");
+        let follow_up = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: "Boundary follow-up".to_owned(),
+                kind: OperationKind::Intimidation,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
+                },
+                approach: OperationApproach::Intimidating,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::from_minutes(4),
+            },
+        )
+        .expect("exact back-to-back follow-up should authorize")
+        .commit(&mut state)
+        .expect("exact back-to-back follow-up should commit");
+
+        let first_tick = run_tick(&registry, &mut state);
+        assert_eq!(first_tick.now, SimTime::from_minutes(1));
+        assert_eq!(first_tick.started_operations, vec![first]);
+        let first_record = state
+            .operations()
+            .get_operation(first)
+            .expect("first operation should persist");
+        assert_eq!(
+            first_record.resolution_due_at(),
+            Some(SimTime::from_minutes(4))
+        );
+        let response = first_record
+            .police_response()
+            .expect("high ambient police presence should dispatch a response");
+        assert_eq!(
+            state
+                .legal()
+                .get_police_response(response)
+                .expect("response should persist")
+                .arrival_due_at(),
+            SimTime::from_minutes(4)
+        );
+
+        for expected_minute in 2..=3 {
+            let tick = run_tick(&registry, &mut state);
+            assert_eq!(tick.now, SimTime::from_minutes(expected_minute));
+            assert!(tick.started_operations.is_empty());
+            assert!(tick.arrived_police_responses.is_empty());
+        }
+
+        let boundary = run_tick(&registry, &mut state);
+        assert_eq!(boundary.now, SimTime::from_minutes(4));
+        assert_eq!(boundary.arrived_police_responses, vec![response]);
+        assert_eq!(boundary.decision_requests.len(), 1);
+        assert!(
+            boundary.started_operations.is_empty(),
+            "the unresolved arrival decision must retain the leader before the back-to-back follow-up begins"
+        );
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(first)
+                .expect("first operation should persist")
+                .status(),
+            OperationStatus::AwaitingDecision
+        );
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(follow_up)
+                .expect("deferred follow-up should persist")
+                .status(),
+            OperationStatus::Authorized
+        );
+        validate_state(&state).expect("same-minute arrival boundary state should validate");
+        validate_invariants(&state);
     }
 }

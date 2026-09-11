@@ -142,7 +142,6 @@ pub(super) fn validate_exposure_incident(
                 discovered_at,
             }],
             origin: Some(EntityRef::Operation(operation.id())),
-            notified_organizations: BTreeSet::from([operation.responsible_organization()]),
             witness,
         },
     )?;

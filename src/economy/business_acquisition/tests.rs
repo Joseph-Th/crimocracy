@@ -1,3 +1,5 @@
+//! Business acquisition ownership, finance, and lifecycle integration tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::id::IdKind;

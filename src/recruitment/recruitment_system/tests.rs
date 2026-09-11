@@ -8,6 +8,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
+use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
     validate_request_recruitment_approval, validate_resolve_decision,
@@ -2696,11 +2697,12 @@ fn require_approval_manager_autonomously_raises_and_leadership_resolves_its_own_
     // manager's proposal without consulting the candidate's future response, and this fixture's
     // actual pitch then succeeds under the ApprovedDecision authority.
     assert_eq!(outcome.approval_requests.len(), 1);
+    assert!(!outcome.approval_requests[0].requests_pause);
     assert_eq!(outcome.attempts.len(), 1);
     let decision = fixture
         .state
         .decisions()
-        .get_decision(outcome.approval_requests[0])
+        .get_decision(outcome.approval_requests[0].decision)
         .expect("approval decision should persist");
     assert_eq!(decision.status(), DecisionStatus::Resolved);
     assert_eq!(
@@ -2777,11 +2779,12 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
     let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
         .expect("NPC approval and refused pitch should resolve atomically");
     assert_eq!(outcome.approval_requests.len(), 1);
+    assert!(!outcome.approval_requests[0].requests_pause);
     assert_eq!(outcome.attempts.len(), 1);
     let decision = fixture
         .state
         .decisions()
-        .get_decision(outcome.approval_requests[0])
+        .get_decision(outcome.approval_requests[0].decision)
         .expect("NPC approval should persist");
     assert_eq!(decision.status(), DecisionStatus::Resolved);
     assert_eq!(
@@ -2839,7 +2842,7 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
     assert_eq!(
         restored
             .decisions()
-            .get_decision(outcome.approval_requests[0])
+            .get_decision(outcome.approval_requests[0].decision)
             .expect("resolved approval should survive restore")
             .status(),
         DecisionStatus::Resolved
@@ -2872,12 +2875,16 @@ fn player_organization_approval_requests_wait_for_the_player() {
         .expect("player approval request should validate");
     assert!(outcome.attempts.is_empty());
     assert_eq!(outcome.approval_requests.len(), 1);
+    assert!(
+        outcome.approval_requests[0].requests_pause,
+        "a player-owned Exception approval must preserve its auto-pause request"
+    );
     assert_eq!(
         fixture
             .state
             .decisions()
             .pending_for_recruitment_approval(fixture.target, fixture.candidate),
-        Some(outcome.approval_requests[0]),
+        Some(outcome.approval_requests[0].decision),
         "the player's own queue stays pending"
     );
     assert_eq!(
@@ -2890,6 +2897,119 @@ fn player_organization_approval_requests_wait_for_the_player() {
         Some(fixture.source)
     );
     validate_state(&fixture.state).expect("pending request state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn run_tick_surfaces_player_recruitment_pause_and_reserves_the_candidate_for_that_pass() {
+    let mut fixture = fixture();
+    designate_player_organization(&mut fixture.state, fixture.target)
+        .expect("target criminal organization should be eligible as player organization");
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(100, 100, 0, 100, 0, 0, 100),
+    )
+    .expect("player recruiter relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("player recruiter relationship should commit");
+
+    let rival = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Second Choice Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let rival_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Choice Manager".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("rival manager should validate");
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: rival,
+            manager: rival_manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("rival personnel mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("rival personnel mandate should commit");
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        rival_manager,
+        relationship(10, 10, 0, 10, 0, 0, 10),
+    )
+    .expect("rival recruiter relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("rival recruiter relationship should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_439));
+    let tick = run_tick(&fixture.registry, &mut fixture.state);
+    assert!(
+        tick.recruitment_attempts.is_empty(),
+        "a weaker same-pass rival must not pitch a candidate already claimed by the player's approval decision"
+    );
+    assert_eq!(
+        tick.decision_requests.len(),
+        1,
+        "recruitment approval should use the canonical tick decision surface"
+    );
+    let request = tick.decision_requests[0];
+    assert!(
+        request.requests_pause,
+        "the player's default Exception preference must survive through run_tick"
+    );
+    let decision = fixture
+        .state
+        .decisions()
+        .get_decision(request.decision)
+        .expect("surfaced recruitment approval should persist");
+    match decision.context() {
+        DecisionContext::RecruitmentApproval(context) => {
+            assert_eq!(context.target_organization(), fixture.target);
+            assert_eq!(context.candidate(), fixture.candidate);
+            assert_eq!(context.recruiter(), fixture.recruiter);
+        }
+        DecisionContext::OperationPoliceArrival { .. } => {
+            panic!("recruitment cadence surfaced the wrong decision kind")
+        }
+    }
+    assert_eq!(decision.status(), DecisionStatus::Pending);
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist while approval is pending")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("tick recruitment decision state should validate");
     validate_invariants(&fixture.state);
 }
 
@@ -2937,7 +3057,7 @@ fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_cha
     let request = fixture
         .state
         .decisions()
-        .get_decision(outcome.approval_requests[0])
+        .get_decision(outcome.approval_requests[0].decision)
         .expect("relationship-ranked approval request should persist");
     match request.context() {
         DecisionContext::RecruitmentApproval(context) => {
@@ -2949,6 +3069,154 @@ fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_cha
     }
     assert_eq!(request.status(), DecisionStatus::Pending);
     validate_state(&fixture.state).expect("relationship-ranked approval state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_contention_recomputes_priority_after_a_manager_loses_their_first_choice() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let fallback_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Fallback Associate".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("fallback candidate should validate");
+
+    let create_recruiter = |fixture: &mut Fixture, organization_name: &str, manager_name: &str| {
+        let organization = insert_organization(
+            &fixture.registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: organization_name.to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("competing organization should validate");
+        let manager = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: manager_name.to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("competing manager should validate");
+        validate_assign_mandate(
+            &fixture.state,
+            MandateDraft {
+                organization,
+                manager,
+                scopes: BTreeSet::from([ResponsibilityScope::Function(
+                    ResponsibilityFunction::Personnel,
+                )]),
+                standing_orders: BTreeMap::from([(
+                    PolicyKind::IndependentRecruitment,
+                    PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+                )]),
+                budget: None,
+            },
+        )
+        .expect("competing personnel mandate should validate")
+        .commit(&mut fixture.state)
+        .expect("competing personnel mandate should commit");
+        (organization, manager)
+    };
+
+    let (_, first_manager) =
+        create_recruiter(&mut fixture, "First Choice Crew", "First Choice Manager");
+    let (_, fallback_manager) = create_recruiter(&mut fixture, "Fallback Crew", "Fallback Manager");
+
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        first_manager,
+        relationship(100, 100, 0, 100, 0, 0, 100),
+    )
+    .expect("first-choice relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("first-choice relationship should commit");
+    validate_set_relationship(
+        &fixture.state,
+        fallback_candidate,
+        fixture.recruiter,
+        relationship(5, 5, 0, 5, 0, 0, 5),
+    )
+    .expect("weak fallback relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("weak fallback relationship should commit");
+    validate_set_relationship(
+        &fixture.state,
+        fallback_candidate,
+        fallback_manager,
+        relationship(40, 40, 0, 40, 0, 0, 40),
+    )
+    .expect("strong live fallback relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("strong live fallback relationship should commit");
+
+    let score = |state: &AppState, candidate, recruiter| {
+        recruitment_relationship_support(
+            fixture.registry.recruitment(),
+            state
+                .social()
+                .get_relationship(candidate, recruiter)
+                .expect("ranked relationship should persist")
+                .dimensions(),
+        )
+    };
+    let first_choice_score = score(&fixture.state, fixture.candidate, first_manager);
+    let original_fixture_score = score(&fixture.state, fixture.candidate, fixture.recruiter);
+    let live_fallback_score = score(&fixture.state, fallback_candidate, fallback_manager);
+    let weak_fallback_score = score(&fixture.state, fallback_candidate, fixture.recruiter);
+    assert!(
+        first_choice_score > original_fixture_score
+            && original_fixture_score > live_fallback_score
+            && live_fallback_score > weak_fallback_score,
+        "fixture must reproduce the stale-priority ordering that the regression protects"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state)
+        .expect("contention-aware autonomous recruitment should resolve");
+    assert_eq!(
+        outcome.attempts.len(),
+        2,
+        "two available prospects should produce two pitches"
+    );
+    let first = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("first attempt should persist");
+    assert_eq!(first.candidate(), fixture.candidate);
+    assert_eq!(first.recruiter(), first_manager);
+    let second = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[1])
+        .expect("second attempt should persist");
+    assert_eq!(second.candidate(), fallback_candidate);
+    assert_eq!(
+        second.recruiter(),
+        fallback_manager,
+        "after the shared first choice is consumed, the strongest remaining relationship must be re-ranked globally"
+    );
+    validate_state(&fixture.state).expect("contention-aware recruitment state should validate");
     validate_invariants(&fixture.state);
 }
 

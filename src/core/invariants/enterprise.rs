@@ -25,8 +25,18 @@ struct EnterpriseAuthorityRefs<'a> {
 }
 
 pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
+    let mut occupied = BTreeMap::new();
     for enterprise in state.enterprises.enterprises() {
         validate_enterprise_record(state, enterprise)?;
+        if enterprise.status() != EnterpriseStatus::Retired
+            && let Some(existing) =
+                occupied.insert((enterprise.kind(), enterprise.location()), enterprise.id())
+        {
+            return Err(StateValidationError::DuplicateEnterpriseLocation {
+                enterprise: enterprise.id(),
+                existing,
+            });
+        }
     }
     let vice_incident_times = derive_vice_incident_times(state)?;
     let mut previous_cycle_at = BTreeMap::new();
@@ -342,7 +352,7 @@ fn derive_vice_incident_times(
         let invalid = || StateValidationError::InvalidInvestigationActivity {
             investigation: investigation.id(),
         };
-        let enterprise = state
+        state
             .enterprises
             .get_enterprise(enterprise_id)
             .ok_or_else(invalid)?;
@@ -350,11 +360,7 @@ fn derive_vice_incident_times(
             .world
             .get_organization(investigation.owner())
             .ok_or_else(invalid)?;
-        if !investigation
-            .notified_organizations()
-            .contains(&enterprise.organization())
-            || owner.kind() != OrganizationKind::LawEnforcement
-        {
+        if owner.kind() != OrganizationKind::LawEnforcement {
             continue;
         }
         for evidence_id in investigation.evidence() {
@@ -399,7 +405,7 @@ fn validate_enterprise_cycle(
         return Err(invalid());
     }
     validate_cycle_attention(state, enterprise, cycle)?;
-    validate_cycle_vice(state, enterprise, cycle, vice_incident_times)?;
+    validate_cycle_vice(enterprise, cycle, vice_incident_times)?;
     validate_cycle_transaction(state, enterprise, cycle, used_transactions)
 }
 
@@ -440,36 +446,17 @@ fn validate_cycle_attention(
 }
 
 fn validate_cycle_vice(
-    state: &AppState,
     enterprise: &EnterpriseRecord,
     cycle: &EnterpriseCycleRecord,
     vice_incident_times: &BTreeSet<(crate::core::id::EnterpriseId, crate::core::time::SimTime)>,
 ) -> Result<(), StateValidationError> {
     let invalid = || StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() };
-    match (cycle.drew_vice_attention(), cycle.vice_information()) {
-        (false, None) => Ok(()),
-        (true, Some(information_id)) => {
-            let information = state
-                .intelligence
-                .get_information(information_id)
-                .ok_or_else(invalid)?;
-            if information.holder() != KnowledgeHolder::Organization(enterprise.organization())
-                || information.source_kind() != InformationSourceKind::AfterAction
-                || information.topic() != InformationTopic::LegalActivity
-                || information.source_entity() != Some(EntityRef::Character(enterprise.manager()))
-                || information.subject() != EntityRef::Enterprise(enterprise.id())
-                || information.observed_at() != cycle.occurred_at()
-                || information.recorded_at() != cycle.occurred_at()
-                || information.reliability() != Reliability::DirectAccess
-                || information.specificity() != Specificity::Specific
-                || !vice_incident_times.contains(&(enterprise.id(), cycle.occurred_at()))
-            {
-                return Err(invalid());
-            }
-            Ok(())
-        }
-        (false, Some(_)) | (true, None) => Err(invalid()),
+    if cycle.drew_vice_attention()
+        != vice_incident_times.contains(&(enterprise.id(), cycle.occurred_at()))
+    {
+        return Err(invalid());
     }
+    Ok(())
 }
 
 fn validate_cycle_transaction(

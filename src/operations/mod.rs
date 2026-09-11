@@ -694,7 +694,6 @@ pub struct OperationResolutionRecord {
     /// because sightline conditions and the exact typed facts observed at that minute are not
     /// re-derivable after later state changes.
     surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
-    legal_activity_information: Option<InformationId>,
     after_action_information: InformationId,
     after_action_report: ReportId,
     history_event: HistoryEventId,
@@ -745,10 +744,6 @@ impl OperationResolutionRecord {
         &self,
     ) -> &BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)> {
         &self.surveillance_signatures
-    }
-
-    pub fn legal_activity_information(&self) -> Option<InformationId> {
-        self.legal_activity_information
     }
 
     pub fn after_action_information(&self) -> InformationId {

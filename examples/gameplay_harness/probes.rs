@@ -328,9 +328,6 @@ pub fn run_vice_attention_probe(
                     discovered_at: scenario.state.now(),
                 }],
                 origin: Some(EntityRef::Enterprise(enterprise_id)),
-                // An originated case must surface to the organization whose activity opened
-                // it - the same production rule a real vice inquiry follows.
-                notified_organizations: BTreeSet::from([scenario.player]),
                 witness: None,
             },
         )?
@@ -355,7 +352,9 @@ pub fn run_vice_attention_probe(
     );
 
     // The heated cycle: the surcharge compounds per active case and the visibility roll is
-    // guaranteed, so this settlement must open the inquiry and surface organization knowledge.
+    // guaranteed, so this settlement must open the inquiry and surface only what the manager
+    // can observe directly. Formal case existence stays institutional until a later channel
+    // discloses it.
     let heated_cycle_at = scenario
         .state
         .enterprises()
@@ -383,7 +382,7 @@ pub fn run_vice_attention_probe(
         )
         .into());
     }
-    let inquiry_knowledge = scenario
+    let formal_case_knowledge = scenario
         .state
         .intelligence()
         .information_for_holder_by_topic(
@@ -392,17 +391,25 @@ pub fn run_vice_attention_probe(
         )
         .find(|information| information.subject() == EntityRef::Enterprise(enterprise_id))
         .map(|record| record.summary().to_owned());
-    let Some(inquiry_knowledge) = inquiry_knowledge else {
+    if formal_case_knowledge.is_some() {
         return Err(
-            "a drawn vice inquiry must surface as organization-held legal-activity knowledge"
+            "vice intake leaked formal enterprise-case knowledge to the organization without a disclosure channel"
                 .into(),
         );
-    };
+    }
     let manager_report = heated_cycle
         .information()
         .and_then(|information| scenario.state.intelligence().get_information(information))
         .map(|record| record.summary().to_owned())
         .unwrap_or_else(|| "cycle report missing".to_owned());
+    if !manager_report.contains("Vice officers were noticed watching")
+        || manager_report.contains("case stays open")
+    {
+        return Err(
+            "the heated enterprise cycle must report observable vice attention without asserting hidden case state"
+                .into(),
+        );
+    }
     println!(
         "[VICE DRAW] {}: the racket's cycle under sustained casework paid {} of street heat (net {}) and drew a dedicated inquiry.",
         stamp(heated_cycle.occurred_at().as_minutes()),
@@ -410,7 +417,9 @@ pub fn run_vice_attention_probe(
         format_cents(heated_cycle.net_cash().cents()),
     );
     println!("[ENTERPRISE] {manager_report}");
-    println!("[VICE HEAT]  {inquiry_knowledge}");
+    println!(
+        "[VICE PRIVACY] formal case knowledge remains undisclosed; the organization has only the manager's observable warning."
+    );
     // The inquiry itself must be real institutional state owned by the intake authority,
     // linked back to the racket as an originated case.
     let inquiry_on_racket = scenario
@@ -431,7 +440,7 @@ pub fn run_vice_attention_probe(
     }
     validate_harness_state(registry, &scenario.state)?;
     println!(
-        "[VICE PASS] clean districts stay clean; sustained casework taxes cycles, then opens a dedicated inquiry the organization hears about through its own manager."
+        "[VICE PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable vice attention."
     );
     Ok(())
 }

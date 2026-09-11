@@ -416,7 +416,7 @@ mod tests {
         patrol_intervals_from_signal, play_session, run_opportunity_portfolio_probe, run_smoke,
         run_vice_attention_probe, validate_batch_strategy_coverage,
         validate_branch_financial_isolation, validate_press_witness_counterplay,
-        validate_second_act_evidence,
+        validate_second_act_evidence, validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -911,6 +911,30 @@ mod tests {
             &covered,
         )
         .expect("one observed abort proves aggregate reachability without forcing every seed");
+    }
+
+    #[test]
+    fn veteran_press_hidden_trace_case_does_not_trigger_case_followup_contract() {
+        let registry = crimocracy::build_registry();
+        let metrics = play_session(
+            &registry,
+            Strategy::Press,
+            ScenarioProfile::VeteranCrew,
+            EvaluationSeeds::new(DEFAULT_WORLD_SEED.wrapping_add(1), DEFAULT_POLICY_SEED),
+            SessionRunMode::Batch,
+        )
+        .expect("veteran press batch sample should execute");
+        assert!(metrics.police_arrived);
+        assert!(metrics.investigation_created);
+        assert_eq!(
+            metrics.exposure_level,
+            Some(crimocracy::operations::OperationExposureLevel::Trace)
+        );
+        assert_eq!(metrics.player_legal_activity_information, 0);
+        assert_eq!(metrics.counterintelligence_outcome, None);
+        validate_strategy_evidence(ScenarioProfile::VeteranCrew, &metrics).expect(
+            "a hidden trace-level case must not make the evaluation demand player-visible case followup",
+        );
     }
 
     fn persisted_operation_id(raw: u32) -> crimocracy::core::id::OperationId {

@@ -10,12 +10,14 @@ pub(super) fn run_press_response(
     campaign_day_minutes: u64,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
+    learn_initial_case_through_contact(scenario, burglary, narrative, metrics)?;
     let mut pending_witness_pressure = schedule_witness_pressure(scenario, narrative, metrics)?;
 
     // The Press branch exercises a real player follow-up: the organization uses only the
-    // surfaced legal-activity report and the crew's field report to authorize counter-surveillance
-    // of the precinct itself. The investigation's evidence, lead, and internal ID stay hidden; the
-    // follow-up reads only whether the authority is still visibly developing the known case.
+    // case-activity fact disclosed through its standing police contact and the crew's field report
+    // to authorize counter-surveillance of the precinct itself. The investigation's evidence,
+    // lead, and internal ID stay hidden; the follow-up reads only whether the authority is still
+    // visibly developing the known case.
     if metrics.player_legal_activity_information > 0
         && metrics.player_police_activity_information > 0
     {
@@ -109,6 +111,32 @@ pub(super) fn run_press_response(
         capture_witness_pressure_outcome(scenario, pressure, narrative, metrics)?;
     }
 
+    Ok(())
+}
+
+fn learn_initial_case_through_contact(
+    scenario: &mut Scenario,
+    burglary: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    if !matches!(
+        metrics.exposure_level,
+        Some(
+            crimocracy::operations::OperationExposureLevel::Witnessed
+                | crimocracy::operations::OperationExposureLevel::Identifying
+        )
+    ) {
+        return Ok(());
+    }
+    // The after-action only tells leadership what the crew observed. A visibly exposed job is
+    // enough reason to ask an existing police contact whether the precinct has opened a case,
+    // but the answer itself must come through the contact's canonical disclosure surface.
+    let disclosed =
+        read_police_contact(scenario, EntityRef::Operation(burglary), narrative, metrics)?;
+    if disclosed.is_some() {
+        refresh_player_case_information(scenario, burglary, metrics);
+    }
     Ok(())
 }
 

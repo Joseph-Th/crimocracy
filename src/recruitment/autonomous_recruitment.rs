@@ -1,12 +1,12 @@
 //! Daily delegated recruitment decisions; `recruitment_system` remains the canonical transaction owner.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{
-    CharacterId, DecisionRequestId, MandateId, OrganizationId, RecruitmentAttemptId,
-};
+use crate::core::id::{CharacterId, MandateId, OrganizationId, RecruitmentAttemptId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::decisions::decision_system::{DecisionError, validate_request_recruitment_approval};
+use crate::decisions::decision_system::{
+    DecisionError, DecisionRequestOutcome, validate_request_recruitment_approval,
+};
 use crate::decisions::{DecisionResponse, RecruitmentApprovalRequestDraft};
 use crate::delegation::delegation_system::{DelegationError, resolve_policy_for_manager};
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
@@ -25,7 +25,7 @@ use thiserror::Error;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AutonomousRecruitmentOutcome {
     pub(crate) attempts: Vec<RecruitmentAttemptId>,
-    pub(crate) approval_requests: Vec<DecisionRequestId>,
+    pub(crate) approval_requests: Vec<DecisionRequestOutcome>,
 }
 
 #[derive(Debug, Error)]
@@ -39,14 +39,19 @@ pub(crate) enum AutonomousRecruitmentError {
 }
 
 #[derive(Clone, Debug)]
+struct RankedRecruitmentCandidate {
+    character: CharacterId,
+    relationship_support: u8,
+}
+
+#[derive(Clone, Debug)]
 struct PreparedRecruitmentAuthority {
     mandate: MandateId,
     organization: OrganizationId,
     manager: CharacterId,
     policy: ApprovalPolicy,
     approach: RecruitmentApproach,
-    candidates: Vec<CharacterId>,
-    strongest_relationship_support: u8,
+    candidates: Vec<RankedRecruitmentCandidate>,
 }
 
 /// Applies the authored recruitment cadence for delegated personnel managers. Candidate choice
@@ -68,34 +73,25 @@ pub(crate) fn apply_due_autonomous_recruitment(
     }
 
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
-    let authorities = prepare_recruitment_authorities(registry, state, personnel_scope)?;
+    let mut authorities = prepare_recruitment_authorities(registry, state, personnel_scope)?;
     let mut outcome = AutonomousRecruitmentOutcome::default();
-    let mut recruited_this_pass = BTreeSet::new();
+    let mut claimed_this_pass = BTreeSet::new();
 
-    for prepared in authorities {
+    while !authorities.is_empty() {
+        let Some((authority_index, candidate)) =
+            select_next_recruitment_action(state, &authorities, &claimed_this_pass)
+        else {
+            break;
+        };
+        let prepared = authorities.remove(authority_index);
         let PreparedRecruitmentAuthority {
             mandate,
             organization,
             manager,
             policy,
             approach,
-            candidates,
-            strongest_relationship_support: _,
+            candidates: _,
         } = prepared;
-        // The list was ranked from one read-only snapshot, but earlier authorities in this same
-        // pass may already have pitched a prospect or raised this organization's approval request.
-        // Recheck only those pass-local exclusions and fall through to the next ranked prospect;
-        // canonical validation below still owns every consequential precondition.
-        let candidate = candidates.into_iter().find(|candidate| {
-            !recruited_this_pass.contains(candidate)
-                && state
-                    .decisions()
-                    .pending_for_recruitment_approval(organization, *candidate)
-                    .is_none()
-        });
-        let Some(candidate) = candidate else {
-            continue;
-        };
         let authority = MandateAuthority {
             mandate,
             manager,
@@ -116,7 +112,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
                     },
                 )?
                 .commit(state)?;
-                recruited_this_pass.insert(candidate);
+                claimed_this_pass.insert(candidate);
                 outcome.attempts.push(attempt);
             }
             ApprovalPolicy::RequireApproval => {
@@ -135,16 +131,20 @@ pub(crate) fn apply_due_autonomous_recruitment(
                 )?;
                 if state.player_organization() == Some(organization) {
                     let committed = request.commit(state)?;
-                    outcome.approval_requests.push(committed.decision);
+                    // The strongest live relationship won this pass's contention. Keep the
+                    // candidate unavailable to weaker same-minute autonomous pitches while
+                    // leadership owns the surfaced approval decision.
+                    claimed_this_pass.insert(candidate);
+                    outcome.approval_requests.push(committed);
                 } else {
                     let (committed, resolution) = request.commit_autonomous_resolution(
                         registry,
                         state,
                         DecisionResponse::Approve,
                     )?;
-                    outcome.approval_requests.push(committed.decision);
+                    outcome.approval_requests.push(committed);
                     if let Some(attempt) = resolution.recruitment_attempt {
-                        recruited_this_pass.insert(candidate);
+                        claimed_this_pass.insert(candidate);
                         outcome.attempts.push(attempt);
                     }
                 }
@@ -155,11 +155,11 @@ pub(crate) fn apply_due_autonomous_recruitment(
 }
 
 /// Builds the day's actionable manager queue without mutation. Managers with no currently usable
-/// prospect are absent entirely. Cross-manager contention is ordered by the strongest visible
-/// relationship each manager can act on, so a lower mandate ID cannot steal first access to a
-/// shared prospect from a materially stronger relationship. Stable IDs break only exact score
-/// ties. Pending approvals are unavailable to every autonomous channel because the canonical
-/// recruitment validators treat that pair as exclusively owned by the decision route.
+/// prospect are absent entirely. Candidate lists are relationship-ranked here, while the live
+/// cross-manager priority is selected after each same-pass action. This matters when an earlier
+/// manager consumes another manager's first choice: the losing manager's weaker fallback must
+/// not retain the stronger first choice's stale priority over another manager's still-actionable
+/// relationship.
 fn prepare_recruitment_authorities(
     registry: &Registry,
     state: &AppState,
@@ -193,14 +193,11 @@ fn prepare_recruitment_authorities(
                 .pending_for_recruitment_approval(organization, *candidate)
                 .is_none()
         });
-        let Some(strongest_relationship_support) = sort_candidates_by_relationship(
-            registry.recruitment(),
-            state,
-            manager,
-            &mut candidates,
-        ) else {
+        let candidates =
+            rank_candidates_by_relationship(registry.recruitment(), state, manager, candidates);
+        if candidates.is_empty() {
             continue;
-        };
+        }
         prepared.push(PreparedRecruitmentAuthority {
             mandate: mandate.id(),
             organization,
@@ -208,46 +205,71 @@ fn prepare_recruitment_authorities(
             policy,
             approach: resolve_autonomous_recruitment_approach(manager_record),
             candidates,
-            strongest_relationship_support,
         });
     }
-    prepared.sort_unstable_by_key(|authority| {
-        (
-            Reverse(authority.strongest_relationship_support),
-            authority.manager,
-            authority.organization,
-            authority.mandate,
-        )
-    });
     Ok(prepared)
 }
 
-fn sort_candidates_by_relationship(
+/// Selects the strongest relationship that can still act in the current pass. Each authority's
+/// candidate vector is already ordered by relationship support and CharacterId, so finding its
+/// first live candidate is cheap and deterministic. The global comparison is repeated after every
+/// action because a consumed prospect can expose a materially weaker fallback for one manager.
+fn select_next_recruitment_action(
+    state: &AppState,
+    authorities: &[PreparedRecruitmentAuthority],
+    claimed_this_pass: &BTreeSet<CharacterId>,
+) -> Option<(usize, CharacterId)> {
+    authorities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, authority)| {
+            let candidate = authority.candidates.iter().find(|candidate| {
+                !claimed_this_pass.contains(&candidate.character)
+                    && state
+                        .decisions()
+                        .pending_for_recruitment_approval(
+                            authority.organization,
+                            candidate.character,
+                        )
+                        .is_none()
+            })?;
+            Some((
+                (
+                    Reverse(candidate.relationship_support),
+                    authority.manager,
+                    authority.organization,
+                    authority.mandate,
+                ),
+                index,
+                candidate.character,
+            ))
+        })
+        .min_by_key(|(priority, _, _)| *priority)
+        .map(|(_, index, candidate)| (index, candidate))
+}
+
+fn rank_candidates_by_relationship(
     definition: &RecruitmentDefinition,
     state: &AppState,
     recruiter: CharacterId,
-    candidates: &mut [CharacterId],
-) -> Option<u8> {
-    // Resolve each relationship score exactly once. Sorting directly with a comparison closure
-    // would repeatedly walk the social index for the same candidates as the sort compared them.
+    candidates: Vec<CharacterId>,
+) -> Vec<RankedRecruitmentCandidate> {
+    // Snapshot each relationship score exactly once for this read-only daily preparation pass.
+    // Later same-pass contention changes candidate availability, not the relationship facts used
+    // to rank that day's pitches.
     let mut ranked: Vec<_> = candidates
-        .iter()
-        .copied()
-        .map(|candidate| {
-            (
-                Reverse(candidate_relationship_support(
-                    definition, state, recruiter, candidate,
-                )),
-                candidate,
-            )
+        .into_iter()
+        .map(|candidate| RankedRecruitmentCandidate {
+            character: candidate,
+            relationship_support: candidate_relationship_support(
+                definition, state, recruiter, candidate,
+            ),
         })
         .collect();
-    ranked.sort_unstable();
-    let strongest = ranked.first().map(|(Reverse(score), _)| *score);
-    for (candidate, (_, ranked_candidate)) in candidates.iter_mut().zip(ranked) {
-        *candidate = ranked_candidate;
-    }
-    strongest
+    ranked.sort_unstable_by_key(|candidate| {
+        (Reverse(candidate.relationship_support), candidate.character)
+    });
+    ranked
 }
 
 fn candidate_relationship_support(

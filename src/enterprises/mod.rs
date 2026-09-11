@@ -190,9 +190,6 @@ pub(super) struct EnterpriseCycleArtifacts {
 pub(super) struct EnterpriseCycleProvenance {
     transaction: Option<LedgerTransactionId>,
     information: Option<InformationId>,
-    /// Organization-facing legal-activity knowledge created when this cycle drew a vice
-    /// inquiry; `None` whenever no inquiry was opened or resumed.
-    vice_information: Option<InformationId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,10 +248,6 @@ impl EnterpriseCycleRecord {
 
     pub fn information(&self) -> Option<InformationId> {
         self.provenance.information
-    }
-
-    pub fn vice_information(&self) -> Option<InformationId> {
-        self.provenance.vice_information
     }
 }
 

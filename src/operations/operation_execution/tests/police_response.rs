@@ -131,19 +131,30 @@ fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() 
             .expect("operation investigation should persist");
         assert_eq!(investigation.owner(), police);
         assert_eq!(resolution.exposure().evidence().len(), 1);
-        let legal_activity_information = resolution
-            .legal_activity_information()
-            .expect("jurisdictional exposure should create player legal-activity knowledge");
-        let legal_activity = state
+        let organization = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should persist")
+            .responsible_organization();
+        assert_eq!(
+            state
+                .intelligence()
+                .information_for_holder_by_topic(
+                    KnowledgeHolder::Organization(organization),
+                    InformationTopic::LegalActivity,
+                )
+                .filter(|information| information.subject() == EntityRef::Operation(operation))
+                .count(),
+            0,
+            "incident intake is institutional state and must not become crew-derived case knowledge"
+        );
+        let after_action = state
             .intelligence()
-            .get_information(legal_activity_information)
-            .expect("player legal-activity information should persist");
-        assert_eq!(legal_activity.topic(), InformationTopic::LegalActivity);
-        assert_eq!(legal_activity.subject(), EntityRef::Operation(operation));
+            .get_information(resolution.after_action_information())
+            .expect("operation after-action information should persist");
         assert!(
-            legal_activity
-                .summary()
-                .contains("produced a police investigation")
+            !after_action.summary().contains("police investigation"),
+            "the crew after-action must not reveal hidden institutional case creation"
         );
         let evidence_id = *resolution
             .exposure()
@@ -188,18 +199,6 @@ fn neighborhood_exposure_opens_jurisdiction_case_and_survives_save_round_trip() 
         restored_exposure.investigation()
     );
     assert_eq!(original_exposure.evidence(), restored_exposure.evidence());
-    assert_eq!(
-        original
-            .operations()
-            .get_operation(operation)
-            .and_then(|record| record.resolution())
-            .and_then(|resolution| resolution.legal_activity_information()),
-        restored
-            .operations()
-            .get_operation(operation)
-            .and_then(|record| record.resolution())
-            .and_then(|resolution| resolution.legal_activity_information())
-    );
 }
 
 #[test]
@@ -220,14 +219,6 @@ fn exposed_operation_without_jurisdiction_creates_no_implicit_case() {
         OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
     ));
     assert_eq!(exposure.investigation(), None);
-    assert_eq!(
-        state
-            .operations()
-            .get_operation(operation)
-            .and_then(|record| record.resolution())
-            .and_then(|resolution| resolution.legal_activity_information()),
-        None
-    );
     assert!(exposure.evidence().is_empty());
     assert_eq!(
         state

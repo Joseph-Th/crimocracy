@@ -5,8 +5,7 @@ mod narrative;
 mod resolution_factors;
 
 use incident_intake::validate_exposure_incident;
-pub(crate) use narrative::write_legal_activity_summary;
-use narrative::{build_after_action_summary, build_legal_activity_summary, outcome_label};
+use narrative::{build_after_action_summary, outcome_label};
 
 pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
@@ -508,7 +507,6 @@ pub(crate) struct ValidatedOperationResolution {
     incident: Option<ValidatedIncidentIntake>,
     incident_authority: Option<CaseIntakeAuthoritySnapshot>,
     surveillance_information: Vec<ValidatedInformation>,
-    legal_activity_information: Option<ValidatedInformation>,
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
@@ -539,11 +537,7 @@ impl ValidatedOperationResolution {
         let surveillance_information_count = u32::try_from(self.surveillance_information.len())
             .expect("surveillance information count must fit u32");
         let mut budget = vec![
-            (
-                IdKind::Information,
-                1 + u32::from(self.legal_activity_information.is_some())
-                    + surveillance_information_count,
-            ),
+            (IdKind::Information, 1 + surveillance_information_count),
             (IdKind::HistoryEvent, 1),
             (IdKind::Report, 1),
         ];
@@ -648,11 +642,6 @@ impl ValidatedOperationResolution {
             investigation,
             evidence,
         };
-        let legal_activity_information = self.legal_activity_information.map(|information| {
-            information
-                .commit(state)
-                .expect("resolution information IDs were preflighted before mutation")
-        });
         let discovered_information = self
             .surveillance_information
             .into_iter()
@@ -699,7 +688,6 @@ impl ValidatedOperationResolution {
                 extraction_arrest,
                 discovered_information,
                 surveillance_signatures,
-                legal_activity_information,
                 after_action_information,
                 after_action_report,
                 history_event,
@@ -811,39 +799,10 @@ pub(crate) fn validate_operation_resolution_plan(
         plan.outcome.factors.target_police_presence(),
         plan.snapshot.resolved_at,
     )?;
-    let legal_activity_summary = if incident.is_some() {
-        let snapshot = incident_authority.expect("a validated incident must have a snapshot");
-        Some(build_legal_activity_summary(
-            state,
-            record,
-            snapshot
-                .organization
-                .expect("a validated incident must have an intake authority"),
-        ))
-    } else {
-        None
-    };
-    let legal_activity_information = legal_activity_summary.as_ref().map(|summary| {
-        validate_record_information(
-            state,
-            InformationDraft {
-                holder: KnowledgeHolder::Organization(record.responsible_organization()),
-                source_kind: InformationSourceKind::AfterAction,
-                topic: crate::intelligence::InformationTopic::LegalActivity,
-                source_entity: Some(EntityRef::Character(record.leader())),
-                subject: EntityRef::Operation(record.id()),
-                observed_at: plan.snapshot.resolved_at,
-                reliability: Reliability::GenerallyReliable,
-                specificity: Specificity::Specific,
-                summary: summary.clone(),
-            },
-        )
-    });
-    let legal_activity_information = legal_activity_information.transpose()?;
-    let after_action_summary = legal_activity_summary.map_or_else(
-        || plan.narrative.summary.clone(),
-        |summary| format!("{} {}", plan.narrative.summary, summary),
-    );
+    // Operation crews can report what they personally observed, but case creation and routing
+    // are institutional facts. Do not turn hidden incident-intake truth into organization-held
+    // knowledge here. Players learn case activity through the legal/contact/intelligence paths.
+    let after_action_summary = plan.narrative.summary.clone();
     let information = validate_record_information(
         state,
         InformationDraft {
@@ -963,7 +922,6 @@ pub(crate) fn validate_operation_resolution_plan(
         incident,
         incident_authority,
         surveillance_information,
-        legal_activity_information,
         information,
         history,
         report,

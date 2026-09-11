@@ -115,8 +115,8 @@ enum SurveillanceTargetSnapshot {
         id: OrganizationId,
         name: String,
         active_members: Vec<(CharacterId, String)>,
-        // Present for law-enforcement/legal-authority targets so the player's known case can be
-        // re-checked through canonical surveillance after standing down.
+        // Present for law-enforcement/legal-authority targets when surveillance can tie visible
+        // authority activity to a case originated by the surveiller's own prior activity.
         law_enforcement_sightline: Option<CaseActivitySignal>,
     },
     Investigation {
@@ -429,10 +429,10 @@ fn resolve_target_snapshot(
                 .map(|character| (character.id(), character.name().to_owned()))
                 .collect();
             let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
-                // A sightline exists only once this authority has surfaced an operation-
-                // originated case to the surveiller; before that there is nothing to re-read,
-                // so surveillance falls back to ordinary personnel observation instead of
-                // fabricating a "shelved" read about a case that never touched this organization.
+                // Watching an authority may reveal whether it is working a case caused by the
+                // surveiller's own activity. Case selection uses only durable origin ownership,
+                // never evidence or subjects; the surveillance operation itself is what turns
+                // that institutional truth into organization-held knowledge.
                 resolve_known_authority_case_activity(state, id, surveiller)
             } else {
                 None
@@ -452,10 +452,9 @@ fn resolve_target_snapshot(
             // Privacy boundary for watching a specific known case: its public face — title,
             // owning authority, lifecycle status, and visibly assigned personnel — is fair
             // surveillance observation, exactly like watching any business or character. The
-            // evidence graph and named subjects are never read here. This deliberately
-            // differs from the organization sightline above, which summarizes an authority's
-            // whole (mostly hidden) caseload and therefore requires prior notification
-            // before it may claim any case-activity read at all.
+            // evidence graph and named subjects are never read here. This deliberately differs
+            // from the organization sightline above, which can only associate authority activity
+            // with cases whose durable origin belongs to the surveilling organization.
             let owner = state
                 .world
                 .get_organization(investigation.owner())
@@ -919,7 +918,13 @@ fn resolve_known_authority_case_activity(
     state
         .legal
         .investigations_for_owner(authority)
-        .filter(|case| case.notified_organizations().contains(&surveiller))
+        .filter(|case| {
+            case.origin().is_some_and(|origin| {
+                crate::legal::investigation_system::case_origin_responsible_organization(
+                    state, origin,
+                ) == Some(surveiller)
+            })
+        })
         .map(|case| crate::legal::case_knowledge::activity_for_status(case.status()))
         .fold(None, |aggregate, activity| {
             Some(match (aggregate, activity) {
@@ -941,8 +946,8 @@ fn authority_sightline_summary(
     activity: CaseActivitySignal,
     outcome: OperationObjectiveOutcome,
 ) -> String {
-    // The observation reports only visible authority activity tied to a case the surveilling
-    // organization already knows exists; it never reveals evidence, subjects, or case internals.
+    // The observation reports only visible authority activity tied to a case caused by the
+    // surveilling organization's own activity; it never reveals evidence, subjects, or internals.
     if outcome == OperationObjectiveOutcome::Partial {
         return format!(
             "Visible activity around {name} remained difficult to judge; a dependable read on whether the case is still being actively developed was not established."
@@ -958,7 +963,7 @@ fn authority_sightline_summary(
             "No active case machinery connected to your recent activity was observed around {name}; the matter appears to have been shelved and routine police functions continue."
         ),
         CaseActivitySignal::Closed => format!(
-            "No active case machinery connected to your recent activity was observed around {name}; the known matter appears closed."
+            "No active case machinery connected to your recent activity was observed around {name}; the matter appears closed."
         ),
     };
     format!(

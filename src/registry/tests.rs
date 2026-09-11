@@ -1,3 +1,5 @@
+//! Immutable registry validation, completeness, and determinism tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;

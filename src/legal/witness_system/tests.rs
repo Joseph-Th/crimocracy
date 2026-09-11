@@ -86,7 +86,6 @@ struct InvestigationRecordWire {
     evidence: BTreeSet<EvidenceId>,
     opened_at: SimTime,
     origin: Option<EntityRef>,
-    notified_organizations: BTreeSet<crate::core::id::OrganizationId>,
     last_activity_at: SimTime,
     version: u32,
 }
@@ -103,7 +102,6 @@ fn investigation_wire(record: &InvestigationRecord) -> InvestigationRecordWire {
         evidence: record.evidence().clone(),
         opened_at: record.opened_at(),
         origin: record.origin(),
-        notified_organizations: record.notified_organizations().clone(),
         last_activity_at: record.last_activity_at(),
         version: record.version(),
     }

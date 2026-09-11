@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
 use crate::core::invariants::{
-    validate_invariants, validate_state, validate_state_against_registry,
+    StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
@@ -150,6 +150,100 @@ fn replace_serialized_enterprise(
     envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
     bincode::deserialize(&envelope_bytes)
         .expect("same-layout enterprise corruption must remain decodable")
+}
+
+#[test]
+fn restore_rejects_duplicate_non_retired_enterprise_kind_at_location() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    validate_revise_mandate(
+        &fixture.state,
+        fixture.authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([
+                fixture.authority.scope,
+                ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("broad enterprise authority should validate")
+    .commit(&mut fixture.state)
+    .expect("broad enterprise authority should commit");
+
+    let first = establish_protection(&registry, &mut fixture);
+    let second_neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Second Enterprise Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(55),
+                    commercial_activity: rating(60),
+                    illicit_demand: rating(45),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(35),
+                },
+            },
+        },
+    )
+    .expect("second neighborhood should validate");
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("second settlement account should validate");
+    let second = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: fixture.organization,
+            authority: MandateAuthority {
+                scope: ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
+                ..fixture.authority
+            },
+            location: EnterpriseLocation::Neighborhood(second_neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: second_settlement,
+        },
+    )
+    .expect("same kind at another location should validate")
+    .commit(&mut fixture.state)
+    .expect("same kind at another location should commit");
+    validate_state(&fixture.state)
+        .expect("canonical distinct-location enterprises should validate");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("canonical distinct-location enterprises should match authored content");
+
+    let second_record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(second)
+        .expect("second enterprise should persist");
+    let mut corrupted = enterprise_wire(second_record);
+    corrupted.assignment.location = fixture.location;
+    let corrupted_envelope = replace_serialized_enterprise(
+        build_save(&registry, &fixture.state).expect("canonical enterprise state should save"),
+        second_record,
+        &corrupted,
+    );
+
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("restore must reject a duplicate non-retired enterprise slot");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::DuplicateEnterpriseLocation {
+            enterprise: second,
+            existing: first,
+        })
+    );
 }
 
 #[derive(Clone, Serialize)]
@@ -426,7 +520,6 @@ fn open_originated_pressure_case(
     case_origin: PressureCaseOrigin,
     title: &str,
     target: EntityRef,
-    notified_organizations: BTreeSet<OrganizationId>,
 ) {
     let PressureCaseOrigin {
         organization: origin_organization,
@@ -480,7 +573,6 @@ fn open_originated_pressure_case(
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Operation(origin)),
-            notified_organizations,
             witness: None,
         },
     )
@@ -661,7 +753,6 @@ struct EnterpriseCycleArtifactsWire {
 struct EnterpriseCycleProvenanceWire {
     transaction: Option<crate::core::id::LedgerTransactionId>,
     information: Option<crate::core::id::InformationId>,
-    vice_information: Option<crate::core::id::InformationId>,
 }
 
 #[derive(Clone, Serialize)]
@@ -696,7 +787,6 @@ fn enterprise_cycle_wire(
         provenance: EnterpriseCycleProvenanceWire {
             transaction: record.transaction(),
             information: record.information(),
-            vice_information: record.vice_information(),
         },
     }
 }
@@ -1033,7 +1123,6 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Enterprise(enterprise)),
-            notified_organizations: BTreeSet::from([fixture.organization]),
             witness: None,
         },
     )
@@ -1197,9 +1286,8 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
     validate_state_against_registry(&registry, &fixture.state)
         .expect("a vice-drawn notable cycle must stay registry-valid");
 
-    // The load boundary must also keep the two information channels causally distinct. These
-    // corruptions preserve the exact bincode layout (Some<InformationId> stays Some and the
-    // vice flag is a fixed-width bool), so restore reaches structural validation rather than
+    // The load boundary must reject a cycle whose vice flag disagrees with canonical incident
+    // evidence. The flag is fixed-width, so restore reaches structural validation rather than
     // failing merely because the bytes are undecodable.
     let second_record = fixture
         .state
@@ -1217,7 +1305,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             &false_vice_flag,
         ),
     )
-    .expect_err("a cycle cannot retain vice information while denying the vice event");
+    .expect_err("a cycle cannot deny a vice event that has canonical incident evidence");
     assert!(
         matches!(
             error,
@@ -1228,54 +1316,6 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             ) if invalid == second
         ),
         "expected invalid vice-flag enterprise cycle, got {error:?}"
-    );
-
-    let mut wrong_vice_information = enterprise_cycle_wire(second_record);
-    wrong_vice_information.provenance.vice_information = second_record.information();
-    let error = restore_save(
-        &registry,
-        replace_serialized_cycle(
-            build_save(&registry, &fixture.state)
-                .expect("valid state should save before vice-topic corruption"),
-            second_record,
-            &wrong_vice_information,
-        ),
-    )
-    .expect_err("vice provenance must point to LegalActivity information");
-    assert!(
-        matches!(
-            error,
-            LoadError::InvalidState(
-                crate::core::invariants::StateValidationError::InvalidEnterpriseCycle {
-                    cycle: invalid,
-                }
-            ) if invalid == second
-        ),
-        "expected invalid vice enterprise cycle, got {error:?}"
-    );
-
-    let mut wrong_manager_information = enterprise_cycle_wire(second_record);
-    wrong_manager_information.provenance.information = second_record.vice_information();
-    let error = restore_save(
-        &registry,
-        replace_serialized_cycle(
-            build_save(&registry, &fixture.state)
-                .expect("valid state should save before manager-topic corruption"),
-            second_record,
-            &wrong_manager_information,
-        ),
-    )
-    .expect_err("manager report provenance must point to FinancialPerformance information");
-    assert!(
-        matches!(
-            error,
-            LoadError::InvalidState(
-                crate::core::invariants::StateValidationError::InvalidEnterpriseCycle {
-                    cycle: invalid,
-                }
-            ) if invalid == second
-        ),
-        "expected invalid manager-information cycle, got {error:?}"
     );
 
     let bytes =
@@ -1503,7 +1543,6 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
             },
             title,
             target,
-            BTreeSet::from([fixture.organization]),
         );
     };
     let due_cycle = |fixture: &mut EnterpriseFixture| {
@@ -1623,7 +1662,6 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
             },
             title,
             EntityRef::Neighborhood(local_neighborhood),
-            BTreeSet::from([fixture.organization]),
         );
     };
     let settle_cycle = |fixture: &mut EnterpriseFixture| {
@@ -1689,7 +1727,6 @@ fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Enterprise(enterprise)),
-            notified_organizations: BTreeSet::from([fixture.organization]),
             witness: None,
         },
     )
@@ -3462,7 +3499,6 @@ fn open_district_pressure_case(
         },
         title,
         EntityRef::Neighborhood(neighborhood),
-        BTreeSet::from([fixture.organization]),
     );
 }
 
@@ -3702,25 +3738,41 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
             .contains(&EntityRef::Enterprise(enterprise)),
         "the inquiry targets the racket itself"
     );
+    // Intake itself stays institutional. The manager can report the observable vice attention,
+    // but formal case activity must be learned through surveillance/contact/legal channels.
     assert_eq!(
-        vice_case.notified_organizations(),
-        &BTreeSet::from([fixture.organization]),
-        "the owning organization is surfaced the case-open knowledge"
+        fixture
+            .state
+            .intelligence()
+            .information_for_holder_by_topic(
+                KnowledgeHolder::Organization(fixture.organization),
+                crate::intelligence::InformationTopic::LegalActivity,
+            )
+            .filter(|information| information.subject() == EntityRef::Enterprise(enterprise))
+            .count(),
+        0
     );
-
-    // The organization holds provenance-bearing legal knowledge about the inquiry.
-    let legal_knowledge = fixture
+    let vice_cycle = fixture
+        .state
+        .enterprises()
+        .cycles_for(enterprise)
+        .max_by_key(|cycle| cycle.occurred_at())
+        .expect("vice cycle should persist");
+    let manager_information = fixture
         .state
         .intelligence()
-        .information_for_holder(KnowledgeHolder::Organization(fixture.organization))
-        .find(|information| {
-            information.topic() == crate::intelligence::InformationTopic::LegalActivity
-                && information.subject() == EntityRef::Enterprise(enterprise)
-        })
-        .expect("vice inquiry must surface as organization-held legal knowledge");
+        .get_information(
+            vice_cycle
+                .information()
+                .expect("notable vice cycle must have a report"),
+        )
+        .expect("vice cycle manager information should persist");
     assert!(
-        legal_knowledge.summary().contains("Vice") || legal_knowledge.summary().contains("vice")
+        manager_information
+            .summary()
+            .contains("Vice officers were noticed watching")
     );
+    assert!(!manager_information.summary().contains("case stays open"));
 
     // The next cycle pays compounded street heat: the pressure case and the new inquiry both
     // tax the district while they stay open, and the changed cost is manager-report-worthy.
@@ -3788,7 +3840,6 @@ fn non_police_enterprise_case_does_not_suppress_first_police_vice_inquiry() {
                 discovered_at: fixture.state.now(),
             }],
             origin: Some(EntityRef::Enterprise(enterprise)),
-            notified_organizations: BTreeSet::from([fixture.organization]),
             witness: None,
         },
     )
