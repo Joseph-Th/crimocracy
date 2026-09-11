@@ -3,7 +3,7 @@
 use super::*;
 
 impl LegalState {
-    pub(crate) fn insert_investigation(&mut self, record: InvestigationRecord) {
+    pub(in crate::legal) fn insert_investigation(&mut self, record: InvestigationRecord) {
         if record.status() == InvestigationStatus::Active && record.lead_investigator().is_none() {
             self.indexes
                 .investigations
@@ -42,7 +42,7 @@ impl LegalState {
 
     /// Extends an existing investigation with the subject matter of a later validated incident.
     /// Declared subjects remain indexed even while some fresh evidence is still weak.
-    pub(crate) fn extend_investigation_incident_subjects(
+    pub(in crate::legal) fn extend_investigation_incident_subjects(
         &mut self,
         investigation_id: InvestigationId,
         subjects: BTreeSet<EntityRef>,
@@ -78,7 +78,7 @@ impl LegalState {
     /// Advances a case's last-activity instant and re-synchronizes the cold-decay index in one
     /// atomic step. Called by every consequence-bearing legal transition: incident intake,
     /// evidence insertion, investigation-work scheduling, and investigation-work resolution.
-    pub(crate) fn set_investigation_activity(
+    pub(in crate::legal) fn set_investigation_activity(
         &mut self,
         investigation_id: InvestigationId,
         at: SimTime,
@@ -116,7 +116,7 @@ impl LegalState {
             .insert(investigation_id);
     }
 
-    pub(crate) fn insert_informant(&mut self, record: InformantRecord) {
+    pub(in crate::legal) fn insert_informant(&mut self, record: InformantRecord) {
         let id = record.id();
         let key = (record.character(), record.handler());
         let handler = record.handler();
@@ -137,7 +137,7 @@ impl LegalState {
             "Index Uniqueness: duplicate informant ID inserted"
         );
     }
-    pub(crate) fn insert_informant_disclosure(
+    pub(in crate::legal) fn insert_informant_disclosure(
         &mut self,
         evidence: EvidenceRecord,
         disclosure: InformantDisclosureRecord,
@@ -173,11 +173,15 @@ impl LegalState {
             "Index Uniqueness: duplicate informant disclosure ID inserted"
         );
     }
-    pub(crate) fn insert_evidence(&mut self, record: EvidenceRecord, activity_at: SimTime) {
+    pub(in crate::legal) fn insert_evidence(
+        &mut self,
+        record: EvidenceRecord,
+        activity_at: SimTime,
+    ) {
         self.insert_evidence_with_work_exemption(record, activity_at, None);
     }
 
-    pub(crate) fn insert_evidence_from_investigation_work(
+    pub(in crate::legal) fn insert_evidence_from_investigation_work(
         &mut self,
         record: EvidenceRecord,
         activity_at: SimTime,
@@ -256,7 +260,11 @@ impl LegalState {
     }
     /// Registers a case witness and resets the case's cold-case inactivity clock: witness
     /// registration is consequence-bearing (cooperation drives future interview support).
-    pub(crate) fn insert_case_witness(&mut self, record: CaseWitnessRecord, activity_at: SimTime) {
+    pub(in crate::legal) fn insert_case_witness(
+        &mut self,
+        record: CaseWitnessRecord,
+        activity_at: SimTime,
+    ) {
         let id = record.id();
         let investigation_id = record.investigation();
         let key = (investigation_id, record.witness());
@@ -296,7 +304,7 @@ impl LegalState {
     /// Updates witness cooperation without manufacturing institutional case activity. Cooperation
     /// changes can be caused externally (for example by intimidation), so they invalidate
     /// case-dependent plans through the investigation version but do not refresh `last_activity_at`.
-    pub(crate) fn set_witness_cooperation(
+    pub(in crate::legal) fn set_witness_cooperation(
         &mut self,
         case_witness: CaseWitnessId,
         cooperation: WitnessCooperation,
@@ -316,11 +324,11 @@ impl LegalState {
             .expect("validated investigation disappeared before witness cooperation commit");
         investigation.version = advance_version_preflighted(investigation.version);
     }
-    pub(crate) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
+    pub(in crate::legal) fn insert_witness_statement(&mut self, record: WitnessStatementRecord) {
         self.insert_witness_statement_with_work_exemption(record, None);
     }
 
-    pub(crate) fn insert_witness_statement_from_investigation_work(
+    pub(in crate::legal) fn insert_witness_statement_from_investigation_work(
         &mut self,
         record: WitnessStatementRecord,
         originating_work: InvestigationWorkId,
@@ -374,7 +382,7 @@ impl LegalState {
             originating_work,
         );
     }
-    pub(crate) fn insert_investigation_work(&mut self, record: InvestigationWorkRecord) {
+    pub(in crate::legal) fn insert_investigation_work(&mut self, record: InvestigationWorkRecord) {
         let id = record.id();
         let investigation_id = record.investigation();
         let scheduled_at = record.scheduled_at();
@@ -422,7 +430,7 @@ impl LegalState {
         investigation.version = advance_version_preflighted(investigation.version);
         self.set_investigation_activity(investigation_id, scheduled_at);
     }
-    pub(crate) fn set_investigation_work_resolution(
+    pub(in crate::legal) fn set_investigation_work_resolution(
         &mut self,
         id: InvestigationWorkId,
         resolution: InvestigationWorkResolution,
@@ -482,7 +490,7 @@ impl LegalState {
     /// Cancels scheduled work while preserving the case's inactivity clock. Detention is an
     /// external availability event, not investigative progress; the investigation version still
     /// advances so every case-dependent plan observes the staffing/work change.
-    pub(crate) fn set_investigation_work_cancellation(
+    pub(in crate::legal) fn set_investigation_work_cancellation(
         &mut self,
         id: InvestigationWorkId,
         cancellation: InvestigationWorkCancellation,
@@ -570,7 +578,7 @@ impl LegalState {
             record.investigation()
         }
     }
-    pub(crate) fn set_investigation_status(
+    pub(in crate::legal) fn set_investigation_status(
         &mut self,
         investigation_id: InvestigationId,
         status: InvestigationStatus,
@@ -673,7 +681,7 @@ impl LegalState {
     /// Promotes an investigator to the case's lead seat. Staffing is single-seat: every
     /// canonical producer assigns exactly one lead, and support-investigator bookkeeping does
     /// not exist, so the seat is only ever filled, never demoted in place.
-    pub(crate) fn set_lead_investigator(
+    pub(in crate::legal) fn set_lead_investigator(
         &mut self,
         investigation_id: InvestigationId,
         investigator: CharacterId,
@@ -699,7 +707,7 @@ impl LegalState {
     /// Releases the single active lead seat because custody made that investigator unavailable.
     /// The case itself remains active and immediately re-enters the unstaffed index so normal
     /// institutional staffing can assign another eligible detective on the same simulation tick.
-    pub(crate) fn release_lead_investigator_for_detention(
+    pub(in crate::legal) fn release_lead_investigator_for_detention(
         &mut self,
         investigation_id: InvestigationId,
         investigator: CharacterId,
@@ -735,7 +743,7 @@ impl LegalState {
             .active_without_lead
             .insert(investigation_id);
     }
-    pub(crate) fn set_jurisdiction(
+    pub(in crate::legal) fn set_jurisdiction(
         &mut self,
         organization: OrganizationId,
         neighborhoods: BTreeSet<NeighborhoodId>,
@@ -794,7 +802,7 @@ impl LegalState {
             );
         }
     }
-    pub(crate) fn insert_patrol_deployment(&mut self, record: PatrolDeploymentRecord) {
+    pub(in crate::legal) fn insert_patrol_deployment(&mut self, record: PatrolDeploymentRecord) {
         let id = record.id();
         let organization = record.organization();
         let neighborhood = record.neighborhood();
@@ -830,7 +838,7 @@ impl LegalState {
             "Index Uniqueness: duplicate patrol deployment ID inserted"
         );
     }
-    pub(crate) fn revise_patrol_deployment(
+    pub(in crate::legal) fn revise_patrol_deployment(
         &mut self,
         id: PatrolDeploymentId,
         windows: Vec<PatrolWindow>,
@@ -851,7 +859,7 @@ impl LegalState {
                 version,
             });
     }
-    pub(crate) fn set_patrol_deployment_status(
+    pub(in crate::legal) fn set_patrol_deployment_status(
         &mut self,
         id: PatrolDeploymentId,
         status: PatrolDeploymentStatus,
@@ -934,7 +942,7 @@ impl LegalState {
                 version,
             });
     }
-    pub(crate) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
+    pub(in crate::legal) fn insert_police_response(&mut self, record: PoliceResponseRecord) {
         let id = record.id();
         let previous_operation = self
             .indexes
@@ -957,7 +965,11 @@ impl LegalState {
             "Index Uniqueness: duplicate police response ID inserted"
         );
     }
-    pub(crate) fn set_police_response_arrived(&mut self, id: PoliceResponseId, at: SimTime) {
+    pub(in crate::legal) fn set_police_response_arrived(
+        &mut self,
+        id: PoliceResponseId,
+        at: SimTime,
+    ) {
         let due_at = self
             .police_responses
             .get(&id)
@@ -985,7 +997,7 @@ impl LegalState {
         record.timing.arrived_at = Some(at);
         record.state.version = advance_version_preflighted(record.state.version);
     }
-    pub(crate) fn insert_arrest(&mut self, record: ArrestRecord) {
+    pub(in crate::legal) fn insert_arrest(&mut self, record: ArrestRecord) {
         let id = record.id();
         debug_assert_eq!(
             record.status(),
@@ -1014,7 +1026,7 @@ impl LegalState {
             "Index Uniqueness: duplicate arrest ID inserted"
         );
     }
-    pub(crate) fn release_arrest(&mut self, id: ArrestId, released_at: SimTime) {
+    pub(in crate::legal) fn release_arrest(&mut self, id: ArrestId, released_at: SimTime) {
         let character = self
             .arrests
             .get(&id)
@@ -1039,7 +1051,10 @@ impl LegalState {
         record.released_at = Some(released_at);
         record.version = advance_version_preflighted(record.version);
     }
-    pub(crate) fn insert_legal_representation(&mut self, record: LegalRepresentationRecord) {
+    pub(in crate::legal) fn insert_legal_representation(
+        &mut self,
+        record: LegalRepresentationRecord,
+    ) {
         let id = record.id();
         debug_assert_eq!(
             record.status(),
@@ -1073,7 +1088,7 @@ impl LegalState {
             "Index Uniqueness: duplicate legal representation ID inserted"
         );
     }
-    pub(crate) fn end_legal_representation(
+    pub(in crate::legal) fn end_legal_representation(
         &mut self,
         id: LegalRepresentationId,
         ended_at: SimTime,
@@ -1130,7 +1145,7 @@ impl LegalState {
         record.artifacts.ended_report = Some(report);
         record.version = advance_version_preflighted(record.version);
     }
-    pub(crate) fn insert_prosecution_case(
+    pub(in crate::legal) fn insert_prosecution_case(
         &mut self,
         case: ProsecutionCaseRecord,
         referral: ProsecutionReferralRecord,
@@ -1172,7 +1187,10 @@ impl LegalState {
         debug_assert!(previous_case.is_none());
         debug_assert!(previous_referral.is_none());
     }
-    pub(crate) fn add_prosecution_referral(&mut self, referral: ProsecutionReferralRecord) {
+    pub(in crate::legal) fn add_prosecution_referral(
+        &mut self,
+        referral: ProsecutionReferralRecord,
+    ) {
         let referral_id = referral.id();
         let case_id = referral.prosecution_case();
         let case = self
@@ -1194,7 +1212,7 @@ impl LegalState {
         let previous = self.prosecution_referrals.insert(referral_id, referral);
         debug_assert!(previous.is_none());
     }
-    pub(crate) fn apply_prosecution_resolution(
+    pub(in crate::legal) fn apply_prosecution_resolution(
         &mut self,
         id: ProsecutionCaseId,
         resolution: ProsecutionCaseResolution,
@@ -1264,7 +1282,7 @@ impl LegalState {
         case.version = advance_version_preflighted(case.version);
     }
 
-    pub(crate) fn set_prosecution_case_prosecutor(
+    pub(in crate::legal) fn set_prosecution_case_prosecutor(
         &mut self,
         id: ProsecutionCaseId,
         prosecutor: CharacterId,
@@ -1291,7 +1309,7 @@ impl LegalState {
             .insert(id);
     }
 
-    pub(crate) fn release_prosecution_case_prosecutor_for_detention(
+    pub(in crate::legal) fn release_prosecution_case_prosecutor_for_detention(
         &mut self,
         id: ProsecutionCaseId,
         prosecutor: CharacterId,

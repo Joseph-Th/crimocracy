@@ -1598,6 +1598,99 @@ fn autonomous_staffing_assigns_best_available_detective_and_respects_active_case
 }
 
 #[test]
+fn autonomous_staffing_prioritizes_developed_case_over_creation_order() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x57AF_C453);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Priority Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Priority Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let junior = insert_test_investigator(&mut state, police, "Priority Junior", 70);
+    let senior = insert_test_investigator(&mut state, police, "Priority Senior", 92);
+
+    let earlier = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Earlier undeveloped inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("earlier case should validate")
+    .commit(&mut state)
+    .expect("earlier case should commit");
+    let developed = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Later developed inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("developed case should validate")
+    .commit(&mut state)
+    .expect("developed case should commit");
+    assert!(
+        earlier < developed,
+        "fixture must expose creation-order bias"
+    );
+
+    validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation: developed,
+            custodian: police,
+            subject: EntityRef::Organization(criminal),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Direct,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("developed-case evidence should validate")
+    .commit(&mut state)
+    .expect("developed-case evidence should commit");
+
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("both cases should receive available detectives");
+    assert_eq!(staffed, vec![(developed, senior), (earlier, junior)]);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(developed)
+            .expect("developed case should persist")
+            .lead_investigator(),
+        Some(senior)
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(earlier)
+            .expect("earlier case should persist")
+            .lead_investigator(),
+        Some(junior)
+    );
+    validate_state(&state).expect("priority staffing state should validate");
+    validate_invariants(&state);
+}
+
+#[test]
 fn structural_validation_rejects_one_investigator_leading_two_active_cases() {
     let registry = build_registry();
     let mut state = AppState::new(0x57AF_D00B);

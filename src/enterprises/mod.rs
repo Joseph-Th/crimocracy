@@ -510,7 +510,7 @@ impl EnterpriseState {
         self.cycles.id_bounds()
     }
 
-    pub(crate) fn insert(&mut self, record: EnterpriseRecord) {
+    fn insert(&mut self, record: EnterpriseRecord) {
         let id = record.id();
         self.by_organization
             .entry(record.organization())
@@ -551,11 +551,7 @@ impl EnterpriseState {
         );
     }
 
-    pub(crate) fn apply_cycle(
-        &mut self,
-        cycle: EnterpriseCycleRecord,
-        next_cycle_at: Option<SimTime>,
-    ) {
+    fn apply_cycle(&mut self, cycle: EnterpriseCycleRecord, next_cycle_at: Option<SimTime>) {
         let enterprise_id = cycle.enterprise();
         let old_next_cycle_at = self
             .records
@@ -596,7 +592,7 @@ impl EnterpriseState {
         );
     }
 
-    pub(crate) fn set_status(
+    fn set_status(
         &mut self,
         id: EnterpriseId,
         status: EnterpriseStatus,

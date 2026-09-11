@@ -225,7 +225,7 @@ impl OperationState {
             .collect()
     }
 
-    pub(crate) fn insert(&mut self, record: OperationRecord) {
+    pub(super) fn insert(&mut self, record: OperationRecord) {
         let id = record.id();
         // Guard before any index mutation so a duplicate ID cannot pollute derived state in
         // a debug build; release builds rely on the monotonic ID allocator for uniqueness.
@@ -263,7 +263,7 @@ impl OperationState {
         );
     }
 
-    pub(crate) fn begin(
+    pub(super) fn begin(
         &mut self,
         id: OperationId,
         started_at: SimTime,
@@ -300,7 +300,7 @@ impl OperationState {
             .insert(id);
     }
 
-    pub(crate) fn set_awaiting_decision(&mut self, id: OperationId, paused_at: SimTime) {
+    pub(super) fn set_awaiting_decision(&mut self, id: OperationId, paused_at: SimTime) {
         let record = self
             .records
             .get(&id)
@@ -322,7 +322,7 @@ impl OperationState {
         self.set_status(id, OperationStatus::AwaitingDecision);
     }
 
-    pub(crate) fn resume(&mut self, id: OperationId, resumed_at: SimTime) {
+    pub(super) fn resume(&mut self, id: OperationId, resumed_at: SimTime) {
         let (due_at, entry_at, paused_at) = {
             let record = self
                 .records
@@ -368,7 +368,7 @@ impl OperationState {
             .insert(id);
     }
 
-    pub(crate) fn abort(&mut self, id: OperationId, abort: OperationAbortRecord) {
+    pub(super) fn abort(&mut self, id: OperationId, abort: OperationAbortRecord) {
         let (status, scheduled_for, due_at) = {
             let record = self
                 .records
@@ -416,7 +416,7 @@ impl OperationState {
         self.set_status(id, OperationStatus::Aborted);
     }
 
-    pub(crate) fn complete(&mut self, id: OperationId, resolution: OperationResolutionRecord) {
+    pub(super) fn complete(&mut self, id: OperationId, resolution: OperationResolutionRecord) {
         let record = self
             .records
             .get(&id)
@@ -516,7 +516,7 @@ impl OperationState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_property_disposition(
+    pub(super) fn set_property_disposition(
         &mut self,
         id: OperationId,
         disposition: OperationPropertyDispositionRecord,
@@ -545,7 +545,7 @@ impl OperationState {
         record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
-    pub(crate) fn set_cash_disposition(
+    pub(super) fn set_cash_disposition(
         &mut self,
         id: OperationId,
         disposition: OperationCashDispositionRecord,

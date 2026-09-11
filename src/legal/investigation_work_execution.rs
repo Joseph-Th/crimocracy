@@ -10,6 +10,7 @@ use crate::core::time::SimTime;
 use crate::core::version::{
     VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
 };
+use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
@@ -923,11 +924,11 @@ pub(crate) fn resolve_improved_evidence_reliability(
 }
 
 /// Builds the canonical statement an interview records. The testimony targets, in order of
-/// preference: the character backed by the strongest evidence already in the case graph
-/// (minimum ID breaking strength ties), the case's origin operation when no person has been
-/// tied to the case yet, a character named as a case subject, and finally the lowest case
-/// subject of any kind so institution-authored cases without an operation origin still
-/// produce a connected statement. Confidence is a deterministic function of the margin.
+/// preference: the character backed by the strongest actionable evidence already in the case
+/// graph (reliability and then minimum ID break strength ties), the case's origin operation when
+/// no person has been tied to the case yet, a character named as a case subject, and finally the
+/// lowest case subject of any kind so institution-authored cases without an operation origin
+/// still produce a connected statement. Confidence is a deterministic function of the margin.
 fn resolve_interview_statement_draft(
     definition: &InvestigationWorkDefinition,
     state: &AppState,
@@ -951,7 +952,14 @@ fn resolve_interview_statement_draft(
                 .expect("investigation evidence set must reference persisted evidence")
         })
         .filter(|evidence| matches!(evidence.subject(), EntityRef::Character(_)))
-        .max_by_key(|evidence| (evidence.strength(), Reverse(evidence.subject())))
+        .filter(|evidence| evidence_is_actionable_case_lead(evidence))
+        .max_by_key(|evidence| {
+            (
+                evidence.strength(),
+                evidence.reliability(),
+                Reverse(evidence.subject()),
+            )
+        })
         .map(|evidence| evidence.subject())
         .or_else(|| {
             investigation

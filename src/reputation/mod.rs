@@ -102,12 +102,7 @@ impl ReputationRecord {
         }
     }
 
-    pub(crate) fn set_score(
-        &mut self,
-        dimension: ReputationDimension,
-        value: u8,
-        changed_at: SimTime,
-    ) {
+    fn set_score(&mut self, dimension: ReputationDimension, value: u8, changed_at: SimTime) {
         let score = ReputationScore::at(value, changed_at);
         match dimension {
             ReputationDimension::Fear => self.fear = score,
@@ -143,7 +138,7 @@ impl ReputationState {
 
     /// Inserts a first-touch reputation record. Records are created exactly once per
     /// (organization, audience) pair; later movement goes through `apply_delta`.
-    pub(crate) fn insert_record(&mut self, record: ReputationRecord) {
+    fn insert_record(&mut self, record: ReputationRecord) {
         let key = (record.organization(), record.audience());
         let previous = self.records.insert(key, record);
         debug_assert!(
@@ -156,11 +151,7 @@ impl ReputationState {
     /// reputation mutation changes exactly one `(organization, audience)` record at a time, so
     /// rescanning the whole sparse map after every delta would make a day-boundary decay
     /// needlessly quadratic as a campaign accumulates audiences.
-    pub(crate) fn remove_if_at_baseline(
-        &mut self,
-        key: (OrganizationId, AudienceKind),
-        baseline: u8,
-    ) {
+    fn remove_if_at_baseline(&mut self, key: (OrganizationId, AudienceKind), baseline: u8) {
         let is_neutral = self.records.get(&key).is_some_and(|record| {
             crate::reputation::ALL_REPUTATION_DIMENSIONS
                 .iter()

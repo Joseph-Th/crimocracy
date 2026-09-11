@@ -344,7 +344,7 @@ impl FinanceState {
         self.transactions.values()
     }
 
-    pub(crate) fn insert_account(&mut self, record: FinancialAccountRecord) {
+    fn insert_account(&mut self, record: FinancialAccountRecord) {
         self.accounts_by_owner
             .entry(record.owner())
             .or_default()
@@ -356,7 +356,7 @@ impl FinanceState {
         );
     }
 
-    pub(crate) fn apply_transaction(
+    fn apply_transaction(
         &mut self,
         record: LedgerTransactionRecord,
         balances: &BTreeMap<FinancialAccountId, Money>,

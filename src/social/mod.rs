@@ -145,7 +145,7 @@ impl SocialState {
     }
     /// In-place relationship write: updates dimensions and bumps the version, or inserts
     /// the first record for the pair and indexes it by target.
-    pub(crate) fn set_relationship(
+    fn set_relationship(
         &mut self,
         from: CharacterId,
         to: CharacterId,

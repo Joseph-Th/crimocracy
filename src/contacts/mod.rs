@@ -323,7 +323,7 @@ impl ContactState {
         self.disclosures.id_bounds()
     }
 
-    pub(crate) fn insert_contact(&mut self, record: InstitutionalContactRecord) {
+    fn insert_contact(&mut self, record: InstitutionalContactRecord) {
         let id = record.id();
         self.indexes
             .by_sponsor
@@ -369,7 +369,7 @@ impl ContactState {
         remove_active_contact_index(&mut self.indexes.active_by_contact, contact, id);
     }
 
-    pub(crate) fn insert_disclosure(&mut self, record: ContactDisclosureRecord) {
+    fn insert_disclosure(&mut self, record: ContactDisclosureRecord) {
         let id = record.id();
         let previous_source = self
             .indexes

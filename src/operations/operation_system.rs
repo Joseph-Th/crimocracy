@@ -1023,6 +1023,30 @@ pub(crate) fn validate_operation_resume_participants(
     Ok(())
 }
 
+/// Applies the operation-owned half of a validated exception-decision request. The decision
+/// system performs the cross-domain freshness checks before inserting its request; keeping the
+/// actual lifecycle mutation here prevents peer domains from reaching through to `OperationState`
+/// internals directly.
+pub(crate) fn apply_decision_pause_preflighted(
+    state: &mut AppState,
+    operation: OperationId,
+    paused_at: SimTime,
+) {
+    state.operations.set_awaiting_decision(operation, paused_at);
+}
+
+/// Applies the operation-owned half of a validated Continue decision. Resume overflow and
+/// participant conflicts are preflighted by `validate_operation_resume_participants`; this
+/// mutation is deliberately infallible after that validation so the decision record and operation
+/// lifecycle can commit as one cross-domain transaction.
+pub(crate) fn apply_decision_resume_preflighted(
+    state: &mut AppState,
+    operation: OperationId,
+    resumed_at: SimTime,
+) {
+    state.operations.resume(operation, resumed_at);
+}
+
 /// Effective occupancy window of a non-terminal operation, projecting the deadline shift a
 /// decision-blocked operation will experience if it resumes at `now`. Returns `None` for terminal
 /// operations (never occupy) and for authorized operations that have not begun (no persisted end).

@@ -260,7 +260,7 @@ impl OpportunityState {
             .collect()
     }
 
-    pub(crate) fn insert(&mut self, record: OpportunityRecord) {
+    fn insert(&mut self, record: OpportunityRecord) {
         let id = record.id();
         let key = OperationOpportunityKey::from_record(&record);
         debug_assert_eq!(record.status(), OpportunityStatus::Open);

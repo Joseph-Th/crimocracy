@@ -26,7 +26,10 @@ use crate::operations::operation_abort::{
     ValidatedOperationAbort, validate_deadline_missed_operation, validate_decision_abort_operation,
     validate_police_arrival_abort_if_applicable,
 };
-use crate::operations::operation_system::{OperationError, has_operation_deadline_fully_passed};
+use crate::operations::operation_system::{
+    OperationError, apply_decision_pause_preflighted, apply_decision_resume_preflighted,
+    has_operation_deadline_fully_passed,
+};
 use crate::operations::{OperationContingency, OperationStatus};
 use crate::recruitment::recruitment_system::{
     RecruitmentError, ValidatedRecruitmentAttempt, ValidatedRecruitmentProposal,
@@ -448,9 +451,7 @@ impl ValidatedDecisionRequest {
                 options: self.options,
                 draft: self.draft,
             }));
-        state
-            .operations
-            .set_awaiting_decision(operation_id, state.now());
+        apply_decision_pause_preflighted(state, operation_id, state.now());
         Ok(DecisionRequestOutcome {
             decision: id,
             requests_pause,
@@ -907,7 +908,7 @@ impl ValidatedDecisionResolution {
                             self.decision,
                             build_resolution(self.response, state.now(), self.resolver),
                         );
-                        state.operations.resume(operation, state.now());
+                        apply_decision_resume_preflighted(state, operation, state.now());
                     }
                     OperationStatus::Aborted => {
                         (*abort.expect("abort decision must carry an operation abort token"))

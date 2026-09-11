@@ -268,7 +268,7 @@ impl DelegationState {
         self.records.id_bounds()
     }
 
-    pub(crate) fn insert(&mut self, record: MandateRecord) {
+    fn insert(&mut self, record: MandateRecord) {
         let id = record.id();
         let previous_manager = self.active_by_manager.insert(record.manager(), id);
         debug_assert!(
@@ -286,7 +286,7 @@ impl DelegationState {
         );
     }
 
-    pub(crate) fn revise(
+    fn revise(
         &mut self,
         id: MandateId,
         scopes: BTreeSet<ResponsibilityScope>,

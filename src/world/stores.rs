@@ -499,34 +499,34 @@ impl WorldState {
     pub(crate) fn businesses(&self) -> impl Iterator<Item = &BusinessRecord> {
         self.businesses.records.values()
     }
-    pub(crate) fn insert_organization(&mut self, record: OrganizationRecord) {
+    pub(super) fn insert_organization(&mut self, record: OrganizationRecord) {
         let previous = self.organizations.insert(record.id(), record);
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate organization ID inserted"
         );
     }
-    pub(crate) fn insert_character(&mut self, record: CharacterRecord) {
+    pub(super) fn insert_character(&mut self, record: CharacterRecord) {
         self.characters.insert(record);
     }
-    pub(crate) fn insert_neighborhood(&mut self, record: NeighborhoodRecord) {
+    pub(super) fn insert_neighborhood(&mut self, record: NeighborhoodRecord) {
         let previous = self.neighborhoods.insert(record.id(), record);
         debug_assert!(
             previous.is_none(),
             "Index Uniqueness: duplicate neighborhood ID inserted"
         );
     }
-    pub(crate) fn insert_business(
+    pub(super) fn insert_business(
         &mut self,
         record: BusinessRecord,
         initial_ownership: BusinessOwnershipChangeRecord,
     ) {
         self.businesses.insert(record, initial_ownership);
     }
-    pub(crate) fn transfer_business_ownership(&mut self, change: BusinessOwnershipChangeRecord) {
+    pub(super) fn transfer_business_ownership(&mut self, change: BusinessOwnershipChangeRecord) {
         self.businesses.transfer_ownership(change);
     }
-    pub(crate) fn set_policy(&mut self, id: OrganizationId, setting: PolicySetting) {
+    pub(super) fn set_policy(&mut self, id: OrganizationId, setting: PolicySetting) {
         let record = self
             .organizations
             .get_mut(&id)
@@ -539,7 +539,7 @@ impl WorldState {
         *version = advance_version_preflighted(*version);
         record.policies.insert(kind, setting);
     }
-    pub(crate) fn reassign_character(
+    pub(super) fn reassign_character(
         &mut self,
         id: CharacterId,
         organization: Option<OrganizationId>,

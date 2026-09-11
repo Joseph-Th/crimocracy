@@ -62,7 +62,7 @@ impl HistoryState {
     pub(crate) fn event_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
-    pub(crate) fn insert(&mut self, event: HistoryEventRecord) {
+    fn insert(&mut self, event: HistoryEventRecord) {
         let previous = self.records.insert(event.id(), event);
         debug_assert!(
             previous.is_none(),

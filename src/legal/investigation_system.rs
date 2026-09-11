@@ -685,10 +685,61 @@ pub fn validate_assign_investigator(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InvestigationStaffingPriority {
+    actionable_evidence: Reverse<usize>,
+    best_strength: Reverse<crate::legal::EvidenceStrength>,
+    best_reliability: Reverse<crate::legal::EvidenceReliability>,
+    evidence_count: Reverse<usize>,
+    last_activity_at: Reverse<SimTime>,
+    investigation: InvestigationId,
+}
+
+fn investigation_staffing_priority(
+    state: &AppState,
+    investigation_id: InvestigationId,
+) -> InvestigationStaffingPriority {
+    let investigation = state
+        .legal
+        .get_investigation(investigation_id)
+        .expect("unstaffed-investigation index must reference an investigation");
+    let mut actionable_evidence = 0_usize;
+    let mut best_actionable_assessment = (
+        crate::legal::EvidenceStrength::Weak,
+        crate::legal::EvidenceReliability::Questionable,
+    );
+    for evidence_id in investigation.evidence() {
+        let evidence = state
+            .legal
+            .get_evidence(*evidence_id)
+            .expect("investigation evidence set must reference an evidence record");
+        if evidence_is_actionable_case_lead(evidence) {
+            actionable_evidence += 1;
+            best_actionable_assessment =
+                best_actionable_assessment.max((evidence.strength(), evidence.reliability()));
+        }
+    }
+    InvestigationStaffingPriority {
+        actionable_evidence: Reverse(actionable_evidence),
+        best_strength: Reverse(best_actionable_assessment.0),
+        best_reliability: Reverse(best_actionable_assessment.1),
+        evidence_count: Reverse(investigation.evidence().len()),
+        last_activity_at: Reverse(investigation.last_activity_at()),
+        investigation: investigation_id,
+    }
+}
+
 pub(crate) fn apply_autonomous_investigator_staffing(
     state: &mut AppState,
 ) -> Result<Vec<(InvestigationId, CharacterId)>, InvestigationError> {
-    let investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
+    let mut investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
+    // Scarce detective capacity is allocated by case substance rather than record creation
+    // order. Prefer cases with more actionable evidence, then the strongest such evidence,
+    // broader evidence, and more recent institutional activity. The case id is only the final
+    // deterministic tie-break when the institution has no modeled reason to prefer either file.
+    investigations.sort_unstable_by_key(|investigation| {
+        investigation_staffing_priority(state, *investigation)
+    });
     let mut staffed = Vec::new();
 
     for investigation_id in investigations {

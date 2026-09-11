@@ -368,14 +368,14 @@ impl DecisionState {
         self.records.id_bounds()
     }
 
-    pub(crate) fn insert(&mut self, record: DecisionRequestRecord) {
+    fn insert(&mut self, record: DecisionRequestRecord) {
         debug_assert_eq!(record.status(), DecisionStatus::Pending);
         self.insert_record(record, true);
     }
 
     /// Inserts a decision that was requested and resolved as one atomic autonomous action.
     /// Resolved records are historical evidence only and must never enter pending indexes.
-    pub(crate) fn insert_resolved(&mut self, record: DecisionRequestRecord) {
+    fn insert_resolved(&mut self, record: DecisionRequestRecord) {
         debug_assert_eq!(record.status(), DecisionStatus::Resolved);
         self.insert_record(record, false);
     }
@@ -407,7 +407,7 @@ impl DecisionState {
         );
     }
 
-    pub(crate) fn resolve(&mut self, id: DecisionRequestId, resolution: DecisionResolution) {
+    fn resolve(&mut self, id: DecisionRequestId, resolution: DecisionResolution) {
         self.remove_pending_indexes(id);
         let record = self
             .records

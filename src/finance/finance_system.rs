@@ -706,9 +706,11 @@ impl ValidatedLaundering {
         // The transfer committed, so the front's plausibility budget shrinks by the same
         // volume. The version check above guarantees the budget window is unchanged, and the
         // total was validated to fit before any mutation.
-        state
-            .economy
-            .set_laundered_this_cycle(self.business, self.new_cycle_total);
+        crate::economy::business_economy_system::apply_laundering_capacity_preflighted(
+            state,
+            self.business,
+            self.new_cycle_total,
+        );
         Ok(id)
     }
 

@@ -888,6 +888,18 @@ fn resolve_basis_point_variance(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
+/// Applies the economy-owned plausibility-budget update for a laundering transaction after the
+/// finance system has revalidated the business-economy version and committed the corresponding
+/// ledger movement. Keeping this write behind the economy system preserves one mutation owner
+/// without introducing a fallible step after money has moved.
+pub(crate) fn apply_laundering_capacity_preflighted(
+    state: &mut AppState,
+    business: BusinessId,
+    total: Money,
+) {
+    state.economy.set_laundered_this_cycle(business, total);
+}
+
 /// Canonical sabotage-damage mutation: extends the target's disruption horizon through an
 /// validated-then-committed plan so repeated attacks push the horizon later and staleness
 /// is re-checked at commit.

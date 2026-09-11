@@ -375,7 +375,7 @@ impl RecruitmentState {
         self.records.id_bounds()
     }
 
-    pub(crate) fn insert(&mut self, record: RecruitmentAttemptRecord) {
+    fn insert(&mut self, record: RecruitmentAttemptRecord) {
         let id = record.id();
         self.by_candidate
             .entry(record.candidate())

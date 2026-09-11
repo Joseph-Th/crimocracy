@@ -149,7 +149,7 @@ impl ReportState {
     pub(crate) fn report_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
-    pub(crate) fn insert(&mut self, report: ReportRecord) {
+    fn insert(&mut self, report: ReportRecord) {
         self.by_recipient
             .entry(report.recipient())
             .or_default()

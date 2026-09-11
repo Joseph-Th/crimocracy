@@ -780,6 +780,92 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
 }
 
 #[test]
+fn interview_statement_ignores_stronger_non_actionable_character_evidence() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: fixture.investigation,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.first),
+            origin: EntityRef::Character(fixture.middle),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Direct,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case witness should validate")
+    .commit(&mut fixture.state)
+    .expect("case witness should commit");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: fixture.investigator,
+            kind: InvestigationWorkKind::WitnessInterview,
+            focus: InvestigationWorkFocus::witness(case_witness),
+        },
+    )
+    .expect("witness interview should validate")
+    .commit(&mut fixture.state)
+    .expect("witness interview should commit");
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::WitnessInterview)
+        .duration();
+    fixture.state.advance_clock(duration);
+    let plan = decide_investigation_work_resolution(
+        &registry,
+        &fixture.state,
+        work,
+        InvestigationWorkRandomness::new(0),
+    )
+    .expect("interview should resolve through the canonical decision path");
+    assert_eq!(plan.outcome(), InvestigationWorkOutcome::Connected);
+    validate_investigation_work_resolution_plan(&registry, &fixture.state, plan)
+        .expect("interview resolution should validate")
+        .commit(&mut fixture.state)
+        .expect("interview resolution should commit");
+    let statement_id = *fixture
+        .state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("case witness should persist")
+        .statements()
+        .iter()
+        .next()
+        .expect("connected interview must persist its statement");
+    let statement = fixture
+        .state
+        .legal()
+        .get_witness_statement(statement_id)
+        .expect("persisted witness statement should resolve");
+
+    assert_eq!(
+        statement.subject(),
+        EntityRef::Character(fixture.middle),
+        "raw strength must not let questionable evidence steer testimony ahead of an actionable lead"
+    );
+    validate_state(&fixture.state).expect("statement-selection fixture should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn actionable_evidence_against_witness_cancels_pending_interview_and_blocks_future_interviews() {
     let registry = build_registry();
     let mut fixture = make_fixture(

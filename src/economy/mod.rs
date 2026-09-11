@@ -262,7 +262,7 @@ impl EconomyState {
         self.cycles.id_bounds()
     }
 
-    pub(crate) fn insert(&mut self, record: BusinessEconomyRecord) {
+    fn insert(&mut self, record: BusinessEconomyRecord) {
         let business = record.business();
         let next_cycle_at = record
             .next_cycle_at()
@@ -285,11 +285,7 @@ impl EconomyState {
         );
     }
 
-    pub(crate) fn apply_cycle(
-        &mut self,
-        cycle: BusinessCycleRecord,
-        next_cycle_at: Option<SimTime>,
-    ) {
+    fn apply_cycle(&mut self, cycle: BusinessCycleRecord, next_cycle_at: Option<SimTime>) {
         let business = cycle.business();
         let old_next_cycle_at = self
             .businesses
@@ -324,7 +320,7 @@ impl EconomyState {
         );
     }
 
-    pub(crate) fn set_status(
+    fn set_status(
         &mut self,
         business: BusinessId,
         status: BusinessOperatingStatus,
@@ -371,7 +367,7 @@ impl EconomyState {
 
     /// Extends the sabotage damage horizon for a business economy. The horizon is monotone:
     /// a new disruption only ever pushes the horizon later, never restores it early.
-    pub(crate) fn apply_disruption(&mut self, business: BusinessId, disrupted_through: SimTime) {
+    fn apply_disruption(&mut self, business: BusinessId, disrupted_through: SimTime) {
         let record = self
             .businesses
             .get_mut(&business)
@@ -387,7 +383,7 @@ impl EconomyState {
     /// The economy owner keeps the running total so laundering plausibility stays a per-cycle
     /// budget rather than a per-transfer allowance; callers pass a pre-validated total so the
     /// write is total and cannot half-apply behind a ledger commit.
-    pub(crate) fn set_laundered_this_cycle(&mut self, business: BusinessId, total: Money) {
+    fn set_laundered_this_cycle(&mut self, business: BusinessId, total: Money) {
         let record = self
             .businesses
             .get_mut(&business)

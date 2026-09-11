@@ -407,7 +407,7 @@ impl IntelligenceState {
     pub(crate) fn information_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
-    pub(crate) fn insert(&mut self, record: InformationRecord) {
+    fn insert(&mut self, record: InformationRecord) {
         let id = record.id();
         self.by_holder
             .entry(record.holder())
