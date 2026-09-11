@@ -410,12 +410,12 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
         for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
             let current = record.score(dimension);
             let changed_at = record.changed_at(dimension);
-            if state
+            let age = state
                 .now()
                 .as_minutes()
-                .saturating_sub(changed_at.as_minutes())
-                < crate::core::time::DAY_MINUTES
-            {
+                .checked_sub(changed_at.as_minutes())
+                .expect("reputation chronology must not place a change in the future");
+            if age < crate::core::time::DAY_MINUTES {
                 continue;
             }
             let current_i = i64::from(current);
@@ -439,7 +439,7 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
 }
 
 impl ReputationRecord {
-    pub(crate) fn at_baseline(
+    fn at_baseline(
         organization: OrganizationId,
         audience: AudienceKind,
         baseline: u8,
@@ -458,14 +458,11 @@ impl ReputationRecord {
 }
 
 impl ReputationState {
-    pub(crate) fn records_contains_key(&self, key: (OrganizationId, AudienceKind)) -> bool {
+    fn records_contains_key(&self, key: (OrganizationId, AudienceKind)) -> bool {
         self.records.contains_key(&key)
     }
 
-    pub(crate) fn record_mut(
-        &mut self,
-        key: (OrganizationId, AudienceKind),
-    ) -> Option<&mut ReputationRecord> {
+    fn record_mut(&mut self, key: (OrganizationId, AudienceKind)) -> Option<&mut ReputationRecord> {
         self.records.get_mut(&key)
     }
 }

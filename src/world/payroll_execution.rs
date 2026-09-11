@@ -316,7 +316,9 @@ fn payroll_remainder_offset(now: SimTime, member_count: usize) -> usize {
     debug_assert!(member_count > 0);
     debug_assert!(is_payroll_due(now));
     let payroll_day = now.as_minutes() / DAY_MINUTES;
-    let zero_based_day = payroll_day.saturating_sub(1);
+    let zero_based_day = payroll_day
+        .checked_sub(1)
+        .expect("payroll is never due before the first completed simulation day");
     let member_count = u64::try_from(member_count)
         .expect("payroll member count must fit the simulation clock width");
     usize::try_from(zero_based_day % member_count)

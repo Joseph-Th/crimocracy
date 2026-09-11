@@ -879,7 +879,7 @@ pub struct EnterpriseDraft {
     pub settlement_account: FinancialAccountId,
 }
 
-pub(crate) fn build_enterprise_record(
+fn build_enterprise_record(
     id: EnterpriseId,
     draft: EnterpriseDraft,
     established_at: SimTime,

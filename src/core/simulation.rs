@@ -256,10 +256,7 @@ fn run_operations_phase(
                 // operation stays Authorized and retries on later ticks. Completion deadlines
                 // and linked opportunity windows are handled by the pre-checks above, so temporary
                 // unavailability cannot silently carry work beyond an authored viability boundary.
-                Err(
-                    OperationError::ParticipantBusy { .. }
-                    | OperationError::DetainedParticipant { .. },
-                ) => {}
+                Err(OperationError::ParticipantBusy { .. }) => {}
                 Err(OperationError::ObjectiveUnavailable { blocker, .. }) => {
                     validate_objective_unavailable_operation(state, operation, blocker)
                         .expect("an unavailable due objective must validate a pre-start abort")

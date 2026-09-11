@@ -400,13 +400,15 @@ pub fn decide_enterprise_cycle(
     // district heat but cannot recursively open another concurrent inquiry into the same
     // racket; clean districts never draw one, so lying low or moving the book remain real
     // counter-play.
-    let vice_chance_basis_points = u32::from(
-        definition
-            .economics()
-            .vice_attention_basis_points_per_active_case(),
+    let vice_chance_basis_points = u32::try_from(
+        (u64::from(
+            definition
+                .economics()
+                .vice_attention_basis_points_per_active_case(),
+        ) * u64::from(active_district_cases))
+        .min(10_000),
     )
-    .saturating_mul(active_district_cases)
-    .min(10_000);
+    .expect("vice chance is explicitly capped to basis-point range");
     let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
     let vice_roll_hits = active_district_cases > 0
         && !had_active_enterprise_inquiry

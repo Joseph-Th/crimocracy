@@ -99,7 +99,8 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                     .any(|operation| {
                         matches!(
                             operation.status(),
-                            crate::operations::OperationStatus::InProgress
+                            crate::operations::OperationStatus::Authorized
+                                | crate::operations::OperationStatus::InProgress
                                 | crate::operations::OperationStatus::AwaitingDecision
                         )
                     });

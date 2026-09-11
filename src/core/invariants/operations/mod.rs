@@ -581,7 +581,7 @@ fn validate_authored_operation_exposure(
     let exposure_factors = exposure.factors();
     let expected_intelligence_mitigation =
         u16::from(resolution.factors().intelligence_quality().value())
-            .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
+            * u16::from(execution.intelligence_mitigation_weight())
             / 100;
     let expected_exposure_score = resolve_exposure_score(execution, exposure_factors);
     let expected_exposure_level = resolve_exposure_level(execution, expected_exposure_score);
@@ -715,19 +715,27 @@ fn validate_operation_actors(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Result<(), StateValidationError> {
-    state
-        .world
-        .get_character(operation.leader())
-        .ok_or(StateValidationError::MissingEntity {
+    let leader = state.world.get_character(operation.leader()).ok_or(
+        StateValidationError::MissingEntity {
             context: "operation leader",
             entity: EntityRef::Character(operation.leader()),
-        })?;
+        },
+    )?;
     let requires_active_membership = matches!(
         operation.status(),
         OperationStatus::Authorized
             | OperationStatus::InProgress
             | OperationStatus::AwaitingDecision
     );
+    if requires_active_membership
+        && let Some(arrest) = state.legal.active_arrest_for_character(leader.id())
+    {
+        return Err(StateValidationError::ActiveOperationDetainedParticipant {
+            operation: operation.id(),
+            participant: leader.id(),
+            arrest: arrest.id(),
+        });
+    }
     let mut role_participants = BTreeSet::new();
     for participant in operation.roles().values() {
         if !role_participants.insert(*participant) {
@@ -749,6 +757,15 @@ fn validate_operation_actors(
             return Err(StateValidationError::ActiveOperationForeignParticipant {
                 operation: operation.id(),
                 participant: *participant,
+            });
+        }
+        if requires_active_membership
+            && let Some(arrest) = state.legal.active_arrest_for_character(*participant)
+        {
+            return Err(StateValidationError::ActiveOperationDetainedParticipant {
+                operation: operation.id(),
+                participant: *participant,
+                arrest: arrest.id(),
             });
         }
     }

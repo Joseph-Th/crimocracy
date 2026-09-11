@@ -66,10 +66,12 @@ pub fn ensure_time_current(now: SimTime, expected: SimTime) -> Result<(), (SimTi
 }
 
 /// Length of one campaign day in minutes in the two widths required by durable time and
-/// minute-of-day records. Keep the literal here so patrol, intelligence, budgets, and daily
-/// schedulers cannot drift onto different definitions of a simulation day.
+/// minute-of-day records, plus the matching duration used by authored daily schedulers. Keep
+/// the literal here so patrol, intelligence, budgets, and daily systems cannot drift onto
+/// different definitions of a simulation day.
 pub const DAY_MINUTES_U16: u16 = 1_440;
 pub const DAY_MINUTES: u64 = DAY_MINUTES_U16 as u64;
+pub const DAY_DURATION: SimDuration = SimDuration::from_minutes(DAY_MINUTES_U16 as u32);
 
 /// True exactly once per campaign day. Minute zero is never a boundary: state created at
 /// the campaign start must not immediately run its daily passes.

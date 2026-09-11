@@ -764,7 +764,8 @@ fn preemptible_operation_bookings_for_character(
         .filter(|operation| {
             matches!(
                 operation.status(),
-                crate::operations::OperationStatus::InProgress
+                crate::operations::OperationStatus::Authorized
+                    | crate::operations::OperationStatus::InProgress
                     | crate::operations::OperationStatus::AwaitingDecision
             )
         })

@@ -404,7 +404,8 @@ pub(crate) fn apply_detainee_informant_recruitment(
         .filter(|arrest| {
             let minutes_in_custody = now
                 .as_minutes()
-                .saturating_sub(arrest.arrested_at().as_minutes());
+                .checked_sub(arrest.arrested_at().as_minutes())
+                .expect("active arrest chronology must not begin in the future");
             // Exact equality is safe because the canonical pipeline advances exactly one
             // minute per tick and this pass runs every tick: each detention reaches its
             // decision minute under observation exactly once. A batched or skipped pass
@@ -482,8 +483,7 @@ fn resolve_informant_flip_chance(
     safety: u32,
     represented: bool,
 ) -> u32 {
-    let safety_bonus =
-        safety.saturating_mul(u32::from(legal.informant_safety_bonus_percent())) / 100;
+    let safety_bonus = safety * u32::from(legal.informant_safety_bonus_percent()) / 100;
     let chance = u32::from(legal.informant_base_flip_chance_percent()) + safety_bonus;
     if represented {
         chance.saturating_sub(u32::from(legal.represented_informant_reduction_percent()))

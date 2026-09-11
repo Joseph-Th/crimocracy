@@ -349,7 +349,7 @@ impl ContactState {
         debug_assert!(previous.is_none(), "duplicate institutional contact ID");
     }
 
-    pub(crate) fn terminate_contact(&mut self, id: ContactId, terminated_at: SimTime) {
+    fn terminate_contact(&mut self, id: ContactId, terminated_at: SimTime) {
         let (sponsor, handler, contact) = {
             let record = self
                 .contacts

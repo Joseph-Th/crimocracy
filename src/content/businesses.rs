@@ -1,6 +1,6 @@
 //! Authored legitimate-business economics, disruption, laundering, and shared venue functions.
 
-use crate::core::time::SimDuration;
+use crate::core::time::{DAY_DURATION, SimDuration};
 use crate::finance::Money;
 use crate::registry::{
     BusinessDisruptionSpec, BusinessEconomicsDefinition, LaunderingConfigSpec, RegistryBuilder,
@@ -47,7 +47,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::Retail,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(12_000),
                 base_operating_cost: Money::from_cents(10_000),
                 wealth_revenue_per_point: Money::from_cents(40),
@@ -62,7 +62,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::Hospitality,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(15_000),
                 base_operating_cost: Money::from_cents(12_000),
                 wealth_revenue_per_point: Money::from_cents(60),
@@ -77,7 +77,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::Automotive,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(14_000),
                 base_operating_cost: Money::from_cents(11_000),
                 wealth_revenue_per_point: Money::from_cents(50),
@@ -92,7 +92,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::Transportation,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(18_000),
                 base_operating_cost: Money::from_cents(15_000),
                 wealth_revenue_per_point: Money::from_cents(40),
@@ -107,7 +107,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::Warehouse,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(9_000),
                 base_operating_cost: Money::from_cents(7_500),
                 wealth_revenue_per_point: Money::from_cents(10),
@@ -122,7 +122,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
         (
             BusinessKind::ProfessionalServices,
             BusinessEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(16_000),
                 base_operating_cost: Money::from_cents(11_000),
                 wealth_revenue_per_point: Money::from_cents(100),
@@ -139,7 +139,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
             BusinessEconomicsDefinition {
                 // Illicit production front: high throughput, high police attention, swings hard with
                 // district demand. Priced as a premium infrastructure acquisition.
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(20_000),
                 base_operating_cost: Money::from_cents(13_000),
                 wealth_revenue_per_point: Money::from_cents(30),
@@ -158,7 +158,7 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 // customer-access hub for the Prohibition economy. Also the most plausible
                 // storefront: customer throughput and till camouflage make it the best laundering
                 // front per-dollar of gross.
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(17_000),
                 base_operating_cost: Money::from_cents(11_000),
                 wealth_revenue_per_point: Money::from_cents(90),

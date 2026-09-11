@@ -295,11 +295,11 @@ impl OpportunityState {
         self.records.insert(id, record);
     }
 
-    pub(crate) fn dismiss(&mut self, id: OpportunityId, at: SimTime) {
+    fn dismiss(&mut self, id: OpportunityId, at: SimTime) {
         self.resolve(id, OpportunityResolution::Dismissed { at });
     }
 
-    pub(crate) fn expire(&mut self, id: OpportunityId, at: SimTime, report: ReportId) {
+    fn expire(&mut self, id: OpportunityId, at: SimTime, report: ReportId) {
         self.resolve(id, OpportunityResolution::Expired { at, report });
         let previous = self.by_report.insert(report, id);
         debug_assert!(
@@ -308,7 +308,7 @@ impl OpportunityState {
         );
     }
 
-    pub(crate) fn convert(&mut self, id: OpportunityId, operation: OperationId, at: SimTime) {
+    fn convert(&mut self, id: OpportunityId, operation: OperationId, at: SimTime) {
         self.resolve(id, OpportunityResolution::Converted { at, operation });
         let previous = self.by_operation.insert(operation, id);
         debug_assert!(

@@ -483,7 +483,7 @@ fn liquidation_memo(
     memo
 }
 
-pub(crate) fn build_disposition_summary(
+fn build_disposition_summary(
     operation_title: &str,
     venue_name: &str,
     estimated_value: Money,
@@ -713,7 +713,7 @@ fn resolve_disposable_cash(
     Ok(proceeds)
 }
 
-pub(crate) fn build_deposit_summary(operation_title: &str, amount: Money) -> String {
+fn build_deposit_summary(operation_title: &str, amount: Money) -> String {
     let mut summary = String::new();
     write_deposit_summary(&mut summary, operation_title, amount)
         .expect("String buffer writes are infallible");

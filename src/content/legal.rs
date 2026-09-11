@@ -1,6 +1,6 @@
 //! Authored legal-system thresholds and investigation-work definitions.
 
-use crate::core::time::SimDuration;
+use crate::core::time::{DAY_DURATION, SimDuration};
 use crate::finance::Money;
 use crate::legal::InvestigationWorkKind;
 use crate::registry::{
@@ -29,7 +29,7 @@ pub(super) fn register_legal(builder: &mut RegistryBuilder) {
                 hostile_band_discount: 2,
             },
             // One custody day before a detainee faces their informant-recruitment decision.
-            informant_decision_delay: SimDuration::from_minutes(1_440),
+            informant_decision_delay: DAY_DURATION,
             // Custody requires corroboration from two independent qualifying sources, including
             // at least one Strong or Direct source. Direct and autonomous arrest use the same bar.
             minimum_arrest_qualifying_evidence: 2,

@@ -456,7 +456,7 @@ pub struct LedgerTransactionDraft {
     pub authorization: Option<MandateAuthority>,
 }
 
-pub(crate) fn build_budget_usage(
+fn build_budget_usage(
     authorization: MandateAuthority,
     mandate_version: u32,
     funding_account: FinancialAccountId,

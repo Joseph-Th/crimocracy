@@ -316,7 +316,7 @@ impl DelegationState {
         }
     }
 
-    pub(crate) fn revoke(&mut self, id: MandateId) {
+    fn revoke(&mut self, id: MandateId) {
         let (manager, scopes) = {
             let record = self
                 .records
@@ -460,7 +460,7 @@ pub struct MandateDraft {
     pub budget: Option<BudgetAuthority>,
 }
 
-pub(crate) fn build_mandate_record(id: MandateId, draft: MandateDraft) -> MandateRecord {
+fn build_mandate_record(id: MandateId, draft: MandateDraft) -> MandateRecord {
     let MandateDraft {
         organization,
         manager,

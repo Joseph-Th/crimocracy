@@ -322,7 +322,8 @@ fn validate_operation_abort(
         }
         (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
         | (OperationStatus::Authorized, OperationAbortCause::OpportunityExpired(_))
-        | (OperationStatus::Authorized, OperationAbortCause::ObjectiveUnavailable(_)) => {
+        | (OperationStatus::Authorized, OperationAbortCause::ObjectiveUnavailable(_))
+        | (OperationStatus::Authorized, OperationAbortCause::ParticipantDetained(_)) => {
             OperationAbortPhase::BeforeStart
         }
         (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed) => {
@@ -366,14 +367,12 @@ fn validate_operation_abort(
         (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder) => {
             (None, None, None, None)
         }
-        (OperationAbortPhase::BeforeStart, OperationAbortCause::ParticipantDetained(_)) => {
-            unreachable!("detention no longer aborts operations before they begin")
-        }
         (
             OperationAbortPhase::BeforeStart,
             OperationAbortCause::DeadlineMissed
             | OperationAbortCause::OpportunityExpired(_)
-            | OperationAbortCause::ObjectiveUnavailable(_),
+            | OperationAbortCause::ObjectiveUnavailable(_)
+            | OperationAbortCause::ParticipantDetained(_),
         )
         | (OperationAbortPhase::InProgress, _)
         | (OperationAbortPhase::AwaitingDecision, _) => {

@@ -1,6 +1,6 @@
 //! Authored standing policies, reputation tuning, executive-brief cadence, and organization upkeep.
 
-use crate::core::time::SimDuration;
+use crate::core::time::DAY_DURATION;
 use crate::finance::Money;
 use crate::registry::{
     ExecutiveBriefDefinitionSpec, RegistryBuilder, ReputationConfigSpec, UpkeepConfigSpec,
@@ -30,7 +30,7 @@ pub(super) fn register_reputation(builder: &mut RegistryBuilder) {
 pub(super) fn register_executive_brief(builder: &mut RegistryBuilder) {
     builder
         .register_executive_brief(ExecutiveBriefDefinitionSpec {
-            cadence: SimDuration::from_minutes(1_440),
+            cadence: DAY_DURATION,
             minimum_source_attention: crate::core::attention::AttentionClass::Notable,
             max_source_entries: 8,
         })

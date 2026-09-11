@@ -337,7 +337,7 @@ pub(super) fn resolve_exposure_plan(
         .exposure_approach_adjustment(record.approach())
         .expect("validated operation approach must have an authored exposure adjustment");
     let intelligence_mitigation = u16::from(intelligence_quality.value())
-        .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
+        * u16::from(execution.intelligence_mitigation_weight())
         / 100;
     let factors = OperationExposureFactors {
         stealth_average,
@@ -444,7 +444,7 @@ pub(crate) fn resolve_operation_police_alert_context(
     let stealth_average = resolve_stealth_average(state, record);
     let (intelligence_quality, _, _, _) = resolve_intelligence_factors(registry, state, operation);
     let intelligence_mitigation = u16::from(intelligence_quality.value())
-        .saturating_mul(u16::from(execution.intelligence_mitigation_weight()))
+        * u16::from(execution.intelligence_mitigation_weight())
         / 100;
     let factors = OperationExposureFactors {
         stealth_average,
@@ -496,13 +496,16 @@ pub(crate) fn resolve_time_pressure(
     base_duration: u32,
     maximum: u8,
 ) -> u8 {
-    let available = due_at.as_minutes().saturating_sub(started_at.as_minutes());
+    let available = due_at
+        .as_minutes()
+        .checked_sub(started_at.as_minutes())
+        .expect("operation resolution cannot be due before it starts");
     let base = u64::from(base_duration);
     if available >= base {
         return 0;
     }
     let shortfall = base - available;
-    let pressure = shortfall.saturating_mul(u64::from(maximum)).div_ceil(base);
+    let pressure = (shortfall * u64::from(maximum)).div_ceil(base);
     u8::try_from(pressure.min(u64::from(maximum))).expect("bounded time pressure must fit u8")
 }
 
@@ -521,10 +524,7 @@ fn weighted_ability(
     let role_weight = u32::from(execution.role_capability_weight());
     let leader_weight = u32::from(execution.leader_capability_weight());
     let total_weight = role_weight + leader_weight;
-    let weighted = role
-        .saturating_mul(role_weight)
-        .saturating_add(leadership.saturating_mul(leader_weight))
-        / total_weight;
+    let weighted = (role * role_weight + leadership * leader_weight) / total_weight;
     i16::try_from(weighted).expect("weighted operation ability must fit i16")
 }
 
@@ -578,7 +578,7 @@ pub(crate) fn resolve_intelligence_factors(
     )
     .expect("intelligence quality must remain within rating bounds");
     let reduction = u16::from(quality.value())
-        .saturating_mul(u16::from(execution.max_intelligence_difficulty_reduction()))
+        * u16::from(execution.max_intelligence_difficulty_reduction())
         / 100;
     let adjustment =
         -i8::try_from(reduction).expect("authored intelligence difficulty reduction must fit i8");

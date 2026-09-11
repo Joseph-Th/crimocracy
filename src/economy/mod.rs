@@ -479,7 +479,7 @@ pub struct BusinessEconomyDraft {
     pub settlement_account: FinancialAccountId,
 }
 
-pub(crate) fn build_business_economy_record(
+fn build_business_economy_record(
     draft: BusinessEconomyDraft,
     established_at: SimTime,
     next_cycle_at: SimTime,

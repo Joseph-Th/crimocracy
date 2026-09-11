@@ -77,10 +77,9 @@ fn validate_relationship_math(spec: &RecruitmentDefinitionSpec) -> Result<(), Re
         || attachment.divisor == 0
         || support_weight_total == 0
         || attachment_weight_total == 0
-        || support_weight_total.saturating_mul(100) / u16::from(support.divisor) > 100
-        || attachment_weight_total.saturating_mul(100) / u16::from(attachment.divisor) > 100
-        || u16::from(support.fear_penalty_weight).saturating_mul(100)
-            / u16::from(support.fear_penalty_divisor)
+        || u32::from(support_weight_total) * 100 / u32::from(support.divisor) > 100
+        || u32::from(attachment_weight_total) * 100 / u32::from(attachment.divisor) > 100
+        || u32::from(support.fear_penalty_weight) * 100 / u32::from(support.fear_penalty_divisor)
             > 100
     {
         return Err(RegistryBuildError::InvalidRecruitmentRelationshipWeights);

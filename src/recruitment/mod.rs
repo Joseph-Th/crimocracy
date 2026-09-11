@@ -475,36 +475,36 @@ pub struct RecruitmentDraft {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RecruitmentRecordParts {
-    pub id: RecruitmentAttemptId,
-    pub draft: RecruitmentDraft,
-    pub context: RecruitmentRecordContextParts,
-    pub resolution: RecruitmentRecordResolutionParts,
+struct RecruitmentRecordParts {
+    id: RecruitmentAttemptId,
+    draft: RecruitmentDraft,
+    context: RecruitmentRecordContextParts,
+    resolution: RecruitmentRecordResolutionParts,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RecruitmentRecordContextParts {
-    pub authority: RecruitmentAuthority,
-    pub recruiter_relationship: RecruitmentRelationshipSnapshot,
-    pub incumbent_relationship: Option<RecruitmentRelationshipSnapshot>,
-    pub previous_organization: Option<OrganizationId>,
-    pub previous_supervisor: Option<CharacterId>,
-    pub pressure_information: Option<InformationId>,
-    pub occurred_at: SimTime,
+struct RecruitmentRecordContextParts {
+    authority: RecruitmentAuthority,
+    recruiter_relationship: RecruitmentRelationshipSnapshot,
+    incumbent_relationship: Option<RecruitmentRelationshipSnapshot>,
+    previous_organization: Option<OrganizationId>,
+    previous_supervisor: Option<CharacterId>,
+    pressure_information: Option<InformationId>,
+    occurred_at: SimTime,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RecruitmentRecordResolutionParts {
-    pub factors: RecruitmentFactors,
-    pub margin: i16,
-    pub outcome: RecruitmentOutcome,
-    pub resulting_candidate_version: u32,
-    pub outcome_information: InformationId,
-    pub history_event: Option<HistoryEventId>,
-    pub member_report: Option<ReportId>,
+struct RecruitmentRecordResolutionParts {
+    factors: RecruitmentFactors,
+    margin: i16,
+    outcome: RecruitmentOutcome,
+    resulting_candidate_version: u32,
+    outcome_information: InformationId,
+    history_event: Option<HistoryEventId>,
+    member_report: Option<ReportId>,
 }
 
-pub(crate) fn build_recruitment_record(parts: RecruitmentRecordParts) -> RecruitmentAttemptRecord {
+fn build_recruitment_record(parts: RecruitmentRecordParts) -> RecruitmentAttemptRecord {
     let RecruitmentRecordParts {
         id,
         draft,
@@ -573,23 +573,21 @@ pub(crate) fn build_recruitment_relationship_snapshot(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RecruitmentFactorComponents {
-    pub recruiter_influence: u8,
-    pub drive_alignment: u8,
-    pub relationship_support: u8,
-    pub incumbent_attachment: u8,
-    pub incumbent_resentment: u8,
-    pub perceived_legal_pressure: u8,
-    pub membership_resistance: u8,
+struct RecruitmentFactorComponents {
+    recruiter_influence: u8,
+    drive_alignment: u8,
+    relationship_support: u8,
+    incumbent_attachment: u8,
+    incumbent_resentment: u8,
+    perceived_legal_pressure: u8,
+    membership_resistance: u8,
     /// The recruiting organization's underworld competence reputation, resolved through the
     /// canonical reputation surface (authored baseline when untouched).
-    pub organization_competence: u8,
-    pub trait_adjustment: i16,
+    organization_competence: u8,
+    trait_adjustment: i16,
 }
 
-pub(crate) fn build_recruitment_factors(
-    components: RecruitmentFactorComponents,
-) -> RecruitmentFactors {
+fn build_recruitment_factors(components: RecruitmentFactorComponents) -> RecruitmentFactors {
     let RecruitmentFactorComponents {
         recruiter_influence,
         drive_alignment,

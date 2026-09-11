@@ -108,6 +108,14 @@ pub enum StateValidationError {
         participant: CharacterId,
     },
     #[error(
+        "active operation {operation} retains detained participant {participant} under arrest {arrest}"
+    )]
+    ActiveOperationDetainedParticipant {
+        operation: OperationId,
+        participant: CharacterId,
+        arrest: ArrestId,
+    },
+    #[error(
         "active operations {first} and {second} have overlapping bookings for participant {participant}"
     )]
     ActiveOperationParticipantOverlap {

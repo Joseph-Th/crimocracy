@@ -1,6 +1,6 @@
 //! Authored recruitment timing, scoring, relationships, drives, and trait rules.
 
-use crate::core::time::SimDuration;
+use crate::core::time::{DAY_DURATION, SimDuration};
 use crate::recruitment::RecruitmentApproach;
 use crate::registry::{
     RecruitmentDefinitionSpec, RecruitmentIncumbentRelationshipDefinition,
@@ -16,7 +16,7 @@ pub(super) fn register_recruitment(builder: &mut RegistryBuilder) {
         .register_recruitment(RecruitmentDefinitionSpec {
             timing: RecruitmentTimingDefinition {
                 cooldown: SimDuration::from_minutes(10_080),
-                autonomous_attempt_cadence: SimDuration::from_minutes(1_440),
+                autonomous_attempt_cadence: DAY_DURATION,
                 perceived_legal_pressure_max_age: SimDuration::from_minutes(20_160),
             },
             scoring: RecruitmentScoringDefinition {

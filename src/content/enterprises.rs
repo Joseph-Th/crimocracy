@@ -1,6 +1,6 @@
 //! Authored enterprise economics and physical/network infrastructure requirements.
 
-use crate::core::time::SimDuration;
+use crate::core::time::DAY_DURATION;
 use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
 use crate::registry::{EnterpriseEconomicsDefinition, RegistryBuilder};
@@ -12,7 +12,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
         (
             EnterpriseKind::Protection,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(4_000),
                 base_operating_cost: Money::from_cents(2_500),
                 demand_revenue_per_point: Money::from_cents(20),
@@ -34,7 +34,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
         (
             EnterpriseKind::Gambling,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(8_000),
                 base_operating_cost: Money::from_cents(4_500),
                 demand_revenue_per_point: Money::from_cents(160),
@@ -55,7 +55,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
         (
             EnterpriseKind::AlcoholDistribution,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(16_000),
                 base_operating_cost: Money::from_cents(10_000),
                 demand_revenue_per_point: Money::from_cents(130),
@@ -84,7 +84,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             // demand and is less dependent on a specific social venue.
             EnterpriseKind::Bookmaking,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(6_500),
                 base_operating_cost: Money::from_cents(4_000),
                 demand_revenue_per_point: Money::from_cents(190),
@@ -110,7 +110,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             // commerce foot traffic, with the lowest police cost of the cash rackets.
             EnterpriseKind::LoanSharking,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(7_000),
                 base_operating_cost: Money::from_cents(3_500),
                 demand_revenue_per_point: Money::from_cents(80),
@@ -133,7 +133,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             // to move goods, not on district demand for vice.
             EnterpriseKind::Fencing,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(5_500),
                 base_operating_cost: Money::from_cents(3_000),
                 demand_revenue_per_point: Money::from_cents(40),
@@ -161,7 +161,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             // that can produce and move alcohol.
             EnterpriseKind::Speakeasy,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(12_000),
                 base_operating_cost: Money::from_cents(6_500),
                 demand_revenue_per_point: Money::from_cents(120),
@@ -191,7 +191,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             // visibility than vice rackets but dependent on union access.
             EnterpriseKind::LaborRacketeering,
             EnterpriseEconomicsDefinition {
-                cycle: SimDuration::from_minutes(1_440),
+                cycle: DAY_DURATION,
                 base_gross: Money::from_cents(9_500),
                 base_operating_cost: Money::from_cents(5_200),
                 demand_revenue_per_point: Money::from_cents(60),

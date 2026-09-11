@@ -41,12 +41,11 @@ pub(crate) fn resolve_recruitment_factors_from_context(
         .map(|rating| rating.value())
         .max()
         .unwrap_or(0);
-    let recruiter_influence = base_influence
-        .saturating_add(
-            u8::from(recruiter.has_trait(TraitKind::Charismatic))
-                .saturating_mul(definition.charismatic_recruiter_bonus()),
-        )
-        .min(100);
+    let recruiter_influence = u16::from(base_influence)
+        + u16::from(recruiter.has_trait(TraitKind::Charismatic))
+            * u16::from(definition.charismatic_recruiter_bonus());
+    let recruiter_influence =
+        u8::try_from(recruiter_influence.min(100)).expect("bounded recruiter influence fits u8");
 
     let drive_alignment = definition
         .drives_for_approach(approach)
@@ -87,18 +86,17 @@ pub(crate) fn recruitment_relationship_support(
     dimensions: RelationshipDimensions,
 ) -> u8 {
     let weights = definition.relationships().recruiter_support;
-    let positive_relationship = u16::from(dimensions.trust.value())
-        .saturating_mul(u16::from(weights.trust_weight))
-        + u16::from(dimensions.respect.value()).saturating_mul(u16::from(weights.respect_weight))
-        + u16::from(dimensions.affection.value())
-            .saturating_mul(u16::from(weights.affection_weight))
-        + u16::from(dimensions.debt.value()).saturating_mul(u16::from(weights.debt_weight));
-    let positive = u8::try_from(positive_relationship / u16::from(weights.divisor))
+    let positive_relationship = u32::from(dimensions.trust.value())
+        * u32::from(weights.trust_weight)
+        + u32::from(dimensions.respect.value()) * u32::from(weights.respect_weight)
+        + u32::from(dimensions.affection.value()) * u32::from(weights.affection_weight)
+        + u32::from(dimensions.debt.value()) * u32::from(weights.debt_weight);
+    let positive = u8::try_from(positive_relationship / u32::from(weights.divisor))
         .expect("bounded relationship support must fit u8")
         .min(100);
     let fear_penalty = u8::try_from(
-        u16::from(dimensions.fear.value()).saturating_mul(u16::from(weights.fear_penalty_weight))
-            / u16::from(weights.fear_penalty_divisor),
+        u32::from(dimensions.fear.value()) * u32::from(weights.fear_penalty_weight)
+            / u32::from(weights.fear_penalty_divisor),
     )
     .expect("bounded relationship fear penalty must fit u8");
     positive.saturating_sub(fear_penalty)
@@ -109,14 +107,11 @@ pub(crate) fn recruitment_incumbent_factors(
     dimensions: RelationshipDimensions,
 ) -> (u8, u8) {
     let weights = definition.relationships().incumbent_attachment;
-    let attachment = (u16::from(dimensions.trust.value())
-        .saturating_mul(u16::from(weights.trust_weight))
-        + u16::from(dimensions.respect.value()).saturating_mul(u16::from(weights.respect_weight))
-        + u16::from(dimensions.affection.value())
-            .saturating_mul(u16::from(weights.affection_weight))
-        + u16::from(dimensions.dependence.value())
-            .saturating_mul(u16::from(weights.dependence_weight)))
-        / u16::from(weights.divisor);
+    let attachment = (u32::from(dimensions.trust.value()) * u32::from(weights.trust_weight)
+        + u32::from(dimensions.respect.value()) * u32::from(weights.respect_weight)
+        + u32::from(dimensions.affection.value()) * u32::from(weights.affection_weight)
+        + u32::from(dimensions.dependence.value()) * u32::from(weights.dependence_weight))
+        / u32::from(weights.divisor);
     (
         u8::try_from(attachment).expect("bounded incumbent attachment must fit u8"),
         dimensions.resentment.value(),
@@ -267,7 +262,8 @@ fn perceived_legal_pressure_score(
     let base = (reliability + specificity) / 2;
     let age = at
         .as_minutes()
-        .saturating_sub(information.observed_at().as_minutes());
+        .checked_sub(information.observed_at().as_minutes())
+        .expect("recruitment pressure information must not postdate its scoring instant");
     let max_age = u64::from(definition.perceived_legal_pressure_max_age().as_minutes());
     let remaining = max_age.saturating_sub(age);
     u8::try_from(u64::from(base) * remaining / max_age)
@@ -298,7 +294,8 @@ pub(crate) fn candidate_pressure_information_ids(
                 // rather than retaining mechanically irrelevant knowledge forever.
                 && at
                     .as_minutes()
-                    .saturating_sub(information.observed_at().as_minutes())
+                    .checked_sub(information.observed_at().as_minutes())
+                    .expect("filtered recruitment information must not postdate the snapshot")
                     < max_age
         })
         .map(InformationRecord::id)

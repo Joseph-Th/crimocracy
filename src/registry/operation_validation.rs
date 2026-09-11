@@ -6,6 +6,7 @@
 
 use super::builder::RegistryBuildError;
 use super::definitions::{OperationDefinition, OperationExecutionDefinition};
+use crate::core::time::DAY_MINUTES_U16;
 use crate::operations::OperationKind;
 
 pub(super) fn validate_operation_definition(
@@ -163,7 +164,9 @@ fn maximum_reachable_time_pressure(
         .police_response
         .entry_offset
         .map_or(0, |offset| offset.as_minutes());
-    let minimum_executable_window = entry_offset.saturating_add(1);
+    let minimum_executable_window = entry_offset
+        .checked_add(1)
+        .expect("validated operation entry offset must leave a representable execution minute");
     let available = minimum_available
         .unwrap_or(0)
         .max(minimum_executable_window);
@@ -194,7 +197,11 @@ fn validate_intelligence(
         .intelligence
         .patrol_observation_bucket
         .as_minutes();
-    if patrol_bucket == 0 || patrol_bucket > 1_440 || 1_440 % patrol_bucket != 0 {
+    let day_minutes = u32::from(DAY_MINUTES_U16);
+    if patrol_bucket == 0
+        || patrol_bucket > day_minutes
+        || !day_minutes.is_multiple_of(patrol_bucket)
+    {
         return Err(RegistryBuildError::InvalidOperationPatrolObservationBucket(
             kind,
         ));
@@ -318,7 +325,9 @@ fn validate_police_response(
         return Err(RegistryBuildError::InvalidOperationResponseDelay(kind));
     }
     if u32::from(execution.police_response.patrol_reduction_minutes)
-        > base_delay.saturating_sub(minimum_delay)
+        > base_delay
+            .checked_sub(minimum_delay)
+            .expect("minimum response delay was validated not to exceed base delay")
     {
         return Err(RegistryBuildError::InvalidOperationResponseReduction(kind));
     }

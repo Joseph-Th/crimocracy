@@ -188,10 +188,7 @@ pub struct DecisionRequestRecord {
 }
 
 impl DecisionRequestRecord {
-    pub(crate) fn from_resolved(
-        parts: DecisionRecordParts,
-        resolution: DecisionResolution,
-    ) -> Self {
+    fn from_resolved(parts: DecisionRecordParts, resolution: DecisionResolution) -> Self {
         let mut record = Self::from(parts);
         record.lifecycle = DecisionLifecycle::Resolved(resolution);
         record.version = 2;
@@ -417,7 +414,7 @@ impl DecisionState {
         record.version = advance_version_preflighted(record.version);
     }
 
-    pub(crate) fn cancel(&mut self, id: DecisionRequestId, cancellation: DecisionCancellation) {
+    fn cancel(&mut self, id: DecisionRequestId, cancellation: DecisionCancellation) {
         self.remove_pending_indexes(id);
         let record = self
             .records
@@ -546,7 +543,7 @@ impl DecisionState {
     }
 }
 
-pub(crate) fn build_cancellation(
+fn build_cancellation(
     cancelled_at: SimTime,
     reason: DecisionCancellationReason,
 ) -> DecisionCancellation {
@@ -575,7 +572,7 @@ pub struct RecruitmentApprovalRequestDraft {
     pub summary: String,
 }
 
-pub(crate) fn build_recruitment_approval_context(
+fn build_recruitment_approval_context(
     target_organization: OrganizationId,
     recruiter: CharacterId,
     candidate: CharacterId,
@@ -591,7 +588,7 @@ pub(crate) fn build_recruitment_approval_context(
     })
 }
 
-pub(crate) fn build_recruitment_approval_authority_snapshot(
+fn build_recruitment_approval_authority_snapshot(
     authority: MandateAuthority,
     mandate_version: u32,
     manager_version: u32,
@@ -605,12 +602,12 @@ pub(crate) fn build_recruitment_approval_authority_snapshot(
     }
 }
 
-pub(crate) struct DecisionRecordParts {
-    pub id: DecisionRequestId,
-    pub recipient: OrganizationId,
-    pub draft: DecisionRequestDraft,
-    pub requested_at: SimTime,
-    pub options: BTreeSet<DecisionResponse>,
+struct DecisionRecordParts {
+    id: DecisionRequestId,
+    recipient: OrganizationId,
+    draft: DecisionRequestDraft,
+    requested_at: SimTime,
+    options: BTreeSet<DecisionResponse>,
 }
 
 impl From<DecisionRecordParts> for DecisionRequestRecord {
@@ -643,7 +640,7 @@ impl From<DecisionRecordParts> for DecisionRequestRecord {
     }
 }
 
-pub(crate) fn build_resolution(
+fn build_resolution(
     response: DecisionResponse,
     resolved_at: SimTime,
     resolved_by: OrganizationId,

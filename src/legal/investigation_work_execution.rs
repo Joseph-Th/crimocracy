@@ -739,8 +739,8 @@ pub(crate) fn resolve_source_support(
             .ok_or(InvestigationWorkError::InvalidFocus)?;
         return Ok(witness_cooperation_support(support, witness.cooperation()));
     }
-    let mut total = 0_u32;
-    let mut count = 0_u32;
+    let mut total = 0_u64;
+    let mut count = 0_u64;
     for evidence_id in work.source_evidence() {
         let evidence = state
             .legal
@@ -749,15 +749,14 @@ pub(crate) fn resolve_source_support(
         if evidence.investigation() != work.investigation() {
             return Err(InvestigationWorkError::InvalidSourceEvidence(*evidence_id));
         }
-        total = total
-            .saturating_add(u32::from(support.strength_score(evidence.strength())))
-            .saturating_add(u32::from(support.reliability_score(evidence.reliability())))
-            .saturating_add(u32::from(
-                support.admissibility_score(evidence.admissibility()),
-            ));
-        count = count.saturating_add(3);
+        total += u64::from(support.strength_score(evidence.strength()))
+            + u64::from(support.reliability_score(evidence.reliability()))
+            + u64::from(support.admissibility_score(evidence.admissibility()));
+        count += 3;
     }
-    let average = total.checked_div(count).unwrap_or(0);
+    let average = total
+        .checked_div(count)
+        .expect("evidence-review work must retain at least one source evidence record");
     Ok(
         Rating::try_new(u8::try_from(average).expect("evidence support average must fit u8"))
             .expect("bounded evidence support average must be a valid rating"),

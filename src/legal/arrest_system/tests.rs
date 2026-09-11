@@ -1774,7 +1774,7 @@ fn detention_preserves_formal_supervision_but_blocks_new_supervisory_work() {
 }
 
 #[test]
-fn custody_defers_authorized_operation_until_participant_release() {
+fn custody_aborts_authorized_operation_before_start() {
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
     use crate::world::world_system::{insert_business, insert_neighborhood};
@@ -1862,7 +1862,7 @@ fn custody_defers_authorized_operation_until_participant_release() {
     )
     .expect("custody should validate despite the future operation booking")
     .commit(&mut fixture.state)
-    .expect("custody should preserve an operation that has not started");
+    .expect("custody should abort an operation whose participant can no longer execute it");
     assert!(
         fixture
             .state
@@ -1875,44 +1875,61 @@ fn custody_defers_authorized_operation_until_participant_release() {
         .state
         .operations()
         .get_operation(operation)
-        .expect("authorized operation should persist");
+        .expect("aborted operation should persist");
     assert_eq!(
         operation_record.status(),
-        crate::operations::OperationStatus::Authorized
+        crate::operations::OperationStatus::Aborted
     );
-    validate_state(&fixture.state)
-        .expect("detention may coexist with an authorized operation that has not started");
-
-    let blocked_tick = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
-    assert!(blocked_tick.started_operations.is_empty());
+    let abort = operation_record
+        .abort_record()
+        .expect("custody preemption should persist an abort cause");
     assert_eq!(
+        abort.phase(),
+        crate::operations::OperationAbortPhase::BeforeStart
+    );
+    assert_eq!(
+        abort.cause(),
+        crate::operations::OperationAbortCause::ParticipantDetained(fixture.suspect)
+    );
+    assert_eq!(
+        abort
+            .artifacts()
+            .expect("custody cancellation should explain itself through durable artifacts")
+            .report(),
         fixture
             .state
-            .operations()
-            .get_operation(operation)
-            .expect("deferred operation should persist")
-            .status(),
-        crate::operations::OperationStatus::Authorized,
-        "detention is temporary unavailability, not a before-start operation failure"
+            .reports()
+            .reports_for(
+                fixture
+                    .state
+                    .world()
+                    .get_character(fixture.suspect)
+                    .and_then(|record| record.organization())
+                    .expect("suspect should retain criminal membership")
+            )
+            .last()
+            .expect("custody cancellation should create a player-facing report")
+            .id()
     );
 
     let maximum_detention = fixture.registry.legal().maximum_detention();
     fixture.state.advance_clock(SimDuration::from_minutes(
-        maximum_detention.as_minutes() - 2,
+        maximum_detention.as_minutes() - 1,
     ));
     let released_tick = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
     assert_eq!(released_tick.custody_releases, vec![arrest]);
-    assert_eq!(released_tick.started_operations, vec![operation]);
+    assert!(released_tick.started_operations.is_empty());
     assert_eq!(
         fixture
             .state
             .operations()
             .get_operation(operation)
-            .expect("released operation should persist")
+            .expect("aborted operation should remain durable after release")
             .status(),
-        crate::operations::OperationStatus::InProgress
+        crate::operations::OperationStatus::Aborted,
+        "release must not resurrect a plan invalidated by a prior arrest"
     );
-    validate_state(&fixture.state).expect("deferred custody operation state should validate");
+    validate_state(&fixture.state).expect("custody-cancelled operation state should validate");
     validate_invariants(&fixture.state);
 }
 

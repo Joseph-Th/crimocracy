@@ -167,10 +167,11 @@ fn resolve_take_cents(
     for hit_at in recent_hits {
         let age = reference_at
             .as_minutes()
-            .saturating_sub(hit_at.as_minutes())
+            .checked_sub(hit_at.as_minutes())
+            .expect("recent-take index must not return a future operation")
             .min(window_minutes);
         let unrecovered = window_minutes.saturating_sub(age);
-        let depletion = depletion_span.saturating_mul(unrecovered) / window_minutes;
+        let depletion = depletion_span * unrecovered / window_minutes;
         let value_basis_points = 10_000_u64.saturating_sub(depletion);
         value = value
             .checked_mul(i128::from(value_basis_points))
