@@ -5,7 +5,7 @@ use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::intelligence::{CaseActivitySignal, Reliability, Specificity};
+use crate::intelligence::{CaseActivitySignal, LegalPersonStatusSignal, Reliability, Specificity};
 use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
@@ -75,6 +75,35 @@ fn typed_signal_rejects_incompatible_topic_without_mutation() {
             subject: EntityRef::Organization(organization),
         }
     );
+    assert_eq!(state.intelligence().information().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
+fn detention_signal_rejects_missing_arrest_without_mutation() {
+    let (_registry, state, organization, character) = make_transfer_fixture();
+    let missing_arrest = ArrestId::from_raw(999);
+    let error = match validate_record_information_with_signal(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(character),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "A detention claim must identify a persisted arrest episode.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
+            arrest: missing_arrest,
+        }),
+    ) {
+        Ok(_) => panic!("typed detention knowledge cannot reference a missing arrest"),
+        Err(error) => error,
+    };
+    assert_eq!(error, IntelligenceError::MissingArrest(missing_arrest));
     assert_eq!(state.intelligence().information().count(), 0);
     validate_invariants(&state);
 }

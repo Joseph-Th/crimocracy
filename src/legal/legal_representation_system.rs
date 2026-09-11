@@ -21,10 +21,11 @@ use crate::finance::finance_system::{
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_record_information,
+    validate_record_information_with_signal,
 };
 use crate::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    LegalPersonStatusSignal, Reliability, Specificity,
 };
 use crate::legal::{
     ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
@@ -332,7 +333,7 @@ pub fn validate_retain_legal_representation(
         defendant.name(),
         draft.fee,
     );
-    let information = validate_record_information(
+    let information = validate_record_information_with_signal(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(draft.sponsor),
@@ -345,6 +346,9 @@ pub fn validate_retain_legal_representation(
             specificity: Specificity::Precise,
             summary: summary.clone(),
         },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
+            arrest: draft.arrest,
+        }),
     )?;
     let report = validate_record_report(
         state,

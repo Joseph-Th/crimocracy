@@ -623,25 +623,50 @@ impl ValidatedInvestigatorAssignment {
         )?;
         // Taking the lead seat is a material case-activity fact: the new lead personally
         // knows the case is active. Prepared before mutation; committed after the role write.
-        let knowledge = crate::legal::case_knowledge::prepare_case_activity_knowledge(
+        let activity_knowledge = crate::legal::case_knowledge::prepare_case_activity_knowledge(
             state,
             self.investigation,
             crate::intelligence::CaseActivitySignal::Active,
             self.investigator,
         )?;
-        if knowledge.is_some() {
-            // Case staffing and its lead's first-hand activity knowledge are one logical
-            // transaction. Preflight the only allocation before the lead/index mutation so
-            // allocator exhaustion cannot leave a staffed case behind an error return.
-            state.ids.reserve(IdKind::Information, 1)?;
+        let witness_knowledge: Vec<_> = state
+            .legal
+            .case_witnesses_for_investigation(self.investigation)
+            .map(|witness| {
+                crate::legal::case_knowledge::prepare_case_witness_knowledge(
+                    state,
+                    self.investigation,
+                    witness.witness(),
+                    self.investigator,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let information_count = usize::from(activity_knowledge.is_some()) + witness_knowledge.len();
+        if information_count != 0 {
+            // Staffing and the lead's first-hand case knowledge are one logical transaction.
+            // Preflight every information allocation before the lead/index mutation so allocator
+            // exhaustion cannot leave a staffed case behind an error return.
+            state.ids.reserve(
+                IdKind::Information,
+                u32::try_from(information_count)
+                    .expect("persisted case-witness count must fit the information ID space"),
+            )?;
         }
         state
             .legal
             .set_lead_investigator(self.investigation, self.investigator);
-        if let Some(knowledge) = knowledge {
+        if let Some(knowledge) = activity_knowledge {
             knowledge
                 .commit(state)
                 .expect("case-activity information ID was preflighted before staffing mutation");
+        }
+        for knowledge in witness_knowledge {
+            knowledge
+                .commit(state)
+                .expect("case-witness information IDs were preflighted before staffing mutation");
         }
         Ok(())
     }

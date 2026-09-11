@@ -327,7 +327,14 @@ impl LegalState {
                 .informants
                 .by_character_handler
                 .get(&(informant.character(), informant.handler()));
-            if pair_index != Some(&id) {
+            if pair_index != Some(&id)
+                || !self
+                    .indexes
+                    .informants
+                    .by_handler
+                    .get(&informant.handler())
+                    .is_some_and(|ids| ids.contains(&id))
+            {
                 return false;
             }
         }
@@ -338,6 +345,17 @@ impl LegalState {
                 .is_some_and(|record| (record.character(), record.handler()) == *key)
             {
                 return false;
+            }
+        }
+        for (handler, ids) in &self.indexes.informants.by_handler {
+            for id in ids {
+                if !self
+                    .informants
+                    .get(id)
+                    .is_some_and(|record| record.handler() == *handler)
+                {
+                    return false;
+                }
             }
         }
         for disclosure in self.informant_disclosures.values() {

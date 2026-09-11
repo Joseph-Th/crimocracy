@@ -18,6 +18,7 @@ use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
+use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::police_response_integration::{
     OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
@@ -163,7 +164,7 @@ pub enum OperationError {
     SimulationTimeOverflow,
     #[error("operation completion deadline leaves no executable window after begin/entry")]
     DeadlineLeavesNoExecutionWindow,
-    #[error("plan lacks required {0:?} intelligence")]
+    #[error("plan lacks usable required {0:?} intelligence at its earliest planned start")]
     MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
     #[error("business {0} has no active operating economy to disrupt")]
     TargetWithoutOperatingEconomy(crate::core::id::BusinessId),
@@ -365,6 +366,12 @@ impl<'registry> ValidatedOperation<'registry> {
                 });
             }
         }
+        validate_authorization_constraints(
+            self.registry,
+            state,
+            self.registry.get_operation(self.draft.kind),
+            &self.draft,
+        )?;
 
         let OperationDraft {
             title,
@@ -510,7 +517,7 @@ pub fn validate_authorize_operation<'registry>(
         &draft.constraints,
     )?;
     validate_extraction_custody_window(registry, state, &draft, extraction_arrest, state.now())?;
-    validate_authorization_constraints(state, &draft)?;
+    validate_authorization_constraints(registry, state, definition, &draft)?;
     validate_authorization_contingencies(definition, &draft)?;
 
     Ok(ValidatedOperation {
@@ -600,20 +607,35 @@ fn validate_authorization_intelligence(
 }
 
 fn validate_authorization_constraints(
+    registry: &Registry,
     state: &AppState,
+    definition: &OperationDefinition,
     draft: &OperationDraft,
 ) -> Result<(), OperationError> {
+    let planning_at = earliest_operation_start_from_authorization(state.now(), draft.scheduled_for);
+    let max_age = u64::from(definition.execution().max_intelligence_age().as_minutes());
     for constraint in &draft.constraints {
         match constraint {
             crate::operations::OperationConstraint::CompleteBy(_) => {}
             crate::operations::OperationConstraint::RequireIntelligenceTopic(topic) => {
                 // Reconnaissance prerequisite: organization-held intelligence of exactly this
-                // topic, already validated for objective relevance, must back the plan.
+                // topic, already validated for objective relevance, must still have nonzero
+                // canonical planning value when the operation can first begin. A stale record
+                // must not satisfy the constraint after the execution model has already reduced
+                // that same information to zero usefulness.
                 let covered = draft.intelligence.iter().any(|information| {
                     state
                         .intelligence
                         .get_information(*information)
-                        .is_some_and(|record| record.topic() == *topic)
+                        .is_some_and(|record| {
+                            record.topic() == *topic
+                                && resolve_information_score(
+                                    registry.information_quality(),
+                                    record,
+                                    planning_at,
+                                    max_age,
+                                ) > 0
+                        })
                 });
                 if !covered {
                     return Err(OperationError::MissingRequiredIntelligenceTopic(*topic));

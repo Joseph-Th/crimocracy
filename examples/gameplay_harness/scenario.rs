@@ -940,9 +940,10 @@ pub fn observe_case_activity_information(record: &InformationRecord) -> Option<b
         Some(InformationSignal::CaseActivity(
             CaseActivitySignal::Shelved | CaseActivitySignal::Closed,
         )) => Some(false),
-        Some(InformationSignal::PersonnelPresence { .. }) => None,
-        Some(InformationSignal::PatrolPattern { .. }) => None,
-        None => None,
+        Some(InformationSignal::LegalPersonStatus(_))
+        | Some(InformationSignal::PersonnelPresence { .. })
+        | Some(InformationSignal::PatrolPattern { .. })
+        | None => None,
     }
 }
 

@@ -157,6 +157,12 @@ impl LegalState {
                 .informants
                 .by_character_handler
                 .insert((informant.character(), informant.handler()), informant.id());
+            self.indexes
+                .informants
+                .by_handler
+                .entry(informant.handler())
+                .or_default()
+                .insert(informant.id());
         }
         for disclosure in self.informant_disclosures.values() {
             self.indexes

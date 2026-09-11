@@ -1,7 +1,7 @@
 //! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::{CharacterId, IdExhaustionError, InformationId, OrganizationId};
+use crate::core::id::{ArrestId, CharacterId, IdExhaustionError, InformationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::intelligence::{
     InformationDraft, InformationRecord, InformationSignal, InformationSourceKind,
@@ -20,6 +20,8 @@ pub enum IntelligenceError {
     MissingOrganization(OrganizationId),
     #[error("information record {0} does not exist")]
     MissingInformation(InformationId),
+    #[error("arrest {0} does not exist")]
+    MissingArrest(ArrestId),
     #[error("entity {0:?} does not exist")]
     MissingEntity(EntityRef),
     #[error("observation time cannot be later than the current simulation time")]
@@ -255,6 +257,13 @@ fn validate_information_signal(
             topic: draft.topic,
             subject: draft.subject,
         });
+    }
+    if let InformationSignal::LegalPersonStatus(
+        crate::intelligence::LegalPersonStatusSignal::Detained { arrest },
+    ) = signal
+        && state.legal.get_arrest(*arrest).is_none()
+    {
+        return Err(IntelligenceError::MissingArrest(*arrest));
     }
     for entity in signal.referenced_entities() {
         if !is_entity_present(state, entity) {

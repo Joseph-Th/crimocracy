@@ -10,7 +10,9 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
-use crate::intelligence::{InformationRecord, InformationSourceKind, KnowledgeHolder};
+use crate::intelligence::{
+    InformationRecord, InformationSignal, InformationSourceKind, KnowledgeHolder,
+};
 use crate::registry::Registry;
 use crate::social::RelationshipRecord;
 use crate::world::{
@@ -353,6 +355,15 @@ fn validate_information(
     }
     if let Some(signal) = information.signal() {
         if !signal.is_compatible(information.topic(), information.subject()) {
+            return Err(StateValidationError::InvalidInformationSignal {
+                information: information.id(),
+            });
+        }
+        if let InformationSignal::LegalPersonStatus(
+            crate::intelligence::LegalPersonStatusSignal::Detained { arrest },
+        ) = signal
+            && state.legal.get_arrest(*arrest).is_none()
+        {
             return Err(StateValidationError::InvalidInformationSignal {
                 information: information.id(),
             });

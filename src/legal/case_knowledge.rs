@@ -1,10 +1,10 @@
-//! Investigator-held case-activity knowledge: the institutional side of counterintelligence.
+//! Investigator-held case activity and witness-identity knowledge: the institutional side of counterintelligence.
 //!
-//! When a detective takes over a case they personally know its activity status, and when the
-//! institution shelves or closes that case the knowledge is refreshed. The knowledge lives as
-//! ordinary provenance-bearing information held by the investigator character, so every consumer
-//! — a police-channel institutional contact, a surveillance read of the precinct, a future
-//! informant — reaches it through the canonical intelligence paths instead of case-graph reads.
+//! When a detective takes over a case they personally know its activity status and every already
+//! registered witness; later witness registration likewise informs the current lead. When the
+//! institution shelves or closes that case, activity knowledge is refreshed. The knowledge lives
+//! as ordinary provenance-bearing information held by the investigator character, so every
+//! consumer reaches it through canonical intelligence paths instead of case-graph reads.
 //! Summaries use consistent activity phrasing for presentation. Authoritative status remains the
 //! typed `InvestigationStatus` on the legal owner; prose is never parsed back into domain state.
 
@@ -17,7 +17,7 @@ use crate::intelligence::intelligence_system::{
 };
 use crate::intelligence::{
     CaseActivitySignal, InformationDraft, InformationSignal, InformationSourceKind,
-    InformationTopic, KnowledgeHolder, Reliability, Specificity,
+    InformationTopic, KnowledgeHolder, LegalPersonStatusSignal, Reliability, Specificity,
 };
 use crate::legal::InvestigationStatus;
 use crate::world::OrganizationKind;
@@ -101,6 +101,59 @@ pub(crate) fn prepare_case_activity_knowledge(
     };
     validate_record_information_with_signal(state, draft, InformationSignal::CaseActivity(activity))
         .map(Some)
+}
+
+/// Builds first-hand knowledge that a staffed law-enforcement case has registered a named
+/// witness. This deliberately lives on the lead investigator rather than the institution so a
+/// police contact can disclose it through the same provenance-preserving path as case activity.
+/// Registration and later lead assignment both call this helper, covering either event order.
+pub(crate) fn prepare_case_witness_knowledge(
+    state: &AppState,
+    investigation: InvestigationId,
+    witness: CharacterId,
+    lead: CharacterId,
+) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
+{
+    let record = state
+        .legal
+        .get_investigation(investigation)
+        .expect("case-witness knowledge must reference a persisted investigation");
+    let owner = record.owner();
+    let organization = state
+        .world
+        .get_organization(owner)
+        .expect("investigation owner must reference a persisted organization");
+    if organization.kind() != OrganizationKind::LawEnforcement {
+        return Ok(None);
+    }
+    let witness_name = state
+        .world
+        .get_character(witness)
+        .expect("case witness must reference a persisted character")
+        .name()
+        .to_owned();
+    let draft = InformationDraft {
+        holder: KnowledgeHolder::Character(lead),
+        source_kind: InformationSourceKind::DirectObservation,
+        topic: InformationTopic::LegalActivity,
+        source_entity: Some(EntityRef::Organization(owner)),
+        subject: EntityRef::Character(witness),
+        observed_at: state.now(),
+        reliability: Reliability::DirectAccess,
+        specificity: Specificity::Precise,
+        summary: format!(
+            "Case witness identified: {witness_name} is registered in case \"{}\".",
+            record.title()
+        ),
+    };
+    validate_record_information_with_signal(
+        state,
+        draft,
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        }),
+    )
+    .map(Some)
 }
 
 /// Convenience mapping for callers that hold an `InvestigationStatus` (for example the

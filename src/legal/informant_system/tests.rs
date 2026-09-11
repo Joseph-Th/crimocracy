@@ -320,6 +320,7 @@ fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins
 
 #[test]
 fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
+    let registry = build_registry();
     let mut fixture = fixture();
     let informant = validate_establish_informant(
         &fixture.state,
@@ -358,8 +359,16 @@ fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
     assert_eq!(first.source_information(), information);
     assert_eq!(first.investigation(), fixture.investigation);
 
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("partially disclosed informant state should save");
+    let bytes = bincode::serialize(&envelope).expect("informant save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("informant save should deserialize");
+    fixture.state = restore_save(&registry, decoded)
+        .expect("informant state should restore with disclosure indexes rebuilt");
+
     let second_pass = apply_informant_disclosures(&mut fixture.state)
-        .expect("second disclosure pass should resolve");
+        .expect("second disclosure pass should resume through rebuilt indexes");
     assert_eq!(second_pass.len(), 1);
     let second = fixture
         .state

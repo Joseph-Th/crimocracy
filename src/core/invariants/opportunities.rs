@@ -8,6 +8,9 @@ use crate::intelligence::KnowledgeHolder;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::OperationExposureLevel;
 use crate::operations::operation_system::is_valid_operation_objective;
+use crate::opportunities::opportunity_system::{
+    source_information_is_usable, source_information_proves_operation_basis,
+};
 use crate::opportunities::{OpportunityRecord, OpportunityResolution};
 use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
@@ -71,11 +74,47 @@ pub(super) fn validate_opportunities_against_registry(
                 }
             }
         });
+        let every_target_has_usable_source = context.targets().iter().all(|target| {
+            opportunity.source_information().iter().any(|source| {
+                state
+                    .intelligence
+                    .get_information(*source)
+                    .is_some_and(|information| {
+                        information.subject() == *target
+                            && source_information_is_usable(
+                                registry,
+                                kind,
+                                information,
+                                opportunity.discovered_at(),
+                            )
+                    })
+            })
+        });
+        let has_supported_action_basis = context.targets().iter().any(|target| {
+            opportunity.source_information().iter().any(|source| {
+                state
+                    .intelligence
+                    .get_information(*source)
+                    .is_some_and(|information| {
+                        information.subject() == *target
+                            && source_information_proves_operation_basis(
+                                registry,
+                                state,
+                                kind,
+                                *target,
+                                information,
+                                opportunity.discovered_at(),
+                            )
+                    })
+            })
+        });
         let report = state
             .reports
             .get_report(opportunity.report())
             .ok_or_else(|| invalid_opportunity(opportunity))?;
         if !has_authored_target
+            || !every_target_has_usable_source
+            || !has_supported_action_basis
             || report.title()
                 != crate::opportunities::opportunity_system::discovery_report_title(
                     definition.display_name(),

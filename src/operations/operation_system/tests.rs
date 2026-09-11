@@ -1844,6 +1844,27 @@ fn require_intelligence_topic_constraint_gates_authorization() {
     .expect("target-security information should record")
     .commit(&mut state)
     .expect("target-security information should commit");
+
+    // Information that will have decayed to zero canonical planning value by the planned start
+    // cannot satisfy a reconnaissance prerequisite merely because the record still exists.
+    let mut stale_draft = draft.clone();
+    stale_draft.intelligence.insert(covering);
+    stale_draft.scheduled_for = state
+        .now()
+        .checked_add(
+            registry
+                .get_operation(OperationKind::Sabotage)
+                .execution()
+                .max_intelligence_age(),
+        )
+        .expect("test schedule should fit simulation time");
+    let error = validate_authorize_operation(&registry, &state, stale_draft)
+        .expect_err("zero-value intelligence at the planned start must not satisfy the constraint");
+    assert_eq!(
+        error,
+        OperationError::MissingRequiredIntelligenceTopic(InformationTopic::TargetSecurity)
+    );
+
     draft.intelligence.insert(covering);
     let validated = validate_authorize_operation(&registry, &state, draft)
         .expect("covered plan should authorize");

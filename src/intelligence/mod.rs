@@ -3,7 +3,9 @@
 pub mod intelligence_system;
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, IdKeyedBounds, InformationId, OrganizationId};
+use crate::core::id::{
+    ArrestId, CharacterId, IdKeyedBounds, InformationId, InvestigationId, OrganizationId,
+};
 use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,6 +62,7 @@ pub enum InformationTopic {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum InformationSignal {
     CaseActivity(CaseActivitySignal),
+    LegalPersonStatus(LegalPersonStatusSignal),
     PersonnelPresence {
         characters: BTreeSet<CharacterId>,
     },
@@ -81,6 +84,10 @@ impl InformationSignal {
                             | EntityRef::Enterprise(_)
                     )
             }
+            Self::LegalPersonStatus(_) => {
+                matches!(topic, InformationTopic::LegalActivity)
+                    && matches!(subject, EntityRef::Character(_))
+            }
             Self::PersonnelPresence { characters } => {
                 !characters.is_empty()
                     && matches!(topic, InformationTopic::Personnel)
@@ -98,6 +105,10 @@ impl InformationSignal {
     pub(crate) fn referenced_entities(&self) -> Vec<EntityRef> {
         match self {
             Self::CaseActivity(_) => Vec::new(),
+            Self::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness { investigation }) => {
+                vec![EntityRef::Investigation(*investigation)]
+            }
+            Self::LegalPersonStatus(LegalPersonStatusSignal::Detained { .. }) => Vec::new(),
             Self::PersonnelPresence { characters } => characters
                 .iter()
                 .copied()
@@ -147,6 +158,15 @@ pub enum CaseActivitySignal {
     Active,
     Shelved,
     Closed,
+}
+
+/// A concrete legal role or custody fact about a person, bound to the legal episode the holder
+/// learned about. These values do not assert current world truth by themselves; consumers that
+/// act on them must still validate the corresponding current legal state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LegalPersonStatusSignal {
+    CaseWitness { investigation: InvestigationId },
+    Detained { arrest: ArrestId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +273,8 @@ pub struct IntelligenceState {
     #[serde(skip)]
     by_holder_topic: BTreeMap<(KnowledgeHolder, InformationTopic), BTreeSet<InformationId>>,
     #[serde(skip)]
+    by_holder_subject: BTreeMap<(KnowledgeHolder, EntityRef), BTreeSet<InformationId>>,
+    #[serde(skip)]
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
     #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
@@ -268,6 +290,7 @@ impl IntelligenceState {
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.by_holder.clear();
         self.by_holder_topic.clear();
+        self.by_holder_subject.clear();
         self.by_subject.clear();
         self.derived_by_source.clear();
         self.internal_transfer_by_source_recipient.clear();
@@ -279,6 +302,10 @@ impl IntelligenceState {
                 .insert(id);
             self.by_holder_topic
                 .entry((record.holder(), record.topic()))
+                .or_default()
+                .insert(id);
+            self.by_holder_subject
+                .entry((record.holder(), record.subject()))
                 .or_default()
                 .insert(id);
             self.by_subject
@@ -332,6 +359,21 @@ impl IntelligenceState {
                     .expect("information holder-topic index must reference information")
             })
     }
+    pub(crate) fn information_for_holder_subject(
+        &self,
+        holder: KnowledgeHolder,
+        subject: EntityRef,
+    ) -> impl Iterator<Item = &InformationRecord> {
+        self.by_holder_subject
+            .get(&(holder, subject))
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("information holder-subject index must reference information")
+            })
+    }
     pub(crate) fn internal_transfer_for(
         &self,
         source: InformationId,
@@ -375,6 +417,10 @@ impl IntelligenceState {
             .entry((record.holder(), record.topic()))
             .or_default()
             .insert(id);
+        self.by_holder_subject
+            .entry((record.holder(), record.subject()))
+            .or_default()
+            .insert(id);
         self.by_subject
             .entry(record.subject())
             .or_default()
@@ -410,6 +456,7 @@ impl IntelligenceState {
         // equal the expected totals only when no stale, duplicate, or foreign entry exists.
         let mut expected_holder_entries = 0_usize;
         let mut expected_holder_topic_entries = 0_usize;
+        let mut expected_holder_subject_entries = 0_usize;
         let mut expected_subject_entries = 0_usize;
         let mut expected_source_entries = 0_usize;
         for (stored_id, record) in &self.records {
@@ -431,9 +478,13 @@ impl IntelligenceState {
                 return false;
             }
             if !self
-                .by_subject
-                .get(&record.subject())
+                .by_holder_subject
+                .get(&(record.holder(), record.subject()))
                 .is_some_and(|ids| ids.contains(&record.id()))
+                || !self
+                    .by_subject
+                    .get(&record.subject())
+                    .is_some_and(|ids| ids.contains(&record.id()))
             {
                 return false;
             }
@@ -449,6 +500,7 @@ impl IntelligenceState {
             }
             expected_holder_entries += 1;
             expected_holder_topic_entries += 1;
+            expected_holder_subject_entries += 1;
             expected_subject_entries += 1;
             expected_source_entries += derived_from.len();
             if record.source_kind() == InformationSourceKind::InternalReport {
@@ -475,6 +527,11 @@ impl IntelligenceState {
         let indexed_holder_topic_entries: usize =
             self.by_holder_topic.values().map(BTreeSet::len).sum();
         if indexed_holder_topic_entries != expected_holder_topic_entries {
+            return false;
+        }
+        let indexed_holder_subject_entries: usize =
+            self.by_holder_subject.values().map(BTreeSet::len).sum();
+        if indexed_holder_subject_entries != expected_holder_subject_entries {
             return false;
         }
         let indexed_subject_entries: usize = self.by_subject.values().map(BTreeSet::len).sum();

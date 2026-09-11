@@ -528,36 +528,32 @@ pub(crate) fn apply_informant_disclosures(
         }
     }
 
-    let candidates: Vec<(InformantId, InformationId, InvestigationId)> = state
-        .legal
-        .informants()
-        .flat_map(|informant| {
-            let handler = informant.handler();
-            let character = informant.character();
-            let mut pairs = Vec::new();
-            for information in state
-                .intelligence
-                .information_for_holder(KnowledgeHolder::Character(character))
-            {
-                if let Some(investigations) = cases_by_handler_subject
-                    .get(&handler)
-                    .and_then(|cases| cases.get(&information.subject()))
-                    && let Some(investigation) = investigations.iter().copied().find(|case| {
+    let mut candidates: Vec<(InformantId, InformationId, InvestigationId)> = Vec::new();
+    for (handler, cases_by_subject) in &cases_by_handler_subject {
+        for informant in state.legal.informants_for_handler(*handler) {
+            let holder = KnowledgeHolder::Character(informant.character());
+            for (subject, investigations) in cases_by_subject {
+                for information in state
+                    .intelligence
+                    .information_for_holder_subject(holder, *subject)
+                {
+                    if let Some(investigation) = investigations.iter().copied().find(|case| {
                         state
                             .legal
                             .informant_disclosure_for_case_information(*case, information.id())
                             .is_none()
-                    })
-                {
-                    // BTreeSet order makes the first not-yet-informed case deterministic. The
-                    // persisted disclosure then causes the next pass to move on to the next
-                    // relevant case rather than repeating or permanently starving it.
-                    pairs.push((informant.id(), information.id(), investigation));
+                    }) {
+                        // One fact feeds at most one matching case per pass. A later pass advances
+                        // to the next case after the disclosure index records this pair.
+                        candidates.push((informant.id(), information.id(), investigation));
+                    }
                 }
             }
-            pairs
-        })
-        .collect();
+        }
+    }
+    // Preserve the prior public ordering contract while using targeted indexes to build the
+    // candidate set: informant id, then information id, then case id.
+    candidates.sort_unstable();
 
     let mut disclosures = Vec::new();
     for (informant, information, investigation) in candidates {

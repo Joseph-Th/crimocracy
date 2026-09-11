@@ -3539,19 +3539,38 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
 
     // Custody can still end after a valid authorization. If it ends after execution starts, the
     // due resolution must become a practical objective failure, not panic because the release
-    // transaction no longer has an arrest to consume.
+    // transaction no longer has an arrest to consume. Renewed custody in this same case must be
+    // based on evidence discovered after the extraction release.
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let renewed_evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::CommunicationRecord,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("post-release evidence should validate")
+    .commit(&mut state)
+    .expect("post-release evidence should commit");
     let rearrest = crate::legal::arrest_system::validate_arrest(
         &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence, corroborating]),
+            evidence: BTreeSet::from([evidence, renewed_evidence]),
         },
     )
-    .expect("explicit re-arrest should validate")
+    .expect("evidence-backed renewed arrest should validate")
     .commit(&mut state)
-    .expect("explicit re-arrest should commit");
+    .expect("evidence-backed renewed arrest should commit");
     let stale_authorization = validate_authorize_operation(
         &registry,
         &state,
@@ -3571,19 +3590,37 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     )
     .expect("fresh custody should produce an extraction authorization token");
     crate::legal::arrest_system::validate_release_arrest(&state, rearrest)
-        .expect("first re-arrest should be releasable before authorization commit")
+        .expect("first renewed arrest should be releasable before authorization commit")
         .commit(&mut state)
-        .expect("first re-arrest release should commit");
+        .expect("first renewed arrest release should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let replacement_evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("replacement-custody evidence should validate")
+    .commit(&mut state)
+    .expect("replacement-custody evidence should commit");
     let replacement_arrest = crate::legal::arrest_system::validate_arrest(
         &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence, corroborating]),
+            evidence: BTreeSet::from([evidence, replacement_evidence]),
         },
     )
-    .expect("replacement custody should validate")
+    .expect("replacement custody should validate from newly developed evidence")
     .commit(&mut state)
     .expect("replacement custody should commit");
     let stale_error = stale_authorization
@@ -3638,16 +3675,34 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         .expect("custody should still be releasable after operation start")
         .commit(&mut state)
         .expect("external custody release should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let later_evidence = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("later-custody evidence should validate")
+    .commit(&mut state)
+    .expect("later-custody evidence should commit");
     let later_arrest = crate::legal::arrest_system::validate_arrest(
         &registry,
         &state,
         ArrestDraft {
             character: detainee,
             investigation,
-            evidence: BTreeSet::from([evidence, corroborating]),
+            evidence: BTreeSet::from([evidence, later_evidence]),
         },
     )
-    .expect("a later re-arrest is a distinct legal event")
+    .expect("new evidence makes the later re-arrest a distinct legal event")
     .commit(&mut state)
     .expect("later re-arrest should commit without retargeting the active operation");
     state.advance_clock(SimDuration::from_minutes(

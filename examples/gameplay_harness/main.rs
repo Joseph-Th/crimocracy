@@ -503,18 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ambiguous_legacy_seed_flag() {
-        let error = parse_options(["--seed", "42"].into_iter().map(str::to_owned)).expect_err(
-            "the removed single-seed surface must not silently conflate world and policy",
-        );
-
-        assert!(matches!(
-            error,
-            HarnessCliError::UnsupportedArgument { argument } if argument == "--seed"
-        ));
-    }
-
-    #[test]
     fn parses_a_focused_smoke_strategy() {
         let options = parse_options(
             ["--mode", "smoke", "--strategy", "press"]

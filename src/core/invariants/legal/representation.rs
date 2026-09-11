@@ -10,8 +10,8 @@ use crate::finance::{
     AccountKind, FinancialAccountRecord, FinancialOwner, LedgerTransactionRecord, Money,
 };
 use crate::intelligence::{
-    InformationRecord, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationRecord, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    LegalPersonStatusSignal, Reliability, Specificity,
 };
 use crate::legal::legal_representation_system::{
     ended_representation_summary, retained_representation_summary,
@@ -253,6 +253,12 @@ fn retained_artifacts_are_valid(
         && information.recorded_at() == representation.retained_at()
         && information.reliability() == Reliability::DirectAccess
         && information.specificity() == Specificity::Precise
+        && information.signal()
+            == Some(&InformationSignal::LegalPersonStatus(
+                LegalPersonStatusSignal::Detained {
+                    arrest: representation.arrest(),
+                },
+            ))
         && information.derived_from().is_empty()
         && information.summary() == expected_summary
         && report.recipient() == representation.sponsor()

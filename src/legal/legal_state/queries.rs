@@ -39,6 +39,22 @@ impl LegalState {
                     .expect("informant pair index must reference an informant")
             })
     }
+    pub(crate) fn informants_for_handler(
+        &self,
+        handler: OrganizationId,
+    ) -> impl Iterator<Item = &InformantRecord> {
+        self.indexes
+            .informants
+            .by_handler
+            .get(&handler)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.informants
+                    .get(id)
+                    .expect("informant-handler index must reference an informant")
+            })
+    }
     pub(crate) fn patrol_deployments_for_neighborhood(
         &self,
         neighborhood: NeighborhoodId,

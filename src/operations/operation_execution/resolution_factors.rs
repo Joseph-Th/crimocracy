@@ -10,6 +10,7 @@ use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
     resolve_patrol_presence_snapshot,
 };
+use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::pressureable_witness_targets;
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
@@ -545,7 +546,7 @@ pub(crate) fn resolve_intelligence_factors(
             .intelligence
             .get_information(*information)
             .expect("validated operation intelligence record must exist");
-        let score = information_score(
+        let score = resolve_information_score(
             registry.information_quality(),
             information,
             planning_at,
@@ -585,30 +586,6 @@ pub(crate) fn resolve_intelligence_factors(
         u8::try_from(covered).expect("authored intelligence topic count must fit u8"),
         u8::try_from(relevant_topics.len()).expect("authored intelligence topic count must fit u8"),
     )
-}
-
-fn information_score(
-    quality: crate::registry::InformationQualityDefinition,
-    information: &crate::intelligence::InformationRecord,
-    planning_at: SimTime,
-    max_age: u64,
-) -> u8 {
-    let reliability = u32::from(quality.reliability_score(information.reliability()));
-    let specificity = u32::from(quality.specificity_score(information.specificity()));
-    let age = planning_at
-        .as_minutes()
-        .saturating_sub(information.observed_at().as_minutes());
-    let freshness = if age >= max_age {
-        0_u32
-    } else {
-        u32::try_from((max_age - age).saturating_mul(100) / max_age)
-            .expect("bounded intelligence freshness must fit u32")
-    };
-    let score = reliability
-        .saturating_mul(specificity)
-        .saturating_mul(freshness)
-        / 10_000;
-    u8::try_from(score).expect("bounded information score must fit u8")
 }
 
 pub(crate) fn resolve_execution_margin(

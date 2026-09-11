@@ -100,6 +100,15 @@ pub enum ArrestError {
         arrest: ArrestId,
     },
     #[error(
+        "character {character} was released from arrest {prior_arrest} in investigation {investigation} at {released_at:?}; renewed custody requires a later custody minute and qualifying evidence from the release minute or later"
+    )]
+    RepeatCustodyWithoutNewEvidence {
+        character: CharacterId,
+        investigation: InvestigationId,
+        prior_arrest: ArrestId,
+        released_at: SimTime,
+    },
+    #[error(
         "investigation {investigation} changed after arrest validation; expected version {expected}, found {found}"
     )]
     StaleInvestigation {
@@ -487,8 +496,63 @@ fn validate_arrest_dependencies(
     if !assessment.has_strong_independent() {
         return Err(ArrestError::NoStrongIndependentEvidence);
     }
+    validate_repeat_custody_evidence(state, draft)?;
 
     Ok(authority)
+}
+
+fn latest_released_arrest_for_case_character(
+    state: &AppState,
+    investigation: InvestigationId,
+    character: CharacterId,
+) -> Option<&ArrestRecord> {
+    state
+        .legal
+        .arrests_for_investigation(investigation)
+        .filter(|arrest| {
+            arrest.character() == character && arrest.status() == ArrestStatus::Released
+        })
+        .max_by_key(|arrest| arrest.id())
+}
+
+fn validate_repeat_custody_evidence(
+    state: &AppState,
+    draft: &ArrestDraft,
+) -> Result<(), ArrestError> {
+    let Some((prior_arrest, released_at)) = repeat_custody_without_new_evidence(
+        state,
+        draft.investigation,
+        draft.character,
+        &draft.evidence,
+    ) else {
+        return Ok(());
+    };
+    Err(ArrestError::RepeatCustodyWithoutNewEvidence {
+        character: draft.character,
+        investigation: draft.investigation,
+        prior_arrest,
+        released_at,
+    })
+}
+
+fn repeat_custody_without_new_evidence(
+    state: &AppState,
+    investigation: InvestigationId,
+    character: CharacterId,
+    evidence: &BTreeSet<EvidenceId>,
+) -> Option<(ArrestId, SimTime)> {
+    let prior = latest_released_arrest_for_case_character(state, investigation, character)?;
+    let released_at = prior
+        .released_at()
+        .expect("released arrest must retain its release instant");
+    (state.now() <= released_at
+        || !evidence.iter().any(|evidence| {
+            state
+                .legal
+                .get_evidence(*evidence)
+                .is_some_and(|record| record.discovered_at() >= released_at)
+        }))
+    .then_some((prior.id(), released_at))
 }
 
 /// Custody is a stronger consequence than adding a subject to a case graph. Weak material or a
@@ -600,12 +664,7 @@ fn resolve_autonomous_arrest_candidate(
     investigation_id: InvestigationId,
     character: CharacterId,
 ) -> Result<Option<AutonomousArrestCandidate>, ArrestError> {
-    if state.legal.active_arrest_for_character(character).is_some()
-        || state
-            .legal
-            .arrests_for_investigation(investigation_id)
-            .any(|arrest| arrest.character() == character)
-    {
+    if state.legal.active_arrest_for_character(character).is_some() {
         return Ok(None);
     }
     let investigation = state
@@ -651,10 +710,15 @@ fn resolve_autonomous_arrest_candidate(
     if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
         return Ok(None);
     }
+    let evidence: BTreeSet<_> = citations.into_values().collect();
+    if repeat_custody_without_new_evidence(state, investigation_id, character, &evidence).is_some()
+    {
+        return Ok(None);
+    }
     Ok(Some(AutonomousArrestCandidate {
         investigation: investigation_id,
         character,
-        evidence: citations.into_values().collect(),
+        evidence,
         independent_sources: assessment.independent_qualifying(),
         strong_sources: assessment.strong_independent(),
     }))

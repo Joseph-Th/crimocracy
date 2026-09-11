@@ -13,6 +13,7 @@ use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{FinancialAccountDraft, LedgerPosting};
+use crate::intelligence::{InformationSignal, LegalPersonStatusSignal};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::{
@@ -1293,6 +1294,20 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
             .kind(),
         ReportKind::Legal
     );
+    assert_eq!(
+        fixture
+            .state
+            .intelligence()
+            .get_information(record.information())
+            .expect("retainer information should persist")
+            .signal(),
+        Some(&InformationSignal::LegalPersonStatus(
+            LegalPersonStatusSignal::Detained {
+                arrest: fixture.arrest,
+            },
+        )),
+        "retaining counsel for a detainee is explicit organization-held custody knowledge"
+    );
     validate_state(&fixture.state).expect("retained-counsel state should validate");
     validate_invariants(&fixture.state);
 
@@ -1308,6 +1323,23 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
             .active_representation_for_arrest(fixture.arrest)
             .map(|record| record.id()),
         Some(representation)
+    );
+    let restored_information = restored
+        .legal()
+        .get_legal_representation(representation)
+        .and_then(|record| {
+            restored
+                .intelligence()
+                .get_information(record.information())
+        })
+        .expect("restored representation must retain its custody knowledge");
+    assert_eq!(
+        restored_information.signal(),
+        Some(&InformationSignal::LegalPersonStatus(
+            LegalPersonStatusSignal::Detained {
+                arrest: fixture.arrest,
+            },
+        ))
     );
 
     validate_end_legal_representation(

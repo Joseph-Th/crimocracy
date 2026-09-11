@@ -21,6 +21,7 @@ use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
 };
+use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
     blocker_matches_objective, effective_objective_outcome,
 };
@@ -74,7 +75,7 @@ fn validate_operation_against_registry(
 ) -> Result<(), StateValidationError> {
     let definition = registry.get_operation(operation.kind());
     let execution = definition.execution();
-    validate_authored_operation_plan(state, operation, definition, execution)?;
+    validate_authored_operation_plan(registry, state, operation, definition, execution)?;
     let Some(resolution) = operation.resolution() else {
         return Ok(());
     };
@@ -91,6 +92,7 @@ fn validate_operation_against_registry(
 }
 
 fn validate_authored_operation_plan(
+    registry: &Registry,
     state: &AppState,
     operation: &OperationRecord,
     definition: &OperationDefinition,
@@ -144,6 +146,27 @@ fn validate_authored_operation_plan(
         })
     });
     let business_target_is_valid = authored_business_target_is_valid(state, operation, execution);
+    let planning_at = resolve_operation_earliest_start(operation);
+    let max_intelligence_age = u64::from(execution.max_intelligence_age().as_minutes());
+    let required_intelligence_is_usable = operation.constraints().iter().all(|constraint| {
+        let OperationConstraint::RequireIntelligenceTopic(topic) = constraint else {
+            return true;
+        };
+        operation.intelligence().iter().any(|information| {
+            state
+                .intelligence
+                .get_information(*information)
+                .is_some_and(|record| {
+                    record.topic() == *topic
+                        && resolve_information_score(
+                            registry.information_quality(),
+                            record,
+                            planning_at,
+                            max_intelligence_age,
+                        ) > 0
+                })
+        })
+    });
     if !definition
         .supported_approaches()
         .contains(&operation.approach())
@@ -175,6 +198,7 @@ fn validate_authored_operation_plan(
         || !before_start_deadline_abort_is_valid
         || !police_response_matches_authorship
         || !business_target_is_valid
+        || !required_intelligence_is_usable
     {
         return Err(invalid_operation_definition(operation));
     }
@@ -667,6 +691,7 @@ fn validate_operation_intelligence(
             },
         )?;
         if record.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
+            || record.recorded_at() > operation.authorized_at()
             || !is_information_subject_relevant(state, operation.objective(), record.subject())
         {
             return Err(StateValidationError::InvalidOperationDefinition {

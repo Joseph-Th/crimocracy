@@ -82,6 +82,8 @@ pub enum WitnessError {
         expected: u32,
         found: u32,
     },
+    #[error("lead case-witness knowledge could not be recorded: {0}")]
+    CaseKnowledge(#[from] crate::intelligence::intelligence_system::IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -103,6 +105,24 @@ impl ValidatedCaseWitnessRegistration {
             self.expected_investigation_version,
             self.expected_character_version,
         )?;
+        let lead = state
+            .legal
+            .get_investigation(self.draft.investigation)
+            .expect("validated investigation must still exist")
+            .lead_investigator();
+        let knowledge = match lead {
+            Some(lead) => crate::legal::case_knowledge::prepare_case_witness_knowledge(
+                state,
+                self.draft.investigation,
+                self.draft.witness,
+                lead,
+            )?,
+            None => None,
+        };
+        state.ids.reserve_many(&[
+            (IdKind::CaseWitness, 1),
+            (IdKind::Information, u32::from(knowledge.is_some())),
+        ])?;
         let id = state.ids.next_case_witness()?;
         state.legal.insert_case_witness(
             CaseWitnessRecord {
@@ -117,6 +137,11 @@ impl ValidatedCaseWitnessRegistration {
             },
             state.now(),
         );
+        if let Some(knowledge) = knowledge {
+            knowledge
+                .commit(state)
+                .expect("case-witness information ID was preflighted before registration mutation");
+        }
         Ok(id)
     }
 }

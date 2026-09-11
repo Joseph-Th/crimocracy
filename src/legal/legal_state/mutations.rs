@@ -126,11 +126,18 @@ impl LegalState {
     pub(crate) fn insert_informant(&mut self, record: InformantRecord) {
         let id = record.id();
         let key = (record.character(), record.handler());
+        let handler = record.handler();
         let previous_pair = self.indexes.informants.by_character_handler.insert(key, id);
         debug_assert!(
             previous_pair.is_none(),
             "Ownership Exclusivity: duplicate informant relationship inserted"
         );
+        self.indexes
+            .informants
+            .by_handler
+            .entry(handler)
+            .or_default()
+            .insert(id);
         let previous = self.informants.insert(id, record);
         debug_assert!(
             previous.is_none(),

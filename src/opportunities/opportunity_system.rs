@@ -8,7 +8,10 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
-use crate::intelligence::KnowledgeHolder;
+use crate::intelligence::{
+    InformationRecord, InformationSignal, KnowledgeHolder, LegalPersonStatusSignal,
+};
+use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_system::is_actionable_opportunity_target;
 use crate::operations::{OperationKind, OperationStatus};
 use crate::opportunities::{
@@ -56,7 +59,7 @@ pub enum OpportunityError {
         information: InformationId,
         subject: EntityRef,
     },
-    #[error("opportunity target {0:?} has no direct source-information record")]
+    #[error("opportunity target {0:?} has no usable direct source-information record")]
     UncoveredTarget(EntityRef),
     #[error(
         "opportunity validity deadline {valid_until:?} must be later than discovery time {now:?}"
@@ -283,21 +286,6 @@ fn validate_discovery_state(
             return Err(OpportunityError::MissingTarget(*target));
         }
     }
-    // A discovery may include contextual entities such as a watchman alongside the business the
-    // crew would actually hit, but at least one covered target must be executable by this exact
-    // operation kind right now. Otherwise the system persists an opportunity the player can never
-    // convert through the canonical operation path.
-    if !draft.targets.iter().any(|target| {
-        is_actionable_opportunity_target(
-            registry,
-            state,
-            draft.organization,
-            draft.operation_kind,
-            *target,
-        )
-    }) {
-        return Err(OpportunityError::NoActionableTarget(draft.operation_kind));
-    }
     if draft.source_information.is_empty() {
         return Err(OpportunityError::MissingSourceInformation);
     }
@@ -319,7 +307,10 @@ fn validate_discovery_state(
                 subject: information.subject(),
             });
         }
-        covered_targets.insert(information.subject());
+        if source_information_is_usable(registry, draft.operation_kind, information, discovered_at)
+        {
+            covered_targets.insert(information.subject());
+        }
     }
     if let Some(uncovered) = draft
         .targets
@@ -327,6 +318,36 @@ fn validate_discovery_state(
         .find(|target| !covered_targets.contains(target))
     {
         return Err(OpportunityError::UncoveredTarget(*uncovered));
+    }
+    // Contextual entities need fresh organization-held coverage, but only the actual action
+    // target must prove a sensitive legal basis. Hidden world state confirms whether a target is
+    // actionable; typed information confirms that the organization legitimately knows why.
+    let has_supported_actionable_target = draft.targets.iter().any(|target| {
+        is_actionable_opportunity_target(
+            registry,
+            state,
+            draft.organization,
+            draft.operation_kind,
+            *target,
+        ) && draft.source_information.iter().any(|source| {
+            state
+                .intelligence
+                .get_information(*source)
+                .is_some_and(|information| {
+                    information.subject() == *target
+                        && source_information_proves_operation_basis(
+                            registry,
+                            state,
+                            draft.operation_kind,
+                            *target,
+                            information,
+                            discovered_at,
+                        )
+                })
+        })
+    });
+    if !has_supported_actionable_target {
+        return Err(OpportunityError::NoActionableTarget(draft.operation_kind));
     }
     if let Some(valid_until) = draft.valid_until
         && valid_until <= discovered_at
@@ -344,6 +365,96 @@ fn validate_discovery_state(
         return Err(OpportunityError::ExistingOpenOpportunity(existing.id()));
     }
     Ok(())
+}
+
+/// Whether a source is still usable at discovery under the operation kind's authored
+/// intelligence-age contract. Historical information remains persisted but cannot manufacture a
+/// fresh opportunity after its planning value reaches zero.
+pub(crate) fn source_information_is_usable(
+    registry: &Registry,
+    operation_kind: OperationKind,
+    information: &InformationRecord,
+    discovered_at: SimTime,
+) -> bool {
+    let max_age = u64::from(
+        registry
+            .get_operation(operation_kind)
+            .execution()
+            .max_intelligence_age()
+            .as_minutes(),
+    );
+    resolve_information_score(
+        registry.information_quality(),
+        information,
+        discovered_at,
+        max_age,
+    ) > 0
+}
+
+/// Sensitive actionability must be learned, not inferred from hidden legal truth. Generic
+/// operation kinds need only usable information about their target; witness pressure and
+/// extraction additionally require a typed legal-person fact bound to the relevant episode.
+pub(crate) fn source_information_proves_operation_basis(
+    registry: &Registry,
+    state: &AppState,
+    operation_kind: OperationKind,
+    target: EntityRef,
+    information: &InformationRecord,
+    discovered_at: SimTime,
+) -> bool {
+    if !source_information_is_usable(registry, operation_kind, information, discovered_at) {
+        return false;
+    }
+
+    match operation_kind {
+        OperationKind::WitnessPressure => {
+            let EntityRef::Character(character) = target else {
+                return false;
+            };
+            let Some(InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+                investigation,
+            })) = information.signal()
+            else {
+                return false;
+            };
+            state
+                .legal
+                .case_witness_for(*investigation, character)
+                .is_some_and(|witness| witness.registered_at() <= information.observed_at())
+        }
+        OperationKind::Extraction => {
+            let EntityRef::Character(character) = target else {
+                return false;
+            };
+            let Some(InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
+                arrest,
+            })) = information.signal()
+            else {
+                return false;
+            };
+            state.legal.get_arrest(*arrest).is_some_and(|arrest| {
+                arrest.character() == character
+                    && arrest.arrested_at() <= information.observed_at()
+                    && arrest
+                        .released_at()
+                        .is_none_or(|released_at| information.observed_at() < released_at)
+                    && arrest.arrested_at() <= discovered_at
+                    && arrest
+                        .released_at()
+                        .is_none_or(|released_at| discovered_at < released_at)
+            })
+        }
+        OperationKind::Burglary
+        | OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Intimidation
+        | OperationKind::Surveillance
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::Sabotage
+        | OperationKind::Arson => true,
+    }
 }
 
 pub struct ValidatedOpportunityDismissal {

@@ -15,9 +15,20 @@ use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InvestigationStatus, InvestigationWorkStatus,
 };
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationError> {
+    // Arrest IDs are allocated monotonically, so this map reconstructs each case/person custody
+    // sequence in commit order. Renewed custody in the same case is valid only after the prior
+    // episode ended and the new arrest actually cites evidence discovered in that release minute
+    // or later. The new arrest itself must still occur on a later minute.
+    let mut prior_custody = BTreeMap::<
+        (
+            crate::core::id::InvestigationId,
+            crate::core::id::CharacterId,
+        ),
+        Option<crate::core::time::SimTime>,
+    >::new();
     for arrest in state.legal.arrests() {
         let _ = state.world.get_character(arrest.character()).ok_or(
             StateValidationError::InvalidArrest {
@@ -35,6 +46,26 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
             .ok_or(StateValidationError::InvalidArrest {
                 arrest: arrest.id(),
             })?;
+        let custody_key = (arrest.investigation(), arrest.character());
+        if let Some(prior_release) = prior_custody.get(&custody_key) {
+            let Some(prior_release) = *prior_release else {
+                return Err(StateValidationError::InvalidArrest {
+                    arrest: arrest.id(),
+                });
+            };
+            let cites_release_or_later_evidence = arrest.evidence().iter().any(|evidence_id| {
+                state
+                    .legal
+                    .get_evidence(*evidence_id)
+                    .is_some_and(|evidence| evidence.discovered_at() >= prior_release)
+            });
+            if arrest.arrested_at() <= prior_release || !cites_release_or_later_evidence {
+                return Err(StateValidationError::InvalidArrest {
+                    arrest: arrest.id(),
+                });
+            }
+        }
+
         if authority.kind() != OrganizationKind::LawEnforcement
             || investigation.owner() != arrest.authority()
             || !investigation
@@ -107,6 +138,7 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                 }
             }
         }
+        prior_custody.insert(custody_key, arrest.released_at());
     }
 
     Ok(())

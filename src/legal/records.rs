@@ -1477,6 +1477,9 @@ pub(super) struct WitnessIndexes {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct InformantIndexes {
     pub(super) by_character_handler: BTreeMap<(CharacterId, OrganizationId), InformantId>,
+    /// Informants grouped by handler so recurring disclosure work touches only relationships
+    /// whose institution currently owns relevant active casework.
+    pub(super) by_handler: BTreeMap<OrganizationId, BTreeSet<InformantId>>,
     pub(super) disclosure_by_case_information:
         BTreeMap<(InvestigationId, InformationId), InformantDisclosureId>,
 }

@@ -1216,7 +1216,7 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
     assert_eq!(record.authority(), fixture.police);
     assert_eq!(record.evidence().len(), 2);
     assert!(record.evidence().contains(&fixture.evidence));
-    let arrest_evidence = record.evidence().clone();
+    let mut arrest_evidence = record.evidence().clone();
     assert_eq!(
         fixture
             .state
@@ -1254,6 +1254,33 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
         .expect("restored detention should remain releasable")
         .commit(&mut restored)
         .expect("restored detention release should commit");
+    let released_at = restored.now();
+    assert_eq!(
+        validate_arrest(
+            &fixture.registry,
+            &restored,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: arrest_evidence.clone(),
+            },
+        )
+        .expect_err("restored unchanged evidence must not reset the custody window"),
+        ArrestError::RepeatCustodyWithoutNewEvidence {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            prior_arrest: arrest,
+            released_at,
+        }
+    );
+    restored.advance_clock(SimDuration::ONE_MINUTE);
+    let fresh = add_character_evidence(
+        &mut restored,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    arrest_evidence.insert(fresh);
     let rearrest = validate_arrest(
         &fixture.registry,
         &restored,
@@ -1263,9 +1290,9 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
             evidence: arrest_evidence,
         },
     )
-    .expect("released restored character should permit a later evidence-backed arrest")
+    .expect("new evidence after restored release should permit renewed custody")
     .commit(&mut restored)
-    .expect("later restored arrest should commit with a fresh ID");
+    .expect("renewed restored arrest should commit with a fresh ID");
     assert_ne!(rearrest, arrest);
     assert_eq!(
         restored
@@ -1282,7 +1309,7 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
             .map(|record| record.id()),
         Some(rearrest)
     );
-    validate_state(&restored).expect("restored re-arrest state should validate");
+    validate_state(&restored).expect("restored renewed-custody state should validate");
     validate_invariants(&restored);
 
     fixture.state.advance_clock(SimDuration::from_minutes(45));
@@ -1378,7 +1405,7 @@ fn due_custody_release_bounds_detention_at_the_authored_window() {
 }
 
 #[test]
-fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() {
+fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_paths() {
     let mut fixture = fixture();
     let corroborating = add_character_evidence(
         &mut fixture.state,
@@ -1404,6 +1431,7 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
         .expect("autonomous custody should remain canonically releasable")
         .commit(&mut fixture.state)
         .expect("release should commit");
+    let released_at = fixture.state.now();
     assert!(
         apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
             .expect("post-release autonomous custody pass should resolve")
@@ -1411,30 +1439,98 @@ fn autonomous_custody_does_not_rearrest_a_released_subject_from_the_same_case() 
         "unchanged evidence must not create an automatic release/re-arrest loop"
     );
     assert_eq!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: BTreeSet::from([fixture.evidence, corroborating]),
+            },
+        )
+        .expect_err("direct custody must not reset the same detention on unchanged evidence"),
+        ArrestError::RepeatCustodyWithoutNewEvidence {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            prior_arrest: first,
+            released_at,
+        }
+    );
+
+    let new_autonomous_evidence = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("release-minute autonomous custody pass should resolve")
+            .is_empty(),
+        "custody must not restart in the same simulation minute as release"
+    );
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let rearrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("release-minute evidence should permit renewed custody on the next minute");
+    assert_eq!(rearrests.len(), 1);
+    let second = rearrests[0];
+    assert_ne!(second, first);
+    assert!(
         fixture
             .state
             .legal()
-            .arrests_for_investigation(fixture.investigation)
-            .count(),
-        1
+            .get_arrest(second)
+            .expect("second arrest should persist")
+            .evidence()
+            .contains(&new_autonomous_evidence)
     );
 
-    // Explicit legal action may deliberately re-arrest after release, but it must satisfy the
-    // same evidentiary custody threshold as autonomous policing.
+    validate_release_arrest(&fixture.state, second)
+        .expect("renewed custody should remain releasable")
+        .commit(&mut fixture.state)
+        .expect("second release should commit");
+    let new_direct_evidence = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    assert!(matches!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: BTreeSet::from([fixture.evidence, new_direct_evidence]),
+            },
+        ),
+        Err(ArrestError::RepeatCustodyWithoutNewEvidence { .. })
+    ));
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
     let explicit_rearrest = validate_arrest(
         &fixture.registry,
         &fixture.state,
         ArrestDraft {
             character: fixture.suspect,
             investigation: fixture.investigation,
-            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+            evidence: BTreeSet::from([fixture.evidence, new_direct_evidence]),
         },
     )
-    .expect("the canonical command may deliberately re-arrest after release")
+    .expect("release-minute evidence should permit deliberate custody on the next minute")
     .commit(&mut fixture.state)
-    .expect("explicit re-arrest should commit");
-    assert_ne!(explicit_rearrest, first);
-    validate_state(&fixture.state).expect("one-shot autonomous custody state should validate");
+    .expect("explicit renewed custody should commit");
+    assert_ne!(explicit_rearrest, second);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_for_investigation(fixture.investigation)
+            .filter(|record| record.character() == fixture.suspect)
+            .count(),
+        3
+    );
+    validate_state(&fixture.state).expect("repeat custody state should remain structurally valid");
     validate_invariants(&fixture.state);
 }
 

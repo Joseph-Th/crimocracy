@@ -3,6 +3,7 @@
 pub(crate) mod operation_abort;
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
+pub(crate) mod operation_intelligence;
 pub(crate) mod operation_objective;
 pub(crate) mod operation_state;
 pub mod operation_system;
@@ -263,22 +264,18 @@ impl OperationObjective {
     }
 }
 
-/// Authorable execution boundaries that have a real mechanical effect. No-casualty or
-/// violence-avoidance style wording was removed because the execution model has no casualty,
-/// injury, or collateral-damage axis to act on.
+/// Authorable execution boundaries backed by current operation mechanics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationConstraint {
     /// Inclusive completion deadline. The operation may resolve on this minute but not after it.
     CompleteBy(SimTime),
     /// Authorization gate: the plan must carry organization-held intelligence of the given
-    /// topic relevant to the objective before it may be authorized. Consumed by operation
-    /// validation; reconnaissance is therefore a planning prerequisite, not flavor.
+    /// topic that is relevant to the objective and still has nonzero planning value at the
+    /// earliest planned start. Reconnaissance is therefore a usable prerequisite, not flavor.
     RequireIntelligenceTopic(InformationTopic),
 }
 
-/// Standing reactions tied to police-response and leadership-follow-up mechanics. Force,
-/// exit, and contact-on-detention reactions were removed because the model has no tactical
-/// combat, pursuit, or detention-contact execution axis to act on.
+/// Standing reactions backed by police-response and leadership-follow-up mechanics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationContingency {
     AbortOnPoliceArrivalBeforeEntry,

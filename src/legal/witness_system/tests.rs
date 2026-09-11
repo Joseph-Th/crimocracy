@@ -2,15 +2,16 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::id::IdKind;
+use crate::core::id::{IdExhaustionError, IdKind};
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
+use crate::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
 use crate::legal::investigation_system::{
-    InvestigationTransition, validate_add_evidence, validate_open_investigation,
-    validate_transition_investigation,
+    InvestigationTransition, validate_add_evidence, validate_assign_investigator,
+    validate_open_investigation, validate_transition_investigation,
 };
 use crate::legal::{
     CaseWitnessRecord, EvidenceDraft, EvidenceRecord, InvestigationDraft, InvestigationRecord,
@@ -311,6 +312,151 @@ fn make_fixture() -> WitnessFixture {
         witness,
         subject,
     }
+}
+
+fn insert_detective(fixture: &mut WitnessFixture, name: &str) -> CharacterId {
+    insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: name.to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(
+                crate::world::CapabilityKind::Investigation,
+                rating(70),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective fixture should validate")
+}
+
+fn assert_lead_knows_witness(fixture: &WitnessFixture, lead: CharacterId) {
+    let records: Vec<_> = fixture
+        .state
+        .intelligence()
+        .information_for_holder_subject(
+            KnowledgeHolder::Character(lead),
+            EntityRef::Character(fixture.witness),
+        )
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].signal(),
+        Some(&InformationSignal::LegalPersonStatus(
+            LegalPersonStatusSignal::CaseWitness {
+                investigation: fixture.investigation,
+            }
+        ))
+    );
+    assert_eq!(records[0].observed_at(), fixture.state.now());
+}
+
+#[test]
+fn witness_registration_informs_an_existing_case_lead() {
+    let mut fixture = make_fixture();
+    let detective = insert_detective(&mut fixture, "Existing Witness Lead");
+    validate_assign_investigator(&fixture.state, fixture.investigation, detective)
+        .expect("detective should be assignable")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("witness should register on a staffed case")
+    .commit(&mut fixture.state)
+    .expect("staffed witness registration should commit atomically");
+
+    assert_lead_knows_witness(&fixture, detective);
+    validate_state(&fixture.state).expect("staffed witness knowledge should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn later_case_staffing_learns_witnesses_registered_before_the_lead() {
+    let mut fixture = make_fixture();
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("unstaffed case should accept its witness")
+    .commit(&mut fixture.state)
+    .expect("unstaffed witness registration should commit");
+
+    let detective = insert_detective(&mut fixture, "Later Witness Lead");
+    validate_assign_investigator(&fixture.state, fixture.investigation, detective)
+        .expect("later detective should be assignable")
+        .commit(&mut fixture.state)
+        .expect("staffing should materialize existing witness knowledge");
+
+    assert_lead_knows_witness(&fixture, detective);
+    validate_state(&fixture.state).expect("post-staffing witness knowledge should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn staffed_witness_registration_preflights_knowledge_allocation_before_mutation() {
+    let mut fixture = make_fixture();
+    let detective = insert_detective(&mut fixture, "Allocation Boundary Lead");
+    validate_assign_investigator(&fixture.state, fixture.investigation, detective)
+        .expect("detective should be assignable")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+
+    let validated = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("staffed witness registration should validate before allocator exhaustion");
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX);
+    let before = bincode::serialize(&fixture.state).expect("pre-commit state should serialize");
+    let next_witness = fixture.state.ids.next_raw(IdKind::CaseWitness);
+
+    assert_eq!(
+        validated
+            .commit(&mut fixture.state)
+            .expect_err("information exhaustion must reject before witness mutation"),
+        WitnessError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "information",
+            next: u32::MAX,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "failed case-witness knowledge allocation must leave authoritative state untouched"
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::CaseWitness),
+        next_witness,
+        "witness allocator must not advance when the composite reservation fails"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .case_witness_for(fixture.investigation, fixture.witness)
+            .is_none()
+    );
 }
 
 #[test]
