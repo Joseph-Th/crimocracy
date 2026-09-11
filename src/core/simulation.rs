@@ -28,7 +28,10 @@ use crate::legal::investigation_work_execution::{
     decide_investigation_work_resolution, find_due_scheduled_investigation_work,
     validate_investigation_work_resolution_plan,
 };
-use crate::operations::operation_abort::validate_deadline_missed_operation;
+use crate::operations::operation_abort::{
+    validate_deadline_missed_operation, validate_expired_opportunity_operation,
+    validate_objective_unavailable_operation,
+};
 use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
     validate_operation_resolution_plan,
@@ -237,17 +240,32 @@ fn run_operations_phase(
                 .expect("a missed operation deadline must validate")
                 .commit(state)
                 .expect("a missed operation deadline must commit atomically");
+        } else if let Some((opportunity, _)) = state
+            .opportunities()
+            .expired_window_for_operation(operation, state.now())
+        {
+            validate_expired_opportunity_operation(state, operation, opportunity.id())
+                .expect("an expired linked opportunity must validate a pre-start abort")
+                .commit(state)
+                .expect("an expired linked opportunity must abort atomically");
         } else {
             match apply_transition(registry, state, operation, OperationTransition::Begin) {
                 Ok(()) => started_operations.push(operation),
                 // A future assignment can become temporarily unavailable when an earlier
                 // operation remains paused longer than projected at authorization time. The due
-                // operation stays Authorized and retries on later ticks. Deadline infeasibility
-                // is handled by the shared pre-check above and therefore never defers silently.
+                // operation stays Authorized and retries on later ticks. Completion deadlines
+                // and linked opportunity windows are handled by the pre-checks above, so temporary
+                // unavailability cannot silently carry work beyond an authored viability boundary.
                 Err(
                     OperationError::ParticipantBusy { .. }
                     | OperationError::DetainedParticipant { .. },
                 ) => {}
+                Err(OperationError::ObjectiveUnavailable { blocker, .. }) => {
+                    validate_objective_unavailable_operation(state, operation, blocker)
+                        .expect("an unavailable due objective must validate a pre-start abort")
+                        .commit(state)
+                        .expect("an unavailable due objective must abort atomically");
+                }
                 Err(error) => {
                     panic!(
                         "due authorized operation could not begin through its canonical path: {error}"
@@ -552,7 +570,8 @@ mod tests {
         OperationKind, OperationObjective, OperationStatus, RoleKind,
     };
     use crate::world::world_system::{
-        insert_business, insert_character, insert_neighborhood, insert_organization,
+        designate_player_organization, insert_business, insert_character, insert_neighborhood,
+        insert_organization,
     };
     use crate::world::{
         AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
@@ -604,6 +623,8 @@ mod tests {
             },
         )
         .expect("crew should validate");
+        designate_player_organization(&mut state, crew)
+            .expect("boundary crew should be the player organization");
         let police = insert_organization(
             &registry,
             &mut state,

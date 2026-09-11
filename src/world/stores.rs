@@ -659,38 +659,9 @@ impl WorldState {
                     expected_character_owner_entries += 1;
                 }
             }
-            if record.version() == 0 {
-                return false;
-            }
-            let mut previous_owner = None;
-            let mut previous_time = None;
-            for version in 1..=record.version() {
-                let Some(change_id) = self
-                    .businesses
-                    .ownership_change_by_business_version
-                    .get(&(record.id(), version))
-                else {
-                    return false;
-                };
-                let Some(change) = self.businesses.ownership_changes.get(change_id) else {
-                    return false;
-                };
-                if change.business() != record.id()
-                    || change.resulting_business_version() != version
-                    || (version == 1 && change.previous_owner().is_some())
-                    || (version > 1 && change.previous_owner() != previous_owner)
-                    || change.previous_owner() == Some(change.new_owner())
-                    || previous_time.is_some_and(|time| change.changed_at() < time)
-                {
-                    return false;
-                }
-                if let BusinessOwner::Organization(organization) = change.new_owner() {
-                    expected_historical_pairs.insert((organization, record.id()));
-                }
-                previous_owner = Some(change.new_owner());
-                previous_time = Some(change.changed_at());
-            }
-            if previous_owner != Some(record.owner()) {
+            if !self
+                .business_ownership_history_is_consistent(record, &mut expected_historical_pairs)
+            {
                 return false;
             }
         }
@@ -769,5 +740,51 @@ impl WorldState {
             return false;
         }
         true
+    }
+
+    /// Replays exactly the persisted ownership entries for one business. Iterating the
+    /// business/version index rather than `1..=record.version()` keeps malformed-save
+    /// validation proportional to persisted data and also rejects stray future versions that
+    /// are not represented by the current business record.
+    fn business_ownership_history_is_consistent(
+        &self,
+        record: &BusinessRecord,
+        historical_pairs: &mut BTreeSet<(OrganizationId, BusinessId)>,
+    ) -> bool {
+        if record.version() == 0 {
+            return false;
+        }
+        let mut previous_owner = None;
+        let mut previous_time = None;
+        let mut history_len = 0_u64;
+        for ((business, version), change_id) in self
+            .businesses
+            .ownership_change_by_business_version
+            .range((record.id(), 0)..=(record.id(), u32::MAX))
+        {
+            history_len += 1;
+            if u64::from(*version) != history_len {
+                return false;
+            }
+            let Some(change) = self.businesses.ownership_changes.get(change_id) else {
+                return false;
+            };
+            if *business != record.id()
+                || change.business() != record.id()
+                || change.resulting_business_version() != *version
+                || (*version == 1 && change.previous_owner().is_some())
+                || (*version > 1 && change.previous_owner() != previous_owner)
+                || change.previous_owner() == Some(change.new_owner())
+                || previous_time.is_some_and(|time| change.changed_at() < time)
+            {
+                return false;
+            }
+            if let BusinessOwner::Organization(organization) = change.new_owner() {
+                historical_pairs.insert((organization, record.id()));
+            }
+            previous_owner = Some(change.new_owner());
+            previous_time = Some(change.changed_at());
+        }
+        history_len == u64::from(record.version()) && previous_owner == Some(record.owner())
     }
 }

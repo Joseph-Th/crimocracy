@@ -229,9 +229,11 @@ pub(super) fn resolve_target_neighborhoods(
                 if let Some(character) = state.world.get_character(id)
                     && let Some(org) = character.organization()
                 {
-                    for business in state.world.businesses_owned_by_organization(org) {
-                        neighborhoods.insert(business.neighborhood());
-                    }
+                    // Reuse organization resolution rather than duplicating only its business
+                    // half here. Institutional characters also operate inside their authority's
+                    // jurisdiction, so surveilling an officer cannot become geographically
+                    // invisible merely because the department owns no business.
+                    queue.push(EntityRef::Organization(org));
                 }
                 for business in state.world.businesses_owned_by_character(id) {
                     neighborhoods.insert(business.neighborhood());

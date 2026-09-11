@@ -66,6 +66,10 @@ fn resolve_incident_witness(
     };
     Some(IncidentWitnessDraft {
         character,
+        subject: exposure
+            .identified_character
+            .map(EntityRef::Character)
+            .unwrap_or(EntityRef::Operation(operation.id())),
         cooperation,
     })
 }

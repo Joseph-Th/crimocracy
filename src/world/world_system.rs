@@ -603,7 +603,7 @@ impl ValidatedBusinessOwnershipTransfer {
     }
 }
 
-pub fn validate_transfer_business_ownership(
+pub(crate) fn validate_transfer_business_ownership(
     state: &AppState,
     business: BusinessId,
     new_owner: BusinessOwner,

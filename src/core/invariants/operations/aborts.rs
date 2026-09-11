@@ -15,6 +15,7 @@ use crate::decisions::{
 };
 use crate::history::HistoryEventKind;
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
+use crate::operations::operation_objective::blocker_matches_objective;
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationContingency, OperationRecord,
@@ -80,8 +81,36 @@ fn validate_before_start_abort(
             }
             validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
         }
+        (OperationAbortCause::OpportunityExpired(opportunity), Some(artifacts)) => {
+            if operation.started_at().is_some()
+                || operation.resolution_due_at().is_some()
+                || state
+                    .opportunities()
+                    .opportunity_for_operation(operation.id())
+                    .is_none_or(|record| {
+                        record.id() != opportunity
+                            || record
+                                .valid_until()
+                                .is_none_or(|valid_until| abort.aborted_at() < valid_until)
+                    })
+            {
+                return Err(invalid_abort(operation));
+            }
+            validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
+        }
+        (OperationAbortCause::ObjectiveUnavailable(blocker), Some(artifacts)) => {
+            if operation.started_at().is_some()
+                || operation.resolution_due_at().is_some()
+                || !blocker_matches_objective(operation, blocker)
+            {
+                return Err(invalid_abort(operation));
+            }
+            validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
+        }
         (OperationAbortCause::AuthorityOrder, Some(_))
         | (OperationAbortCause::DeadlineMissed, None)
+        | (OperationAbortCause::OpportunityExpired(_), None)
+        | (OperationAbortCause::ObjectiveUnavailable(_), None)
         | (OperationAbortCause::Decision(_), _)
         | (OperationAbortCause::PoliceArrival(_), _)
         | (OperationAbortCause::ParticipantDetained(_), _) => Err(invalid_abort(operation)),
@@ -126,7 +155,11 @@ fn validate_in_progress_abort(
         OperationAbortCause::PoliceArrival(response_id) => {
             validate_in_progress_police_abort(state, operation, abort, response_id)?;
         }
-        OperationAbortCause::Decision(_) => return Err(invalid_abort(operation)),
+        OperationAbortCause::Decision(_)
+        | OperationAbortCause::OpportunityExpired(_)
+        | OperationAbortCause::ObjectiveUnavailable(_) => {
+            return Err(invalid_abort(operation));
+        }
     }
     validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
 }
@@ -186,7 +219,11 @@ fn validate_awaiting_decision_abort(
         OperationAbortCause::Decision(decision_id) => {
             validate_decision_abort(state, operation, abort, decision_id)?;
         }
-        OperationAbortCause::AuthorityOrder => return Err(invalid_abort(operation)),
+        OperationAbortCause::AuthorityOrder
+        | OperationAbortCause::OpportunityExpired(_)
+        | OperationAbortCause::ObjectiveUnavailable(_) => {
+            return Err(invalid_abort(operation));
+        }
     }
     validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
 }
@@ -386,6 +423,8 @@ fn validate_operation_abort_artifacts(
         OperationAbortCause::AuthorityOrder
         | OperationAbortCause::Decision(_)
         | OperationAbortCause::DeadlineMissed
+        | OperationAbortCause::OpportunityExpired(_)
+        | OperationAbortCause::ObjectiveUnavailable(_)
         | OperationAbortCause::ParticipantDetained(_) => None,
     };
     match (
@@ -462,7 +501,9 @@ fn validate_operation_abort_artifacts(
                                     .entities
                                     .contains(&EntityRef::Neighborhood(response.neighborhood()))
                         }),
-                    OperationAbortCause::DeadlineMissed => true,
+                    OperationAbortCause::DeadlineMissed
+                    | OperationAbortCause::OpportunityExpired(_)
+                    | OperationAbortCause::ObjectiveUnavailable(_) => true,
                     OperationAbortCause::ParticipantDetained(character) => {
                         entry.entities.contains(&EntityRef::Character(character))
                     }
@@ -508,7 +549,9 @@ fn validate_operation_abort_artifacts(
                             .entities()
                             .contains(&EntityRef::Neighborhood(response.neighborhood()))
                 }),
-            OperationAbortCause::DeadlineMissed => false,
+            OperationAbortCause::DeadlineMissed
+            | OperationAbortCause::OpportunityExpired(_)
+            | OperationAbortCause::ObjectiveUnavailable(_) => false,
             OperationAbortCause::ParticipantDetained(character) => !history
                 .entities()
                 .contains(&EntityRef::Character(character)),

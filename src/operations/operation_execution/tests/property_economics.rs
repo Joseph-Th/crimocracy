@@ -1,6 +1,7 @@
 //! Operation property proceeds, disposition, depletion, and financial-reporting tests.
 
 use super::*;
+use crate::reports::organization_financial_report::validate_organization_financial_report;
 
 fn insert_property_disposition_fixture(
     registry: &Registry,

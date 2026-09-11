@@ -378,6 +378,9 @@ fn validate_converted_opportunity(
         || opportunity.valid_until().is_some_and(|valid_until| {
             crate::operations::operation_system::resolve_operation_earliest_start(operation)
                 >= valid_until
+                || operation
+                    .started_at()
+                    .is_some_and(|started_at| started_at >= valid_until)
         })
         || operation.responsible_organization() != opportunity.organization()
         || operation.kind() != context.operation_kind()

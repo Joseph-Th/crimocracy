@@ -1,8 +1,10 @@
-//! Operation abort validation, causal artifacts, and custody/police/deadline preemption.
+//! Operation abort validation, causal artifacts, and custody/police/deadline/opportunity/objective preemption.
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, DecisionRequestId, IdKind, OperationId, PoliceResponseId};
+use crate::core::id::{
+    CharacterId, DecisionRequestId, IdKind, OperationId, OpportunityId, PoliceResponseId,
+};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::ensure_version_can_advance;
@@ -13,12 +15,13 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::operations::operation_objective::resolve_objective_blocker;
 use crate::operations::operation_system::{
     OperationError, has_missed_operation_deadline, resolve_earliest_operation_deadline,
 };
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
-    OperationRecord, OperationStatus,
+    OperationObjectiveBlocker, OperationRecord, OperationStatus,
 };
 use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
@@ -34,6 +37,54 @@ pub(crate) fn validate_deadline_missed_operation(
         return Err(OperationError::DeadlineNotMissed { operation });
     }
     validate_operation_abort(state, operation, OperationAbortCause::DeadlineMissed)
+}
+
+pub(crate) fn validate_expired_opportunity_operation(
+    state: &AppState,
+    operation: OperationId,
+    opportunity: OpportunityId,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(OperationError::MissingOperation(operation))?;
+    if !opportunity_expiry_can_abort(state, record, opportunity) {
+        return Err(OperationError::InvalidAbortCause {
+            operation,
+            status: record.status(),
+            cause: OperationAbortCause::OpportunityExpired(opportunity),
+        });
+    }
+    validate_operation_abort(
+        state,
+        operation,
+        OperationAbortCause::OpportunityExpired(opportunity),
+    )
+}
+
+pub(crate) fn validate_objective_unavailable_operation(
+    state: &AppState,
+    operation: OperationId,
+    blocker: OperationObjectiveBlocker,
+) -> Result<ValidatedOperationAbort, OperationError> {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(OperationError::MissingOperation(operation))?;
+    if record.status() != OperationStatus::Authorized
+        || resolve_objective_blocker(state, record) != Some(blocker)
+    {
+        return Err(OperationError::InvalidAbortCause {
+            operation,
+            status: record.status(),
+            cause: OperationAbortCause::ObjectiveUnavailable(blocker),
+        });
+    }
+    validate_operation_abort(
+        state,
+        operation,
+        OperationAbortCause::ObjectiveUnavailable(blocker),
+    )
 }
 
 pub struct ValidatedOperationAbort {
@@ -176,6 +227,24 @@ impl ValidatedOperationAbort {
                 cause: self.cause,
             });
         }
+        if let OperationAbortCause::OpportunityExpired(opportunity) = self.cause
+            && !opportunity_expiry_can_abort(state, record, opportunity)
+        {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
+        }
+        if let OperationAbortCause::ObjectiveUnavailable(blocker) = self.cause
+            && resolve_objective_blocker(state, record) != Some(blocker)
+        {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
+        }
         Ok(())
     }
 }
@@ -251,7 +320,9 @@ fn validate_operation_abort(
         (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
             OperationAbortPhase::BeforeStart
         }
-        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed) => {
+        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
+        | (OperationStatus::Authorized, OperationAbortCause::OpportunityExpired(_))
+        | (OperationStatus::Authorized, OperationAbortCause::ObjectiveUnavailable(_)) => {
             OperationAbortPhase::BeforeStart
         }
         (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed) => {
@@ -298,7 +369,12 @@ fn validate_operation_abort(
         (OperationAbortPhase::BeforeStart, OperationAbortCause::ParticipantDetained(_)) => {
             unreachable!("detention no longer aborts operations before they begin")
         }
-        (OperationAbortPhase::BeforeStart, OperationAbortCause::DeadlineMissed)
+        (
+            OperationAbortPhase::BeforeStart,
+            OperationAbortCause::DeadlineMissed
+            | OperationAbortCause::OpportunityExpired(_)
+            | OperationAbortCause::ObjectiveUnavailable(_),
+        )
         | (OperationAbortPhase::InProgress, _)
         | (OperationAbortPhase::AwaitingDecision, _) => {
             let summary = build_abort_summary(state, record, cause)?;
@@ -364,6 +440,8 @@ fn validate_operation_abort(
                 OperationAbortCause::AuthorityOrder
                 | OperationAbortCause::Decision(_)
                 | OperationAbortCause::DeadlineMissed
+                | OperationAbortCause::OpportunityExpired(_)
+                | OperationAbortCause::ObjectiveUnavailable(_)
                 | OperationAbortCause::ParticipantDetained(_) => None,
             };
             let report = validate_record_report(
@@ -480,6 +558,51 @@ fn build_abort_summary(
                 authority.name()
             ))
         }
+        OperationAbortCause::OpportunityExpired(opportunity) => {
+            let opportunity = state
+                .opportunities()
+                .opportunity_for_operation(operation.id())
+                .filter(|record| record.id() == opportunity)
+                .ok_or(OperationError::InvalidAbortArtifacts {
+                    operation: operation.id(),
+                })?;
+            let valid_until =
+                opportunity
+                    .valid_until()
+                    .ok_or(OperationError::InvalidAbortArtifacts {
+                        operation: operation.id(),
+                    })?;
+            Ok(format!(
+                "{} was cancelled before execution because its linked opportunity window expired at minute {}. Objective resolution was not completed.",
+                operation.title(),
+                valid_until.as_minutes(),
+            ))
+        }
+        OperationAbortCause::ObjectiveUnavailable(blocker) => {
+            let reason = match blocker {
+                OperationObjectiveBlocker::TargetBusinessOwnershipMismatch
+                    if operation.kind() == crate::operations::OperationKind::GamblingEvent =>
+                {
+                    "the gambling venue was no longer under the sponsoring organization's control"
+                }
+                OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
+                    "the target had come under the sponsoring organization's ownership"
+                }
+                OperationObjectiveBlocker::TargetEconomyInactive => {
+                    "the target business was no longer operating"
+                }
+                OperationObjectiveBlocker::NoPressureableWitnessCase => {
+                    "there was no remaining witness cooperation the crew could affect"
+                }
+                OperationObjectiveBlocker::ExtractionCustodyEnded => {
+                    "the target was no longer detained"
+                }
+            };
+            Ok(format!(
+                "{} was cancelled before execution because {reason}. Objective resolution was not attempted.",
+                operation.title()
+            ))
+        }
         OperationAbortCause::DeadlineMissed => {
             let deadline = resolve_earliest_operation_deadline(operation)
                 .expect("validated deadline abort must retain a completion deadline");
@@ -537,12 +660,26 @@ fn abort_entities(
             entities.insert(EntityRef::Organization(response.authority()));
             entities.insert(EntityRef::Neighborhood(response.neighborhood()));
         }
-        OperationAbortCause::DeadlineMissed => {}
+        OperationAbortCause::DeadlineMissed
+        | OperationAbortCause::OpportunityExpired(_)
+        | OperationAbortCause::ObjectiveUnavailable(_) => {}
         OperationAbortCause::ParticipantDetained(character) => {
             entities.insert(EntityRef::Character(character));
         }
     }
     Ok(entities)
+}
+
+fn opportunity_expiry_can_abort(
+    state: &AppState,
+    operation: &OperationRecord,
+    opportunity: OpportunityId,
+) -> bool {
+    operation.status() == OperationStatus::Authorized
+        && state
+            .opportunities()
+            .expired_window_for_operation(operation.id(), state.now())
+            .is_some_and(|(record, _)| record.id() == opportunity)
 }
 
 /// Pre-entry police-arrival abort gate. Each operation receives at most one police

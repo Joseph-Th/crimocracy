@@ -235,8 +235,22 @@ pub enum OperationError {
         deadline: SimTime,
         now: SimTime,
     },
+    #[error(
+        "operation {operation} cannot begin because linked opportunity {opportunity} expired at {valid_until:?} before {now:?}"
+    )]
+    OpportunityWindowExpired {
+        operation: OperationId,
+        opportunity: crate::core::id::OpportunityId,
+        valid_until: SimTime,
+        now: SimTime,
+    },
     #[error("operation {operation} has not missed a completion deadline")]
     DeadlineNotMissed { operation: OperationId },
+    #[error("operation {operation} objective is no longer actionable: {blocker:?}")]
+    ObjectiveUnavailable {
+        operation: OperationId,
+        blocker: crate::operations::OperationObjectiveBlocker,
+    },
     #[error("operation {operation} cannot use abort cause {cause:?} from status {status:?}")]
     InvalidAbortCause {
         operation: OperationId,
@@ -1394,6 +1408,22 @@ pub(crate) fn validate_begin_operation(
             deadline,
             now: state.now(),
         });
+    }
+    if let Some((opportunity, valid_until)) = state
+        .opportunities()
+        .expired_window_for_operation(operation, state.now())
+    {
+        return Err(OperationError::OpportunityWindowExpired {
+            operation,
+            opportunity: opportunity.id(),
+            valid_until,
+            now: state.now(),
+        });
+    }
+    if let Some(blocker) =
+        crate::operations::operation_objective::resolve_objective_blocker(state, record)
+    {
+        return Err(OperationError::ObjectiveUnavailable { operation, blocker });
     }
     let execution = registry.get_operation(record.kind()).execution();
     if let Some(deadline) =

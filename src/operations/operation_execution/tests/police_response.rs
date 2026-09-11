@@ -9,6 +9,157 @@ struct PoliceResponseRoutingWire {
     source_operation: OperationId,
 }
 
+#[test]
+fn rival_post_entry_police_exception_aborts_instead_of_waiting_for_player_direction() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
+        },
+    )
+    .expect("zero-presence patrol should validate")
+    .commit(&mut state)
+    .expect("zero-presence patrol should commit");
+    let player = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Player Observer Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("player organization should validate");
+    designate_player_organization(&mut state, player)
+        .expect("player organization should be eligible");
+
+    let start = run_tick(&registry, &mut state);
+    assert_eq!(start.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("observable rival burglary should dispatch a response");
+    let response_due = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("response should persist")
+        .arrival_due_at();
+
+    let arrival_outcome = run_until_police_response_arrives(&registry, &mut state, response_id);
+    assert_eq!(arrival_outcome.now, response_due);
+    assert!(
+        arrival_outcome.decision_requests.is_empty(),
+        "rival leadership exceptions must not wait for player input"
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rival operation should persist");
+    assert_eq!(operation_record.status(), OperationStatus::Aborted);
+    assert_eq!(
+        operation_record
+            .abort_record()
+            .expect("rival leadership should leave causal abort history")
+            .cause(),
+        OperationAbortCause::AuthorityOrder
+    );
+    assert!(
+        state
+            .decisions()
+            .decisions_for_operation(operation)
+            .next()
+            .is_none(),
+        "autonomous rival handling must not manufacture a pending player-facing decision"
+    );
+    validate_state(&state).expect("rival police-exception abort state should remain valid");
+    validate_state_against_registry(&registry, &state)
+        .expect("rival police-exception abort should match authored content");
+    validate_invariants(&state);
+}
+
+#[test]
+fn pre_designation_police_exception_aborts_instead_of_creating_unowned_decision() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    assert_eq!(
+        state.player_organization(),
+        None,
+        "fixture must exercise the campaign before any player organization is designated"
+    );
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
+        },
+    )
+    .expect("zero-presence patrol should validate")
+    .commit(&mut state)
+    .expect("zero-presence patrol should commit");
+
+    let start = run_tick(&registry, &mut state);
+    assert_eq!(start.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("observable operation should dispatch a response");
+
+    let arrival_outcome = run_until_police_response_arrives(&registry, &mut state, response_id);
+    assert!(
+        arrival_outcome.decision_requests.is_empty(),
+        "no player designation means there is no external recipient for a leadership decision"
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist as history");
+    assert_eq!(operation_record.status(), OperationStatus::Aborted);
+    assert_eq!(
+        operation_record
+            .abort_record()
+            .expect("autonomous leadership should leave abort causality")
+            .cause(),
+        OperationAbortCause::AuthorityOrder
+    );
+    assert!(
+        state
+            .decisions()
+            .decisions_for_operation(operation)
+            .next()
+            .is_none()
+    );
+    validate_state(&state).expect("pre-designation autonomous abort should remain valid");
+    validate_state_against_registry(&registry, &state)
+        .expect("pre-designation autonomous abort should match authored content");
+    validate_invariants(&state);
+}
+
 #[derive(Clone, Serialize)]
 struct PoliceResponseTimingWire {
     dispatched_at: SimTime,
@@ -408,6 +559,13 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    let player = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized operation should persist")
+        .responsible_organization();
+    designate_player_organization(&mut state, player)
+        .expect("operation sponsor should be eligible as the player organization");
     validate_establish_patrol_deployment(
         &state,
         PatrolDeploymentDraft {
@@ -446,12 +604,7 @@ fn post_entry_police_arrival_raises_provenance_backed_decision() {
         .arrival_due_at();
     assert!(response_due > entry_at);
 
-    let arrival_outcome = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if outcome.arrived_police_responses.contains(&response_id) {
-            break outcome;
-        }
-    };
+    let arrival_outcome = run_until_police_response_arrives(&registry, &mut state, response_id);
     assert_eq!(arrival_outcome.now, response_due);
     assert_eq!(arrival_outcome.arrived_police_responses, vec![response_id]);
     assert_eq!(arrival_outcome.decision_requests.len(), 1);
@@ -546,6 +699,13 @@ fn police_arrival_decision_id_exhaustion_leaves_response_dispatched_and_operatio
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    let player = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized operation should persist")
+        .responsible_organization();
+    designate_player_organization(&mut state, player)
+        .expect("operation sponsor should be eligible as the player organization");
     validate_establish_patrol_deployment(
         &state,
         PatrolDeploymentDraft {
@@ -1241,21 +1401,7 @@ fn restore_rejects_arrived_police_response_version_without_a_second_mutation() {
         .get_operation(operation)
         .and_then(|record| record.police_response())
         .expect("jurisdictional operation should dispatch a response");
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if outcome.arrived_police_responses.contains(&response_id) {
-            break;
-        }
-        assert!(
-            state
-                .legal()
-                .get_police_response(response_id)
-                .expect("response should persist while dispatched")
-                .status()
-                == PoliceResponseStatus::Dispatched,
-            "response must remain dispatched until its single arrival transition"
-        );
-    }
+    run_until_police_response_arrives(&registry, &mut state, response_id);
     let response = state
         .legal()
         .get_police_response(response_id)

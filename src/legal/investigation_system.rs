@@ -134,6 +134,11 @@ pub enum InvestigationError {
     },
     #[error("character {character} is a subject of this case and cannot be its named witness")]
     WitnessIsCaseSubject { character: CharacterId },
+    #[error("named witness {character} cannot be bound to unrelated incident subject {subject:?}")]
+    WitnessSubjectOutsideIncident {
+        character: CharacterId,
+        subject: EntityRef,
+    },
     #[error(
         "character {witness} is already registered as case witness {existing} for investigation {investigation}"
     )]
@@ -448,10 +453,11 @@ fn validate_investigation_transition_dependencies(
 /// Deterministically shelves origin-linked investigations whose owning authority has been
 /// institutionally inactive for the authored cold window.
 ///
-/// Cold cases are suspended through the canonical lifecycle transition, which revalidates every
-/// dependency (no scheduled work, no active arrest) at the current minute, so work that appeared
-/// between the deadline index scan and this call simply keeps the case active and decay retries on
-/// the refreshed deadline. Only cases carrying a case-origination link (an operation or enterprise
+/// Cold cases are handled through the canonical lifecycle transition. Scheduled work defers decay,
+/// suspension revalidates the no-active-arrest rule, and a case whose actionable subjects are all
+/// detained takes the explicit close branch below. Work that appeared between the deadline index
+/// scan and this call simply keeps the case active and decay retries on the refreshed deadline.
+/// Only cases carrying a case-origination link (an operation or enterprise
 /// whose exposure opened them) are eligible: institution-authored casework keeps its lifecycle
 /// until an explicit staff decision. Identifying a concrete character does not manufacture
 /// perpetual institutional activity: if the case produces no further work or evidence for the
@@ -1140,6 +1146,7 @@ impl ValidatedIncidentIntake {
                     id,
                     investigation,
                     witness: witness.character,
+                    subject: witness.subject,
                     cooperation: witness.cooperation,
                     registered_at: state.now(),
                     statements: Default::default(),
@@ -1272,6 +1279,21 @@ fn validate_incident_intake_dependencies(
         {
             return Err(InvestigationError::WitnessIsCaseSubject {
                 character: witness.character,
+            });
+        }
+        if !is_entity_present(state, witness.subject) {
+            return Err(InvestigationError::MissingEntity(witness.subject));
+        }
+        let subject_belongs_to_incident = draft.origin == Some(witness.subject)
+            || draft.subjects.contains(&witness.subject)
+            || draft
+                .evidence
+                .iter()
+                .any(|evidence| evidence.subject == witness.subject);
+        if !subject_belongs_to_incident {
+            return Err(InvestigationError::WitnessSubjectOutsideIncident {
+                character: witness.character,
+                subject: witness.subject,
             });
         }
     }

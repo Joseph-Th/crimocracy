@@ -40,15 +40,18 @@ pub enum WitnessError {
         investigation: InvestigationId,
         witness: CharacterId,
     },
+    #[error(
+        "character {witness} cannot be registered to testify about unrelated subject {subject:?} in investigation {investigation}"
+    )]
+    WitnessSubjectOutsideCase {
+        investigation: InvestigationId,
+        witness: CharacterId,
+        subject: EntityRef,
+    },
     #[error("case witness {0} does not exist")]
     MissingCaseWitness(CaseWitnessId),
     #[error("case witness {0} already has a recorded statement")]
     WitnessAlreadyStatemented(CaseWitnessId),
-    #[error("case witness {witness} cannot give testimony about unrelated entity {subject:?}")]
-    StatementSubjectOutsideCase {
-        witness: CaseWitnessId,
-        subject: EntityRef,
-    },
     #[error("witness statement summary must not be empty")]
     EmptyStatement,
     #[error("witness statement references missing entity {0:?}")]
@@ -129,6 +132,7 @@ impl ValidatedCaseWitnessRegistration {
                 id,
                 investigation: self.draft.investigation,
                 witness: self.draft.witness,
+                subject: self.draft.subject,
                 cooperation: self.draft.cooperation,
                 registered_at: state.now(),
                 statements: Default::default(),
@@ -221,6 +225,16 @@ fn validate_registration_dependencies(
         return Err(WitnessError::WitnessIsCaseSubject {
             investigation: draft.investigation,
             witness: draft.witness,
+        });
+    }
+    if !is_entity_present(state, draft.subject) {
+        return Err(WitnessError::MissingEntity(draft.subject));
+    }
+    if !witness_subject_is_case_relevant(state, investigation, draft.subject, None) {
+        return Err(WitnessError::WitnessSubjectOutsideCase {
+            investigation: draft.investigation,
+            witness: draft.witness,
+            subject: draft.subject,
         });
     }
     if let Some(existing) = state
@@ -350,7 +364,7 @@ impl ValidatedWitnessStatement {
             .ids
             .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
         self.ensure_current(state)?;
-        let (investigation_id, witness_id, cooperation) = {
+        let (investigation_id, witness_id, subject, cooperation) = {
             let case_witness = validate_witness_mutation_snapshot(
                 state,
                 self.draft.case_witness,
@@ -361,6 +375,7 @@ impl ValidatedWitnessStatement {
             (
                 case_witness.investigation(),
                 case_witness.witness(),
+                case_witness.subject(),
                 case_witness.cooperation(),
             )
         };
@@ -384,7 +399,7 @@ impl ValidatedWitnessStatement {
                 custodian: investigation.owner(),
             },
             connection: EvidenceConnection {
-                subject: self.draft.subject,
+                subject,
                 origin: self.draft.origin,
                 source: Some(EntityRef::Character(witness_id)),
                 derived_from: Default::default(),
@@ -416,7 +431,7 @@ impl ValidatedWitnessStatement {
         let statement_record = WitnessStatementRecord {
             id: statement,
             case_witness: self.draft.case_witness,
-            subject: self.draft.subject,
+            subject,
             origin: self.draft.origin,
             confidence: self.draft.confidence,
             cooperation,
@@ -560,21 +575,6 @@ fn validate_statement_dependencies(
     if draft.summary.trim().is_empty() {
         return Err(WitnessError::EmptyStatement);
     }
-    if !is_entity_present(state, draft.subject) {
-        return Err(WitnessError::MissingEntity(draft.subject));
-    }
-    let investigation = state
-        .legal
-        .get_investigation(case_witness.investigation())
-        .ok_or(WitnessError::MissingInvestigation(
-            case_witness.investigation(),
-        ))?;
-    if !witness_statement_subject_is_case_relevant(state, investigation, draft.subject, None) {
-        return Err(WitnessError::StatementSubjectOutsideCase {
-            witness: case_witness.id(),
-            subject: draft.subject,
-        });
-    }
     if let Some(origin) = draft.origin
         && !is_entity_present(state, origin)
     {
@@ -584,13 +584,11 @@ fn validate_statement_dependencies(
     Ok(())
 }
 
-/// Named testimony may strengthen explicitly declared case subject matter, identify the case's
-/// originating event, or develop an entity already connected by other evidence. It may not
-/// introduce an entity with no prior connection to the investigation. `excluded_evidence` lets
-/// restore validation ignore the statement's own testimony evidence. Declared subjects are kept
-/// separately from evidence-promoted effective subjects so the latter cannot circularly justify
-/// the testimony that promoted them.
-pub(crate) fn witness_statement_subject_is_case_relevant(
+/// A witness may be bound only to declared case subject matter, the originating event, or an
+/// entity already connected by other evidence. Registration uses this predicate before persisting
+/// that binding. Restore validation supplies `excluded_evidence` to ignore the witness's own
+/// testimony evidence, preventing circular justification of a binding that promoted its subject.
+pub(crate) fn witness_subject_is_case_relevant(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
     subject: EntityRef,

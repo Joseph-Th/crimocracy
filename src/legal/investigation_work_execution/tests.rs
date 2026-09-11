@@ -31,6 +31,38 @@ struct WorkFixture {
     _second_evidence: EvidenceId,
 }
 
+fn run_until_work_resolved(registry: &Registry, state: &mut AppState, work: InvestigationWorkId) {
+    let due_at = state
+        .legal()
+        .get_investigation_work(work)
+        .expect("scheduled fixture work should persist")
+        .due_at();
+    let remaining_ticks = due_at
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("scheduled fixture work cannot already be overdue");
+    assert!(
+        remaining_ticks > 0,
+        "fixture work wait must begin before its due time"
+    );
+    for _ in 0..remaining_ticks {
+        let outcome = run_tick(registry, state);
+        if outcome.resolved_investigation_work.contains(&work) {
+            return;
+        }
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation_work(work)
+                .expect("fixture work should persist while awaiting resolution")
+                .status(),
+            InvestigationWorkStatus::Scheduled,
+            "fixture work {work} left Scheduled without appearing in the resolution outcome"
+        );
+    }
+    panic!("fixture work {work} did not resolve by its due time {due_at:?}");
+}
+
 fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("test rating must be valid")
 }
@@ -579,6 +611,7 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Hostile,
         },
     )
@@ -596,12 +629,7 @@ fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
             "attempt {attempt} should schedule exactly one interview"
         );
         let interview = scheduled[0];
-        loop {
-            let outcome = run_tick(&registry, &mut fixture.state);
-            if outcome.resolved_investigation_work.contains(&interview) {
-                break;
-            }
-        }
+        run_until_work_resolved(&registry, &mut fixture.state, interview);
     }
 
     // The authored attempt budget is spent: the scheduling pass must propose nothing further,
@@ -660,6 +688,7 @@ fn witness_interview_scheduling_prioritizes_unattempted_witness_before_retry() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Hostile,
         },
     )
@@ -699,6 +728,7 @@ fn witness_interview_scheduling_prioritizes_unattempted_witness_before_retry() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.middle,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Hostile,
         },
     )
@@ -737,6 +767,7 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -748,7 +779,6 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
         &fixture.state,
         crate::legal::WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.target),
             origin: None,
             confidence: rating(80),
             summary: "The witness already gave a usable account.".to_owned(),
@@ -780,7 +810,7 @@ fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
 }
 
 #[test]
-fn interview_statement_ignores_stronger_non_actionable_character_evidence() {
+fn interview_statement_uses_registered_subject_despite_other_case_evidence() {
     let registry = build_registry();
     let mut fixture = make_fixture(
         90,
@@ -806,6 +836,7 @@ fn interview_statement_ignores_stronger_non_actionable_character_evidence() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -858,8 +889,8 @@ fn interview_statement_ignores_stronger_non_actionable_character_evidence() {
 
     assert_eq!(
         statement.subject(),
-        EntityRef::Character(fixture.middle),
-        "raw strength must not let questionable evidence steer testimony ahead of an actionable lead"
+        EntityRef::Character(fixture.first),
+        "later or stronger case evidence must not make a witness testify about a different subject"
     );
     validate_state(&fixture.state).expect("statement-selection fixture should remain valid");
     validate_invariants(&fixture.state);
@@ -879,6 +910,7 @@ fn actionable_evidence_against_witness_cancels_pending_interview_and_blocks_futu
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1002,6 +1034,7 @@ fn direct_statement_cancels_redundant_pending_interview_without_cancelling_its_c
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1027,7 +1060,6 @@ fn direct_statement_cancels_redundant_pending_interview_without_cancelling_its_c
         &fixture.state,
         crate::legal::WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.target),
             origin: None,
             confidence: rating(80),
             summary: "The witness voluntarily gave the account before the appointment.".to_owned(),
@@ -1156,6 +1188,7 @@ fn late_reviewable_evidence_is_scheduled_after_case_was_already_staffed() {
         crate::legal::CaseWitnessDraft {
             investigation,
             witness,
+            subject: EntityRef::Character(suspect),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1204,11 +1237,8 @@ fn late_reviewable_evidence_is_scheduled_after_case_was_already_staffed() {
     );
     assert!(second_tick.scheduled_witness_interviews.is_empty());
 
-    let mut interview_resolved = second_tick.resolved_investigation_work.contains(&interview);
-    while !interview_resolved {
-        interview_resolved = run_tick(&registry, &mut state)
-            .resolved_investigation_work
-            .contains(&interview);
+    if !second_tick.resolved_investigation_work.contains(&interview) {
+        run_until_work_resolved(&registry, &mut state, interview);
     }
 
     // Scheduling phases run before due work resolves, so the newly idle detective picks up the
@@ -1255,6 +1285,7 @@ fn later_witness_pressure_does_not_rewrite_completed_interview_support() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1350,6 +1381,7 @@ fn witness_scheduler_surfaces_work_id_exhaustion_without_partial_schedule() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1605,6 +1637,7 @@ fn investigator_cannot_hold_two_scheduled_casework_tasks() {
         crate::legal::CaseWitnessDraft {
             investigation: fixture.investigation,
             witness,
+            subject: EntityRef::Character(fixture.first),
             cooperation: crate::legal::WitnessCooperation::Cooperative,
         },
     )
@@ -1679,6 +1712,7 @@ fn autonomous_witness_scheduler_starts_only_one_interview_per_detective() {
             crate::legal::CaseWitnessDraft {
                 investigation: fixture.investigation,
                 witness,
+                subject: EntityRef::Character(fixture.first),
                 cooperation: crate::legal::WitnessCooperation::Cooperative,
             },
         )

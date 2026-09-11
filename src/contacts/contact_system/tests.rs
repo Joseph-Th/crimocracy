@@ -6,10 +6,12 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::SimDuration;
-use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::intelligence_system::{
+    validate_information_transfer, validate_record_information,
+};
 use crate::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationDraft, InformationSourceKind, InformationTopic, InformationTransferDraft,
+    KnowledgeHolder, Reliability, Specificity,
 };
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
@@ -72,6 +74,82 @@ fn resentment_alone_does_not_create_an_institutional_contact_channel() {
     );
     assert_eq!(fixture.state.contacts().contacts().count(), 0);
     validate_state(&fixture.state).expect("resentment-only social state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn pending_contact_sources_rank_observation_time_before_late_transfer_time() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let contact = establish(&mut fixture);
+    let colleague = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Institutional Colleague".to_owned(),
+            organization: Some(fixture.institution),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("institutional colleague should validate");
+    let stale_observation = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(colleague),
+        InformationTopic::LegalActivity,
+    );
+
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    let source_character = fixture.source;
+    let current_observation = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+
+    fixture.state.advance_clock(SimDuration::from_minutes(60));
+    let late_transfer = validate_information_transfer(
+        &fixture.state,
+        InformationTransferDraft {
+            source: stale_observation,
+            recipient: KnowledgeHolder::Character(source_character),
+        },
+    )
+    .expect("same-institution information transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("same-institution information transfer should commit");
+    let transferred = fixture
+        .state
+        .intelligence()
+        .get_information(late_transfer)
+        .expect("transferred information should persist");
+    assert!(
+        transferred.recorded_at()
+            > fixture
+                .state
+                .intelligence()
+                .get_information(current_observation)
+                .expect("current observation should persist")
+                .recorded_at()
+    );
+    assert!(
+        transferred.observed_at()
+            < fixture
+                .state
+                .intelligence()
+                .get_information(current_observation)
+                .expect("current observation should persist")
+                .observed_at()
+    );
+
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, contact),
+        vec![current_observation, late_transfer],
+        "a recently forwarded old fact must not outrank a genuinely newer observation"
+    );
+    validate_state(&fixture.state)
+        .expect("observation-time disclosure ordering must preserve valid state");
     validate_invariants(&fixture.state);
 }
 

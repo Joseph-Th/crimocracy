@@ -5,6 +5,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OperationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::enterprises::EnterpriseStatus;
+use crate::intelligence::KnowledgeHolder;
 use crate::operations::operation_objective::{
     has_active_foreign_witness_case, has_pressureable_witness_case,
 };
@@ -160,7 +161,9 @@ fn validate_active_field_objective_targets(
                 *target,
             )
         }
-        OperationObjective::GatherInformation { .. } => Ok(()),
+        OperationObjective::GatherInformation { target } => {
+            validate_surveillance_target_knowledge(state, responsible_organization, *target)
+        }
         // Sabotage targets a business whose premises the crew must physically reach, and one
         // that actually operates. Disrupting a shuttered or economy-less storefront would have
         // no modeled effect, so authorization rejects it up front.
@@ -208,6 +211,51 @@ fn validate_active_field_objective_targets(
             }
             Ok(())
         }
+    }
+}
+
+/// Administrative runtime records are not ambient world knowledge. A crew may directly surveil
+/// its own operation or enterprise, and an authority may surveil its own case; otherwise the
+/// responsible organization must already hold some information naming that exact record. Treat an
+/// unknown-but-real administrative target as missing so authorization cannot be used as an
+/// existence oracle for hidden state.
+fn validate_surveillance_target_knowledge(
+    state: &AppState,
+    organization: OrganizationId,
+    target: EntityRef,
+) -> Result<(), OperationError> {
+    let intrinsically_known = match target {
+        EntityRef::Operation(operation) => state
+            .operations
+            .get_operation(operation)
+            .is_some_and(|record| record.responsible_organization() == organization),
+        EntityRef::Investigation(investigation) => state
+            .legal
+            .get_investigation(investigation)
+            .is_some_and(|record| record.owner() == organization),
+        EntityRef::Enterprise(enterprise) => state
+            .enterprises
+            .get_enterprise(enterprise)
+            .is_some_and(|record| record.organization() == organization),
+        EntityRef::Organization(_)
+        | EntityRef::Character(_)
+        | EntityRef::Neighborhood(_)
+        | EntityRef::Business(_)
+        | EntityRef::Evidence(_)
+        | EntityRef::FinancialAccount(_)
+        | EntityRef::DecisionRequest(_)
+        | EntityRef::Mandate(_) => return Ok(()),
+    };
+    if intrinsically_known
+        || state
+            .intelligence
+            .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
+            .next()
+            .is_some()
+    {
+        Ok(())
+    } else {
+        Err(OperationError::MissingEntity(target))
     }
 }
 

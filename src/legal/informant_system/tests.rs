@@ -4,22 +4,28 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::time::SimDuration;
+use crate::core::simulation::run_tick;
+use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
 };
 use crate::legal::ArrestDraft;
 use crate::legal::investigation_system::{
-    InvestigationError, InvestigationTransition, validate_add_evidence,
+    InvestigationError, InvestigationTransition, validate_add_evidence, validate_incident_intake,
     validate_open_investigation, validate_transition_investigation,
 };
-use crate::legal::{EvidenceDraft, InvestigationDraft};
+use crate::legal::{EvidenceDraft, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft};
+use crate::operations::operation_system::validate_authorize_operation;
+use crate::operations::{
+    OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
+};
 use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
 };
 use crate::world::{
-    AutonomyLevel, CharacterDraft, DriveKind, OrganizationDraft, OrganizationKind, Rating,
+    AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft, OrganizationKind,
+    Rating,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -319,7 +325,7 @@ fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins
 }
 
 #[test]
-fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
+fn autonomous_disclosure_reaches_each_matching_case_in_one_pass() {
     let registry = build_registry();
     let mut fixture = fixture();
     let informant = validate_establish_informant(
@@ -348,43 +354,40 @@ fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
 
     let first_pass = apply_informant_disclosures(&mut fixture.state)
         .expect("first disclosure pass should resolve");
-    assert_eq!(first_pass.len(), 1);
-    let first = fixture
-        .state
-        .legal()
-        .informant_disclosures()
-        .find(|record| record.id() == first_pass[0])
-        .expect("first disclosure should persist");
-    assert_eq!(first.informant(), informant);
-    assert_eq!(first.source_information(), information);
-    assert_eq!(first.investigation(), fixture.investigation);
+    assert_eq!(first_pass.len(), 2);
+    let first_pass_cases = first_pass
+        .iter()
+        .map(|id| {
+            let record = fixture
+                .state
+                .legal()
+                .informant_disclosures()
+                .find(|record| record.id() == *id)
+                .expect("same-pass disclosure should persist");
+            assert_eq!(record.informant(), informant);
+            assert_eq!(record.source_information(), information);
+            record.investigation()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        first_pass_cases,
+        BTreeSet::from([fixture.investigation, second_case]),
+        "case creation order must not delay the same held fact for another matching active file"
+    );
 
     let envelope = build_save(&registry, &fixture.state)
-        .expect("partially disclosed informant state should save");
+        .expect("fully propagated informant state should save");
     let bytes = bincode::serialize(&envelope).expect("informant save should serialize");
     let decoded: SaveEnvelope =
         bincode::deserialize(&bytes).expect("informant save should deserialize");
     fixture.state = restore_save(&registry, decoded)
         .expect("informant state should restore with disclosure indexes rebuilt");
 
-    let second_pass = apply_informant_disclosures(&mut fixture.state)
-        .expect("second disclosure pass should resume through rebuilt indexes");
-    assert_eq!(second_pass.len(), 1);
-    let second = fixture
-        .state
-        .legal()
-        .informant_disclosures()
-        .find(|record| record.id() == second_pass[0])
-        .expect("second disclosure should persist");
-    assert_eq!(second.informant(), informant);
-    assert_eq!(second.source_information(), information);
-    assert_eq!(second.investigation(), second_case);
-
     assert!(
         apply_informant_disclosures(&mut fixture.state)
-            .expect("exhausted disclosure pass should resolve")
+            .expect("rebuilt disclosure indexes should preserve exhaustion")
             .is_empty(),
-        "one personal fact should be disclosed once to each relevant active case, then stop"
+        "one personal fact should reach every relevant active case once, then stop"
     );
     assert_eq!(
         fixture
@@ -398,6 +401,189 @@ fn autonomous_disclosure_reaches_each_matching_case_across_successive_passes() {
     );
     validate_state(&fixture.state).expect("multi-case disclosure state should remain valid");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn informant_disclosure_refreshes_all_matching_originated_cases_before_cold_decay() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1F0A_C01D);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Parallel Case Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Parallel Case Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let source = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Parallel Case Source".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("source fixture should validate");
+    let make_leader = |state: &mut AppState, name: &str| {
+        insert_character(
+            state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: Some(criminal),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Surveillance,
+                    Rating::try_new(60).expect("fixture rating should validate"),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("operation leader fixture should validate")
+    };
+    let first_leader = make_leader(&mut state, "First Parallel Observer");
+    let second_leader = make_leader(&mut state, "Second Parallel Observer");
+
+    // Offset setup from the day boundary so the regression isolates legal phase ordering.
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let informant = validate_establish_informant(
+        &state,
+        InformantDraft {
+            character: source,
+            handler: police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut state)
+    .expect("informant establishment should commit");
+    let information = validate_record_information(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(source),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(criminal),
+            observed_at: state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The source knows the crew's current personnel structure.".to_owned(),
+        },
+    )
+    .expect("source information should validate")
+    .commit(&mut state)
+    .expect("source information should commit");
+
+    let cold_window = registry.legal().cold_case_window();
+    let scheduled_for = SimTime::from_minutes(
+        state
+            .now()
+            .as_minutes()
+            .checked_add(u64::from(cold_window.as_minutes()))
+            .and_then(|minute| minute.checked_add(60))
+            .expect("fixture schedule should fit simulation time"),
+    );
+    let mut cases = Vec::new();
+    for (index, leader) in [first_leader, second_leader].into_iter().enumerate() {
+        let origin = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: format!("Parallel surveillance origin {}", index + 1),
+                kind: OperationKind::Surveillance,
+                responsible_organization: criminal,
+                leader,
+                objective: OperationObjective::GatherInformation {
+                    target: EntityRef::Organization(criminal),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for,
+            },
+        )
+        .expect("future surveillance origin should validate")
+        .commit(&mut state)
+        .expect("future surveillance origin should commit");
+        let case = validate_incident_intake(
+            &state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: format!("Parallel originated case {}", index + 1),
+                subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+                evidence: vec![IncidentEvidenceDraft {
+                    subject: EntityRef::Organization(criminal),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Weak,
+                    reliability: EvidenceReliability::Questionable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                }],
+                origin: Some(EntityRef::Operation(origin)),
+                witness: None,
+            },
+        )
+        .expect("distinct active incident should open its own originated case")
+        .commit(&mut state)
+        .expect("originated case should commit")
+        .investigation;
+        cases.push(case);
+    }
+    assert_ne!(cases[0], cases[1]);
+
+    state.advance_clock(SimDuration::from_minutes(
+        cold_window
+            .as_minutes()
+            .checked_sub(1)
+            .expect("cold-case window must exceed one minute"),
+    ));
+    let outcome = run_tick(&registry, &mut state);
+
+    assert_eq!(outcome.informant_disclosures.len(), 2);
+    assert!(outcome.cold_case_suspensions.is_empty());
+    let disclosed_cases = outcome
+        .informant_disclosures
+        .iter()
+        .map(|id| {
+            let disclosure = state
+                .legal()
+                .informant_disclosures()
+                .find(|record| record.id() == *id)
+                .expect("same-minute disclosure should persist");
+            assert_eq!(disclosure.informant(), informant);
+            assert_eq!(disclosure.source_information(), information);
+            disclosure.investigation()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(disclosed_cases, cases.iter().copied().collect());
+    for case in cases {
+        let investigation = state
+            .legal()
+            .get_investigation(case)
+            .expect("refreshed case should persist");
+        assert_eq!(investigation.status(), InvestigationStatus::Active);
+        assert_eq!(investigation.last_activity_at(), state.now());
+    }
+    validate_state(&state).expect("same-minute disclosure state should validate");
+    validate_invariants(&state);
 }
 
 #[test]

@@ -21,7 +21,8 @@ use crate::legal::police_response_system::{
     find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
 };
 use crate::operations::operation_abort::{
-    police_arrival_can_abort, validate_police_arrival_abort_operation,
+    police_arrival_can_abort, validate_authority_abort_operation,
+    validate_police_arrival_abort_operation,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
 use crate::operations::{OperationContingency, OperationStatus};
@@ -155,7 +156,13 @@ pub(crate) fn apply_due_police_response_arrivals(
     let mut arrived = Vec::with_capacity(due.len());
     let mut decisions = Vec::new();
     for response_id in due {
-        let (operation_id, should_abort_before_entry, decision, participant_pressure) = {
+        let (
+            operation_id,
+            should_abort_before_entry,
+            autonomous_leadership_abort,
+            decision,
+            participant_pressure,
+        ) = {
             let response = state
                 .legal
                 .get_police_response(response_id)
@@ -167,12 +174,19 @@ pub(crate) fn apply_due_police_response_arrivals(
             // The owning pre-entry abort predicate, shared with the canonical abort
             // validator so the tick pass and validation can never disagree.
             let should_abort = police_arrival_can_abort(state, operation, response_id);
-            let decision = if !should_abort
+            let requests_leadership = !should_abort
                 && operation.status() == OperationStatus::InProgress
                 && operation
                     .contingencies()
-                    .contains(&OperationContingency::RequestDecisionOnPoliceArrival)
-            {
+                    .contains(&OperationContingency::RequestDecisionOnPoliceArrival);
+            // Only the explicitly designated player organization has an external decision-maker.
+            // Every other organization, including all organizations before player designation,
+            // must resolve the exception autonomously or the operation can remain blocked forever.
+            // Until rival tactical judgment has its own authored policy, use the conservative
+            // canonical leadership action and abort.
+            let autonomous_leadership_abort = requests_leadership
+                && state.player_organization() != Some(operation.responsible_organization());
+            let decision = if requests_leadership && !autonomous_leadership_abort {
                 Some(validate_request_police_arrival_decision_on_arrival(
                     state,
                     response_id,
@@ -195,7 +209,13 @@ pub(crate) fn apply_due_police_response_arrivals(
             } else {
                 Vec::new()
             };
-            (operation.id(), should_abort, decision, participant_pressure)
+            (
+                operation.id(),
+                should_abort,
+                autonomous_leadership_abort,
+                decision,
+                participant_pressure,
+            )
         };
 
         let arrival = validate_police_response_arrival(state, response_id)?;
@@ -203,6 +223,11 @@ pub(crate) fn apply_due_police_response_arrivals(
             Some(
                 validate_police_arrival_abort_operation(state, operation_id, response_id)
                     .expect("due pre-entry response must satisfy the authored abort contingency"),
+            )
+        } else if autonomous_leadership_abort {
+            Some(
+                validate_authority_abort_operation(state, operation_id)
+                    .expect("non-player leadership exception must remain abortable"),
             )
         } else {
             None

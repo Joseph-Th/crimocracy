@@ -755,6 +755,10 @@ pub struct CaseWitnessRecord {
     pub(super) id: CaseWitnessId,
     pub(super) investigation: InvestigationId,
     pub(super) witness: CharacterId,
+    /// Subject matter this witness was registered as having observed. Persisting the binding
+    /// prevents a later interview from choosing a different suspect merely because stronger
+    /// evidence entered the case after registration.
+    pub(super) subject: EntityRef,
     pub(super) cooperation: WitnessCooperation,
     pub(super) registered_at: SimTime,
     pub(super) statements: BTreeSet<WitnessStatementId>,
@@ -775,6 +779,10 @@ impl CaseWitnessRecord {
 
     pub fn witness(&self) -> CharacterId {
         self.witness
+    }
+
+    pub fn subject(&self) -> EntityRef {
+        self.subject
     }
 
     pub fn cooperation(&self) -> WitnessCooperation {
@@ -855,13 +863,13 @@ impl WitnessStatementRecord {
 pub struct CaseWitnessDraft {
     pub investigation: InvestigationId,
     pub witness: CharacterId,
+    pub subject: EntityRef,
     pub cooperation: WitnessCooperation,
 }
 
 #[derive(Clone, Debug)]
 pub struct WitnessStatementDraft {
     pub case_witness: CaseWitnessId,
-    pub subject: EntityRef,
     pub origin: Option<EntityRef>,
     pub confidence: Rating,
     pub summary: String,
@@ -1579,6 +1587,8 @@ pub struct IncidentIntakeDraft {
 #[derive(Clone, Debug)]
 pub struct IncidentWitnessDraft {
     pub character: CharacterId,
+    /// Subject this named witness actually observed in the incident.
+    pub subject: EntityRef,
     pub cooperation: WitnessCooperation,
 }
 

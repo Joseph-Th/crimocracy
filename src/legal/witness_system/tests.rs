@@ -36,6 +36,7 @@ struct CaseWitnessRecordWire {
     id: CaseWitnessId,
     investigation: InvestigationId,
     witness: CharacterId,
+    subject: EntityRef,
     cooperation: WitnessCooperation,
     registered_at: SimTime,
     statements: BTreeSet<crate::core::id::WitnessStatementId>,
@@ -200,6 +201,7 @@ fn case_witness_wire(record: &CaseWitnessRecord) -> CaseWitnessRecordWire {
         id: record.id(),
         investigation: record.investigation(),
         witness: record.witness(),
+        subject: record.subject(),
         cooperation: record.cooperation(),
         registered_at: record.registered_at(),
         statements: record.statements().clone(),
@@ -366,6 +368,7 @@ fn witness_registration_informs_an_existing_case_lead() {
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -386,6 +389,7 @@ fn later_case_staffing_learns_witnesses_registered_before_the_lead() {
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -418,6 +422,7 @@ fn staffed_witness_registration_preflights_knowledge_allocation_before_mutation(
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -468,6 +473,7 @@ fn case_subject_cannot_be_registered_as_case_witness() {
             CaseWitnessDraft {
                 investigation: fixture.investigation,
                 witness: fixture.subject,
+                subject: EntityRef::Character(fixture.subject),
                 cooperation: WitnessCooperation::Cooperative,
             },
         )
@@ -489,6 +495,58 @@ fn case_subject_cannot_be_registered_as_case_witness() {
             .is_none()
     );
     validate_state(&fixture.state).expect("rejected self-conflicted witness state must stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn witness_cannot_be_registered_for_subject_outside_case() {
+    let mut fixture = make_fixture();
+    let outsider = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unrelated Registration Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("unrelated character fixture should validate");
+    let next_witness = fixture.state.ids.next_raw(IdKind::CaseWitness);
+
+    assert_eq!(
+        validate_register_case_witness(
+            &fixture.state,
+            CaseWitnessDraft {
+                investigation: fixture.investigation,
+                witness: fixture.witness,
+                subject: EntityRef::Character(outsider),
+                cooperation: WitnessCooperation::Cooperative,
+            },
+        )
+        .expect_err("registration must bind testimony only to existing case subject matter"),
+        WitnessError::WitnessSubjectOutsideCase {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            subject: EntityRef::Character(outsider),
+        }
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::CaseWitness),
+        next_witness,
+        "rejected registration must not consume a case-witness id"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .case_witness_for(fixture.investigation, fixture.witness)
+            .is_none()
+    );
+    validate_state(&fixture.state)
+        .expect("rejected unrelated witness subject must leave valid state");
     validate_invariants(&fixture.state);
 }
 
@@ -543,80 +601,6 @@ fn restore_rejects_effective_investigation_subject_without_declared_or_evidence_
 }
 
 #[test]
-fn witness_statement_cannot_introduce_unrelated_case_subject() {
-    let registry = build_registry();
-    let mut fixture = make_fixture();
-    let outsider = insert_character(
-        &mut fixture.state,
-        CharacterDraft {
-            name: "Unrelated Bystander".to_owned(),
-            organization: None,
-            supervisor: None,
-            autonomy: AutonomyLevel::Guided,
-            capabilities: BTreeMap::new(),
-            traits: BTreeSet::new(),
-            drives: BTreeMap::new(),
-        },
-    )
-    .expect("unrelated character fixture should validate");
-    let case_witness = validate_register_case_witness(
-        &fixture.state,
-        CaseWitnessDraft {
-            investigation: fixture.investigation,
-            witness: fixture.witness,
-            cooperation: WitnessCooperation::Cooperative,
-        },
-    )
-    .expect("case witness registration should validate")
-    .commit(&mut fixture.state)
-    .expect("case witness registration should commit");
-    let next_statement = fixture.state.ids.next_raw(IdKind::WitnessStatement);
-    let next_evidence = fixture.state.ids.next_raw(IdKind::Evidence);
-
-    assert_eq!(
-        validate_record_witness_statement(
-            &registry,
-            &fixture.state,
-            WitnessStatementDraft {
-                case_witness,
-                subject: EntityRef::Character(outsider),
-                origin: None,
-                confidence: rating(95),
-                summary: "The witness names someone with no connection to this case.".to_owned(),
-            },
-        )
-        .expect_err("testimony must not manufacture evidence against an unrelated entity"),
-        WitnessError::StatementSubjectOutsideCase {
-            witness: case_witness,
-            subject: EntityRef::Character(outsider),
-        }
-    );
-    assert_eq!(
-        fixture.state.ids.next_raw(IdKind::WitnessStatement),
-        next_statement
-    );
-    assert_eq!(fixture.state.ids.next_raw(IdKind::Evidence), next_evidence);
-    assert!(
-        fixture
-            .state
-            .legal()
-            .get_investigation(fixture.investigation)
-            .expect("investigation should persist")
-            .evidence()
-            .iter()
-            .all(|evidence| fixture
-                .state
-                .legal()
-                .get_evidence(*evidence)
-                .is_some_and(|record| record.subject() != EntityRef::Character(outsider)))
-    );
-    validate_state(&fixture.state).expect("rejected unrelated testimony must preserve valid state");
-    validate_state_against_registry(&registry, &fixture.state)
-        .expect("rejected unrelated testimony must preserve authored validity");
-    validate_invariants(&fixture.state);
-}
-
-#[test]
 fn restore_rejects_statement_whose_only_case_connection_is_its_own_subject_promotion() {
     let registry = build_registry();
     let mut fixture = make_fixture();
@@ -668,18 +652,18 @@ fn restore_rejects_statement_whose_only_case_connection_is_its_own_subject_promo
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(lead),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
     .expect("case witness should validate")
     .commit(&mut fixture.state)
     .expect("case witness should commit");
-    let statement = validate_record_witness_statement(
+    let _statement = validate_record_witness_statement(
         &registry,
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(lead),
             origin: None,
             confidence: rating(95),
             summary: "The witness develops the weak lead into an identified subject.".to_owned(),
@@ -729,10 +713,10 @@ fn restore_rejects_statement_whose_only_case_connection_is_its_own_subject_promo
     assert!(matches!(
         error,
         crate::core::persistence::LoadError::InvalidState(
-            crate::core::invariants::StateValidationError::InvalidWitnessStatement {
-                statement: invalid
+            crate::core::invariants::StateValidationError::InvalidCaseWitness {
+                witness: invalid
             }
-        ) if invalid == statement.statement
+        ) if invalid == case_witness
     ));
 }
 
@@ -744,6 +728,7 @@ fn external_witness_cooperation_change_does_not_refresh_police_case_activity() {
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -786,6 +771,7 @@ fn restore_rejects_witness_attempt_counter_without_completed_interview_history()
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -836,6 +822,7 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -847,7 +834,6 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: Some(EntityRef::Organization(fixture.criminal)),
             confidence: rating(88),
             summary: "Mercer identifies Frank Dello as the man he saw leaving the crew's garage."
@@ -906,7 +892,6 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
             &fixture.state,
             WitnessStatementDraft {
                 case_witness,
-                subject: EntityRef::Character(fixture.subject),
                 origin: None,
                 confidence: rating(95),
                 summary: "Mercer repeats the same identification.".to_owned(),
@@ -955,6 +940,7 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: second_witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -966,7 +952,6 @@ fn named_witness_statement_creates_source_bearing_testimony_and_survives_save() 
         &restored,
         WitnessStatementDraft {
             case_witness: second_case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: None,
             confidence: rating(61),
             summary: "Bell separately places Dello near the garage that evening.".to_owned(),
@@ -993,6 +978,7 @@ fn later_subject_promotion_preserves_historical_testimony_but_ends_witness_role(
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -1004,7 +990,6 @@ fn later_subject_promotion_preserves_historical_testimony_but_ends_witness_role(
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: None,
             confidence: rating(88),
             summary: "Mercer identifies Dello before later evidence implicates Mercer himself."
@@ -1111,6 +1096,7 @@ fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -1142,6 +1128,7 @@ fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -1154,6 +1141,7 @@ fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes
             CaseWitnessDraft {
                 investigation: fixture.investigation,
                 witness: fixture.witness,
+                subject: EntityRef::Character(fixture.subject),
                 cooperation: WitnessCooperation::Cooperative,
             },
         )
@@ -1176,7 +1164,6 @@ fn witness_registration_and_cooperation_tokens_reject_case_and_statement_changes
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: None,
             confidence: rating(55),
             summary: "Mercer says he is fairly sure Dello was present.".to_owned(),
@@ -1218,6 +1205,7 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
         CaseWitnessDraft {
             investigation: fixture.investigation,
             witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -1229,7 +1217,6 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: None,
             confidence: rating(72),
             summary: "Mercer identifies Dello from the alley encounter.".to_owned(),
@@ -1252,7 +1239,6 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
         &fixture.state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(fixture.subject),
             origin: None,
             confidence: rating(90),
             summary: "Mercer offers a second identification.".to_owned(),

@@ -656,10 +656,9 @@ fn validate_conversion_match(
             opportunity: opportunity.id(),
         });
     }
-    // The opportunity window is meaningful: converting must bind an operation that will actually
-    // execute inside the window, not one scheduled after the opportunity has closed. Otherwise the
-    // "valid until" deadline could be consumed by an operation that never runs while the situation
-    // was live.
+    // The opportunity window is meaningful: conversion may only bind work whose planned earliest
+    // start is inside the window. Begin-time validation rechecks the converted opportunity, so a
+    // later crew delay cannot carry the operation past this viability boundary after conversion.
     let earliest_start =
         crate::operations::operation_system::resolve_operation_earliest_start(operation);
     if opportunity

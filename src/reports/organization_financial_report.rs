@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, InformationId, OperationId,
-    OrganizationId,
+    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
+    InformationId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -14,12 +14,12 @@ use crate::economy::business_reporting::{
 use crate::enterprises::enterprise_reporting::{
     EnterpriseReportingError, resolve_organization_enterprise_financial_summary,
 };
-use crate::finance::Money;
+use crate::finance::{FinancialOwner, Money};
 use crate::operations::OperationStatus;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -58,6 +58,27 @@ enum NotableFinancialItem {
         operation: OperationId,
         information: InformationId,
     },
+    OperationCash {
+        operation: OperationId,
+        information: InformationId,
+    },
+    OperationCashDisposition {
+        operation: OperationId,
+        information: InformationId,
+    },
+}
+
+#[derive(Default)]
+struct OperationFinancialSummary {
+    held_property_count: u32,
+    held_property_value: Money,
+    property_disposition_count: u32,
+    realized_property_cash: Money,
+    held_cash_count: u32,
+    held_cash_value: Money,
+    cash_deposit_count: u32,
+    deposited_cash: Money,
+    notable: Vec<(SimTime, NotableFinancialItem)>,
 }
 
 pub fn validate_organization_financial_report(
@@ -78,15 +99,15 @@ pub fn validate_organization_financial_report(
         period_start,
         period_end,
     )?;
-    let (property_operation_count, held_property_value) =
-        resolve_held_operation_property(state, recipient, period_end)?;
-    let (property_disposition_count, realized_property_cash) =
-        resolve_liquidated_operation_property(state, recipient, period_start, period_end)?;
+    let operation_summary =
+        resolve_operation_financial_summary(state, recipient, period_start, period_end)?;
+    let liquid_cash = resolve_organization_liquid_cash(state, recipient, period_end)?;
     let money = crate::finance::helpers::format_money_cents;
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Routine,
         summary: format!(
-            "Legitimate businesses: {} businesses, {} cycles, gross {}, operating cost {}, net {}. Illicit enterprises: {} enterprises, {} cycles, gross {}, operating cost {}, net {}. Held operation property at period end: {} operation(s), estimated value {}, unliquidated. Liquidated operation property during period: {} disposition(s), realized cash {}.",
+            "Liquid organization cash: {}. Legitimate businesses: {} businesses, {} cycles, gross {}, operating cost {}, net {}. Illicit enterprises: {} enterprises, {} cycles, gross {}, operating cost {}, net {}. Held operation property at period end: {} operation(s), estimated value {}, unliquidated. Liquidated operation property during period: {} disposition(s), realized cash {}. Held operation cash at period end: {} operation(s), amount {}, undeposited. Deposited operation cash during period: {} deposit(s), amount {}.",
+            money(liquid_cash.cents()),
             business_summary.totals.business_count,
             business_summary.totals.cycle_count,
             money(business_summary.totals.gross_revenue.cents()),
@@ -97,10 +118,14 @@ pub fn validate_organization_financial_report(
             money(enterprise_summary.totals.gross_revenue.cents()),
             money(enterprise_summary.totals.operating_cost.cents()),
             money(enterprise_summary.totals.net_cash.cents()),
-            property_operation_count,
-            money(held_property_value.cents()),
-            property_disposition_count,
-            money(realized_property_cash.cents()),
+            operation_summary.held_property_count,
+            money(operation_summary.held_property_value.cents()),
+            operation_summary.property_disposition_count,
+            money(operation_summary.realized_property_cash.cents()),
+            operation_summary.held_cash_count,
+            money(operation_summary.held_cash_value.cents()),
+            operation_summary.cash_deposit_count,
+            money(operation_summary.deposited_cash.cents()),
         ),
         sources: Vec::new(),
         entities: BTreeSet::new(),
@@ -114,18 +139,7 @@ pub fn validate_organization_financial_report(
         period_start,
         period_end,
     )?);
-    notable.extend(collect_operation_property_items(
-        state,
-        recipient,
-        period_start,
-        period_end,
-    ));
-    notable.extend(collect_operation_property_disposition_items(
-        state,
-        recipient,
-        period_start,
-        period_end,
-    ));
+    notable.extend(operation_summary.notable);
     notable.sort_by_key(|(occurred_at, item)| (*occurred_at, *item));
     for (_, item) in notable {
         entries.push(build_notable_entry(state, item)?);
@@ -142,111 +156,160 @@ pub fn validate_organization_financial_report(
     )?)
 }
 
-fn resolve_held_operation_property(
+fn resolve_organization_liquid_cash(
     state: &AppState,
     recipient: OrganizationId,
     period_end: SimTime,
-) -> Result<(u32, Money), OrganizationFinancialReportError> {
-    let mut count = 0_u32;
-    let mut value = Money::ZERO;
-    for operation in state.operations().operations_for_organization(recipient) {
-        let Some(resolution) = operation.resolution() else {
-            continue;
-        };
-        if resolution.resolved_at() > period_end {
-            continue;
-        }
-        let Some(proceeds) = resolution.property_proceeds() else {
-            continue;
-        };
-        if operation
-            .property_disposition()
-            .is_some_and(|disposition| disposition.disposed_at() <= period_end)
-        {
-            continue;
-        }
-        count = count
-            .checked_add(1)
-            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-        value = value
-            .checked_add(proceeds.estimated_value())
-            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+) -> Result<Money, OrganizationFinancialReportError> {
+    let owner = FinancialOwner::Organization(recipient);
+    if period_end == state.now() {
+        return state
+            .finance()
+            .accounts_for(owner)
+            .try_fold(Money::ZERO, |total, account| {
+                total
+                    .checked_add(account.spendable_balance())
+                    .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)
+            });
     }
-    Ok((count, value))
+
+    // A historical report must not mix current materialized balances with an earlier reporting
+    // window. Account ownership and kind are immutable, so replay postings into this owner's
+    // liquid accounts through the requested end minute. Ledger chronology is globally monotone.
+    let mut balances: BTreeMap<FinancialAccountId, Money> = state
+        .finance()
+        .accounts_for(owner)
+        .filter(|account| account.kind().is_liquid())
+        .map(|account| (account.id(), Money::ZERO))
+        .collect();
+    for transaction in state.finance().transactions() {
+        if transaction.occurred_at() > period_end {
+            break;
+        }
+        for posting in transaction.postings() {
+            let Some(balance) = balances.get_mut(&posting.account) else {
+                continue;
+            };
+            *balance = balance
+                .checked_add(posting.amount)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        }
+    }
+    balances
+        .into_values()
+        .filter(|balance| *balance > Money::ZERO)
+        .try_fold(Money::ZERO, |total, balance| {
+            total
+                .checked_add(balance)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)
+        })
 }
 
-fn resolve_liquidated_operation_property(
+fn resolve_operation_financial_summary(
     state: &AppState,
     recipient: OrganizationId,
     period_start: SimTime,
     period_end: SimTime,
-) -> Result<(u32, Money), OrganizationFinancialReportError> {
-    let mut count = 0_u32;
-    let mut value = Money::ZERO;
+) -> Result<OperationFinancialSummary, OrganizationFinancialReportError> {
+    let mut summary = OperationFinancialSummary::default();
     for operation in state.operations().operations_for_organization(recipient) {
-        let Some(disposition) = operation.property_disposition() else {
-            continue;
-        };
-        if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
-            continue;
-        }
-        count = count
-            .checked_add(1)
-            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-        value = value
-            .checked_add(disposition.realized_value())
-            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-    }
-    Ok((count, value))
-}
-
-fn collect_operation_property_items(
-    state: &AppState,
-    recipient: OrganizationId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Vec<(SimTime, NotableFinancialItem)> {
-    state
-        .operations()
-        .operations_for_organization(recipient)
-        .filter(|operation| operation.status() == OperationStatus::Completed)
-        .filter_map(|operation| {
-            let resolution = operation.resolution()?;
-            (resolution.resolved_at() >= period_start
+        if let Some(resolution) = operation.resolution() {
+            if resolution.resolved_at() <= period_end {
+                if let Some(proceeds) = resolution.property_proceeds()
+                    && !operation
+                        .property_disposition()
+                        .is_some_and(|disposition| disposition.disposed_at() <= period_end)
+                {
+                    summary.held_property_count = summary
+                        .held_property_count
+                        .checked_add(1)
+                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+                    summary.held_property_value = summary
+                        .held_property_value
+                        .checked_add(proceeds.estimated_value())
+                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+                }
+                if let Some(proceeds) = resolution.cash_proceeds()
+                    && !operation
+                        .cash_disposition()
+                        .is_some_and(|disposition| disposition.disposed_at() <= period_end)
+                {
+                    summary.held_cash_count = summary
+                        .held_cash_count
+                        .checked_add(1)
+                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+                    summary.held_cash_value = summary
+                        .held_cash_value
+                        .checked_add(proceeds.amount())
+                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+                }
+            }
+            if operation.status() == OperationStatus::Completed
+                && resolution.resolved_at() >= period_start
                 && resolution.resolved_at() <= period_end
-                && resolution.property_proceeds().is_some())
-            .then_some((
-                resolution.resolved_at(),
-                NotableFinancialItem::OperationProperty {
+            {
+                if resolution.property_proceeds().is_some() {
+                    summary.notable.push((
+                        resolution.resolved_at(),
+                        NotableFinancialItem::OperationProperty {
+                            operation: operation.id(),
+                            information: resolution.after_action_information(),
+                        },
+                    ));
+                }
+                if resolution.cash_proceeds().is_some() {
+                    summary.notable.push((
+                        resolution.resolved_at(),
+                        NotableFinancialItem::OperationCash {
+                            operation: operation.id(),
+                            information: resolution.after_action_information(),
+                        },
+                    ));
+                }
+            }
+        }
+        if let Some(disposition) = operation.property_disposition()
+            && disposition.disposed_at() >= period_start
+            && disposition.disposed_at() <= period_end
+        {
+            summary.property_disposition_count = summary
+                .property_disposition_count
+                .checked_add(1)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.realized_property_cash = summary
+                .realized_property_cash
+                .checked_add(disposition.realized_value())
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.notable.push((
+                disposition.disposed_at(),
+                NotableFinancialItem::OperationPropertyDisposition {
                     operation: operation.id(),
-                    information: resolution.after_action_information(),
+                    information: disposition.information(),
                 },
-            ))
-        })
-        .collect()
-}
-
-fn collect_operation_property_disposition_items(
-    state: &AppState,
-    recipient: OrganizationId,
-    period_start: SimTime,
-    period_end: SimTime,
-) -> Vec<(SimTime, NotableFinancialItem)> {
-    state
-        .operations()
-        .operations_for_organization(recipient)
-        .filter_map(|operation| {
-            let disposition = operation.property_disposition()?;
-            (disposition.disposed_at() >= period_start && disposition.disposed_at() <= period_end)
-                .then_some((
-                    disposition.disposed_at(),
-                    NotableFinancialItem::OperationPropertyDisposition {
-                        operation: operation.id(),
-                        information: disposition.information(),
-                    },
-                ))
-        })
-        .collect()
+            ));
+        }
+        if let Some(disposition) = operation.cash_disposition()
+            && disposition.disposed_at() >= period_start
+            && disposition.disposed_at() <= period_end
+        {
+            summary.cash_deposit_count = summary
+                .cash_deposit_count
+                .checked_add(1)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.deposited_cash = summary
+                .deposited_cash
+                .checked_add(disposition.realized_value())
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.notable.push((
+                disposition.disposed_at(),
+                NotableFinancialItem::OperationCashDisposition {
+                    operation: operation.id(),
+                    information: disposition.information(),
+                },
+            ));
+        }
+    }
+    Ok(summary)
 }
 
 fn collect_notable_business_cycles(
@@ -362,6 +425,22 @@ fn build_notable_entry(
             information,
             EntityRef::Operation(operation),
             format!("Property disposition {operation}"),
+        ),
+        NotableFinancialItem::OperationCash {
+            operation,
+            information,
+        } => (
+            information,
+            EntityRef::Operation(operation),
+            format!("Operation cash proceeds {operation}"),
+        ),
+        NotableFinancialItem::OperationCashDisposition {
+            operation,
+            information,
+        } => (
+            information,
+            EntityRef::Operation(operation),
+            format!("Cash deposit {operation}"),
         ),
     };
     let record = state

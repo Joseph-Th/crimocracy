@@ -89,6 +89,42 @@ fn reputation_deltas_create_sparse_records_clamped_to_the_score_range() {
 }
 
 #[test]
+fn standing_shift_reports_the_clamped_delta_that_was_actually_applied() {
+    let (registry, mut state, organization) = make_state();
+    let baseline = registry.reputation().baseline();
+    let raise_to_rail = i8::try_from(99_i16 - i16::from(baseline))
+        .expect("fixture baseline should allow reaching score 99 in one delta");
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Police,
+        ReputationDimension::Fear,
+        raise_to_rail,
+    )
+    .expect("fixture standing should move near the upper rail");
+
+    let shifts = apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+        .expect("vice inquiry should apply its remaining bounded standing change");
+    assert_eq!(shifts.len(), 1);
+    assert_eq!(
+        shifts[0].delta, 1,
+        "reported shift must equal the score movement after clamping, not the larger authored request"
+    );
+    assert_eq!(
+        resolve_score(
+            &registry,
+            &state.reputation,
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+        ),
+        100
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn reputation_deltas_reject_unknown_organizations_without_state_change() {
     let (registry, mut state, _organization) = make_state();
     let missing = crate::core::id::OrganizationId::from_raw(9_999);

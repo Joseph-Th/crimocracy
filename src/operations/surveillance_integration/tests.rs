@@ -7,7 +7,11 @@ use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
 use crate::core::time::SimDuration;
-use crate::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
+use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::{
+    CaseActivitySignal, InformationDraft, InformationSignal, InformationSourceKind,
+    KnowledgeHolder, PatrolIntervalSignal, Reliability, Specificity,
+};
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     InvestigationTransition, apply_cold_case_decay, validate_add_evidence,
@@ -453,6 +457,86 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
 }
 
 #[test]
+fn foreign_operation_surveillance_requires_prior_organization_knowledge() {
+    let mut fixture = fixture(100, false);
+    let rival = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Observed Rival Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let rival_observer = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Rival Observer".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(100))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("rival observer should validate");
+    let business = fixture.business;
+    let rival_operation = authorize_surveillance_for(
+        &mut fixture,
+        rival,
+        rival_observer,
+        EntityRef::Business(business),
+    );
+
+    let unknown = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Probe unknown rival operation".to_owned(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: fixture.crew,
+            leader: fixture.observer,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Operation(rival_operation),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, fixture.observer)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect_err("a raw rival operation id must not reveal hidden operation existence");
+    assert_eq!(
+        unknown,
+        OperationError::MissingEntity(EntityRef::Operation(rival_operation))
+    );
+
+    validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.crew),
+            source_kind: InformationSourceKind::StreetRumor,
+            topic: InformationTopic::OperationalOutcome,
+            source_entity: None,
+            subject: EntityRef::Operation(rival_operation),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::Unreliable,
+            specificity: Specificity::General,
+            summary: "Street sources identified a rival field operation.".to_owned(),
+        },
+    )
+    .expect("organization-held rival-operation knowledge should validate")
+    .commit(&mut fixture.state)
+    .expect("organization-held rival-operation knowledge should commit");
+    authorize_surveillance(&mut fixture, EntityRef::Operation(rival_operation));
+    validate_state(&fixture.state).expect("known rival-operation surveillance should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn achieved_surveillance_carries_every_observed_patrol_window_in_typed_signal() {
     let mut fixture = fixture(100, false);
     let windows = [60_u16, 180, 300, 420, 540]
@@ -848,6 +932,48 @@ fn investigation_surveillance_reports_visible_case_activity_without_evidence_gra
     .expect("hidden case evidence should validate")
     .commit(&mut fixture.state)
     .expect("hidden case evidence should commit");
+    let hidden_target = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Probe unknown case".to_owned(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: fixture.crew,
+            leader: fixture.observer,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Investigation(investigation),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, fixture.observer)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect_err("a raw hidden investigation id must not be a surveillance existence oracle");
+    assert_eq!(
+        hidden_target,
+        OperationError::MissingEntity(EntityRef::Investigation(investigation))
+    );
+    validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.crew),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: Some(EntityRef::Organization(fixture.police)),
+            subject: EntityRef::Investigation(investigation),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "Observers identified the Harbor Ledger Inquiry as an active police file."
+                .to_owned(),
+        },
+    )
+    .expect("organization-held case knowledge should validate")
+    .commit(&mut fixture.state)
+    .expect("organization-held case knowledge should commit");
     let operation = authorize_surveillance(&mut fixture, EntityRef::Investigation(investigation));
     resolve_with_zero_variance(&mut fixture, operation);
     let resolution = fixture

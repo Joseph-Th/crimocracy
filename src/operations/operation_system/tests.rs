@@ -24,8 +24,8 @@ use crate::operations::{
 };
 use crate::reports::ReportKind;
 use crate::world::world_system::{
-    insert_business, insert_character, insert_neighborhood, insert_organization,
-    validate_reassign_character, validate_transfer_business_ownership,
+    designate_player_organization, insert_business, insert_character, insert_neighborhood,
+    insert_organization, validate_reassign_character, validate_transfer_business_ownership,
 };
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
@@ -140,6 +140,86 @@ fn make_test_draft(
         contingencies: Vec::new(),
         scheduled_for: SimTime::ZERO,
     }
+}
+
+#[test]
+fn due_operation_aborts_before_start_when_objective_became_unavailable() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(business) = target else {
+        panic!("fixture target should be a business");
+    };
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.scheduled_for = SimTime::from_minutes(1);
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("foreign business should be actionable at authorization")
+        .commit(&mut state)
+        .expect("future operation should commit");
+
+    validate_transfer_business_ownership(
+        &state,
+        business,
+        BusinessOwner::Organization(organization),
+    )
+    .expect("authorized work must not freeze target ownership")
+    .commit(&mut state)
+    .expect("business acquisition should commit before the operation begins");
+
+    let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+    assert!(outcome.started_operations.is_empty());
+    assert!(outcome.resolved_operations.is_empty());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("cancelled operation should remain as history");
+    assert_eq!(record.status(), OperationStatus::Aborted);
+    assert!(record.started_at().is_none());
+    assert!(record.resolution_due_at().is_none());
+    let abort = record
+        .abort_record()
+        .expect("objective loss should persist explicit abort causality");
+    assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
+    assert_eq!(
+        abort.cause(),
+        OperationAbortCause::ObjectiveUnavailable(
+            OperationObjectiveBlocker::TargetBusinessOwnershipMismatch,
+        )
+    );
+    let artifacts = abort
+        .artifacts()
+        .expect("objective-loss cancellation should be visible to leadership");
+    assert!(
+        state
+            .intelligence()
+            .get_information(artifacts.information())
+            .expect("objective-loss information should persist")
+            .summary()
+            .contains("had come under the sponsoring organization's ownership")
+    );
+    assert!(
+        state
+            .operations()
+            .find_active_operation_booking(leader)
+            .is_none()
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("objective-loss abort should remain registry-valid");
+    validate_invariants(&state);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("objective-loss abort should save"),
+    )
+    .expect("objective-loss abort should restore under the current schema");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.abort_record())
+            .map(|abort| abort.cause()),
+        Some(OperationAbortCause::ObjectiveUnavailable(
+            OperationObjectiveBlocker::TargetBusinessOwnershipMismatch,
+        ))
+    );
 }
 
 fn insert_test_operation_leader(
@@ -1568,6 +1648,8 @@ fn deadline_constrained_operation_resolves_on_its_clamped_deadline_minute() {
 #[test]
 fn decision_paused_operation_auto_aborts_when_deadline_expires() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    designate_player_organization(&mut state, organization)
+        .expect("decision fixture organization should be eligible as the player organization");
     let mut draft = make_test_draft(organization, leader, target);
     draft
         .constraints
@@ -1585,12 +1667,15 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("operation should begin before its deadline");
     // The dispatched response arrives and pauses the operation pending leadership.
-    let decision = loop {
+    let mut decision = None;
+    for _ in 0..9 {
         let outcome = crate::core::simulation::run_tick(&registry, &mut state);
         if let Some(request) = outcome.decision_requests.first() {
-            break request.decision;
+            decision = Some(request.decision);
+            break;
         }
-    };
+    }
+    let decision = decision.expect("police response must request leadership before the deadline");
     assert_eq!(
         state
             .operations()

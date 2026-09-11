@@ -630,112 +630,127 @@ impl OperationState {
         // Forward direction plus exact-count agreement replaces per-entry reverse walks:
         // ids are unique and every index is a function of its record, so matching entry
         // totals prove no stale, duplicate, or foreign index membership survives.
-        let mut expected_by_organization = 0_usize;
-        let mut expected_by_status = 0_usize;
-        let mut expected_active_participant_links = 0_usize;
-        let mut expected_authorized = 0_usize;
-        let mut expected_in_progress = 0_usize;
-        let mut expected_takes = 0_usize;
-        let mut expected_discovered_links = 0_usize;
+        let mut expected = OperationIndexExpectations::default();
         for (stored_id, record) in &self.records {
-            if *stored_id != record.id() {
-                return false;
-            }
-            if !self
-                .by_organization
-                .get(&record.responsible_organization())
-                .is_some_and(|ids| ids.contains(&record.id()))
+            if *stored_id != record.id()
+                || !self.record_indexes_are_consistent(record, &mut expected)
             {
                 return false;
             }
-            if !self
+        }
+        self.index_entry_counts_match(expected)
+    }
+
+    fn record_indexes_are_consistent(
+        &self,
+        record: &OperationRecord,
+        expected: &mut OperationIndexExpectations,
+    ) -> bool {
+        if !self
+            .by_organization
+            .get(&record.responsible_organization())
+            .is_some_and(|ids| ids.contains(&record.id()))
+            || !self
                 .by_status
                 .get(&record.status())
                 .is_some_and(|ids| ids.contains(&record.id()))
-            {
+        {
+            return false;
+        }
+        expected.by_organization += 1;
+        expected.by_status += 1;
+
+        let active = !matches!(
+            record.status(),
+            OperationStatus::Completed | OperationStatus::Aborted
+        );
+        let participants = record.participants();
+        if participants.iter().any(|participant| {
+            self.active_by_participant
+                .get(participant)
+                .is_some_and(|ids| ids.contains(&record.id()))
+                != active
+        }) {
+            return false;
+        }
+        if active {
+            expected.active_participant_links += participants.len();
+        }
+
+        let authorized = record.status() == OperationStatus::Authorized;
+        if self
+            .authorized_by_start
+            .get(&record.scheduled_for())
+            .is_some_and(|ids| ids.contains(&record.id()))
+            != authorized
+        {
+            return false;
+        }
+        expected.authorized += usize::from(authorized);
+
+        let in_progress = record.status() == OperationStatus::InProgress;
+        let resolution_indexed = record.resolution_due_at().is_some_and(|due_at| {
+            self.in_progress_by_resolution_due
+                .get(&due_at)
+                .is_some_and(|ids| ids.contains(&record.id()))
+        });
+        if resolution_indexed != in_progress {
+            return false;
+        }
+        expected.in_progress += usize::from(in_progress);
+
+        record.resolution().is_none_or(|resolution| {
+            self.resolution_indexes_are_consistent(record, resolution, expected)
+        })
+    }
+
+    fn resolution_indexes_are_consistent(
+        &self,
+        record: &OperationRecord,
+        resolution: &OperationResolutionRecord,
+        expected: &mut OperationIndexExpectations,
+    ) -> bool {
+        for information in resolution.discovered_information() {
+            if self.by_discovered_information.get(information) != Some(&record.id()) {
                 return false;
-            }
-            let active = !matches!(
-                record.status(),
-                OperationStatus::Completed | OperationStatus::Aborted
-            );
-            let participants = record.participants();
-            for participant in &participants {
-                let active_indexed = self
-                    .active_by_participant
-                    .get(participant)
-                    .is_some_and(|ids| ids.contains(&record.id()));
-                if active_indexed != active {
-                    return false;
-                }
-            }
-            let authorized_indexed = self
-                .authorized_by_start
-                .get(&record.scheduled_for())
-                .is_some_and(|ids| ids.contains(&record.id()));
-            if authorized_indexed != (record.status() == OperationStatus::Authorized) {
-                return false;
-            }
-            let resolution_indexed = record.resolution_due_at().is_some_and(|due_at| {
-                self.in_progress_by_resolution_due
-                    .get(&due_at)
-                    .is_some_and(|ids| ids.contains(&record.id()))
-            });
-            if resolution_indexed != (record.status() == OperationStatus::InProgress) {
-                return false;
-            }
-            expected_by_organization += 1;
-            expected_by_status += 1;
-            if active {
-                expected_active_participant_links += participants.len();
-            }
-            if record.status() == OperationStatus::Authorized {
-                expected_authorized += 1;
-            }
-            if record.status() == OperationStatus::InProgress {
-                expected_in_progress += 1;
-            }
-            if let Some(resolution) = record.resolution() {
-                for information in resolution.discovered_information() {
-                    if self.by_discovered_information.get(information) != Some(&record.id()) {
-                        return false;
-                    }
-                }
-                expected_discovered_links += resolution.discovered_information().len();
-                // Recency-depletion index membership must match exactly: a completed
-                // successful business take is indexed; everything else is not.
-                let taken_business = record.objective().taken_business();
-                let should_index = taken_business.is_some()
-                    && record.status() == OperationStatus::Completed
-                    && resolution_has_positive_take(resolution);
-                let indexed = taken_business
-                    .and_then(|business| {
-                        self.successful_takes_by_business_kind
-                            .get(&(business, record.kind()))
-                    })
-                    .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
-                if indexed != should_index {
-                    return false;
-                }
-                if should_index {
-                    expected_takes += 1;
-                }
             }
         }
+        expected.discovered_links += resolution.discovered_information().len();
+
+        // Recency-depletion index membership must match exactly: a completed successful
+        // business take is indexed; everything else is not.
+        let taken_business = record.objective().taken_business();
+        let should_index = taken_business.is_some()
+            && record.status() == OperationStatus::Completed
+            && resolution_has_positive_take(resolution);
+        let indexed = taken_business
+            .and_then(|business| {
+                self.successful_takes_by_business_kind
+                    .get(&(business, record.kind()))
+            })
+            .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
+        if indexed != should_index {
+            return false;
+        }
+        expected.takes += usize::from(should_index);
+        true
+    }
+
+    fn index_entry_counts_match(&self, expected: OperationIndexExpectations) -> bool {
         let indexed_by_organization: usize = self.by_organization.values().map(BTreeSet::len).sum();
-        if indexed_by_organization != expected_by_organization {
+        if indexed_by_organization != expected.by_organization {
             return false;
         }
         let indexed_by_status: usize = self.by_status.values().map(BTreeSet::len).sum();
-        if indexed_by_status != expected_by_status {
+        if indexed_by_status != expected.by_status {
             return false;
         }
         let indexed_active_participant_links: usize =
             self.active_by_participant.values().map(BTreeSet::len).sum();
-        if indexed_active_participant_links != expected_active_participant_links {
+        if indexed_active_participant_links != expected.active_participant_links {
             return false;
         }
-        if self.by_discovered_information.len() != expected_discovered_links {
+        if self.by_discovered_information.len() != expected.discovered_links {
             return false;
         }
         let indexed_takes: usize = self
@@ -743,11 +758,11 @@ impl OperationState {
             .values()
             .map(BTreeSet::len)
             .sum();
-        if indexed_takes != expected_takes {
+        if indexed_takes != expected.takes {
             return false;
         }
         let indexed_authorized: usize = self.authorized_by_start.values().map(BTreeSet::len).sum();
-        if indexed_authorized != expected_authorized {
+        if indexed_authorized != expected.authorized {
             return false;
         }
         let indexed_in_progress: usize = self
@@ -755,11 +770,19 @@ impl OperationState {
             .values()
             .map(BTreeSet::len)
             .sum();
-        if indexed_in_progress != expected_in_progress {
-            return false;
-        }
-        true
+        indexed_in_progress == expected.in_progress
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OperationIndexExpectations {
+    by_organization: usize,
+    by_status: usize,
+    active_participant_links: usize,
+    authorized: usize,
+    in_progress: usize,
+    takes: usize,
+    discovered_links: usize,
 }
 
 fn resolution_has_positive_take(resolution: &crate::operations::OperationResolutionRecord) -> bool {

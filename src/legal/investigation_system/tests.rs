@@ -292,6 +292,7 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
             origin: Some(EntityRef::Operation(origin)),
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: witness,
+                subject: EntityRef::Operation(origin),
                 cooperation: crate::legal::WitnessCooperation::Reluctant,
             }),
         },
@@ -336,6 +337,7 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
             origin: Some(EntityRef::Operation(origin)),
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: witness,
+                subject: EntityRef::Operation(origin),
                 cooperation: crate::legal::WitnessCooperation::Cooperative,
             }),
         },
@@ -460,6 +462,7 @@ fn resumed_incident_rejects_witness_already_tracked_as_subject_on_the_shelf() {
             origin: Some(EntityRef::Operation(origin)),
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: conflicted,
+                subject: EntityRef::Operation(origin),
                 cooperation: crate::legal::WitnessCooperation::Cooperative,
             }),
         },

@@ -7,8 +7,7 @@ use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
 use crate::legal::witness_system::{
-    resolve_witness_reliability, resolve_witness_strength,
-    witness_statement_subject_is_case_relevant,
+    resolve_witness_reliability, resolve_witness_strength, witness_subject_is_case_relevant,
 };
 use crate::legal::{
     Admissibility, EvidenceKind, EvidenceRecord, InvestigationRecord, InvestigationStatus,
@@ -574,6 +573,8 @@ pub(super) fn validate_case_witnesses(
                 witness: witness.id(),
             })?;
         if state.world.get_character(witness.witness()).is_none()
+            || !is_entity_present(state, witness.subject())
+            || !case_witness_subject_was_relevant_at_registration(state, investigation, witness)
             || witness.registered_at() < investigation.opened_at()
             || witness.registered_at() > state.now()
             || witness.statements().len() > 1
@@ -599,6 +600,28 @@ pub(super) fn validate_case_witnesses(
     Ok(())
 }
 
+fn case_witness_subject_was_relevant_at_registration(
+    state: &AppState,
+    investigation: &InvestigationRecord,
+    witness: &crate::legal::CaseWitnessRecord,
+) -> bool {
+    investigation.origin() == Some(witness.subject())
+        || investigation
+            .declared_subjects()
+            .contains(&witness.subject())
+        || investigation.evidence().iter().copied().any(|evidence_id| {
+            state
+                .legal
+                .get_evidence(evidence_id)
+                .is_some_and(|evidence| {
+                    evidence.subject() == witness.subject()
+                        && evidence.discovered_at() <= witness.registered_at()
+                        && !(evidence.kind() == EvidenceKind::WitnessTestimony
+                            && evidence.source() == Some(EntityRef::Character(witness.witness())))
+                })
+        })
+}
+
 pub(super) fn validate_witness_statements(
     state: &AppState,
 ) -> Result<BTreeSet<EvidenceId>, StateValidationError> {
@@ -620,7 +643,8 @@ pub(super) fn validate_witness_statements(
             || statement.recorded_at() < case_witness.registered_at()
             || statement.recorded_at() > state.now()
             || !is_entity_present(state, statement.subject())
-            || !witness_statement_subject_is_case_relevant(
+            || statement.subject() != case_witness.subject()
+            || !witness_subject_is_case_relevant(
                 state,
                 investigation,
                 statement.subject(),

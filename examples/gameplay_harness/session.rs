@@ -266,17 +266,9 @@ fn capture_witness_pressure_outcome(
                         | crimocracy::legal::WitnessCooperation::Hostile
                 )
             });
-        if narrative && metrics.witness_cooperation_degraded {
-            println!(
-                "[KNOWLEDGE] The word got back: {} will be a harder witness for anyone now.",
-                scenario
-                    .state
-                    .world()
-                    .get_character(scenario.target_owner)
-                    .map(|record| record.name().to_owned())
-                    .unwrap_or_else(|| "the witness".to_owned()),
-            );
-        }
+        // Cooperation is intentionally audit-only here. The player-facing after-action above can
+        // report what the crew attempted and observed, but no information channel reveals the
+        // witness owner's hidden cooperation state after the pressure operation.
     }
     Ok(())
 }

@@ -128,22 +128,14 @@ fn narrate_started_operations(scenario: &Scenario, outcome: &TickOutcome, narrat
             .operations()
             .get_operation(*operation)
             .expect("started operation must exist");
+        if record.responsible_organization() != scenario.player {
+            continue;
+        }
         println!(
             "[START]   {}: {} started.",
             stamp(outcome.now.as_minutes()),
             record.title()
         );
-        if let Some(response) = record.police_response() {
-            let response = scenario
-                .state
-                .legal()
-                .get_police_response(response)
-                .expect("dispatched response must persist");
-            println!(
-                "          Police response dispatched; estimated arrival minute {} based on local deployment.",
-                response.arrival_due_at().as_minutes()
-            );
-        }
     }
 }
 
@@ -440,6 +432,9 @@ fn narrate_resolutions_and_enterprise_cycles(
             .operations()
             .get_operation(*operation)
             .expect("resolved operation must persist");
+        if record.responsible_organization() != scenario.player {
+            continue;
+        }
         let resolution = record
             .resolution()
             .expect("resolved operation must have result");
@@ -457,8 +452,38 @@ fn narrate_resolutions_and_enterprise_cycles(
 }
 
 fn narrate_routine_cycle_summary(scenario: &Scenario, outcome: &TickOutcome) {
-    if outcome.business_cycles.is_empty()
-        && outcome.enterprise_cycles.is_empty()
+    let player_business_cycles = outcome
+        .business_cycles
+        .iter()
+        .filter(|cycle_id| {
+            scenario
+                .state
+                .economy()
+                .get_cycle(**cycle_id)
+                .is_some_and(|cycle| {
+                    cycle.owner() == crimocracy::world::BusinessOwner::Organization(scenario.player)
+                })
+        })
+        .count();
+    let player_enterprise_cycles = outcome
+        .enterprise_cycles
+        .iter()
+        .filter(|cycle_id| {
+            scenario
+                .state
+                .enterprises()
+                .get_cycle(**cycle_id)
+                .and_then(|cycle| {
+                    scenario
+                        .state
+                        .enterprises()
+                        .get_enterprise(cycle.enterprise())
+                })
+                .is_some_and(|enterprise| enterprise.organization() == scenario.player)
+        })
+        .count();
+    if player_business_cycles == 0
+        && player_enterprise_cycles == 0
         && outcome.executive_brief.is_none()
     {
         return;
@@ -494,8 +519,8 @@ fn narrate_routine_cycle_summary(scenario: &Scenario, outcome: &TickOutcome) {
         println!(
             "[ROUTINE] {}: {} legitimate business cycle(s), {} delegated enterprise cycle(s); daily brief delivered.",
             stamp(outcome.now.as_minutes()),
-            outcome.business_cycles.len(),
-            outcome.enterprise_cycles.len(),
+            player_business_cycles,
+            player_enterprise_cycles,
         );
     }
 }

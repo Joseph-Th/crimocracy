@@ -44,7 +44,6 @@ use crate::operations::{
     OperationContingency, OperationDraft, OperationKind, OperationObjective,
     OperationObjectiveBlocker, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
-use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization, validate_reassign_character, validate_transfer_business_ownership,
@@ -57,6 +56,7 @@ use crate::world::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod financial_reporting;
 mod police_response;
 mod property_economics;
 
@@ -111,16 +111,7 @@ fn replace_serialized_cash_proceeds(
 #[test]
 fn restore_rejects_cash_proceeds_not_derived_from_operation_economics() {
     let (registry, mut state, _organization, operation) = make_operation_fixture();
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if outcome.resolved_operations.contains(&operation) {
-            break;
-        }
-        assert!(
-            state.now().as_minutes() < 100,
-            "cash-take fixture should resolve well before this guard"
-        );
-    }
+    run_until_operation_resolved(&registry, &mut state, operation);
     let proceeds = state
         .operations()
         .get_operation(operation)
@@ -163,13 +154,9 @@ fn detention_cancels_pending_operation_decision_and_aborts_operation() {
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     run_tick(&registry, &mut state);
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.decision_requests.is_empty() {
-            break;
-        }
-    }
+    run_until_police_arrival_decision(&registry, &mut state, operation);
     let decision_id = state
         .decisions()
         .pending_for_operation(operation)
@@ -511,6 +498,174 @@ fn make_exposed_operation_fixture(
     )
 }
 
+fn designate_operation_owner_as_player(
+    state: &mut AppState,
+    operation: OperationId,
+) -> OrganizationId {
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("fixture operation should persist")
+        .responsible_organization();
+    designate_player_organization(state, organization)
+        .expect("fixture operation owner should be eligible as the player organization");
+    organization
+}
+
+fn run_until_police_arrival_decision(
+    registry: &Registry,
+    state: &mut AppState,
+    operation: OperationId,
+) -> SimTime {
+    let response = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("started decision fixture should have a police response");
+    let arrival_due_at = state
+        .legal()
+        .get_police_response(response)
+        .expect("fixture police response should persist")
+        .arrival_due_at();
+    let remaining_ticks = arrival_due_at
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("police response cannot be overdue before the fixture wait begins");
+    assert!(
+        remaining_ticks > 0,
+        "fixture wait must begin before police arrival"
+    );
+
+    for _ in 0..remaining_ticks {
+        let outcome = run_tick(registry, state);
+        if !outcome.decision_requests.is_empty() {
+            assert_eq!(
+                outcome.arrived_police_responses,
+                vec![response],
+                "the fixture decision must be caused by its expected police arrival"
+            );
+            return outcome.now;
+        }
+        assert!(
+            outcome.resolved_operations.is_empty(),
+            "the fixture operation resolved before its expected police-arrival decision"
+        );
+    }
+    panic!(
+        "player operation did not request leadership direction when police response {response} arrived at {arrival_due_at:?}"
+    );
+}
+
+fn run_until_operation_resolved(
+    registry: &Registry,
+    state: &mut AppState,
+    operation: OperationId,
+) -> crate::core::simulation::TickOutcome {
+    let terminal_by = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("fixture operation should persist while awaiting resolution");
+        match record.status() {
+            OperationStatus::Authorized | OperationStatus::InProgress => {}
+            OperationStatus::AwaitingDecision => {
+                panic!(
+                    "operation {operation} is decision-paused instead of progressing to resolution"
+                )
+            }
+            OperationStatus::Completed => {
+                panic!("operation {operation} was already completed before the resolution wait")
+            }
+            OperationStatus::Aborted => {
+                panic!("operation {operation} was already aborted before the resolution wait")
+            }
+        }
+        record.resolution_due_at().unwrap_or_else(|| {
+            let earliest_start =
+                crate::operations::operation_system::resolve_operation_earliest_start(record);
+            let authored_due = earliest_start
+                .checked_add(registry.get_operation(record.kind()).execution().duration())
+                .expect("fixture operation duration must fit the simulation clock");
+            record
+                .constraints()
+                .iter()
+                .fold(authored_due, |due, constraint| match constraint {
+                    OperationConstraint::CompleteBy(deadline) => due.min(*deadline),
+                    OperationConstraint::RequireIntelligenceTopic(_) => due,
+                })
+        })
+    };
+    let remaining_ticks = terminal_by
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("fixture resolution boundary cannot predate the wait");
+    assert!(
+        remaining_ticks > 0,
+        "fixture wait must begin before operation {operation}'s resolution boundary {terminal_by:?}"
+    );
+
+    for _ in 0..remaining_ticks {
+        let outcome = run_tick(registry, state);
+        if outcome.resolved_operations.contains(&operation) {
+            return outcome;
+        }
+        match state
+            .operations()
+            .get_operation(operation)
+            .expect("fixture operation should persist while awaiting resolution")
+            .status()
+        {
+            OperationStatus::Authorized | OperationStatus::InProgress => {}
+            OperationStatus::AwaitingDecision => panic!(
+                "operation {operation} unexpectedly paused for a decision before {terminal_by:?}"
+            ),
+            OperationStatus::Aborted => {
+                panic!("operation {operation} unexpectedly aborted before {terminal_by:?}")
+            }
+            OperationStatus::Completed => panic!(
+                "operation {operation} completed without appearing in the tick resolution outcome"
+            ),
+        }
+    }
+    panic!("operation {operation} did not resolve by its expected boundary {terminal_by:?}");
+}
+
+fn run_until_police_response_arrives(
+    registry: &Registry,
+    state: &mut AppState,
+    response: PoliceResponseId,
+) -> crate::core::simulation::TickOutcome {
+    let arrival_due_at = state
+        .legal()
+        .get_police_response(response)
+        .expect("fixture police response should persist while awaiting arrival")
+        .arrival_due_at();
+    let remaining_ticks = arrival_due_at
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("fixture police response cannot already be overdue before the wait");
+    assert!(
+        remaining_ticks > 0,
+        "fixture wait must begin before police response {response} arrives"
+    );
+    for _ in 0..remaining_ticks {
+        assert_eq!(
+            state
+                .legal()
+                .get_police_response(response)
+                .expect("fixture police response should persist while awaiting arrival")
+                .status(),
+            PoliceResponseStatus::Dispatched,
+            "police response {response} must remain dispatched until its arrival transition"
+        );
+        let outcome = run_tick(registry, state);
+        if outcome.arrived_police_responses.contains(&response) {
+            return outcome;
+        }
+    }
+    panic!("police response {response} did not arrive by {arrival_due_at:?}");
+}
+
 fn make_exposed_operation_fixture_with_constraints(
     kind: OperationKind,
     assign_jurisdiction: bool,
@@ -739,13 +894,8 @@ fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() 
         make_exposed_operation_fixture(OperationKind::Sabotage, true, Vec::new());
     let started = run_tick(&registry, &mut state);
     assert_eq!(started.started_operations, vec![operation]);
-    let resolution_outcome = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.resolved_operations.is_empty() {
-            break outcome;
-        }
-    };
-    assert!(!resolution_outcome.resolved_operations.is_empty());
+    let resolution_outcome = run_until_operation_resolved(&registry, &mut state, operation);
+    assert_eq!(resolution_outcome.resolved_operations, vec![operation]);
     let record = state
         .operations()
         .get_operation(operation)
@@ -758,10 +908,7 @@ fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() 
 }
 
 #[test]
-fn sabotage_of_a_suspended_target_records_practical_objective_failure() {
-    // Regression: a target whose economy went suspended between authorization and resolution
-    // has nothing operating to disrupt, yet the after-action narrative unconditionally
-    // claimed disruption. The summary and the committed effect must agree.
+fn sabotage_of_a_suspended_target_aborts_before_start() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture(OperationKind::Sabotage, false, Vec::new());
     let record = state
@@ -782,24 +929,90 @@ fn sabotage_of_a_suspended_target_records_practical_objective_failure() {
         .expect("an active target economy should suspend")
         .commit(&mut state)
         .expect("target economy suspension should commit");
-    run_tick(&registry, &mut state);
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.resolved_operations.is_empty() {
-            break;
-        }
-    }
+    let outcome = run_tick(&registry, &mut state);
+    assert!(outcome.started_operations.is_empty());
+    assert!(outcome.resolved_operations.is_empty());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("cancelled sabotage should persist");
+    assert_eq!(record.status(), OperationStatus::Aborted);
+    assert!(record.resolution().is_none());
+    let abort = record
+        .abort_record()
+        .expect("unavailable sabotage objective should record causality");
+    assert_eq!(
+        abort.cause(),
+        OperationAbortCause::ObjectiveUnavailable(OperationObjectiveBlocker::TargetEconomyInactive)
+    );
+    let summary = state
+        .reports()
+        .get_report(
+            abort
+                .artifacts()
+                .expect("pre-start objective cancellation should surface artifacts")
+                .report(),
+        )
+        .expect("objective-cancellation report should persist")
+        .entries()[0]
+        .summary
+        .clone();
+    assert!(
+        !summary.contains(crate::operations::operation_economics::SABOTAGE_DISRUPTION_CLAUSE),
+        "a suspended target cannot be disrupted, so the after-action must not claim it: {summary}"
+    );
+    assert!(summary.contains("target business was no longer operating"));
+    let economy = state
+        .economy()
+        .get_business_economy(business)
+        .expect("target economy should persist");
+    assert!(
+        economy.disrupted_through().is_none(),
+        "no disruption may be committed against a suspended economy"
+    );
+    validate_state(&state).expect("suspended-target sabotage state should validate");
+    validate_state_against_registry(&registry, &state)
+        .expect("suspended-target pre-start abort should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn sabotage_target_suspended_mid_execution_records_practical_objective_failure() {
+    // A target can still become impossible after the crew actually starts. That remains a
+    // completed tactical attempt with a persisted practical blocker rather than being rewritten
+    // as a pre-start cancellation.
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Sabotage, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let business = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started sabotage should persist");
+        let OperationObjective::DisruptBusiness {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("sabotage fixture must target a business");
+        };
+        *business
+    };
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("an active target economy should suspend during execution")
+        .commit(&mut state)
+        .expect("mid-execution target suspension should commit");
+    run_until_operation_resolved(&registry, &mut state, operation);
     let record = state
         .operations()
         .get_operation(operation)
         .expect("resolved sabotage should persist");
     let resolution = record
         .resolution()
-        .expect("completed operation should persist its resolution");
+        .expect("started sabotage should persist its practical failure");
     assert_eq!(
         resolution.objective_outcome(),
-        OperationObjectiveOutcome::Failed,
-        "a crew cannot achieve a disruption objective against a business that is not operating"
+        OperationObjectiveOutcome::Failed
     );
     assert_eq!(
         resolution.objective_blocker(),
@@ -812,20 +1025,18 @@ fn sabotage_of_a_suspended_target_records_practical_objective_failure() {
         .entries()[0]
         .summary
         .clone();
-    assert!(
-        !summary.contains(crate::operations::operation_economics::SABOTAGE_DISRUPTION_CLAUSE),
-        "a suspended target cannot be disrupted, so the after-action must not claim it: {summary}"
-    );
+    assert!(!summary.contains(crate::operations::operation_economics::SABOTAGE_DISRUPTION_CLAUSE));
     assert!(summary.contains("no active business to disrupt"));
-    let economy = state
-        .economy()
-        .get_business_economy(business)
-        .expect("target economy should persist");
     assert!(
-        economy.disrupted_through().is_none(),
-        "no disruption may be committed against a suspended economy"
+        state
+            .economy()
+            .get_business_economy(business)
+            .expect("target economy should persist")
+            .disrupted_through()
+            .is_none()
     );
-    validate_state(&state).expect("suspended-target sabotage state should validate");
+    validate_state_against_registry(&registry, &state)
+        .expect("mid-execution practical failure should remain registry-valid");
     validate_invariants(&state);
 }
 
@@ -1187,6 +1398,7 @@ fn detained_witness_cannot_be_pressured_and_in_flight_detention_blocks_the_effec
             CaseWitnessDraft {
                 investigation,
                 witness,
+                subject: EntityRef::Character(leader),
                 cooperation: WitnessCooperation::Reluctant,
             },
         )
@@ -1384,6 +1596,7 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
         CaseWitnessDraft {
             investigation,
             witness,
+            subject: EntityRef::Character(leader),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -1417,7 +1630,6 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
         &state,
         WitnessStatementDraft {
             case_witness,
-            subject: EntityRef::Character(leader),
             origin: None,
             confidence: Rating::try_new(80).expect("fixture confidence should validate"),
             summary: "The witness has already given the case a usable account.".to_owned(),
@@ -1598,6 +1810,7 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
         CaseWitnessDraft {
             investigation: first_investigation,
             witness,
+            subject: EntityRef::Character(leader),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -1679,6 +1892,7 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
         CaseWitnessDraft {
             investigation: second_investigation,
             witness,
+            subject: EntityRef::Character(leader),
             cooperation: WitnessCooperation::Cooperative,
         },
     )
@@ -2091,6 +2305,7 @@ fn police_arrival_decision_pauses_and_shifts_operation_resolution_schedule() {
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     let started = run_tick(&registry, &mut state);
     assert_eq!(started.started_operations, vec![operation]);
     let organization = state
@@ -2106,13 +2321,7 @@ fn police_arrival_decision_pauses_and_shifts_operation_resolution_schedule() {
         .expect("in-progress operation should be scheduled for resolution");
 
     // The response arrives post-entry and raises the leadership decision automatically.
-    let paused_at = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.decision_requests.is_empty() {
-            break outcome.now;
-        }
-        assert!(outcome.resolved_operations.is_empty());
-    };
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
     let decision_id = state
         .decisions()
         .pending_for_operation(operation)
@@ -2153,14 +2362,9 @@ fn police_arrival_decision_pauses_and_shifts_operation_resolution_schedule() {
     );
 
     let shifted_due = resumed.resolution_due_at().expect("shifted deadline");
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.resolved_operations.is_empty() {
-            assert_eq!(outcome.now, shifted_due);
-            assert_eq!(outcome.resolved_operations, vec![operation]);
-            break;
-        }
-    }
+    let outcome = run_until_operation_resolved(&registry, &mut state, operation);
+    assert_eq!(outcome.now, shifted_due);
+    assert_eq!(outcome.resolved_operations, vec![operation]);
     validate_state(&state).expect("resumed operation state should validate");
     validate_invariants(&state);
 }
@@ -2174,6 +2378,7 @@ fn resume_allows_current_minute_follow_up_when_next_tick_start_equals_shifted_en
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
             vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     let started = run_tick(&registry, &mut state);
     assert_eq!(started.started_operations, vec![operation]);
     let operation_record = state
@@ -2204,13 +2409,7 @@ fn resume_allows_current_minute_follow_up_when_next_tick_start_equals_shifted_en
         .resolution_due_at()
         .expect("started intimidation must have a due time");
 
-    let paused_at = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.decision_requests.is_empty() {
-            break outcome.now;
-        }
-        assert!(outcome.resolved_operations.is_empty());
-    };
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
     assert_eq!(
         paused_at + SimDuration::ONE_MINUTE,
         due_at,
@@ -2281,6 +2480,7 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
             vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     assert_eq!(
         run_tick(&registry, &mut state).started_operations,
         vec![operation]
@@ -2310,16 +2510,8 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
         })
         .expect("fixture operation must target a business");
 
-    while state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should persist")
-        .status()
-        != OperationStatus::AwaitingDecision
-    {
-        run_tick(&registry, &mut state);
-    }
-    assert_eq!(state.now(), SimTime::from_minutes(5));
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
+    assert_eq!(paused_at, SimTime::from_minutes(5));
 
     let follow_up = validate_authorize_operation(
         &registry,
@@ -2402,6 +2594,7 @@ fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
             vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     assert_eq!(
         run_tick(&registry, &mut state).started_operations,
         vec![operation]
@@ -2431,16 +2624,8 @@ fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
         })
         .expect("fixture operation must target a business");
 
-    while state
-        .operations()
-        .get_operation(operation)
-        .expect("operation should persist")
-        .status()
-        != OperationStatus::AwaitingDecision
-    {
-        run_tick(&registry, &mut state);
-    }
-    assert_eq!(state.now(), SimTime::from_minutes(5));
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
+    assert_eq!(paused_at, SimTime::from_minutes(5));
 
     let entry_specialist = insert_character(
         &mut state,
@@ -2554,6 +2739,7 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     run_tick(&registry, &mut state);
     let organization = state
         .operations()
@@ -2588,12 +2774,7 @@ fn resume_rejects_participant_booked_into_the_pause_extension_window() {
         .expect("fixture objective should reference its target business");
 
     // The response arrives post-entry and pauses the operation pending leadership.
-    let paused_at = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.decision_requests.is_empty() {
-            break outcome.now;
-        }
-    };
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
     let decision_id = state
         .decisions()
         .pending_for_operation(operation)
@@ -2666,6 +2847,7 @@ fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts(
             true,
             vec![OperationContingency::RequestDecisionOnPoliceArrival],
         );
+    designate_operation_owner_as_player(&mut state, operation);
     run_tick(&registry, &mut state);
     let organization = state
         .operations()
@@ -2673,13 +2855,7 @@ fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts(
         .expect("operation should exist")
         .responsible_organization();
     // The post-entry arrival pauses the operation pending leadership direction.
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        assert!(outcome.resolved_operations.is_empty());
-        if !outcome.decision_requests.is_empty() {
-            break;
-        }
-    }
+    run_until_police_arrival_decision(&registry, &mut state, operation);
     let decision_id = state
         .decisions()
         .pending_for_operation(operation)
@@ -3365,6 +3541,52 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
             && custody_ends_at == state.now() + maximum_detention
     ));
 
+    // A custody relationship can also end early after authorization but before the crew enters.
+    // The due operation must cancel before start rather than spending an execution window on a
+    // detainee who is already free.
+    let mut released_before_start = state.clone();
+    let cancelled_extraction = validate_authorize_operation(
+        &registry,
+        &released_before_start,
+        OperationDraft {
+            title: "Released-before-entry extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: released_before_start.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("current custody should allow a near-term extraction")
+    .commit(&mut released_before_start)
+    .expect("near-term extraction should commit");
+    crate::legal::arrest_system::validate_release_arrest(&released_before_start, arrest)
+        .expect("custody should be releasable before the operation begins")
+        .commit(&mut released_before_start)
+        .expect("early custody release should commit");
+    let cancelled_tick = run_tick(&registry, &mut released_before_start);
+    assert!(cancelled_tick.started_operations.is_empty());
+    let cancelled = released_before_start
+        .operations()
+        .get_operation(cancelled_extraction)
+        .expect("cancelled extraction should persist");
+    assert_eq!(cancelled.status(), OperationStatus::Aborted);
+    assert_eq!(
+        cancelled.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::ObjectiveUnavailable(
+            OperationObjectiveBlocker::ExtractionCustodyEnded,
+        ))
+    );
+    assert!(cancelled.started_at().is_none());
+    validate_state_against_registry(&registry, &released_before_start)
+        .expect("pre-start custody-loss abort should remain registry-valid");
+    validate_invariants(&released_before_start);
+
     // If an already-running extraction is delayed until the custody cap, mandatory release is the
     // first same-minute lifecycle action. The operation then records a practical failure instead
     // of receiving credit for breaking custody that legally ended at the same instant.
@@ -3481,12 +3703,7 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
       } if character == detainee && operation == extraction
     ));
     let operation_count = state.operations().operations().count();
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.resolved_operations.is_empty() {
-            break;
-        }
-    }
+    run_until_operation_resolved(&registry, &mut state, extraction);
     let record = state
         .operations()
         .get_operation(extraction)
@@ -3874,12 +4091,7 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     .expect("intimidation operation should validate")
     .commit(&mut state)
     .expect("intimidation operation should commit");
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if !outcome.resolved_operations.is_empty() {
-            break;
-        }
-    }
+    run_until_operation_resolved(&registry, &mut state, operation);
     let record = state
         .operations()
         .get_operation(operation)
@@ -4056,6 +4268,31 @@ fn control_plane_surveillance_targets_proxy_to_their_owner_footprint() {
 }
 
 #[test]
+fn institutional_character_target_inherits_organization_jurisdiction() {
+    let (_registry, mut state, police, neighborhood, _operation) =
+        make_exposed_business_operation_fixture(true);
+    let officer = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Jurisdiction Officer".to_owned(),
+            organization: Some(police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("officer fixture should validate");
+
+    assert_eq!(
+        resolve_target_neighborhoods(&state, vec![EntityRef::Character(officer)]),
+        BTreeSet::from([neighborhood]),
+        "an institutional character must inherit the same jurisdiction footprint as their organization"
+    );
+}
+
+#[test]
 fn operation_case_geography_does_not_follow_later_organization_assets() {
     let (registry, mut state, _police, incident_neighborhood, operation) =
         make_exposed_business_operation_fixture(true);
@@ -4067,12 +4304,7 @@ fn operation_case_geography_does_not_follow_later_organization_assets() {
 
     let started = run_tick(&registry, &mut state);
     assert_eq!(started.started_operations, vec![operation]);
-    loop {
-        let outcome = run_tick(&registry, &mut state);
-        if outcome.resolved_operations.contains(&operation) {
-            break;
-        }
-    }
+    run_until_operation_resolved(&registry, &mut state, operation);
     let investigation = state
         .operations()
         .get_operation(operation)
@@ -4250,6 +4482,7 @@ fn witness_pressure_prefers_case_geography_over_character_organization_footprint
         CaseWitnessDraft {
             investigation,
             witness,
+            subject: EntityRef::Neighborhood(neighborhood),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -4272,6 +4505,7 @@ fn witness_pressure_prefers_case_geography_over_character_organization_footprint
         CaseWitnessDraft {
             investigation: newer_investigation,
             witness,
+            subject: EntityRef::Neighborhood(newer_neighborhood),
             cooperation: WitnessCooperation::Cooperative,
         },
     )

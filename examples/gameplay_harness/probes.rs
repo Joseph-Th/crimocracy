@@ -760,6 +760,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
         CaseWitnessDraft {
             investigation,
             witness: shopkeeper,
+            subject: EntityRef::Character(defendant),
             cooperation: WitnessCooperation::Cooperative,
         },
     )?

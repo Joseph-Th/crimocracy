@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::build_registry;
+use crate::core::id::InvestigationWorkId;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
@@ -22,7 +23,7 @@ use crate::legal::investigation_system::{
 };
 use crate::legal::{
     Admissibility, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    InformantDisclosureDraft, InformantDraft, InvestigationDraft,
+    InformantDisclosureDraft, InformantDraft, InvestigationDraft, InvestigationWorkStatus,
 };
 use crate::registry::Registry;
 use crate::world::world_system::{
@@ -39,6 +40,40 @@ struct Fixture {
     suspect: CharacterId,
     investigation: InvestigationId,
     evidence: EvidenceId,
+}
+
+fn run_until_investigation_work_resolved(fixture: &mut Fixture, work: InvestigationWorkId) {
+    let due_at = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("scheduled fixture work should persist")
+        .due_at();
+    let remaining_ticks = due_at
+        .as_minutes()
+        .checked_sub(fixture.state.now().as_minutes())
+        .expect("scheduled fixture work cannot already be overdue");
+    assert!(
+        remaining_ticks > 0,
+        "fixture work wait must begin before its due time"
+    );
+    for _ in 0..remaining_ticks {
+        let outcome = run_tick(&fixture.registry, &mut fixture.state);
+        if outcome.resolved_investigation_work.contains(&work) {
+            return;
+        }
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_investigation_work(work)
+                .expect("fixture work should persist while awaiting resolution")
+                .status(),
+            InvestigationWorkStatus::Scheduled,
+            "fixture work {work} left Scheduled without appearing in the resolution outcome"
+        );
+    }
+    panic!("fixture work {work} did not resolve by its due time {due_at:?}");
 }
 
 #[test]
@@ -157,12 +192,7 @@ fn autonomous_arrest_can_cite_developed_evidence_when_primary_source_is_not_cust
     .expect("questionable source review should schedule")
     .commit(&mut fixture.state)
     .expect("questionable source review should commit");
-    loop {
-        let tick = run_tick(&fixture.registry, &mut fixture.state);
-        if tick.resolved_investigation_work.contains(&work) {
-            break;
-        }
-    }
+    run_until_investigation_work_resolved(&mut fixture, work);
     let derived = fixture
         .state
         .legal()
@@ -1889,7 +1919,6 @@ fn custody_defers_authorized_operation_until_participant_release() {
 #[test]
 fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
     use crate::core::entity::EntityRef;
-    use crate::core::simulation::run_tick;
     use crate::legal::investigation_system::{
         validate_assign_investigator, validate_incident_intake,
     };
@@ -2049,12 +2078,7 @@ fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
     .expect("reviewable source should schedule")
     .commit(&mut fixture.state)
     .expect("review should commit");
-    loop {
-        let outcome = run_tick(&fixture.registry, &mut fixture.state);
-        if outcome.resolved_investigation_work.contains(&work) {
-            break;
-        }
-    }
+    run_until_investigation_work_resolved(&mut fixture, work);
     let derived = fixture
         .state
         .legal()

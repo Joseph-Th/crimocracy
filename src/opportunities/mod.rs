@@ -227,6 +227,19 @@ impl OpportunityState {
         })
     }
 
+    /// Returns the converted opportunity whose authored validity window has closed before its
+    /// linked operation began. Converted opportunities are no longer in the open-expiry index,
+    /// so operation scheduling must follow the canonical operation link for this lifecycle edge.
+    pub(crate) fn expired_window_for_operation(
+        &self,
+        operation: OperationId,
+        now: SimTime,
+    ) -> Option<(&OpportunityRecord, SimTime)> {
+        let opportunity = self.opportunity_for_operation(operation)?;
+        let valid_until = opportunity.valid_until()?;
+        (now >= valid_until).then_some((opportunity, valid_until))
+    }
+
     pub fn find_open_operation(
         &self,
         organization: OrganizationId,

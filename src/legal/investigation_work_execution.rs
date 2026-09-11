@@ -10,7 +10,6 @@ use crate::core::time::SimTime;
 use crate::core::version::{
     VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
 };
-use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
@@ -923,12 +922,9 @@ pub(crate) fn resolve_improved_evidence_reliability(
     }
 }
 
-/// Builds the canonical statement an interview records. The testimony targets, in order of
-/// preference: the character backed by the strongest actionable evidence already in the case
-/// graph (reliability and then minimum ID break strength ties), the case's origin operation when
-/// no person has been tied to the case yet, a character named as a case subject, and finally the
-/// lowest case subject of any kind so institution-authored cases without an operation origin
-/// still produce a connected statement. Confidence is a deterministic function of the margin.
+/// Builds the canonical statement an interview records. The testimony subject is fixed when the
+/// witness is registered; later case evidence cannot retroactively make this person testify about
+/// a different suspect. Confidence is a deterministic function of the margin.
 fn resolve_interview_statement_draft(
     definition: &InvestigationWorkDefinition,
     state: &AppState,
@@ -936,46 +932,11 @@ fn resolve_interview_statement_draft(
     case_witness: CaseWitnessId,
     margin: i16,
 ) -> Result<WitnessStatementDraft, InvestigationWorkError> {
-    use std::cmp::Reverse;
-
-    let investigation = state
+    let subject = state
         .legal
-        .get_investigation(work.investigation())
-        .expect("validated interview investigation must exist");
-    let subject = investigation
-        .evidence()
-        .iter()
-        .map(|id| {
-            state
-                .legal
-                .get_evidence(*id)
-                .expect("investigation evidence set must reference persisted evidence")
-        })
-        .filter(|evidence| matches!(evidence.subject(), EntityRef::Character(_)))
-        .filter(|evidence| evidence_is_actionable_case_lead(evidence))
-        .max_by_key(|evidence| {
-            (
-                evidence.strength(),
-                evidence.reliability(),
-                Reverse(evidence.subject()),
-            )
-        })
-        .map(|evidence| evidence.subject())
-        .or_else(|| {
-            investigation
-                .origin()
-                .filter(|origin| {
-                    matches!(origin, EntityRef::Operation(_) | EntityRef::Enterprise(_))
-                })
-                .or_else(|| {
-                    investigation
-                        .subjects()
-                        .iter()
-                        .find(|subject| matches!(subject, EntityRef::Character(_)))
-                        .copied()
-                })
-                .or_else(|| investigation.subjects().iter().next().copied())
-        })
+        .get_case_witness(case_witness)
+        .filter(|witness| witness.investigation() == work.investigation())
+        .map(|witness| witness.subject())
         .ok_or(InvestigationWorkError::InvalidFocus)?;
     let confidence = Rating::try_new(
         definition
@@ -986,7 +947,6 @@ fn resolve_interview_statement_draft(
     .expect("authored interview confidence must be a valid rating");
     Ok(WitnessStatementDraft {
         case_witness,
-        subject,
         origin: None,
         confidence,
         summary: format!(

@@ -64,6 +64,32 @@ fn replace_serialized_organization(
         .expect("same-layout organization corruption should remain decodable")
 }
 
+fn replace_serialized_business(
+    envelope: SaveEnvelope,
+    original: &BusinessRecord,
+    replacement: &BusinessRecord,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("business should serialize");
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement business should serialize");
+    assert_eq!(original_bytes.len(), replacement_bytes.len());
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "business record should occur once in save"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout business corruption should remain decodable")
+}
+
 #[test]
 fn recruitment_policy_history_is_reconstructible_from_toggle_versions() {
     let registry = build_registry();
@@ -559,6 +585,57 @@ fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history()
         SimTime::from_minutes(20),
     ));
     validate_invariants(&state);
+}
+
+#[test]
+fn restore_rejects_ownership_history_beyond_business_version() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0B51_F001);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "History Boundary Owner".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("owner should validate");
+    let individual_owner =
+        make_test_character(&mut state, "Later Individual Owner", organization, None);
+    let business = make_test_business(
+        &registry,
+        &mut state,
+        BusinessOwner::Organization(organization),
+    );
+    state.advance_clock(SimDuration::from_minutes(1));
+    validate_transfer_business_ownership(
+        &state,
+        business,
+        BusinessOwner::Character(individual_owner),
+    )
+    .expect("character transfer should validate")
+    .commit(&mut state)
+    .expect("character transfer should commit");
+
+    let current = state
+        .world()
+        .get_business(business)
+        .expect("business should persist")
+        .clone();
+    assert_eq!(current.version(), 2);
+    let mut corrupted = current.clone();
+    corrupted.owner = BusinessOwner::Organization(organization);
+    corrupted.version = 1;
+
+    let envelope = build_save(&registry, &state).expect("canonical ownership history should save");
+    let corrupted_envelope = replace_serialized_business(envelope, &current, &corrupted);
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("ownership history beyond the current business version must be rejected");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::IndexInconsistency { subsystem: "world" }),
+        "restore must reject a title history containing versions beyond the business record"
+    );
 }
 
 #[test]

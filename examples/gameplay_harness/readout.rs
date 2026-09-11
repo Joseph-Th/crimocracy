@@ -8,7 +8,9 @@ use crimocracy::economy::business_reporting::resolve_organization_business_finan
 use crimocracy::enterprises::EnterpriseLocation;
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
-use crimocracy::operations::{OperationAbortCause, OperationAbortPhase, OperationObjectiveOutcome};
+use crimocracy::operations::{
+    OperationAbortCause, OperationAbortPhase, OperationObjectiveBlocker, OperationObjectiveOutcome,
+};
 use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::world::{CapabilityKind, Rating};
 use std::collections::BTreeMap;
@@ -1352,6 +1354,21 @@ pub fn abort_cause_label(cause: OperationAbortCause) -> String {
         OperationAbortCause::Decision(id) => format!("decision request {id}"),
         OperationAbortCause::PoliceArrival(id) => format!("police arrival {id}"),
         OperationAbortCause::DeadlineMissed => "missed deadline".to_owned(),
+        OperationAbortCause::OpportunityExpired(id) => format!("opportunity {id} expired"),
+        OperationAbortCause::ObjectiveUnavailable(blocker) => match blocker {
+            OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
+                "objective unavailable: target ownership changed".to_owned()
+            }
+            OperationObjectiveBlocker::TargetEconomyInactive => {
+                "objective unavailable: target business inactive".to_owned()
+            }
+            OperationObjectiveBlocker::NoPressureableWitnessCase => {
+                "objective unavailable: witness pressure no longer actionable".to_owned()
+            }
+            OperationObjectiveBlocker::ExtractionCustodyEnded => {
+                "objective unavailable: target custody ended".to_owned()
+            }
+        },
         OperationAbortCause::ParticipantDetained(id) => format!("participant detention {id}"),
     }
 }

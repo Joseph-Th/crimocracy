@@ -248,10 +248,12 @@ fn resolve_shift(
     let proposed = i32::from(current) + i32::from(delta);
     let next = u8::try_from(proposed.clamp(0, 100))
         .expect("clamped reputation arithmetic stays inside the score range");
+    let applied_delta =
+        i8::try_from(i16::from(next) - i16::from(current)).expect("bounded score delta fits i8");
     (next != current).then_some(AppliedStandingShift {
         audience,
         dimension,
-        delta,
+        delta: applied_delta,
     })
 }
 

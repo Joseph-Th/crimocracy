@@ -506,9 +506,9 @@ pub(crate) fn apply_informant_disclosures(
         return Ok(Vec::new());
     }
     // Active cases owned by each handler, keyed by entities that make information relevant to
-    // the case. Keep every matching case instead of collapsing the key to its smallest ID: one
-    // fact still feeds at most one case per pass, but later passes may carry it into another
-    // relevant active case once the earlier case already received it.
+    // the case. A held fact is institutionally available to every matching active file in the
+    // same pass. Serializing that propagation one case per minute would make case ID determine
+    // which file gets refreshed before same-minute cold-case decay.
     let mut cases_by_handler_subject: BTreeMap<
         OrganizationId,
         BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
@@ -537,22 +537,20 @@ pub(crate) fn apply_informant_disclosures(
                     .intelligence
                     .information_for_holder_subject(holder, *subject)
                 {
-                    if let Some(investigation) = investigations.iter().copied().find(|case| {
+                    for investigation in investigations.iter().copied().filter(|case| {
                         state
                             .legal
                             .informant_disclosure_for_case_information(*case, information.id())
                             .is_none()
                     }) {
-                        // One fact feeds at most one matching case per pass. A later pass advances
-                        // to the next case after the disclosure index records this pair.
                         candidates.push((informant.id(), information.id(), investigation));
                     }
                 }
             }
         }
     }
-    // Preserve the prior public ordering contract while using targeted indexes to build the
-    // candidate set: informant id, then information id, then case id.
+    // Stable commit order is informant id, then information id, then case id. IDs order equal
+    // facts only; they no longer decide whether another matching case receives the fact at all.
     candidates.sort_unstable();
 
     let mut disclosures = Vec::new();

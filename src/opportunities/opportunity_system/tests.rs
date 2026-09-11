@@ -22,9 +22,12 @@ use crate::legal::{
     EvidenceStrength, InvestigationDraft, WitnessCooperation,
 };
 use crate::operations::operation_system::{
-    OperationTransition, apply_transition, validate_authorize_operation,
+    OperationError, OperationTransition, apply_transition, validate_authorize_operation,
 };
-use crate::operations::{OperationApproach, OperationDraft, OperationObjective, RoleKind};
+use crate::operations::{
+    OperationAbortCause, OperationApproach, OperationDraft, OperationObjective, OperationStatus,
+    RoleKind,
+};
 use crate::opportunities::OpportunityResolution;
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_organization,
@@ -416,6 +419,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         CaseWitnessDraft {
             investigation: witness_case,
             witness: witness_character,
+            subject: EntityRef::Business(fixture.business),
             cooperation: WitnessCooperation::Reluctant,
         },
     )
@@ -998,6 +1002,123 @@ fn conversion_requires_exact_authorized_operation_and_survives_save_round_trip()
         Some(opportunity)
     );
     validate_state(&restored).expect("restored opportunity state should validate");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn converted_operation_cannot_begin_after_its_opportunity_window_expires() {
+    let mut fixture = make_fixture();
+    let valid_until = SimTime::from_minutes(20);
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, valid_until),
+    )
+    .expect("bounded opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("bounded opportunity should commit");
+    let operation = authorize_matching_operation(&mut fixture);
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("in-window operation should convert the opportunity")
+        .commit(&mut fixture.state)
+        .expect("opportunity conversion should commit");
+
+    fixture.state.advance_clock(SimDuration::from_minutes(20));
+    let error = apply_transition(
+        &fixture.registry,
+        &mut fixture.state,
+        operation,
+        OperationTransition::Begin,
+    )
+    .expect_err("a converted operation must not begin after its opportunity expired");
+    assert_eq!(
+        error,
+        OperationError::OpportunityWindowExpired {
+            operation,
+            opportunity,
+            valid_until,
+            now: valid_until,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("rejected operation should persist")
+            .status(),
+        OperationStatus::Authorized
+    );
+    validate_state(&fixture.state).expect("expired-window authorization should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn tick_aborts_delayed_converted_operation_when_opportunity_window_expires() {
+    let mut fixture = make_fixture();
+    let valid_until = SimTime::from_minutes(20);
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, valid_until),
+    )
+    .expect("bounded opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("bounded opportunity should commit");
+    let operation = authorize_matching_operation(&mut fixture);
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("in-window operation should convert the opportunity")
+        .commit(&mut fixture.state)
+        .expect("opportunity conversion should commit");
+
+    fixture.state.advance_clock(SimDuration::from_minutes(19));
+    let outcome = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(outcome.now, valid_until);
+    assert!(
+        !outcome.started_operations.contains(&operation),
+        "the expired opportunity must preempt begin"
+    );
+    let record = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("expired-window operation should persist historically");
+    assert_eq!(record.status(), OperationStatus::Aborted);
+    let abort = record
+        .abort_record()
+        .expect("expired-window operation should persist causal abort provenance");
+    assert_eq!(
+        abort.cause(),
+        OperationAbortCause::OpportunityExpired(opportunity)
+    );
+    assert_eq!(abort.aborted_at(), valid_until);
+    let artifacts = abort
+        .artifacts()
+        .expect("opportunity-expiry abort should be visible to leadership");
+    assert!(
+        fixture
+            .state
+            .reports()
+            .get_report(artifacts.report())
+            .expect("opportunity-expiry report should persist")
+            .entries()[0]
+            .summary
+            .contains("linked opportunity window expired")
+    );
+
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("opportunity-expiry abort should build a valid save");
+    let restored = restore_save(&fixture.registry, envelope)
+        .expect("opportunity-expiry abort should survive restore");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.abort_record())
+            .map(|abort| abort.cause()),
+        Some(OperationAbortCause::OpportunityExpired(opportunity))
+    );
+    validate_state(&restored).expect("restored expired-window abort should validate");
     validate_invariants(&restored);
 }
 

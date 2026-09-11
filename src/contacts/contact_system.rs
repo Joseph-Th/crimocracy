@@ -591,8 +591,9 @@ pub fn find_pending_disclosure_sources(
             .get_information(*right)
             .expect("pending disclosure source must remain indexed as information");
         right_record
-            .recorded_at()
-            .cmp(&left_record.recorded_at())
+            .observed_at()
+            .cmp(&left_record.observed_at())
+            .then_with(|| right_record.recorded_at().cmp(&left_record.recorded_at()))
             .then_with(|| right.cmp(left))
     });
     sources.dedup();

@@ -2,10 +2,12 @@
 
 mod incident_intake;
 mod narrative;
+mod resolution_effects;
 mod resolution_factors;
 
 use incident_intake::validate_exposure_incident;
 use narrative::{build_after_action_summary, outcome_label};
+use resolution_effects::validate_resolution_effects;
 
 pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
@@ -26,9 +28,7 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
-use crate::economy::business_economy_system::{
-    BusinessEconomyError, ValidatedBusinessDisruption, validate_disrupt_business_economy,
-};
+use crate::economy::business_economy_system::{BusinessEconomyError, ValidatedBusinessDisruption};
 use crate::history::history_system::{HistoryError, ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
 use crate::intelligence::intelligence_system::{
@@ -736,52 +736,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .get_operation(plan.snapshot.operation)
         .expect("validated resolution operation must exist");
     ensure_version_can_advance(record.version(), "operation")?;
-    let expected_property_proceeds =
-        resolve_property_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
-    if plan.outcome.property_proceeds_plan != expected_property_proceeds {
-        return Err(OperationResolutionError::StalePropertyProceedsContext {
-            operation: plan.snapshot.operation,
-        });
-    }
-    let expected_cash_proceeds =
-        resolve_cash_proceeds(registry, state, record, plan.outcome.objective_outcome)?;
-    if plan.outcome.cash_proceeds_plan != expected_cash_proceeds {
-        return Err(OperationResolutionError::StaleCashProceedsContext {
-            operation: plan.snapshot.operation,
-        });
-    }
-    // Extraction success frees the exact arrest observed in the resolution snapshot. If custody
-    // already ended, resolution remains valid but the effective objective outcome is Failed and
-    // there is no release effect. This turns a mutable legal dependency into an explicit causal
-    // outcome instead of a due-tick panic.
-    let detainee_release = match record.objective() {
-        crate::operations::OperationObjective::FreeDetainee { target } => {
-            match plan.outcome.objective_outcome {
-                OperationObjectiveOutcome::Achieved | OperationObjectiveOutcome::Partial => {
-                    let arrest = plan.outcome.extraction_arrest.ok_or(
-                        OperationResolutionError::StaleExtractionContext {
-                            operation: plan.snapshot.operation,
-                        },
-                    )?;
-                    let release =
-                        crate::legal::arrest_system::validate_release_arrest(state, arrest)
-                            .map_err(|error| OperationResolutionError::DetaineeRelease {
-                                operation: plan.snapshot.operation,
-                                character: *target,
-                                error,
-                            })?;
-                    debug_assert_eq!(release.arrest(), arrest);
-                    Some(release)
-                }
-                OperationObjectiveOutcome::Failed => None,
-            }
-        }
-        crate::operations::OperationObjective::AcquireProperty { .. }
-        | crate::operations::OperationObjective::ObtainCash { .. }
-        | crate::operations::OperationObjective::Frighten { .. }
-        | crate::operations::OperationObjective::GatherInformation { .. }
-        | crate::operations::OperationObjective::DisruptBusiness { .. } => None,
-    };
+    let effects = validate_resolution_effects(registry, state, record, &plan.outcome)?;
     let surveillance_information = match &plan.outcome.surveillance {
         Some(surveillance) => validate_surveillance_information(
             state,
@@ -845,51 +800,6 @@ pub(crate) fn validate_operation_resolution_plan(
             }],
         },
     )?;
-    // Witness pressure degrades every registration that can still influence future testimony.
-    // Statemented or already-hostile witnesses have no remaining modeled cooperation effect and
-    // are therefore objective blockers rather than fake successful intimidation.
-    let mut witness_intimidation = Vec::new();
-    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
-        && let (
-            crate::operations::OperationKind::WitnessPressure,
-            crate::operations::OperationObjective::Frighten {
-                target: EntityRef::Character(_),
-            },
-        ) = (record.kind(), record.objective())
-    {
-        for &(case_witness, cooperation) in &plan.outcome.witness_pressure_targets {
-            let degraded = match cooperation {
-                WitnessCooperation::Cooperative => WitnessCooperation::Reluctant,
-                WitnessCooperation::Reluctant => WitnessCooperation::Hostile,
-                WitnessCooperation::Hostile => {
-                    unreachable!("pressureable witness targets exclude hostile cooperation")
-                }
-            };
-            witness_intimidation.push(
-                crate::legal::witness_system::validate_set_witness_cooperation(
-                    state,
-                    case_witness,
-                    degraded,
-                )?,
-            );
-        }
-    }
-    // Sabotage damage lands through the canonical economy disruption path. A suspended target is
-    // converted to a practical objective failure during planning, so every non-failed sabotage
-    // reaching this point must have a real disruption effect to commit.
-    let mut business_disruption = None;
-    if plan.outcome.objective_outcome != OperationObjectiveOutcome::Failed
-        && let (
-            crate::operations::OperationKind::Sabotage | crate::operations::OperationKind::Arson,
-            crate::operations::OperationObjective::DisruptBusiness {
-                target: EntityRef::Business(business),
-            },
-        ) = (record.kind(), record.objective())
-    {
-        business_disruption = Some(validate_disrupt_business_economy(
-            registry, state, *business,
-        )?);
-    }
     // Personal after-action knowledge for each participant: the crew knows what went down
     // even though the organization's own record is the org-held after-action. Validating
     // here keeps commit free of fallible content checks after terminal mutation.
@@ -925,9 +835,9 @@ pub(crate) fn validate_operation_resolution_plan(
         information,
         history,
         report,
-        detainee_release,
-        witness_intimidation,
-        business_disruption,
+        detainee_release: effects.detainee_release,
+        witness_intimidation: effects.witness_intimidation,
+        business_disruption: effects.business_disruption,
         participant_information,
     })
 }

@@ -53,6 +53,7 @@ use crate::operations::{
 };
 use crate::recruitment::recruitment_system::validate_recruitment_attempt;
 use crate::recruitment::{RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome};
+use crate::registry::Registry;
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::reports::report_system::validate_record_report;
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -107,6 +108,83 @@ struct TestScenario {
     state: AppState,
     operation: crate::core::id::OperationId,
     mandate: crate::core::id::MandateId,
+}
+
+fn run_until_operation_decision(
+    registry: &Registry,
+    state: &mut AppState,
+    operation: crate::core::id::OperationId,
+) -> crate::decisions::decision_system::DecisionRequestOutcome {
+    let response = if let Some(response) = state
+        .operations()
+        .get_operation(operation)
+        .expect("decision fixture operation should persist")
+        .police_response()
+    {
+        response
+    } else {
+        let earliest_start = crate::operations::operation_system::resolve_operation_earliest_start(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("decision fixture operation should persist before start"),
+        );
+        let ticks_until_start = earliest_start
+            .as_minutes()
+            .checked_sub(state.now().as_minutes())
+            .expect("decision fixture cannot already be past its earliest start");
+        assert!(
+            ticks_until_start > 0,
+            "an operation at its start boundary should have been started by the preceding tick"
+        );
+        let mut dispatched = None;
+        for _ in 0..ticks_until_start {
+            let outcome = run_tick(registry, state);
+            assert!(
+                outcome.decision_requests.is_empty(),
+                "police-arrival decision cannot precede operation dispatch"
+            );
+            if let Some(response) = state
+                .operations()
+                .get_operation(operation)
+                .expect("decision fixture operation should persist through start")
+                .police_response()
+            {
+                dispatched = Some(response);
+                break;
+            }
+        }
+        dispatched.unwrap_or_else(|| {
+            panic!(
+                "operation {operation} did not start and dispatch by its earliest start {earliest_start:?}"
+            )
+        })
+    };
+    let arrival_due_at = state
+        .legal()
+        .get_police_response(response)
+        .expect("fixture police response should persist")
+        .arrival_due_at();
+    let remaining_ticks = arrival_due_at
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("decision wait cannot begin after the police response due time");
+    assert!(
+        remaining_ticks > 0,
+        "decision wait must begin before police arrival"
+    );
+    for _ in 0..remaining_ticks {
+        let outcome = run_tick(registry, state);
+        if let Some(request) = outcome.decision_requests.into_iter().next() {
+            assert_eq!(
+                outcome.arrived_police_responses,
+                vec![response],
+                "fixture decision must be caused by the expected police arrival"
+            );
+            return request;
+        }
+    }
+    panic!("operation {operation} did not raise its police-arrival decision by {arrival_due_at:?}");
 }
 
 const SOAK_OPENING_BUDGET_LIQUIDITY_CENTS: i64 = 50_000;
@@ -1004,17 +1082,12 @@ fn stale_decision_resolution_cannot_commit_twice() {
     let registry = build_registry();
     let TestScenario {
         mut state,
-        operation: _,
+        operation,
         mandate: _,
     } = make_test_scenario();
     // The operation's police response arrives and pauses it with a pending decision.
     run_tick(&registry, &mut state);
-    let decision = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if let Some(request) = outcome.decision_requests.first() {
-            break request.decision;
-        }
-    };
+    let decision = run_until_operation_decision(&registry, &mut state, operation).decision;
     let recipient = state
         .player_organization()
         .expect("fixture should have player organization");
@@ -1241,12 +1314,7 @@ fn save_round_trip_preserves_pending_decision_and_attention_settings() {
     let default_auto_pause = state.attention_settings().clone();
     // The operation's police response arrives and raises the exception decision through
     // the canonical arrival path.
-    let request = loop {
-        let outcome = run_tick(&registry, &mut state);
-        if let Some(decision) = outcome.decision_requests.first() {
-            break *decision;
-        }
-    };
+    let request = run_until_operation_decision(&registry, &mut state, operation);
     // Exception-class requests pause by default.
     assert!(request.requests_pause);
 

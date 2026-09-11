@@ -17,7 +17,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{
     ArrestId, BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId,
     HistoryEventId, InformationId, InvestigationId, LedgerTransactionId, NeighborhoodId,
-    OperationId, OrganizationId, PoliceResponseId, ReportId,
+    OperationId, OpportunityId, OrganizationId, PoliceResponseId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
@@ -314,6 +314,8 @@ pub enum OperationAbortCause {
     Decision(DecisionRequestId),
     PoliceArrival(PoliceResponseId),
     DeadlineMissed,
+    OpportunityExpired(OpportunityId),
+    ObjectiveUnavailable(OperationObjectiveBlocker),
     ParticipantDetained(CharacterId),
 }
 
