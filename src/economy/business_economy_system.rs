@@ -866,7 +866,7 @@ fn resolve_disrupted_gross(
     normal_gross: Money,
     gross_basis_points: u32,
 ) -> Result<Money, BusinessEconomyError> {
-    crate::finance::helpers::resolve_basis_point_share(normal_gross, gross_basis_points)
+    crate::finance::helpers::apply_basis_point_multiplier(normal_gross, gross_basis_points)
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 

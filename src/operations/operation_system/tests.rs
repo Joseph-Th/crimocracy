@@ -8,7 +8,7 @@ use crate::core::invariants::{
     StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
-use crate::core::time::SimTime;
+use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -17,6 +17,9 @@ use crate::intelligence::{
 use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, validate_operation_resolution_plan,
+};
+use crate::operations::operation_scheduling::{
+    find_due_authorized_operations, find_due_operations_with_missed_deadlines,
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationApproach, OperationDraft, OperationKind,

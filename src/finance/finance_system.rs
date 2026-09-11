@@ -15,7 +15,7 @@ use crate::economy::business_economy_system::resolve_business_current_gross;
 use crate::finance::{
     AccountKind, BudgetUsageRecord, FinancialAccountDraft, FinancialAccountRecord, FinancialOwner,
     LedgerPosting, LedgerTransactionDraft, LedgerTransactionRecord, Money, build_budget_usage,
-    helpers::resolve_basis_point_share,
+    helpers::apply_basis_point_multiplier,
 };
 use crate::registry::Registry;
 use crate::world::{BusinessOwner, OrganizationKind};
@@ -602,8 +602,8 @@ pub struct LaunderingDraft {
 pub enum LaunderingError {
     #[error("laundering amount must be positive")]
     NonPositiveAmount,
-    #[error("laundering amount is too small to produce the authored front fee")]
-    AmountTooSmallForFee,
+    #[error("laundering amount is too small to produce both a front fee and accounted funds")]
+    AmountTooSmallForSplit,
     #[error("laundering organization {0} does not exist")]
     MissingOrganization(crate::core::id::OrganizationId),
     #[error("laundering organization {0} is not a criminal organization")]
@@ -727,6 +727,21 @@ impl ValidatedLaundering {
     }
 }
 
+fn resolve_laundering_split(
+    amount: Money,
+    fee_basis_points: u32,
+) -> Result<(Money, Money), LaunderingError> {
+    let fee = apply_basis_point_multiplier(amount, fee_basis_points)
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    let credited = amount
+        .checked_sub(fee)
+        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    if fee <= Money::ZERO || credited <= Money::ZERO {
+        return Err(LaunderingError::AmountTooSmallForSplit);
+    }
+    Ok((fee, credited))
+}
+
 pub fn validate_launder_funds(
     registry: &Registry,
     state: &AppState,
@@ -810,7 +825,7 @@ pub fn validate_launder_funds(
     // sabotage-disrupted front cannot hide cash its degraded books cannot explain.
     let gross_potential = resolve_business_current_gross(registry, state, draft.business)?;
     let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
-    let capacity = resolve_basis_point_share(gross_potential, capacity_basis_points)
+    let capacity = apply_basis_point_multiplier(gross_potential, capacity_basis_points)
         .ok_or(LaunderingError::ArithmeticOverflow)?;
     let already_laundered = economy.laundered_this_cycle();
     let remaining = capacity
@@ -826,20 +841,11 @@ pub fn validate_launder_funds(
     let new_cycle_total = already_laundered
         .checked_add(draft.amount)
         .ok_or(LaunderingError::ArithmeticOverflow)?;
-    // Fee split: the front keeps the authored cut as legitimate revenue.
-    let fee = resolve_basis_point_share(draft.amount, registry.laundering().fee_basis_points())
-        .ok_or(LaunderingError::ArithmeticOverflow)?;
-    if fee == Money::ZERO {
-        // Every laundering transfer must materially use the selected front. Apart from making
-        // tiny transfers economically nonsensical, a zero fee would omit the business
-        // operating-account posting and make the ledger unable to prove which front absorbed
-        // the transfer during restore validation.
-        return Err(LaunderingError::AmountTooSmallForFee);
-    }
-    let credited = draft
-        .amount
-        .checked_sub(fee)
-        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    // Both legs must remain material after cent rounding. A zero fee would fail to prove which
+    // front absorbed the transfer, while a zero accounted credit would call a pure front-revenue
+    // transfer "laundering" without cleaning any money.
+    let (fee, credited) =
+        resolve_laundering_split(draft.amount, registry.laundering().fee_basis_points())?;
     let mut postings = vec![
         LedgerPosting {
             account: draft.street_account,

@@ -12,6 +12,7 @@ use crate::intelligence::{
     InformationRecord, InformationSignal, KnowledgeHolder, LegalPersonStatusSignal,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
+use crate::operations::operation_scheduling::resolve_operation_earliest_start;
 use crate::operations::operation_system::is_actionable_opportunity_target;
 use crate::operations::{OperationKind, OperationStatus};
 use crate::opportunities::{
@@ -659,8 +660,7 @@ fn validate_conversion_match(
     // The opportunity window is meaningful: conversion may only bind work whose planned earliest
     // start is inside the window. Begin-time validation rechecks the converted opportunity, so a
     // later crew delay cannot carry the operation past this viability boundary after conversion.
-    let earliest_start =
-        crate::operations::operation_system::resolve_operation_earliest_start(operation);
+    let earliest_start = resolve_operation_earliest_start(operation);
     if opportunity
         .valid_until()
         .is_some_and(|valid_until| earliest_start >= valid_until)

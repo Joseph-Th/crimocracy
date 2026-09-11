@@ -9,24 +9,32 @@ pub(crate) fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
     per_point.checked_mul(i64::from(rating))
 }
 
+/// Rounds a pre-scaled cents×basis-points product back to whole cents using the crate's
+/// canonical half-away-from-zero rule. Keeping this primitive on the wider i128 intermediate
+/// lets registry arithmetic proofs use the exact runtime rule before a value is known to fit
+/// Money.
+pub(crate) fn round_basis_point_product(product: i128) -> Option<i128> {
+    let negative = product < 0;
+    let magnitude = product.checked_abs()?.checked_add(5_000)? / 10_000;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 /// Applies a basis-point variance (-10000..+10000 maps to 0..200%) to an amount.
 /// Rounds half away from zero so upside and downside variances are symmetric.
 pub(crate) fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> Option<Money> {
     let factor = 10_000_i128 + i128::from(basis_points);
     let scaled = i128::from(amount.cents()).checked_mul(factor)?;
-    let sign = if scaled < 0 { -1 } else { 1 };
-    let adjusted = (scaled.abs() + 5_000) / 10_000 * sign;
+    let adjusted = round_basis_point_product(scaled)?;
     let cents = i64::try_from(adjusted).ok()?;
     Some(Money::from_cents(cents))
 }
 
-/// Reduces an amount to its basis-point share (`0..=10_000` maps to 0..100%), rounded half
-/// away from zero to match the crate's single rounding convention.
-pub(crate) fn resolve_basis_point_share(amount: Money, basis_points: u32) -> Option<Money> {
+/// Applies an unsigned basis-point multiplier to an amount, rounded half away from zero to
+/// match the crate's single money-rounding convention. `10_000` is 100%; larger multipliers
+/// intentionally represent values above the source amount (for example operation take sizing).
+pub(crate) fn apply_basis_point_multiplier(amount: Money, basis_points: u32) -> Option<Money> {
     let scaled = i128::from(amount.cents()).checked_mul(i128::from(basis_points))?;
-    let negative = scaled < 0;
-    let adjusted = (scaled.abs() + 5_000) / 10_000;
-    let adjusted = if negative { -adjusted } else { adjusted };
+    let adjusted = round_basis_point_product(scaled)?;
     let cents = i64::try_from(adjusted).ok()?;
     Some(Money::from_cents(cents))
 }
@@ -118,7 +126,28 @@ pub(crate) fn count_trailing_losing_cycles<T: Copy>(
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_gross_variance, format_money_cents};
+    use super::{apply_basis_point_multiplier, describe_gross_variance, format_money_cents};
+    use crate::finance::Money;
+
+    #[test]
+    fn basis_point_multiplier_uses_one_symmetric_money_rounding_rule() {
+        assert_eq!(
+            apply_basis_point_multiplier(Money::from_cents(1), 5_000),
+            Some(Money::from_cents(1))
+        );
+        assert_eq!(
+            apply_basis_point_multiplier(Money::from_cents(-1), 5_000),
+            Some(Money::from_cents(-1))
+        );
+        assert_eq!(
+            apply_basis_point_multiplier(Money::from_cents(3), 5_000),
+            Some(Money::from_cents(2))
+        );
+        assert_eq!(
+            apply_basis_point_multiplier(Money::from_cents(1), 40_000),
+            Some(Money::from_cents(4))
+        );
+    }
 
     #[test]
     fn money_format_groups_thousands_and_preserves_sign() {

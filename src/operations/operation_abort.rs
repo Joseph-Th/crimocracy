@@ -16,9 +16,10 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::operation_objective::resolve_objective_blocker;
-use crate::operations::operation_system::{
-    OperationError, has_missed_operation_deadline, resolve_earliest_operation_deadline,
+use crate::operations::operation_scheduling::{
+    has_missed_operation_deadline, resolve_earliest_operation_deadline,
 };
+use crate::operations::operation_system::OperationError;
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
     OperationObjectiveBlocker, OperationRecord, OperationStatus,

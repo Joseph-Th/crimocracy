@@ -892,7 +892,8 @@ pub struct BusinessDisruptionSpec {
     /// How long a successful sabotage keeps the target's economy degraded.
     pub duration: SimDuration,
     /// Basis points of normal gross revenue a disrupted business earns per cycle
-    /// (for example 4_000 = 40 percent of normal).
+    /// (for example 4_000 = 40 percent of normal). Must be below 100% so a persisted
+    /// disruption is economically material.
     pub gross_basis_points: u32,
 }
 #[derive(Clone, Copy, Debug)]
@@ -911,7 +912,8 @@ impl BusinessDisruptionDefinition {
 #[derive(Clone, Copy, Debug)]
 pub struct LaunderingConfigSpec {
     /// Basis points of each laundered transfer kept by the front business as revenue
-    /// (for example 1_500 = a 15 percent laundering cut).
+    /// (for example 1_500 = a 15 percent laundering cut). Must remain below 100% so every
+    /// successful transfer produces some accounted funds.
     pub fee_basis_points: u32,
     /// Maximum aggregate laundering volume per operating cycle as basis points of the front's
     /// current legitimate gross potential (for example 5_000 = half of one cycle's gross).
@@ -937,15 +939,21 @@ pub struct ReputationConfigSpec {
     /// Points a touched impression drifts toward the baseline per campaign day.
     pub daily_decay_step: u8,
     /// Police fear at or above which a governed organization suspends delegated
-    /// expansion for the day: outfits keep their head down while visibly hot.
+    /// expansion for the day: outfits keep their head down while visibly hot. This must remain
+    /// above the neutral baseline so an untouched organization can still expand.
     pub expansion_police_fear_ceiling: u8,
+    /// Positive police-fear movement after clearly witnessed exposure.
     pub witnessed_exposure_police_fear: i8,
+    /// Police-fear movement after identifying exposure; never weaker than witnessed exposure.
     pub identifying_exposure_police_fear: i8,
     /// Police fear applied when one of the organization's own rackets draws a dedicated vice
-    /// inquiry: a case built on the racket itself is at least as alarming as being seen.
+    /// inquiry: a case built on the racket itself is at least as alarming as witnessed exposure.
     pub vice_inquiry_police_fear: i8,
+    /// Positive competence movement for an achieved objective.
     pub achieved_underworld_competence: i8,
+    /// Positive competence movement for a partial objective, no stronger than full success.
     pub partial_underworld_competence: i8,
+    /// Positive business-fear movement from publicly exposed violence.
     pub violent_businesses_fear: i8,
 }
 #[derive(Clone, Copy, Debug)]

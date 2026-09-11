@@ -192,6 +192,21 @@ fn recruitment_spec() -> RecruitmentDefinitionSpec {
     }
 }
 
+fn reputation_spec() -> ReputationConfigSpec {
+    let definition = build_registry().reputation();
+    ReputationConfigSpec {
+        baseline: definition.baseline(),
+        daily_decay_step: definition.daily_decay_step(),
+        expansion_police_fear_ceiling: definition.expansion_police_fear_ceiling(),
+        witnessed_exposure_police_fear: definition.witnessed_exposure_police_fear(),
+        identifying_exposure_police_fear: definition.identifying_exposure_police_fear(),
+        vice_inquiry_police_fear: definition.vice_inquiry_police_fear(),
+        achieved_underworld_competence: definition.achieved_underworld_competence(),
+        partial_underworld_competence: definition.partial_underworld_competence(),
+        violent_businesses_fear: definition.violent_businesses_fear(),
+    }
+}
+
 #[test]
 fn authored_recruitment_definition_is_complete_and_queryable() {
     let registry = build_registry();
@@ -220,6 +235,37 @@ fn authored_recruitment_definition_is_complete_and_queryable() {
 }
 
 #[test]
+fn reputation_authoring_rejects_neutral_throttle_and_inverted_consequences() {
+    let mut spec = reputation_spec();
+    spec.expansion_police_fear_ceiling = spec.baseline;
+    assert!(matches!(
+        RegistryBuilder::default().register_reputation(spec),
+        Err(RegistryBuildError::InvalidReputationCeiling)
+    ));
+
+    let mut spec = reputation_spec();
+    spec.identifying_exposure_police_fear = spec.witnessed_exposure_police_fear - 1;
+    assert!(matches!(
+        RegistryBuilder::default().register_reputation(spec),
+        Err(RegistryBuildError::InvalidReputationConsequence)
+    ));
+
+    let mut spec = reputation_spec();
+    spec.vice_inquiry_police_fear = spec.witnessed_exposure_police_fear - 1;
+    assert!(matches!(
+        RegistryBuilder::default().register_reputation(spec),
+        Err(RegistryBuildError::InvalidReputationConsequence)
+    ));
+
+    let mut spec = reputation_spec();
+    spec.partial_underworld_competence = -1;
+    assert!(matches!(
+        RegistryBuilder::default().register_reputation(spec),
+        Err(RegistryBuildError::InvalidReputationConsequence)
+    ));
+}
+
+#[test]
 fn authored_legal_timing_keeps_informant_decision_inside_bounded_custody() {
     let legal = build_registry().legal();
     assert_eq!(
@@ -234,6 +280,27 @@ fn authored_legal_timing_keeps_informant_decision_inside_bounded_custody() {
         legal.witness_testimony().strength_thresholds(),
         [35, 60, 85]
     );
+}
+
+#[test]
+fn authored_economic_effects_must_change_the_resource_they_claim_to_model() {
+    let mut builder = RegistryBuilder::default();
+    assert!(matches!(
+        builder.register_business_disruption(BusinessDisruptionSpec {
+            duration: SimDuration::ONE_MINUTE,
+            gross_basis_points: 10_000,
+        }),
+        Err(RegistryBuildError::InvalidBusinessDisruptionGrossBasisPoints)
+    ));
+
+    let mut builder = RegistryBuilder::default();
+    assert!(matches!(
+        builder.register_laundering(LaunderingConfigSpec {
+            fee_basis_points: 10_000,
+            plausibility_gross_basis_points: 10_000,
+        }),
+        Err(RegistryBuildError::InvalidLaunderingFee)
+    ));
 }
 
 #[test]
@@ -340,6 +407,55 @@ fn operation_proceeds_arithmetic_is_safe_regardless_of_registration_order() {
             operation.execution().clone(),
         )
         .expect("operation is individually representable before business authorship");
+    assert!(matches!(
+        operation_first.register_business(business_kind, business),
+        Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(kind))
+            if kind == operation_kind
+    ));
+}
+
+#[test]
+fn operation_proceeds_overflow_proof_matches_runtime_cent_rounding_boundary() {
+    let registry = build_registry();
+    let business_kind = crate::world::BusinessKind::Retail;
+    let mut business = registry.get_business(business_kind).economics().clone();
+    // Document theft pays 125% of modeled gross. This exact gross produces
+    // i64::MAX + 0.5 cents before rounding: truncation would fit, while the runtime's canonical
+    // round-half-away rule must reject it as one cent beyond Money's representable range.
+    business.base_gross = Money::from_cents(7_378_697_629_483_820_646);
+    business.wealth_revenue_per_point = Money::ZERO;
+    business.commerce_revenue_per_point = Money::ZERO;
+    business.gross_variance_basis_points = 0;
+    business.notable_variance_basis_points = 0;
+
+    let operation_kind = OperationKind::DocumentTheft;
+    let operation = registry.get_operation(operation_kind);
+    let mut business_first = RegistryBuilder::default();
+    business_first
+        .register_business(business_kind, business.clone())
+        .expect("boundary business is individually representable");
+    assert!(matches!(
+        business_first.register_operation(
+            operation_kind,
+            "Document theft",
+            operation.supported_approaches().clone(),
+            operation.required_roles().clone(),
+            operation.execution().clone(),
+        ),
+        Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(kind))
+            if kind == operation_kind
+    ));
+
+    let mut operation_first = RegistryBuilder::default();
+    operation_first
+        .register_operation(
+            operation_kind,
+            "Document theft",
+            operation.supported_approaches().clone(),
+            operation.required_roles().clone(),
+            operation.execution().clone(),
+        )
+        .expect("operation is individually representable before boundary business authorship");
     assert!(matches!(
         operation_first.register_business(business_kind, business),
         Err(RegistryBuildError::OperationProceedsArithmeticOutOfRange(kind))
@@ -810,7 +926,7 @@ fn operation_definition_rejects_empty_or_inert_approach_authorship() {
 }
 
 #[test]
-fn operation_definition_rejects_partial_cash_take_above_full_outcome_fraction() {
+fn operation_definition_requires_partial_and_repeat_take_penalties_to_be_material() {
     let registry = crate::build_registry();
     let definition = registry.get_operation(OperationKind::Robbery);
     let approaches = definition.supported_approaches().clone();
@@ -820,7 +936,7 @@ fn operation_definition_rejects_partial_cash_take_above_full_outcome_fraction() 
         .cash_proceeds
         .as_mut()
         .expect("robbery must author cash proceeds")
-        .partial_take_basis_points = 10_001;
+        .partial_take_basis_points = 10_000;
 
     let mut builder = RegistryBuilder::default();
     assert!(matches!(
@@ -834,6 +950,80 @@ fn operation_definition_rejects_partial_cash_take_above_full_outcome_fraction() 
         Err(RegistryBuildError::InvalidOperationPartialCashTake(
             OperationKind::Robbery
         ))
+    ));
+
+    let definition = registry.get_operation(OperationKind::Burglary);
+    let approaches = definition.supported_approaches().clone();
+    let roles = definition.required_roles().clone();
+    let mut execution = definition.execution().clone();
+    execution
+        .property_proceeds
+        .as_mut()
+        .expect("burglary must author property proceeds")
+        .immediate_repeat_value_basis_points = 10_000;
+
+    let mut builder = RegistryBuilder::default();
+    assert!(matches!(
+        builder.register_operation(
+            OperationKind::Burglary,
+            "Burglary",
+            approaches,
+            roles,
+            execution,
+        ),
+        Err(RegistryBuildError::InvalidOperationTakeRecovery(
+            OperationKind::Burglary
+        ))
+    ));
+}
+
+#[test]
+fn property_liquidation_police_adjustment_must_change_recovery_in_both_directions() {
+    let registry = crate::build_registry();
+    let definition = registry.get_operation(OperationKind::Burglary);
+    let approaches = definition.supported_approaches().clone();
+    let roles = definition.required_roles().clone();
+
+    let mut execution = definition.execution().clone();
+    execution
+        .property_proceeds
+        .as_mut()
+        .expect("burglary must author property proceeds")
+        .liquidation_police_adjustment_basis_points_per_point = 0;
+    assert!(matches!(
+        RegistryBuilder::default().register_operation(
+            OperationKind::Burglary,
+            "Burglary",
+            approaches.clone(),
+            roles.clone(),
+            execution,
+        ),
+        Err(
+            RegistryBuildError::InvalidOperationPropertyLiquidationPoliceAdjustment(
+                OperationKind::Burglary
+            )
+        )
+    ));
+
+    let mut execution = definition.execution().clone();
+    let property = execution
+        .property_proceeds
+        .as_mut()
+        .expect("burglary must author property proceeds");
+    property.liquidation_min_recovery_basis_points = property.liquidation_recovery_basis_points;
+    assert!(matches!(
+        RegistryBuilder::default().register_operation(
+            OperationKind::Burglary,
+            "Burglary",
+            approaches,
+            roles,
+            execution,
+        ),
+        Err(
+            RegistryBuildError::InvalidOperationPropertyLiquidationPoliceAdjustment(
+                OperationKind::Burglary
+            )
+        )
     ));
 }
 

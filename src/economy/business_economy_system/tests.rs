@@ -417,7 +417,7 @@ fn later_sabotage_does_not_retroactively_invalidate_prior_laundering() {
     let normal_gross =
         resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
             .expect("fixture gross should resolve");
-    let normal_capacity = crate::finance::helpers::resolve_basis_point_share(
+    let normal_capacity = crate::finance::helpers::apply_basis_point_multiplier(
         normal_gross,
         registry.laundering().plausibility_gross_basis_points(),
     )
@@ -432,7 +432,7 @@ fn later_sabotage_does_not_retroactively_invalidate_prior_laundering() {
     let disrupted_gross =
         resolve_business_current_gross(&registry, &fixture.state, fixture.business)
             .expect("disrupted gross should resolve");
-    let disrupted_capacity = crate::finance::helpers::resolve_basis_point_share(
+    let disrupted_capacity = crate::finance::helpers::apply_basis_point_multiplier(
         disrupted_gross,
         registry.laundering().plausibility_gross_basis_points(),
     )
@@ -1653,11 +1653,9 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
     )
     .expect("normal gross should resolve");
     let disrupted_basis_points = registry.business_disruption().gross_basis_points();
-    let expected_disrupted_gross = Money::from_cents(
-        (i128::from(normal_gross.cents()) * i128::from(disrupted_basis_points) / 10_000)
-            .try_into()
-            .expect("disrupted gross should fit money"),
-    );
+    let expected_disrupted_gross =
+        crate::finance::helpers::apply_basis_point_multiplier(normal_gross, disrupted_basis_points)
+            .expect("disrupted gross should fit money");
 
     fixture
         .state

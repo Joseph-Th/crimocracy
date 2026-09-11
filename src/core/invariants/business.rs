@@ -484,7 +484,7 @@ fn validate_business_economies_against_registry(
             let amounts =
                 laundering_transaction_amounts(state, economy, organization.id(), transaction)
                     .ok_or_else(|| invalid_economy(economy))?;
-            let expected_fee = crate::finance::helpers::resolve_basis_point_share(
+            let expected_fee = crate::finance::helpers::apply_basis_point_multiplier(
                 amounts.amount,
                 registry.laundering().fee_basis_points(),
             )
@@ -493,7 +493,11 @@ fn validate_business_economies_against_registry(
                 .amount
                 .checked_sub(expected_fee)
                 .ok_or_else(|| invalid_economy(economy))?;
-            if amounts.fee != expected_fee || amounts.accounted != expected_accounted {
+            if expected_fee <= crate::finance::Money::ZERO
+                || expected_accounted <= crate::finance::Money::ZERO
+                || amounts.fee != expected_fee
+                || amounts.accounted != expected_accounted
+            {
                 return Err(invalid_economy(economy));
             }
         }
@@ -511,7 +515,7 @@ fn validate_business_economies_against_registry(
         .map_err(|_| StateValidationError::InvalidBusinessEconomy {
             business: economy.business(),
         })?;
-        let capacity = crate::finance::helpers::resolve_basis_point_share(
+        let capacity = crate::finance::helpers::apply_basis_point_multiplier(
             gross,
             registry.laundering().plausibility_gross_basis_points(),
         )

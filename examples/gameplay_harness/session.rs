@@ -172,10 +172,10 @@ pub fn launder_through_front(
                 draft(Money::from_cents(capacity_cents)),
             ) {
                 Ok(validated) => Some(validated),
-                Err(LaunderingError::AmountTooSmallForFee) => {
+                Err(LaunderingError::AmountTooSmallForSplit) => {
                     if narrative {
                         println!(
-                            "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce a real front fee; {} stays street cash.",
+                            "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce both a real front fee and accounted funds; {} stays street cash.",
                             format_cents(requested_cents),
                         );
                     }
@@ -184,7 +184,7 @@ pub fn launder_through_front(
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(LaunderingError::AmountTooSmallForFee) => return Ok(None),
+        Err(LaunderingError::AmountTooSmallForSplit) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let Some(validated) = validated else {

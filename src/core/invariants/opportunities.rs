@@ -7,6 +7,7 @@ use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::OperationExposureLevel;
+use crate::operations::operation_scheduling::resolve_operation_earliest_start;
 use crate::operations::operation_system::is_valid_operation_objective;
 use crate::opportunities::opportunity_system::{
     source_information_is_usable, source_information_proves_operation_basis,
@@ -376,8 +377,7 @@ fn validate_converted_opportunity(
             .valid_until()
             .is_some_and(|valid_until| at >= valid_until)
         || opportunity.valid_until().is_some_and(|valid_until| {
-            crate::operations::operation_system::resolve_operation_earliest_start(operation)
-                >= valid_until
+            resolve_operation_earliest_start(operation) >= valid_until
                 || operation
                     .started_at()
                     .is_some_and(|started_at| started_at >= valid_until)

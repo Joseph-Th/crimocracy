@@ -5,6 +5,7 @@ pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
 pub(crate) mod operation_intelligence;
 pub(crate) mod operation_objective;
+pub(crate) mod operation_scheduling;
 pub(crate) mod operation_state;
 pub mod operation_system;
 pub(crate) mod police_response_integration;

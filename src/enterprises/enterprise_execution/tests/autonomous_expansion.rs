@@ -1271,15 +1271,26 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         .expect("district-pressure intake should commit");
     }
 
-    // Start one point below the value that will become the ceiling after day-boundary decay
-    // followed by the authored vice consequence: 45 -> 44 decay -> +6 vice = 50.
+    // Start at the value that becomes exactly the expansion ceiling after one day-boundary
+    // decay step and the authored vice consequence.
+    let reputation = registry.reputation();
+    let pre_tick_fear = reputation
+        .expansion_police_fear_ceiling()
+        .checked_sub(
+            u8::try_from(reputation.vice_inquiry_police_fear())
+                .expect("authored vice fear is registry-validated positive"),
+        )
+        .and_then(|value| value.checked_add(reputation.daily_decay_step()))
+        .expect("authored fixture values leave a representable pre-tick fear");
+    let setup_delta = i8::try_from(i16::from(pre_tick_fear) - i16::from(reputation.baseline()))
+        .expect("bounded reputation setup delta fits i8");
     crate::reputation::reputation_system::apply_reputation_delta(
         &registry,
         &mut fixture.state,
         fixture.organization,
         crate::reputation::AudienceKind::Police,
         crate::reputation::ReputationDimension::Fear,
-        5,
+        setup_delta,
     )
     .expect("pre-tick fear setup should apply");
     fixture

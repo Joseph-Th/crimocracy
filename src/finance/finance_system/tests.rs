@@ -2109,7 +2109,7 @@ fn laundering_rejects_amount_that_would_bypass_the_front_fee() {
     )
     .err()
     .expect("a laundering transfer must produce a nonzero front fee");
-    assert_eq!(error, LaunderingError::AmountTooSmallForFee);
+    assert_eq!(error, LaunderingError::AmountTooSmallForSplit);
     assert_eq!(
         fixture
             .state
@@ -2120,6 +2120,13 @@ fn laundering_rejects_amount_that_would_bypass_the_front_fee() {
         Money::ZERO
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn laundering_split_rejects_rounding_that_leaves_no_accounted_credit() {
+    let error = resolve_laundering_split(Money::from_cents(1), 9_999)
+        .expect_err("a transfer consumed entirely by the rounded fee does not launder funds");
+    assert_eq!(error, LaunderingError::AmountTooSmallForSplit);
 }
 
 #[test]
@@ -2162,13 +2169,11 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
     let gross_potential =
         resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
             .expect("gross potential should resolve");
-    let capacity = Money::from_cents(
-        (i128::from(gross_potential.cents())
-            * i128::from(registry.laundering().plausibility_gross_basis_points())
-            / 10_000)
-            .try_into()
-            .expect("capacity should fit money"),
-    );
+    let capacity = crate::finance::helpers::apply_basis_point_multiplier(
+        gross_potential,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("capacity should fit money");
     assert!(
         capacity.cents() < 1_000_000,
         "fixture expects a capacity below the seeded cash"
@@ -2189,12 +2194,11 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
     .commit(&mut fixture.state)
     .expect("in-capacity laundering should commit");
 
-    let fee = Money::from_cents(
-        (i128::from(capacity.cents()) * i128::from(registry.laundering().fee_basis_points())
-            / 10_000)
-            .try_into()
-            .expect("fee should fit money"),
-    );
+    let fee = crate::finance::helpers::apply_basis_point_multiplier(
+        capacity,
+        registry.laundering().fee_basis_points(),
+    )
+    .expect("fee should fit money");
     let transaction = fixture
         .state
         .finance()
@@ -2361,13 +2365,11 @@ fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
     let gross_potential =
         resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
             .expect("gross potential should resolve");
-    let capacity = Money::from_cents(
-        (i128::from(gross_potential.cents())
-            * i128::from(registry.laundering().plausibility_gross_basis_points())
-            / 10_000)
-            .try_into()
-            .expect("capacity should fit money"),
-    );
+    let capacity = crate::finance::helpers::apply_basis_point_multiplier(
+        gross_potential,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("capacity should fit money");
     let before_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
         .state
         .finance()
@@ -2527,7 +2529,7 @@ fn disrupted_front_capacity_shrinks_with_degraded_books() {
 
     let current_gross = resolve_business_current_gross(&registry, &fixture.state, fixture.business)
         .expect("disrupted gross should resolve");
-    let degraded_capacity = crate::finance::helpers::resolve_basis_point_share(
+    let degraded_capacity = crate::finance::helpers::apply_basis_point_multiplier(
         current_gross,
         registry.laundering().plausibility_gross_basis_points(),
     )
@@ -2537,7 +2539,7 @@ fn disrupted_front_capacity_shrinks_with_degraded_books() {
     let healthy_gross =
         resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
             .expect("healthy gross should resolve");
-    let healthy_capacity = crate::finance::helpers::resolve_basis_point_share(
+    let healthy_capacity = crate::finance::helpers::apply_basis_point_multiplier(
         healthy_gross,
         registry.laundering().plausibility_gross_basis_points(),
     )

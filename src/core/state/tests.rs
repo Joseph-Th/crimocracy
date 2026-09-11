@@ -123,12 +123,13 @@ fn run_until_operation_decision(
     {
         response
     } else {
-        let earliest_start = crate::operations::operation_system::resolve_operation_earliest_start(
-            state
-                .operations()
-                .get_operation(operation)
-                .expect("decision fixture operation should persist before start"),
-        );
+        let earliest_start =
+            crate::operations::operation_scheduling::resolve_operation_earliest_start(
+                state
+                    .operations()
+                    .get_operation(operation)
+                    .expect("decision fixture operation should persist before start"),
+            );
         let ticks_until_start = earliest_start
             .as_minutes()
             .checked_sub(state.now().as_minutes())

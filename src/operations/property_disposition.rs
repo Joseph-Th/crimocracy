@@ -449,18 +449,18 @@ pub(crate) fn resolve_property_liquidation_value(
         i32::from(definition.liquidation_min_recovery_basis_points()),
         i32::from(definition.liquidation_max_recovery_basis_points()),
     );
-    let value = i128::from(estimated_value.cents())
-        .checked_mul(i128::from(recovery_basis))
-        .ok_or(PropertyDispositionError::ArithmeticOverflow(operation))?
-        / 10_000_i128;
-    let cents = i64::try_from(value)
-        .map_err(|_| PropertyDispositionError::ArithmeticOverflow(operation))?;
-    if cents <= 0 {
-        // Integer division legitimately rounds a tiny estimated value to zero; that is a
-        // mundane small-haul case, not an overflow.
+    let value = crate::finance::helpers::apply_basis_point_multiplier(
+        estimated_value,
+        u32::try_from(recovery_basis)
+            .expect("validated liquidation recovery basis points are nonnegative"),
+    )
+    .ok_or(PropertyDispositionError::ArithmeticOverflow(operation))?;
+    if value <= Money::ZERO {
+        // Canonical cent rounding can legitimately reduce a tiny estimated value to zero; that
+        // is a mundane small-haul case, not an overflow.
         return Err(PropertyDispositionError::NegligibleValue(operation));
     }
-    Ok(Money::from_cents(cents))
+    Ok(value)
 }
 
 /// Renders the canonical liquidation ledger memo; one template source shared by the commit
@@ -759,16 +759,65 @@ mod tests {
     use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
     use crate::finance::FinancialAccountDraft;
     use crate::finance::finance_system::insert_account;
-    use crate::world::world_system::{insert_character, insert_neighborhood, insert_organization};
+    use crate::world::world_system::{
+        insert_business, insert_character, insert_neighborhood, insert_organization,
+    };
     use crate::world::{
-        AutonomyLevel, CapabilityKind, CharacterDraft, NeighborhoodDraft,
-        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
-        OrganizationDraft, OrganizationKind, Rating,
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
+        CapabilityKind, CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+        Rating,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
     fn rating(value: u8) -> Rating {
         Rating::try_new(value).expect("test rating must be valid")
+    }
+
+    #[test]
+    fn property_liquidation_uses_canonical_cent_rounding() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xD15A_1932);
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Neutral Fence Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(50),
+                        commercial_activity: rating(50),
+                        illicit_demand: rating(50),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(50),
+                    },
+                },
+            },
+        )
+        .expect("liquidation neighborhood should validate");
+        let venue = insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: "Neutral Fence".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                neighborhood,
+                owner: BusinessOwner::Independent,
+            },
+        )
+        .expect("liquidation venue should validate");
+
+        let realized = resolve_property_liquidation_value(
+            &registry,
+            &state,
+            OperationKind::Burglary,
+            Money::from_cents(1),
+            OperationId::from_raw(1),
+            venue,
+        )
+        .expect("65% of one cent follows canonical half-away rounding");
+        assert_eq!(realized, Money::from_cents(1));
     }
 
     #[test]

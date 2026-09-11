@@ -369,7 +369,7 @@ fn validate_proceeds(
                 kind,
             ));
         }
-        if !(1..=10_000).contains(&property.partial_recovery_basis_points) {
+        if !(1..10_000).contains(&property.partial_recovery_basis_points) {
             return Err(RegistryBuildError::InvalidOperationPartialPropertyRecovery(
                 kind,
             ));
@@ -378,18 +378,18 @@ fn validate_proceeds(
             return Err(RegistryBuildError::InvalidOperationPropertyLiquidationRecovery(kind));
         }
         if property.recent_take_recovery_window.as_minutes() == 0
-            || !(1..=10_000).contains(&property.immediate_repeat_value_basis_points)
+            || !(1..10_000).contains(&property.immediate_repeat_value_basis_points)
         {
             return Err(RegistryBuildError::InvalidOperationTakeRecovery(kind));
         }
-        if property.liquidation_police_neutral_rating > 100
-            || property.liquidation_police_adjustment_basis_points_per_point > 100
+        if !(1..100).contains(&property.liquidation_police_neutral_rating)
+            || !(1..=100).contains(&property.liquidation_police_adjustment_basis_points_per_point)
             || !(1..=10_000).contains(&property.liquidation_min_recovery_basis_points)
             || !(1..=10_000).contains(&property.liquidation_max_recovery_basis_points)
             || property.liquidation_min_recovery_basis_points
-                > property.liquidation_recovery_basis_points
+                >= property.liquidation_recovery_basis_points
             || property.liquidation_recovery_basis_points
-                > property.liquidation_max_recovery_basis_points
+                >= property.liquidation_max_recovery_basis_points
         {
             return Err(
                 RegistryBuildError::InvalidOperationPropertyLiquidationPoliceAdjustment(kind),
@@ -403,11 +403,11 @@ fn validate_proceeds(
         if !(1..=100_000).contains(&cash.business_take_basis_points) {
             return Err(RegistryBuildError::InvalidOperationCashTakeMultiplier(kind));
         }
-        if !(1..=10_000).contains(&cash.partial_take_basis_points) {
+        if !(1..10_000).contains(&cash.partial_take_basis_points) {
             return Err(RegistryBuildError::InvalidOperationPartialCashTake(kind));
         }
         if cash.recent_take_recovery_window.as_minutes() == 0
-            || !(1..=10_000).contains(&cash.immediate_repeat_value_basis_points)
+            || !(1..10_000).contains(&cash.immediate_repeat_value_basis_points)
         {
             return Err(RegistryBuildError::InvalidOperationTakeRecovery(kind));
         }

@@ -1,4 +1,4 @@
-//! Operation authorization, scheduling, and lifecycle; objective actionability lives in the child validator.
+//! Operation authorization and lifecycle mutation; read-only timing/booking policy lives in `operation_scheduling`, while objective actionability lives in the child validator.
 
 mod objective_validation;
 
@@ -12,13 +12,20 @@ use crate::core::id::{
     ArrestId, CharacterId, IdExhaustionError, InformationId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::operation_intelligence::resolve_information_score;
+use crate::operations::operation_scheduling::{
+    authorized_booking_priority, checked_earliest_operation_start_from_authorization,
+    earliest_operation_start_from_authorization, has_overlapping_operation_window,
+    projected_authorized_operation_window, projected_operation_window,
+    resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
+    resolve_operation_earliest_start,
+};
 use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::police_response_integration::{
     OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
@@ -609,11 +616,6 @@ fn find_busy_participant_for_begin(
         })
 }
 
-fn authorized_booking_priority(operation: &OperationRecord) -> (SimTime, OperationId) {
-    debug_assert_eq!(operation.status(), OperationStatus::Authorized);
-    (resolve_operation_earliest_start(operation), operation.id())
-}
-
 /// Validates the operation's required seats and participant availability while collecting the
 /// version pins consumed by the authorization token. Keeping this as one concern prevents the
 /// public authorization path from interleaving roster validation with plan semantics.
@@ -784,36 +786,6 @@ fn validate_deadline_execution_window(
     Ok(())
 }
 
-/// Earliest completion deadline that leaves no executable minute after the operation's authored
-/// entry milestone when beginning at `begin_at`. `None` means every deadline still leaves a
-/// usable execution window. Checked minute arithmetic makes this safe for restore validation at
-/// the edge of the representable simulation clock.
-pub(crate) fn resolve_deadline_without_execution_window(
-    execution: &crate::registry::OperationExecutionDefinition,
-    begin_at: SimTime,
-    constraints: &[crate::operations::OperationConstraint],
-) -> Option<SimTime> {
-    let earliest_deadline = constraints
-        .iter()
-        .filter_map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBy(deadline) => Some(*deadline),
-            crate::operations::OperationConstraint::RequireIntelligenceTopic(_) => None,
-        });
-    let entry_offset = u64::from(
-        execution
-            .operation_entry_offset()
-            .unwrap_or(SimDuration::from_minutes(0))
-            .as_minutes(),
-    );
-    let first_executable_minute = begin_at.as_minutes().checked_add(entry_offset);
-    earliest_deadline
-        .filter(|deadline| {
-            first_executable_minute
-                .is_none_or(|first_executable| deadline.as_minutes() <= first_executable)
-        })
-        .min()
-}
-
 fn find_busy_participant(
     registry: &Registry,
     state: &AppState,
@@ -863,38 +835,6 @@ fn find_busy_participant_in_window(
             })
             .map(|operation| (*participant, operation.id()))
     })
-}
-
-/// Occupancy window for an operation that is still awaiting its begin transition.
-///
-/// `run_tick` advances the clock before starting due operations. Therefore an operation
-/// authorized for the current minute cannot occupy its crew until the next minute, while a
-/// future operation begins on its authored schedule. Binding completion deadlines shorten the
-/// same window at authorization time and at begin time. Keeping both rules here prevents the
-/// booking projection from ending a minute early or reserving time beyond a deadline.
-fn projected_authorized_operation_window(
-    registry: &Registry,
-    authorized_at: SimTime,
-    kind: OperationKind,
-    scheduled_for: SimTime,
-    constraints: &[crate::operations::OperationConstraint],
-) -> (SimTime, SimTime) {
-    let start = earliest_operation_start_from_authorization(authorized_at, scheduled_for);
-    // Authorization rejects an unrepresentable authored window before this projection is used
-    // for a new plan. Existing-state overlap checks are read-only, so clamp an impossible
-    // historical/malformed end to the finite horizon rather than letting a query panic.
-    let mut end = start
-        .checked_add(registry.get_operation(kind).execution().duration())
-        .unwrap_or(SimTime::from_minutes(u64::MAX));
-    for constraint in constraints {
-        let crate::operations::OperationConstraint::CompleteBy(deadline) = constraint else {
-            continue;
-        };
-        if *deadline < end {
-            end = *deadline;
-        }
-    }
-    (start, end)
 }
 
 /// Reject an extraction that cannot finish before the target's currently modeled custody ends.
@@ -982,42 +922,6 @@ fn validate_extraction_custody_current(
     Ok(())
 }
 
-fn earliest_operation_start_from_authorization(
-    authorized_at: SimTime,
-    scheduled_for: SimTime,
-) -> SimTime {
-    checked_earliest_operation_start_from_authorization(authorized_at, scheduled_for)
-        .expect("validated operation must retain a representable earliest start")
-}
-
-fn checked_earliest_operation_start_from_authorization(
-    authorized_at: SimTime,
-    scheduled_for: SimTime,
-) -> Option<SimTime> {
-    if scheduled_for > authorized_at {
-        Some(scheduled_for)
-    } else {
-        authorized_at
-            .as_minutes()
-            .checked_add(1)
-            .map(SimTime::from_minutes)
-    }
-}
-
-/// First legal execution minute for a persisted authorized operation. A future plan begins on its
-/// authored schedule, while a plan authorized for the current minute cannot retroactively execute
-/// inside the minute in which authorization was committed.
-pub(crate) fn resolve_operation_earliest_start(record: &OperationRecord) -> SimTime {
-    earliest_operation_start_from_authorization(record.authorized_at(), record.scheduled_for())
-}
-
-pub(crate) fn try_resolve_operation_earliest_start(record: &OperationRecord) -> Option<SimTime> {
-    checked_earliest_operation_start_from_authorization(
-        record.authorized_at(),
-        record.scheduled_for(),
-    )
-}
-
 /// Validates that resuming a decision-blocked operation at `resumed_at` does not double-book any
 /// of its participants. Resuming shifts the resolution deadline forward by the pause duration, so
 /// the post-resume window can collide with operations authorized while this one was paused.
@@ -1097,215 +1001,6 @@ pub(crate) fn apply_decision_resume_preflighted(
     resumed_at: SimTime,
 ) {
     state.operations.resume(operation, resumed_at);
-}
-
-/// Effective occupancy window of a non-terminal operation, projecting the deadline shift a
-/// decision-blocked operation will experience if it resumes at `now`. Returns `None` for terminal
-/// operations (never occupy) and for authorized operations that have not begun (no persisted end).
-fn projected_operation_window(
-    existing: &OperationRecord,
-    now: SimTime,
-) -> Option<(SimTime, SimTime)> {
-    if matches!(
-        existing.status(),
-        OperationStatus::Completed | OperationStatus::Aborted
-    ) {
-        return None;
-    }
-    let start = existing.started_at().unwrap_or(existing.scheduled_for());
-    let mut end = existing.resolution_due_at()?;
-    if existing.status() == OperationStatus::AwaitingDecision
-        && let Some(paused_at) = existing.awaiting_decision_since()
-    {
-        // If this already-paused operation would extend past the representable clock horizon,
-        // it cannot safely resume. For booking purposes it occupies the crew through the end
-        // of representable time; the actual resume path rejects with SimulationTimeOverflow.
-        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, now))
-            .unwrap_or(SimTime::from_minutes(u64::MAX));
-    }
-    Some((start, end))
-}
-
-/// Effective participant-booking window for any non-terminal operation. Authorized work uses
-/// its guaranteed first executable minute plus authored/deadline-bounded duration; started work
-/// uses the persisted runtime window, with an unresolved decision pause projected through `now`.
-/// This is the single booking projection shared by runtime admission and restore validation.
-pub(crate) fn resolve_operation_booking_window(
-    registry: &Registry,
-    operation: &OperationRecord,
-    now: SimTime,
-) -> Option<(SimTime, SimTime)> {
-    if let Some(window) = projected_operation_window(operation, now) {
-        return Some(window);
-    }
-    if operation.status() != OperationStatus::Authorized {
-        return None;
-    }
-    Some(projected_authorized_operation_window(
-        registry,
-        operation.authorized_at(),
-        operation.kind(),
-        operation.scheduled_for(),
-        operation.constraints(),
-    ))
-}
-
-/// Reconstructs the booking window visible at a historical instant for a currently non-terminal
-/// operation. This is used only for persistence validation: when an overlap exists now because a
-/// decision pause grew, the later authorization must still have observed a non-overlapping pair.
-pub(crate) fn resolve_operation_booking_window_at(
-    registry: &Registry,
-    operation: &OperationRecord,
-    at: SimTime,
-) -> Option<(SimTime, SimTime)> {
-    if operation.status() == OperationStatus::Authorized
-        || operation
-            .started_at()
-            .is_none_or(|started_at| at < started_at)
-    {
-        return Some(projected_authorized_operation_window(
-            registry,
-            operation.authorized_at(),
-            operation.kind(),
-            operation.scheduled_for(),
-            operation.constraints(),
-        ));
-    }
-    if matches!(
-        operation.status(),
-        OperationStatus::Completed | OperationStatus::Aborted
-    ) {
-        return None;
-    }
-    let start = operation.started_at()?;
-    let mut end = operation.resolution_due_at()?;
-    if operation.status() == OperationStatus::AwaitingDecision
-        && let Some(paused_at) = operation.awaiting_decision_since()
-        && paused_at <= at
-    {
-        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
-            .unwrap_or(SimTime::from_minutes(u64::MAX));
-    }
-    Some((start, end))
-}
-
-fn has_overlapping_operation_window(
-    registry: &Registry,
-    existing: &OperationRecord,
-    now: SimTime,
-    requested_start: SimTime,
-    requested_end: SimTime,
-) -> bool {
-    let Some((existing_start, existing_end)) =
-        resolve_operation_booking_window(registry, existing, now)
-    else {
-        return false;
-    };
-    requested_start < existing_end && existing_start < requested_end
-}
-
-pub(crate) fn find_due_authorized_operations(state: &AppState) -> Vec<OperationId> {
-    state
-        .operations
-        .find_due_authorized(state.now())
-        .into_iter()
-        .filter(|operation| {
-            let record = state
-                .operations
-                .get_operation(*operation)
-                .expect("authorized start-time index must reference an operation");
-            resolve_operation_earliest_start(record) <= state.now()
-        })
-        .collect()
-}
-
-/// True once an operation can no longer satisfy its earliest completion deadline. Running or
-/// paused work misses only when the deadline minute arrives; authorized work also misses when a
-/// delayed begin leaves no executable minute after its authored entry milestone. This lets the
-/// scheduler fail closed as soon as waiting has made the authored plan impossible.
-pub(crate) fn has_missed_operation_deadline(
-    registry: &Registry,
-    state: &AppState,
-    operation: OperationId,
-) -> bool {
-    let Some(record) = state.operations.get_operation(operation) else {
-        return false;
-    };
-    let Some(deadline) = resolve_earliest_operation_deadline(record) else {
-        return false;
-    };
-    if state.now() >= deadline {
-        return true;
-    }
-    if record.status() != OperationStatus::Authorized {
-        return false;
-    }
-    resolve_deadline_without_execution_window(
-        registry.get_operation(record.kind()).execution(),
-        state.now(),
-        record.constraints(),
-    )
-    .is_some()
-}
-
-/// True once the operation's completion deadline has fully passed, using the same strict
-/// comparison as the overdue-abort scan. An explicit leadership abort resolved on the deadline
-/// minute itself is an active choice rather than a missed deadline, so the decision path uses
-/// this form and records its `Decision` cause; the automatic scan still produces
-/// `DeadlineMissed` artifacts because it only fires strictly after the deadline.
-pub(crate) fn has_operation_deadline_fully_passed(
-    state: &AppState,
-    operation: OperationId,
-) -> bool {
-    state
-        .operations
-        .get_operation(operation)
-        .and_then(resolve_earliest_operation_deadline)
-        .is_some_and(|deadline| state.now() > deadline)
-}
-
-/// Operations whose completion deadline has fully passed without resolution. Begin clamps
-/// `resolution_due_at` to a binding deadline, so an in-progress operation is due to resolve on
-/// the deadline minute itself; the strict comparison lets that same-minute resolution win over
-/// the abort scan. Only work that failed to resolve by its deadline — reachable when a decision
-/// request pauses the operation across the deadline — is reported here for a hard abort.
-pub(crate) fn find_due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
-    let mut due = state
-        .operations
-        .operations_with_status(OperationStatus::InProgress)
-        .chain(
-            state
-                .operations
-                .operations_with_status(OperationStatus::AwaitingDecision),
-        )
-        .filter(|operation| {
-            resolve_earliest_operation_deadline(operation)
-                .is_some_and(|deadline| state.now() > deadline)
-        })
-        .map(|operation| {
-            (
-                resolve_earliest_operation_deadline(operation)
-                    .expect("filtered overdue operation must retain a completion deadline"),
-                operation.id(),
-            )
-        })
-        .collect::<Vec<_>>();
-    // The status indexes are separate, so restore one global chronological order before any
-    // deadline abort creates IDs or reports that later work can observe. ID breaks ties only
-    // among operations whose deadline is the same instant.
-    due.sort_unstable();
-    due.into_iter().map(|(_, operation)| operation).collect()
-}
-
-pub(crate) fn resolve_earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
-    record
-        .constraints()
-        .iter()
-        .filter_map(|constraint| match constraint {
-            crate::operations::OperationConstraint::CompleteBy(deadline) => Some(*deadline),
-            crate::operations::OperationConstraint::RequireIntelligenceTopic(_) => None,
-        })
-        .min()
 }
 
 pub fn apply_transition(

@@ -36,10 +36,11 @@ use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
     validate_operation_resolution_plan,
 };
-use crate::operations::operation_system::{
-    OperationError, OperationTransition, apply_transition, find_due_authorized_operations,
-    find_due_operations_with_missed_deadlines, has_missed_operation_deadline,
+use crate::operations::operation_scheduling::{
+    find_due_authorized_operations, find_due_operations_with_missed_deadlines,
+    has_missed_operation_deadline,
 };
+use crate::operations::operation_system::{OperationError, OperationTransition, apply_transition};
 use crate::operations::police_response_integration::apply_due_police_response_arrivals;
 use crate::opportunities::opportunity_system::apply_opportunity_expiry;
 use crate::recruitment::autonomous_recruitment::apply_due_autonomous_recruitment;

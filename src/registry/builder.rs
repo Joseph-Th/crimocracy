@@ -156,7 +156,7 @@ pub(crate) enum RegistryBuildError {
         "operation {0:?} property-proceeds business multiplier must be in 1..=100000 basis points"
     )]
     InvalidOperationPropertyValueMultiplier(OperationKind),
-    #[error("operation {0:?} partial property recovery must be in 1..=10000 basis points")]
+    #[error("operation {0:?} partial property recovery must be in 1..10000 basis points")]
     InvalidOperationPartialPropertyRecovery(OperationKind),
     #[error("operation {0:?} property liquidation recovery must be in 1..=10000 basis points")]
     InvalidOperationPropertyLiquidationRecovery(OperationKind),
@@ -168,7 +168,7 @@ pub(crate) enum RegistryBuildError {
     OperationPropertyObjectiveContractMismatch(OperationKind),
     #[error("operation {0:?} cash-take business multiplier must be in 1..=100000 basis points")]
     InvalidOperationCashTakeMultiplier(OperationKind),
-    #[error("operation {0:?} partial cash take must be in 1..=10000 basis points")]
+    #[error("operation {0:?} partial cash take must be in 1..10000 basis points")]
     InvalidOperationPartialCashTake(OperationKind),
     #[error("operation {0:?} cash-proceeds definition does not match its objective contract")]
     OperationCashObjectiveContractMismatch(OperationKind),
@@ -251,13 +251,13 @@ pub(crate) enum RegistryBuildError {
     MissingBusinessDisruption,
     #[error("business disruption duration must be positive")]
     InvalidBusinessDisruptionDuration,
-    #[error("business disruption gross basis points must be in 1..=10000")]
+    #[error("business disruption gross basis points must be in 1..10000")]
     InvalidBusinessDisruptionGrossBasisPoints,
     #[error("duplicate laundering configuration definition")]
     DuplicateLaunderingConfig,
     #[error("missing laundering configuration definition")]
     MissingLaunderingConfig,
-    #[error("laundering fee basis points must be in 1..=10000")]
+    #[error("laundering fee basis points must be in 1..10000")]
     InvalidLaunderingFee,
     #[error("laundering plausibility basis points must be in 1..=10000")]
     InvalidLaunderingPlausibility,
@@ -267,10 +267,12 @@ pub(crate) enum RegistryBuildError {
     MissingReputationConfig,
     #[error("reputation baseline must be in 0..=100")]
     InvalidReputationBaseline,
-    #[error("reputation expansion fear ceiling must be in 0..=100")]
+    #[error("reputation expansion fear ceiling must be above baseline and at most 100")]
     InvalidReputationCeiling,
     #[error("authored reputation consequence deltas must stay in -25..=25")]
     InvalidReputationDelta,
+    #[error("authored reputation consequences must move standing in their named direction")]
+    InvalidReputationConsequence,
     #[error("reputation daily decay step must be positive")]
     InvalidReputationDecayStep,
     #[error("executive brief cadence must be positive")]
@@ -323,8 +325,8 @@ fn maximum_varied_gross_fits_i64(
         gross += i128::from(*per_point) * 100;
     }
     let factor = 10_000_i128 + i128::from(variance_basis_points);
-    let varied = (gross * factor + 5_000) / 10_000;
-    varied <= i128::from(i64::MAX)
+    crate::finance::helpers::round_basis_point_product(gross * factor)
+        .is_some_and(|varied| varied <= i128::from(i64::MAX))
 }
 
 fn maximum_business_gross_cents(economics: &BusinessEconomicsDefinition) -> i128 {
@@ -350,8 +352,9 @@ fn operation_proceeds_fit_business_gross(
     let Some(multiplier) = multiplier else {
         return true;
     };
-    maximum_business_gross_cents(economics) * i128::from(multiplier) / 10_000
-        <= i128::from(i64::MAX)
+    let scaled = maximum_business_gross_cents(economics) * i128::from(multiplier);
+    crate::finance::helpers::round_basis_point_product(scaled)
+        .is_some_and(|proceeds| proceeds <= i128::from(i64::MAX))
 }
 
 fn business_economics_fit_production_arithmetic(economics: &BusinessEconomicsDefinition) -> bool {
@@ -541,7 +544,7 @@ impl RegistryBuilder {
         if spec.duration.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidBusinessDisruptionDuration);
         }
-        if spec.gross_basis_points == 0 || spec.gross_basis_points > 10_000 {
+        if spec.gross_basis_points == 0 || spec.gross_basis_points >= 10_000 {
             return Err(RegistryBuildError::InvalidBusinessDisruptionGrossBasisPoints);
         }
         self.business_disruption = Some(BusinessDisruptionDefinition {
@@ -557,7 +560,7 @@ impl RegistryBuilder {
         if self.laundering.is_some() {
             return Err(RegistryBuildError::DuplicateLaunderingConfig);
         }
-        if spec.fee_basis_points == 0 || spec.fee_basis_points > 10_000 {
+        if spec.fee_basis_points == 0 || spec.fee_basis_points >= 10_000 {
             return Err(RegistryBuildError::InvalidLaunderingFee);
         }
         if spec.plausibility_gross_basis_points == 0
@@ -584,7 +587,7 @@ impl RegistryBuilder {
         if spec.expansion_police_fear_ceiling > 100 {
             return Err(RegistryBuildError::InvalidReputationCeiling);
         }
-        if spec.expansion_police_fear_ceiling < spec.baseline {
+        if spec.expansion_police_fear_ceiling <= spec.baseline {
             return Err(RegistryBuildError::InvalidReputationCeiling);
         }
         for delta in [
@@ -600,6 +603,16 @@ impl RegistryBuilder {
             if !(-25..=25).contains(&delta) {
                 return Err(RegistryBuildError::InvalidReputationDelta);
             }
+        }
+        if spec.witnessed_exposure_police_fear <= 0
+            || spec.identifying_exposure_police_fear < spec.witnessed_exposure_police_fear
+            || spec.vice_inquiry_police_fear < spec.witnessed_exposure_police_fear
+            || spec.achieved_underworld_competence <= 0
+            || spec.partial_underworld_competence <= 0
+            || spec.partial_underworld_competence > spec.achieved_underworld_competence
+            || spec.violent_businesses_fear <= 0
+        {
+            return Err(RegistryBuildError::InvalidReputationConsequence);
         }
         if spec.daily_decay_step == 0 {
             // A zero decay step would make decay a structural no-op: impressions never

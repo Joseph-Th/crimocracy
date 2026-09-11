@@ -23,11 +23,13 @@ use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
     blocker_matches_objective, character_objective_target, effective_objective_outcome,
 };
-use crate::operations::operation_system::{
-    is_information_subject_relevant, is_valid_operation_objective,
+use crate::operations::operation_scheduling::{
     resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
     resolve_operation_booking_window, resolve_operation_booking_window_at,
     resolve_operation_earliest_start, try_resolve_operation_earliest_start,
+};
+use crate::operations::operation_system::{
+    is_information_subject_relevant, is_valid_operation_objective,
 };
 use crate::operations::police_response_integration::resolve_police_arrival_delay;
 use crate::operations::property_disposition::resolve_property_liquidation_value;

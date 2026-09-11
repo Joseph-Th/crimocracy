@@ -582,7 +582,7 @@ fn run_until_operation_resolved(
         }
         record.resolution_due_at().unwrap_or_else(|| {
             let earliest_start =
-                crate::operations::operation_system::resolve_operation_earliest_start(record);
+                crate::operations::operation_scheduling::resolve_operation_earliest_start(record);
             let authored_due = earliest_start
                 .checked_add(registry.get_operation(record.kind()).execution().duration())
                 .expect("fixture operation duration must fit the simulation clock");

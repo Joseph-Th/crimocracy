@@ -19,7 +19,9 @@ pub(super) fn register_reputation(builder: &mut RegistryBuilder) {
             expansion_police_fear_ceiling: 50,
             witnessed_exposure_police_fear: 8,
             identifying_exposure_police_fear: 10,
-            vice_inquiry_police_fear: 6,
+            // A dedicated case on one of our own rackets is at least as alarming as a
+            // witnessed job, matching the consequence contract in reputation_system.
+            vice_inquiry_police_fear: 8,
             achieved_underworld_competence: 3,
             partial_underworld_competence: 1,
             violent_businesses_fear: 3,

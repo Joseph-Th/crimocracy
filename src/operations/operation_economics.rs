@@ -13,6 +13,8 @@ use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::economy::business_economy_system::resolve_business_gross_potential;
+use crate::finance::Money;
+use crate::finance::helpers::apply_basis_point_multiplier;
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
 };
@@ -143,17 +145,14 @@ fn resolve_take_cents(
     recent_hits: &[SimTime],
     overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
 ) -> Result<i64, OperationResolutionError> {
-    let full_value = i128::from(gross_cents)
-        .checked_mul(i128::from(economics.full_basis_points))
-        .ok_or(overflow(operation))?
-        / 10_000_i128;
+    let full_value =
+        apply_basis_point_multiplier(Money::from_cents(gross_cents), economics.full_basis_points)
+            .ok_or(overflow(operation))?;
     let mut value = match outcome {
         OperationObjectiveOutcome::Achieved => full_value,
         OperationObjectiveOutcome::Partial => {
-            full_value
-                .checked_mul(i128::from(economics.partial_basis_points))
+            apply_basis_point_multiplier(full_value, u32::from(economics.partial_basis_points))
                 .ok_or(overflow(operation))?
-                / 10_000_i128
         }
         OperationObjectiveOutcome::Failed => {
             unreachable!("failed takes return early")
@@ -173,12 +172,26 @@ fn resolve_take_cents(
         let unrecovered = window_minutes.saturating_sub(age);
         let depletion = depletion_span * unrecovered / window_minutes;
         let value_basis_points = 10_000_u64.saturating_sub(depletion);
-        value = value
-            .checked_mul(i128::from(value_basis_points))
-            .ok_or(overflow(operation))?
-            / 10_000_i128;
+        let scaled = apply_basis_point_multiplier(
+            value,
+            u32::try_from(value_basis_points)
+                .expect("bounded take-recovery basis points must fit u32"),
+        )
+        .ok_or(overflow(operation))?;
+        // Repeat-target depletion is a penalty, not neutral pricing. Cent rounding must not
+        // erase a still-active penalty by mapping a positive amount back to itself, otherwise
+        // one-cent proceeds become an immortal fixed point under repeated hits. Preserve the
+        // shared half-away rule when it moves value, but force at least one cent of reduction
+        // while the hit is not fully recovered.
+        value = if value_basis_points < 10_000 && value > Money::ZERO && scaled >= value {
+            value
+                .checked_sub(Money::from_cents(1))
+                .expect("positive take value can lose one cent")
+        } else {
+            scaled
+        };
     }
-    i64::try_from(value).map_err(|_| overflow(operation))
+    Ok(value.cents())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,3 +348,57 @@ pub(crate) fn depleted_take_clause(kind: OperationKind) -> &'static str {
 /// the authored disruption horizon.
 pub(crate) const SABOTAGE_DISRUPTION_CLAUSE: &str =
     "The target's operations are disrupted and will earn well below normal until repairs catch up.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::id::OperationId;
+
+    fn proceeds_overflow(operation: OperationId) -> OperationResolutionError {
+        OperationResolutionError::PropertyProceedsOverflow { operation }
+    }
+
+    #[test]
+    fn take_economics_rounds_pricing_consistently_without_erasing_depletion() {
+        let operation = OperationId::from_raw(1);
+        let partial = resolve_take_cents(
+            operation,
+            3,
+            TakeEconomics {
+                full_basis_points: 5_000,
+                partial_basis_points: 5_000,
+                recovery_window: SimDuration::from_minutes(10),
+                immediate_repeat_value_basis_points: 5_000,
+            },
+            OperationObjectiveOutcome::Partial,
+            SimTime::from_minutes(10),
+            &[],
+            proceeds_overflow,
+        )
+        .expect("small partial take should remain representable");
+        assert_eq!(
+            partial, 1,
+            "3c at 50%, then 50% again should round 2c to 1c rather than truncate to zero"
+        );
+
+        let depleted = resolve_take_cents(
+            operation,
+            1,
+            TakeEconomics {
+                full_basis_points: 10_000,
+                partial_basis_points: 10_000,
+                recovery_window: SimDuration::from_minutes(10),
+                immediate_repeat_value_basis_points: 5_000,
+            },
+            OperationObjectiveOutcome::Achieved,
+            SimTime::from_minutes(10),
+            &[SimTime::from_minutes(10)],
+            proceeds_overflow,
+        )
+        .expect("small depleted take should remain representable");
+        assert_eq!(
+            depleted, 0,
+            "an active repeat-target penalty must not round a one-cent take back to one cent"
+        );
+    }
+}
