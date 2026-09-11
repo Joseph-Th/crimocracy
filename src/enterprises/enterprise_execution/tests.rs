@@ -828,6 +828,10 @@ fn rating(value: u8) -> Rating {
 }
 
 fn make_test_enterprise_fixture() -> EnterpriseFixture {
+    make_test_enterprise_fixture_for_kind(OrganizationKind::Criminal)
+}
+
+fn make_test_enterprise_fixture_for_kind(kind: OrganizationKind) -> EnterpriseFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xE17E_1931);
     let organization = insert_organization(
@@ -835,7 +839,7 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
         &mut state,
         OrganizationDraft {
             name: "Enterprise Test Organization".to_owned(),
-            kind: OrganizationKind::Criminal,
+            kind,
         },
     )
     .expect("organization fixture should validate");
@@ -910,6 +914,33 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
         cash,
         settlement,
     }
+}
+
+#[test]
+fn establishment_rejects_non_criminal_enterprise_organization() {
+    let registry = build_registry();
+    let fixture = make_test_enterprise_fixture_for_kind(OrganizationKind::Commercial);
+    let error = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: fixture.organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .err()
+    .expect("a legitimate organization must not establish a criminal enterprise");
+    assert_eq!(
+        error,
+        EnterpriseError::InvalidOrganizationKind(fixture.organization)
+    );
+    assert_eq!(fixture.state.enterprises().enterprises().count(), 0);
+    validate_invariants(&fixture.state);
 }
 
 fn establish_protection(registry: &Registry, fixture: &mut EnterpriseFixture) -> EnterpriseId {

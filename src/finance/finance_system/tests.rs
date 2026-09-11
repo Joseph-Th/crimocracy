@@ -1936,6 +1936,10 @@ struct LaunderingFixture {
 }
 
 fn make_laundering_fixture() -> LaunderingFixture {
+    make_laundering_fixture_for_kind(OrganizationKind::Criminal)
+}
+
+fn make_laundering_fixture_for_kind(kind: OrganizationKind) -> LaunderingFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xC0FFEE);
     let organization = insert_organization(
@@ -1943,7 +1947,7 @@ fn make_laundering_fixture() -> LaunderingFixture {
         &mut state,
         OrganizationDraft {
             name: "Laundering Test Organization".to_owned(),
-            kind: OrganizationKind::Criminal,
+            kind,
         },
     )
     .expect("organization fixture should validate");
@@ -2032,6 +2036,90 @@ fn make_laundering_fixture() -> LaunderingFixture {
         accounted,
         business,
     }
+}
+
+#[test]
+fn laundering_rejects_non_criminal_organization() {
+    let registry = build_registry();
+    let fixture = make_laundering_fixture_for_kind(OrganizationKind::Commercial);
+    let error = validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(100),
+        },
+    )
+    .err()
+    .expect("money laundering is a criminal-organization action");
+    assert_eq!(
+        error,
+        LaunderingError::InvalidOrganizationKind(fixture.organization)
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn laundering_rejects_amount_that_would_bypass_the_front_fee() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seed tiny laundering amount".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-3),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(3),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("tiny seed transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("tiny seed transfer should commit");
+
+    let error = validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(3),
+        },
+    )
+    .err()
+    .expect("a laundering transfer must produce a nonzero front fee");
+    assert_eq!(error, LaunderingError::AmountTooSmallForFee);
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("front economy should remain present")
+            .laundered_this_cycle(),
+        Money::ZERO
+    );
+    validate_invariants(&fixture.state);
 }
 
 #[test]

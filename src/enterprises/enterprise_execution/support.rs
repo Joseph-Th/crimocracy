@@ -9,10 +9,13 @@ pub(super) fn validate_enterprise_environment(
     location: EnterpriseLocation,
     supporting_businesses: &BTreeSet<BusinessId>,
 ) -> Result<(), EnterpriseError> {
-    let _ = state
+    let organization_record = state
         .world
         .get_organization(organization)
         .ok_or(EnterpriseError::InvalidOrganization(organization))?;
+    if organization_record.kind() != OrganizationKind::Criminal {
+        return Err(EnterpriseError::InvalidOrganizationKind(organization));
+    }
     let resolved = resolve_mandate_authority(state, authority)?;
     if resolved.organization() != organization {
         return Err(EnterpriseError::AuthorityOrganizationMismatch {
@@ -434,15 +437,18 @@ pub(super) fn has_active_enterprise_inquiry(
     state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
 ) -> bool {
-    state.legal.active_investigations().any(|investigation| {
-        investigation.evidence().iter().any(|evidence_id| {
-            let evidence = state
-                .legal
-                .get_evidence(*evidence_id)
-                .expect("investigation evidence index must reference persisted evidence");
-            is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+    state
+        .legal
+        .active_investigations_for_subject(EntityRef::Enterprise(enterprise))
+        .any(|investigation| {
+            investigation.evidence().iter().any(|evidence_id| {
+                let evidence = state
+                    .legal
+                    .get_evidence(*evidence_id)
+                    .expect("investigation evidence index must reference persisted evidence");
+                is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+            })
         })
-    })
 }
 
 /// Canonical persisted signature of enterprise vice intake. Incident continuation may resume a

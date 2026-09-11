@@ -7,8 +7,12 @@ use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save
 use crate::core::simulation::run_tick;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_reporting::resolve_organization_business_financial_summary;
-use crate::finance::finance_system::insert_account;
-use crate::finance::{FinancialAccountDraft, FinancialOwner};
+use crate::finance::finance_system::{
+    LaunderingDraft, insert_account, validate_launder_funds, validate_record_transaction,
+};
+use crate::finance::{
+    FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
+};
 use crate::reports::ReportKind;
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 use crate::world::world_system::{
@@ -228,6 +232,7 @@ struct BusinessEconomyRecordWire {
     disrupted_through: Option<SimTime>,
     loss_streak_anchor: Option<SimTime>,
     laundered_this_cycle: Money,
+    laundering_transactions_this_cycle: BTreeSet<crate::core::id::LedgerTransactionId>,
     version: u32,
 }
 
@@ -314,8 +319,145 @@ fn business_economy_wire(
         disrupted_through: record.disrupted_through(),
         loss_streak_anchor: record.loss_streak_anchor(),
         laundered_this_cycle: record.laundered_this_cycle(),
+        laundering_transactions_this_cycle: record.laundering_transactions_this_cycle().clone(),
         version: record.version(),
     }
+}
+
+#[test]
+fn restore_rejects_laundering_total_not_derived_from_linked_ledger_transactions() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let laundering = fund_and_launder(&registry, &mut fixture, Money::from_cents(500));
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("laundered economy should persist");
+    assert_eq!(record.laundered_this_cycle(), Money::from_cents(500));
+    assert_eq!(
+        record.laundering_transactions_this_cycle(),
+        &BTreeSet::from([laundering])
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("valid laundering state should save"),
+    )
+    .expect("valid laundering provenance should restore");
+    assert_eq!(
+        restored
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("restored laundering economy should persist")
+            .laundered_this_cycle(),
+        Money::from_cents(500)
+    );
+
+    let mut corrupted = business_economy_wire(record);
+    corrupted.laundered_this_cycle = Money::ZERO;
+    let error = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state)
+                .expect("valid laundering state should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("laundering capacity cannot be restored from an unauditable counter");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessEconomy { business }
+        ) if business == fixture.business
+    ));
+}
+
+#[test]
+fn resume_starts_a_fresh_laundering_window() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    fund_and_launder(&registry, &mut fixture, Money::from_cents(500));
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("laundered economy should persist")
+            .laundered_this_cycle(),
+        Money::from_cents(500)
+    );
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("laundered front should suspend")
+        .commit(&mut fixture.state)
+        .expect("laundered front should suspend atomically");
+    validate_resume_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("suspended front should resume")
+        .commit(&mut fixture.state)
+        .expect("front resumption should commit atomically");
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("resumed economy should persist");
+    assert_eq!(record.laundered_this_cycle(), Money::ZERO);
+    assert!(record.laundering_transactions_this_cycle().is_empty());
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("fresh laundering window after resume should restore safely");
+}
+
+#[test]
+fn later_sabotage_does_not_retroactively_invalidate_prior_laundering() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let normal_gross =
+        resolve_business_gross_potential(&registry, &fixture.state, fixture.business)
+            .expect("fixture gross should resolve");
+    let normal_capacity = crate::finance::helpers::resolve_basis_point_share(
+        normal_gross,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("fixture laundering capacity should resolve");
+    assert!(normal_capacity > Money::ZERO);
+    fund_and_launder(&registry, &mut fixture, normal_capacity);
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("laundered front should remain sabotageable")
+        .commit(&mut fixture.state)
+        .expect("sabotage should commit after laundering");
+    let disrupted_gross =
+        resolve_business_current_gross(&registry, &fixture.state, fixture.business)
+            .expect("disrupted gross should resolve");
+    let disrupted_capacity = crate::finance::helpers::resolve_basis_point_share(
+        disrupted_gross,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .expect("disrupted laundering capacity should resolve");
+    assert!(
+        disrupted_capacity < normal_capacity,
+        "fixture sabotage must reduce current laundering capacity"
+    );
+    assert!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("front economy should persist")
+            .laundered_this_cycle()
+            > disrupted_capacity,
+        "prior valid laundering should now exceed only the later degraded capacity"
+    );
+
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("later sabotage must not retroactively invalidate prior laundering");
+    let envelope =
+        build_save(&registry, &fixture.state).expect("post-sabotage laundering state should save");
+    restore_save(&registry, envelope)
+        .expect("post-sabotage laundering state should restore without rewriting history");
 }
 
 fn replace_serialized_economy(
@@ -527,6 +669,10 @@ fn rating(value: u8) -> Rating {
 }
 
 fn make_business_economy_fixture() -> BusinessEconomyFixture {
+    make_business_economy_fixture_for_kind(OrganizationKind::Commercial)
+}
+
+fn make_business_economy_fixture_for_kind(kind: OrganizationKind) -> BusinessEconomyFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xB051_1932);
     let organization = insert_organization(
@@ -534,7 +680,7 @@ fn make_business_economy_fixture() -> BusinessEconomyFixture {
         &mut state,
         OrganizationDraft {
             name: "Legitimate Holdings".to_owned(),
-            kind: OrganizationKind::Commercial,
+            kind,
         },
     )
     .expect("organization fixture should validate");
@@ -594,6 +740,75 @@ fn make_business_economy_fixture() -> BusinessEconomyFixture {
         operating,
         settlement,
     }
+}
+
+fn fund_and_launder(
+    registry: &Registry,
+    fixture: &mut BusinessEconomyFixture,
+    amount: Money,
+) -> crate::core::id::LedgerTransactionId {
+    let owner = FinancialOwner::Organization(fixture.organization);
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("concealed reserve should validate");
+    let street = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("street cash should validate");
+    let accounted = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted funds should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seed laundering test cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: amount
+                        .checked_neg()
+                        .expect("positive test amount must negate"),
+                },
+                LedgerPosting {
+                    account: street,
+                    amount,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("test cash transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("test cash transfer should commit");
+    validate_launder_funds(
+        registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: street,
+            business: fixture.business,
+            accounted_account: accounted,
+            amount,
+        },
+    )
+    .expect("test laundering should validate")
+    .commit(&mut fixture.state)
+    .expect("test laundering should commit")
 }
 
 fn establish_business_economy(registry: &Registry, fixture: &mut BusinessEconomyFixture) {

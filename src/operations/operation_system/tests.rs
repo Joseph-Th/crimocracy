@@ -143,6 +143,85 @@ fn make_test_draft(
 }
 
 #[test]
+fn operation_rejects_character_objective_target_as_crew_participant() {
+    let (registry, state, organization, leader, _) = make_test_operation_state();
+    let draft = OperationDraft {
+        title: "Self-surveillance".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation {
+            target: EntityRef::Character(leader),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("a character cannot carry out an operation targeting themself");
+    assert_eq!(
+        error,
+        OperationError::ObjectiveTargetIsParticipant { character: leader }
+    );
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_state_against_registry(&registry, &state)
+        .expect("rejected self-targeting must preserve canonical state");
+    validate_invariants(&state);
+}
+
+#[test]
+fn operation_rejects_non_criminal_responsible_organization() {
+    let (registry, mut state, _, _, target) = make_test_operation_state();
+    let authority = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Operation-ineligible authority".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("authority fixture should validate");
+    let officer = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Operation-ineligible officer".to_owned(),
+            organization: Some(authority),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("officer fixture should validate");
+    let draft = OperationDraft {
+        title: "Authority surveillance".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: authority,
+        leader: officer,
+        objective: OperationObjective::GatherInformation { target },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, officer)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+
+    let error = validate_authorize_operation(&registry, &state, draft)
+        .expect_err("criminal operations require a criminal sponsoring organization");
+    assert_eq!(error, OperationError::InvalidOrganizationKind(authority));
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_state_against_registry(&registry, &state)
+        .expect("rejected non-criminal sponsorship must preserve canonical state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn due_operation_aborts_before_start_when_objective_became_unavailable() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let EntityRef::Business(business) = target else {
@@ -942,6 +1021,64 @@ fn operation_allows_non_overlapping_future_assignment() {
 
     validate_authorize_operation(&registry, &state, later)
         .expect("a future operation at the prior operation's real end should validate");
+    validate_invariants(&state);
+}
+
+#[test]
+fn delayed_earlier_operation_keeps_priority_over_later_authorized_reservation() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let first = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("first operation should validate")
+    .commit(&mut state)
+    .expect("first operation should commit");
+    let duration = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .duration();
+    let first_projected_end = SimTime::from_minutes(1) + duration;
+    let mut later = make_test_draft(organization, leader, target);
+    later.scheduled_for = first_projected_end;
+    let later = validate_authorize_operation(&registry, &state, later)
+        .expect("originally back-to-back later operation should validate")
+        .commit(&mut state)
+        .expect("later reservation should commit");
+
+    state.advance_clock(SimDuration::from_minutes(2));
+    validate_begin_operation(&registry, &state, first)
+        .expect("a later reservation must not leapfrog overdue earlier work")
+        .commit(&mut state)
+        .expect("delayed earlier operation should begin");
+    validate_state_against_registry(&registry, &state)
+        .expect("canonical delay-created overlap must remain restore-valid");
+
+    let later_due_minutes = first_projected_end.as_minutes() - state.now().as_minutes();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(later_due_minutes).expect("fixture delay must fit SimDuration"),
+    ));
+    let error = validate_begin_operation(&registry, &state, later)
+        .err()
+        .expect("later reservation must wait for the earlier live commitment");
+    assert_eq!(
+        error,
+        OperationError::ParticipantBusy {
+            character: leader,
+            operation: first,
+        }
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(later)
+            .expect("later operation should persist")
+            .status(),
+        OperationStatus::Authorized
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("queued later reservation must remain registry-valid");
     validate_invariants(&state);
 }
 

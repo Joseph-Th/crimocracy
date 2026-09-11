@@ -226,6 +226,14 @@ impl ValidatedInformantDisclosure {
         let strength = informant_strength(information.specificity());
         let reliability = informant_reliability(information.reliability());
         let disclosed_at = state.now();
+        crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+            state,
+            self.draft.investigation,
+            subject,
+            strength,
+            reliability,
+            Admissibility::Unknown,
+        )?;
 
         let evidence_id = state
             .ids
@@ -280,6 +288,18 @@ pub fn validate_record_informant_disclosure(
         .get_investigation(draft.investigation)
         .expect("validated investigation must exist");
     ensure_version_can_advance(investigation.version(), "investigation")?;
+    let information = state
+        .intelligence
+        .get_information(draft.source_information)
+        .expect("validated source information must exist");
+    crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+        state,
+        draft.investigation,
+        information.subject(),
+        informant_strength(information.specificity()),
+        informant_reliability(information.reliability()),
+        Admissibility::Unknown,
+    )?;
     Ok(ValidatedInformantDisclosure {
         draft,
         expected_investigation_version: investigation.version(),
@@ -505,34 +525,35 @@ pub(crate) fn apply_informant_disclosures(
     if !state.legal.has_informants() {
         return Ok(Vec::new());
     }
-    // Active cases owned by each handler, keyed by entities that make information relevant to
-    // the case. A held fact is institutionally available to every matching active file in the
-    // same pass. Serializing that propagation one case per minute would make case ID determine
-    // which file gets refreshed before same-minute cold-case decay.
-    let mut cases_by_handler_subject: BTreeMap<
-        OrganizationId,
-        BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
-    > = BTreeMap::new();
-    for investigation in state.legal.active_investigations() {
-        let cases = cases_by_handler_subject
-            .entry(investigation.owner())
-            .or_default();
-        if let Some(origin) = investigation.origin() {
-            cases.entry(origin).or_default().insert(investigation.id());
-        }
-        for subject in investigation.subjects() {
-            cases
-                .entry(*subject)
-                .or_default()
-                .insert(investigation.id());
-        }
-    }
-
     let mut candidates: Vec<(InformantId, InformationId, InvestigationId)> = Vec::new();
-    for (handler, cases_by_subject) in &cases_by_handler_subject {
-        for informant in state.legal.informants_for_handler(*handler) {
+    let handlers: BTreeSet<OrganizationId> = state
+        .legal
+        .informants()
+        .map(|informant| informant.handler())
+        .collect();
+    for handler in handlers {
+        // Build only this handler's live case view. A held fact is institutionally available to
+        // every matching active file in the same pass. Serializing that propagation one case per
+        // minute would make case ID determine which file gets refreshed before same-minute
+        // cold-case decay.
+        let mut cases_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>> = BTreeMap::new();
+        for investigation in state.legal.active_investigations_for_owner(handler) {
+            if let Some(origin) = investigation.origin() {
+                cases_by_subject
+                    .entry(origin)
+                    .or_default()
+                    .insert(investigation.id());
+            }
+            for subject in investigation.subjects() {
+                cases_by_subject
+                    .entry(*subject)
+                    .or_default()
+                    .insert(investigation.id());
+            }
+        }
+        for informant in state.legal.informants_for_handler(handler) {
             let holder = KnowledgeHolder::Character(informant.character());
-            for (subject, investigations) in cases_by_subject {
+            for (subject, investigations) in &cases_by_subject {
                 for information in state
                     .intelligence
                     .information_for_holder_subject(holder, *subject)

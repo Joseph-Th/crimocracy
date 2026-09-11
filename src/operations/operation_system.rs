@@ -47,6 +47,8 @@ pub enum OperationError {
     EmptyTitle,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
+    #[error("operation organization {0} is not a criminal organization")]
+    InvalidOrganizationKind(OrganizationId),
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
     #[error("entity {0:?} does not exist")]
@@ -154,6 +156,8 @@ pub enum OperationError {
         first_role: RoleKind,
         second_role: RoleKind,
     },
+    #[error("operation objective target {character} cannot also be a crew participant")]
+    ObjectiveTargetIsParticipant { character: CharacterId },
     #[error("operation is missing required role {0:?}")]
     MissingRequiredRole(RoleKind),
     #[error("role {0:?} has no execution function for this operation kind")]
@@ -443,12 +447,17 @@ pub fn validate_authorize_operation<'registry>(
     if draft.title.trim().is_empty() {
         return Err(OperationError::EmptyTitle);
     }
-    let _ = state
+    let organization = state
         .world
         .get_organization(draft.responsible_organization)
         .ok_or(OperationError::MissingOrganization(
             draft.responsible_organization,
         ))?;
+    if organization.kind() != crate::world::OrganizationKind::Criminal {
+        return Err(OperationError::InvalidOrganizationKind(
+            draft.responsible_organization,
+        ));
+    }
     let leader = state
         .world
         .get_character(draft.leader)
@@ -505,6 +514,12 @@ pub fn validate_authorize_operation<'registry>(
         &draft,
         &mut expected_participant_versions,
     )?;
+    if let Some(character) =
+        crate::operations::operation_objective::character_objective_target(&draft.objective)
+        && participants.contains(&character)
+    {
+        return Err(OperationError::ObjectiveTargetIsParticipant { character });
+    }
     if let Some((character, operation)) = find_busy_participant(
         registry,
         state,
@@ -555,25 +570,48 @@ fn find_busy_participant_for_begin(
     requested_start: SimTime,
     requested_end: SimTime,
 ) -> Option<(CharacterId, OperationId)> {
-    find_busy_participant_in_window(
-        registry,
-        state,
-        participants,
-        Some(operation),
-        requested_start,
-        requested_end,
-    )
-    .or_else(|| {
-        participants.iter().find_map(|participant| {
+    let requested = state
+        .operations
+        .get_operation(operation)
+        .expect("begin-time operation must exist");
+    participants
+        .iter()
+        .find_map(|participant| {
             state
                 .operations
                 .active_operations_for_participant(*participant)
                 .find(|other| {
-                    other.id() != operation && other.status() == OperationStatus::AwaitingDecision
+                    other.id() != operation
+                        && has_overlapping_operation_window(
+                            registry,
+                            other,
+                            state.now(),
+                            requested_start,
+                            requested_end,
+                        )
+                        && (other.status() != OperationStatus::Authorized
+                            || authorized_booking_priority(other)
+                                < authorized_booking_priority(requested))
                 })
                 .map(|other| (*participant, other.id()))
         })
-    })
+        .or_else(|| {
+            participants.iter().find_map(|participant| {
+                state
+                    .operations
+                    .active_operations_for_participant(*participant)
+                    .find(|other| {
+                        other.id() != operation
+                            && other.status() == OperationStatus::AwaitingDecision
+                    })
+                    .map(|other| (*participant, other.id()))
+            })
+        })
+}
+
+fn authorized_booking_priority(operation: &OperationRecord) -> (SimTime, OperationId) {
+    debug_assert_eq!(operation.status(), OperationStatus::Authorized);
+    (resolve_operation_earliest_start(operation), operation.id())
 }
 
 /// Validates the operation's required seats and participant availability while collecting the
@@ -1172,10 +1210,11 @@ pub(crate) fn find_due_authorized_operations(state: &AppState) -> Vec<OperationI
         .find_due_authorized(state.now())
         .into_iter()
         .filter(|operation| {
-            state
+            let record = state
                 .operations
                 .get_operation(*operation)
-                .is_some_and(|record| resolve_operation_earliest_start(record) <= state.now())
+                .expect("authorized start-time index must reference an operation");
+            resolve_operation_earliest_start(record) <= state.now()
         })
         .collect()
 }

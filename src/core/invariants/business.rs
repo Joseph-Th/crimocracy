@@ -9,20 +9,20 @@ use crate::economy::{BusinessCycleRecord, BusinessEconomyRecord, BusinessOperati
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
 use crate::registry::Registry;
-use crate::world::BusinessOwner;
+use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateValidationError> {
-    for economy in state.economy.business_economies() {
-        validate_business_economy_record(state, economy)?;
-    }
-
-    let mut previous_cycle_at = BTreeMap::new();
     let mut used_transactions: BTreeSet<LedgerTransactionId> = state
         .enterprises
         .cycles()
         .filter_map(|cycle| cycle.transaction())
         .collect();
+    for economy in state.economy.business_economies() {
+        validate_business_economy_record(state, economy, &mut used_transactions)?;
+    }
+
+    let mut previous_cycle_at = BTreeMap::new();
     for cycle in state.economy.cycles() {
         validate_business_cycle(state, cycle, &mut previous_cycle_at, &mut used_transactions)?;
     }
@@ -32,6 +32,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
 fn validate_business_economy_record(
     state: &AppState,
     economy: &BusinessEconomyRecord,
+    used_transactions: &mut BTreeSet<LedgerTransactionId>,
 ) -> Result<(), StateValidationError> {
     if economy.version() == 0 {
         return Err(invalid_economy(economy));
@@ -42,10 +43,121 @@ fn validate_business_economy_record(
         .ok_or_else(|| invalid_economy(economy))?;
     validate_business_economy_accounts(state, economy)?;
     validate_business_economy_schedule(state, economy)?;
-    if economy.laundered_this_cycle().cents() < 0 {
+    if economy.laundered_this_cycle().cents() < 0
+        || !validate_current_laundering_window(state, economy, used_transactions)?
+    {
         return Err(invalid_economy(economy));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct LaunderingTransactionAmounts {
+    amount: Money,
+    accounted: Money,
+    fee: Money,
+}
+
+fn validate_current_laundering_window(
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+    used_transactions: &mut BTreeSet<LedgerTransactionId>,
+) -> Result<bool, StateValidationError> {
+    let transactions = economy.laundering_transactions_this_cycle();
+    if transactions.is_empty() != (economy.laundered_this_cycle() == Money::ZERO) {
+        return Ok(false);
+    }
+    if transactions.is_empty() {
+        return Ok(true);
+    }
+    let business = state
+        .world
+        .get_business(economy.business())
+        .ok_or_else(|| invalid_economy(economy))?;
+    let BusinessOwner::Organization(organization) = business.owner() else {
+        return Ok(false);
+    };
+    let window_start = [
+        Some(economy.established_at()),
+        economy.last_cycle_at(),
+        economy.loss_streak_anchor(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .expect("business economy always has an establishment instant");
+    let mut total = Money::ZERO;
+    for transaction_id in transactions {
+        if !used_transactions.insert(*transaction_id) {
+            return Ok(false);
+        }
+        let transaction = state
+            .finance
+            .get_transaction(*transaction_id)
+            .ok_or_else(|| invalid_economy(economy))?;
+        if transaction.occurred_at() < window_start
+            || transaction.occurred_at() > state.now()
+            || transaction.budget_usage().is_some()
+        {
+            return Ok(false);
+        }
+        let Some(amounts) =
+            laundering_transaction_amounts(state, economy, organization, transaction)
+        else {
+            return Ok(false);
+        };
+        total = total
+            .checked_add(amounts.amount)
+            .ok_or_else(|| invalid_economy(economy))?;
+    }
+    Ok(total == economy.laundered_this_cycle())
+}
+
+fn laundering_transaction_amounts(
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+    organization: crate::core::id::OrganizationId,
+    transaction: &crate::finance::LedgerTransactionRecord,
+) -> Option<LaunderingTransactionAmounts> {
+    if transaction.postings().len() != 3 {
+        return None;
+    }
+    let mut amount = None;
+    let mut accounted = None;
+    let mut fee = None;
+    for posting in transaction.postings() {
+        let account = state.finance.get_account(posting.account)?;
+        if posting.amount < Money::ZERO
+            && account.owner() == FinancialOwner::Organization(organization)
+            && account.kind() == AccountKind::StreetCash
+            && amount.is_none()
+        {
+            amount = posting.amount.checked_neg();
+        } else if posting.amount > Money::ZERO
+            && account.owner() == FinancialOwner::Organization(organization)
+            && account.kind() == AccountKind::AccountedFunds
+            && accounted.is_none()
+        {
+            accounted = Some(posting.amount);
+        } else if posting.amount > Money::ZERO
+            && posting.account == economy.operating_account()
+            && account.owner() == FinancialOwner::Business(economy.business())
+            && account.kind() == AccountKind::LegitimateOperating
+            && fee.is_none()
+        {
+            fee = Some(posting.amount);
+        } else {
+            return None;
+        }
+    }
+    let amount = amount?;
+    let accounted = accounted?;
+    let fee = fee?;
+    (accounted.checked_add(fee) == Some(amount)).then_some(LaunderingTransactionAmounts {
+        amount,
+        accounted,
+        fee,
+    })
 }
 
 fn validate_business_economy_accounts(
@@ -346,7 +458,52 @@ fn validate_business_economies_against_registry(
         if laundered == crate::finance::Money::ZERO {
             continue;
         }
-        let gross = crate::economy::business_economy_system::resolve_business_current_gross(
+        let business = state
+            .world
+            .get_business(economy.business())
+            .ok_or_else(|| invalid_economy(economy))?;
+        let BusinessOwner::Organization(organization) = business.owner() else {
+            return Err(invalid_economy(economy));
+        };
+        let organization = state
+            .world
+            .get_organization(organization)
+            .ok_or_else(|| invalid_economy(economy))?;
+        if organization.kind() != OrganizationKind::Criminal
+            || !business
+                .functions()
+                .contains(&BusinessFunction::CashIntensive)
+        {
+            return Err(invalid_economy(economy));
+        }
+        for transaction_id in economy.laundering_transactions_this_cycle() {
+            let transaction = state
+                .finance
+                .get_transaction(*transaction_id)
+                .ok_or_else(|| invalid_economy(economy))?;
+            let amounts =
+                laundering_transaction_amounts(state, economy, organization.id(), transaction)
+                    .ok_or_else(|| invalid_economy(economy))?;
+            let expected_fee = crate::finance::helpers::resolve_basis_point_share(
+                amounts.amount,
+                registry.laundering().fee_basis_points(),
+            )
+            .ok_or_else(|| invalid_economy(economy))?;
+            let expected_accounted = amounts
+                .amount
+                .checked_sub(expected_fee)
+                .ok_or_else(|| invalid_economy(economy))?;
+            if amounts.fee != expected_fee || amounts.accounted != expected_accounted {
+                return Err(invalid_economy(economy));
+            }
+        }
+        // Restore can prove the immutable normal-gross ceiling for this operating window, but
+        // not whether each historical laundering transfer happened before or after a later
+        // sabotage hit because disruption start history is not duplicated on the economy
+        // record. Live laundering always enforces the stricter current (possibly disrupted)
+        // capacity at the transfer instant. Rechecking today's degraded capacity here would
+        // retroactively invalidate money that was legitimately laundered before later damage.
+        let gross = crate::economy::business_economy_system::resolve_business_gross_potential(
             registry,
             state,
             economy.business(),

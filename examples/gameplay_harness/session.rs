@@ -166,12 +166,25 @@ pub fn launder_through_front(
                     format_cents(requested_cents),
                 );
             }
-            Some(validate_launder_funds(
+            match validate_launder_funds(
                 scenario.registry,
                 &scenario.state,
                 draft(Money::from_cents(capacity_cents)),
-            )?)
+            ) {
+                Ok(validated) => Some(validated),
+                Err(LaunderingError::AmountTooSmallForFee) => {
+                    if narrative {
+                        println!(
+                            "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce a real front fee; {} stays street cash.",
+                            format_cents(requested_cents),
+                        );
+                    }
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
+        Err(LaunderingError::AmountTooSmallForFee) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let Some(validated) = validated else {

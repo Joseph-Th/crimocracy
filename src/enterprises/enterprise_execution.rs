@@ -80,6 +80,8 @@ pub enum EnterpriseError {
     MissingEnterprise(EnterpriseId),
     #[error("organization {0} does not exist")]
     InvalidOrganization(OrganizationId),
+    #[error("enterprise organization {0} is not a criminal organization")]
+    InvalidOrganizationKind(OrganizationId),
     #[error(
         "enterprise authority belongs to organization {authority_organization}, not {enterprise_organization}"
     )]

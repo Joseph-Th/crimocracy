@@ -10,8 +10,9 @@ use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
 use crate::legal::investigation_system::{
-    InvestigationTransition, validate_add_evidence, validate_assign_investigator,
-    validate_open_investigation, validate_transition_investigation,
+    InvestigationError, InvestigationTransition, apply_autonomous_investigator_staffing,
+    validate_add_evidence, validate_assign_investigator, validate_open_investigation,
+    validate_transition_investigation,
 };
 use crate::legal::{
     CaseWitnessRecord, EvidenceDraft, EvidenceRecord, InvestigationDraft, InvestigationRecord,
@@ -405,6 +406,85 @@ fn later_case_staffing_learns_witnesses_registered_before_the_lead() {
 
     assert_lead_knows_witness(&fixture, detective);
     validate_state(&fixture.state).expect("post-staffing witness knowledge should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn named_case_witness_cannot_become_lead_and_autonomous_staffing_skips_them() {
+    let mut fixture = make_fixture();
+    let conflicted = insert_detective(&mut fixture, "Witness Detective");
+    let replacement = insert_detective(&mut fixture, "Independent Detective");
+    let witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: conflicted,
+            subject: EntityRef::Character(fixture.subject),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("qualified detective may be a witness before taking a case role")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+
+    assert_eq!(
+        validate_assign_investigator(&fixture.state, fixture.investigation, conflicted)
+            .expect_err("a named witness cannot lead the same investigation"),
+        InvestigationError::InvestigatorIsCaseWitness {
+            investigation: fixture.investigation,
+            investigator: conflicted,
+            witness,
+        }
+    );
+    let staffed = apply_autonomous_investigator_staffing(&mut fixture.state)
+        .expect("autonomous staffing should skip witness-conflicted detectives");
+    assert_eq!(staffed, vec![(fixture.investigation, replacement)]);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("investigation should persist")
+            .lead_investigator(),
+        Some(replacement)
+    );
+    validate_state(&fixture.state).expect("witness-conflict staffing must preserve valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn current_case_lead_cannot_be_registered_as_named_witness() {
+    let mut fixture = make_fixture();
+    let detective = insert_detective(&mut fixture, "Lead Witness Conflict");
+    validate_assign_investigator(&fixture.state, fixture.investigation, detective)
+        .expect("detective should be assignable before witness conflict")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+
+    assert_eq!(
+        validate_register_case_witness(
+            &fixture.state,
+            CaseWitnessDraft {
+                investigation: fixture.investigation,
+                witness: detective,
+                subject: EntityRef::Character(fixture.subject),
+                cooperation: WitnessCooperation::Reluctant,
+            },
+        )
+        .expect_err("the current lead cannot simultaneously become a factual witness"),
+        WitnessError::WitnessIsLeadInvestigator {
+            investigation: fixture.investigation,
+            witness: detective,
+        }
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .case_witness_for(fixture.investigation, detective)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("rejected lead-witness conflict must preserve state");
     validate_invariants(&fixture.state);
 }
 

@@ -72,12 +72,17 @@ fn resolve_enterprise_authority<'a>(
     state: &'a AppState,
     enterprise: &EnterpriseRecord,
 ) -> Result<EnterpriseAuthorityRefs<'a>, StateValidationError> {
-    state
+    let organization = state
         .world
         .get_organization(enterprise.organization())
         .ok_or(StateValidationError::InvalidEnterpriseAuthority {
             enterprise: enterprise.id(),
         })?;
+    if organization.kind() != OrganizationKind::Criminal {
+        return Err(StateValidationError::InvalidEnterpriseAuthority {
+            enterprise: enterprise.id(),
+        });
+    }
     let authority = enterprise.authority();
     let mandate = state.delegation.get_mandate(authority.mandate).ok_or(
         StateValidationError::InvalidEnterpriseAuthority {

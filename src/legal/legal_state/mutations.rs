@@ -28,6 +28,12 @@ impl LegalState {
             self.indexes.investigations.active.insert(record.id());
             self.indexes
                 .investigations
+                .active_by_owner
+                .entry(record.owner())
+                .or_default()
+                .insert(record.id());
+            self.indexes
+                .investigations
                 .cases_by_last_activity
                 .entry(record.last_activity_at())
                 .or_default()
@@ -198,9 +204,24 @@ impl LegalState {
     ) {
         let investigation_id = record.investigation();
         let evidence_id = record.id();
-        let invalidated_witness = if evidence_is_actionable_case_lead(&record)
-            && let EntityRef::Character(character) = record.subject()
-        {
+        let actionable_character = if evidence_is_actionable_case_lead(&record) {
+            match record.subject() {
+                EntityRef::Character(character) => Some(character),
+                EntityRef::Organization(_)
+                | EntityRef::Neighborhood(_)
+                | EntityRef::Business(_)
+                | EntityRef::Operation(_)
+                | EntityRef::Investigation(_)
+                | EntityRef::Evidence(_)
+                | EntityRef::FinancialAccount(_)
+                | EntityRef::DecisionRequest(_)
+                | EntityRef::Mandate(_)
+                | EntityRef::Enterprise(_) => None,
+            }
+        } else {
+            None
+        };
+        let invalidated_witness = if let Some(character) = actionable_character {
             self.indexes
                 .witnesses
                 .case_witness_by_case_character
@@ -209,6 +230,36 @@ impl LegalState {
         } else {
             None
         };
+        let invalidated_lead = actionable_character.filter(|character| {
+            self.investigations
+                .get(&investigation_id)
+                .is_some_and(|investigation| investigation.lead_investigator == Some(*character))
+        });
+        let invalidated_prosecution_cases: Vec<(ProsecutionCaseId, CharacterId)> =
+            if let Some(prosecutor) = actionable_character {
+                let cases: Vec<_> = self
+                    .indexes
+                    .prosecutions
+                    .reviewing_cases_by_prosecutor
+                    .get(&prosecutor)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                cases
+                    .into_iter()
+                    .filter(|case| {
+                        self.prosecution_cases
+                            .get(case)
+                            .expect("prosecutor-case index must reference a prosecution case")
+                            .source_investigation()
+                            == investigation_id
+                    })
+                    .map(|case| (case, prosecutor))
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let investigation = self
             .investigations
             .get_mut(&investigation_id)
@@ -251,6 +302,22 @@ impl LegalState {
                 InvestigationWorkCancellationReason::WitnessBecameCaseSubject(evidence_id),
                 originating_work,
             );
+        }
+        if let Some(investigator) = invalidated_lead {
+            // The evidence insertion above already revised the case. Cancel any other pending
+            // work and release the newly conflicted lead as parts of that same semantic change,
+            // without manufacturing extra investigation revisions.
+            self.cancel_scheduled_investigator_work_for_case_mutation(
+                investigation_id,
+                investigator,
+                activity_at,
+                InvestigationWorkCancellationReason::InvestigatorBecameCaseSubject(evidence_id),
+                originating_work,
+            );
+            self.release_lead_investigator_for_case_mutation(investigation_id, investigator);
+        }
+        for (case, prosecutor) in invalidated_prosecution_cases {
+            self.release_prosecution_case_prosecutor_runtime(case, prosecutor);
         }
         // Advance the case's last-activity instant to the commit minute, not the evidence's
         // discovery time: backdated evidence is legal (see validate_evidence_draft), but the case
@@ -540,6 +607,45 @@ impl LegalState {
         );
     }
 
+    /// Cancels the investigator's scheduled work when the same case mutation makes that
+    /// investigator a case subject. The causative evidence already advances the investigation.
+    fn cancel_scheduled_investigator_work_for_case_mutation(
+        &mut self,
+        investigation_id: InvestigationId,
+        investigator: CharacterId,
+        cancelled_at: SimTime,
+        reason: InvestigationWorkCancellationReason,
+        originating_work: Option<InvestigationWorkId>,
+    ) {
+        let work = self
+            .indexes
+            .work
+            .work_by_investigator
+            .get(&investigator)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|work| {
+                self.investigation_work.get(work).is_some_and(|record| {
+                    record.investigation() == investigation_id
+                        && record.status() == InvestigationWorkStatus::Scheduled
+                })
+            });
+        let Some(work) = work else {
+            return;
+        };
+        if Some(work) == originating_work {
+            return;
+        }
+        self.set_investigation_work_cancellation_runtime(
+            work,
+            InvestigationWorkCancellation {
+                cancelled_at,
+                reason,
+            },
+        );
+    }
+
     /// Applies only the work-owned portion of cancellation and returns its investigation. Most
     /// callers use `set_investigation_work_cancellation`, which also advances the case. Composite
     /// witness/evidence mutations use this directly through the helper above because their
@@ -593,6 +699,7 @@ impl LegalState {
             .investigations
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before lifecycle commit");
+        let owner = investigation.owner;
         investigation.status = status;
         investigation.version = advance_version_preflighted(investigation.version);
         // Shelving or closing a case releases its lead: a case nobody works holds no
@@ -631,8 +738,20 @@ impl LegalState {
         let is_active = investigation.status == InvestigationStatus::Active;
         if is_active && !was_active {
             self.indexes.investigations.active.insert(investigation_id);
+            self.indexes
+                .investigations
+                .active_by_owner
+                .entry(owner)
+                .or_default()
+                .insert(investigation_id);
         } else if was_active && !is_active {
             self.indexes.investigations.active.remove(&investigation_id);
+            if let Some(ids) = self.indexes.investigations.active_by_owner.get_mut(&owner) {
+                ids.remove(&investigation_id);
+                if ids.is_empty() {
+                    self.indexes.investigations.active_by_owner.remove(&owner);
+                }
+            }
         }
         match (previous_status, status) {
             // Suspending or closing an active case shelves it: it leaves the cold-decay index.
@@ -712,14 +831,33 @@ impl LegalState {
         investigation_id: InvestigationId,
         investigator: CharacterId,
     ) {
+        self.release_lead_investigator_runtime(investigation_id, investigator, true);
+    }
+
+    fn release_lead_investigator_for_case_mutation(
+        &mut self,
+        investigation_id: InvestigationId,
+        investigator: CharacterId,
+    ) {
+        self.release_lead_investigator_runtime(investigation_id, investigator, false);
+    }
+
+    fn release_lead_investigator_runtime(
+        &mut self,
+        investigation_id: InvestigationId,
+        investigator: CharacterId,
+        advance_case_version: bool,
+    ) {
         let record = self
             .investigations
             .get_mut(&investigation_id)
-            .expect("validated investigation disappeared before detention staffing release");
+            .expect("validated investigation disappeared before staffing release");
         assert_eq!(record.status, InvestigationStatus::Active);
         assert_eq!(record.lead_investigator, Some(investigator));
         record.lead_investigator = None;
-        record.version = advance_version_preflighted(record.version);
+        if advance_case_version {
+            record.version = advance_version_preflighted(record.version);
+        }
         if let Some(cases) = self
             .indexes
             .investigations
@@ -729,7 +867,7 @@ impl LegalState {
             let removed = cases.remove(&investigation_id);
             debug_assert!(
                 removed,
-                "detained lead must be present in investigator index"
+                "released lead must be present in investigator index"
             );
             if cases.is_empty() {
                 self.indexes
@@ -1314,10 +1452,18 @@ impl LegalState {
         id: ProsecutionCaseId,
         prosecutor: CharacterId,
     ) {
+        self.release_prosecution_case_prosecutor_runtime(id, prosecutor);
+    }
+
+    fn release_prosecution_case_prosecutor_runtime(
+        &mut self,
+        id: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    ) {
         let case = self
             .prosecution_cases
             .get_mut(&id)
-            .expect("validated prosecution case disappeared before detention staffing release");
+            .expect("validated prosecution case disappeared before staffing release");
         debug_assert_eq!(case.status(), ProsecutionCaseStatus::Reviewing);
         debug_assert_eq!(case.assigned_prosecutor(), Some(prosecutor));
         case.context.assigned_prosecutor = None;

@@ -18,7 +18,7 @@ use crate::finance::{
     helpers::resolve_basis_point_share,
 };
 use crate::registry::Registry;
-use crate::world::BusinessOwner;
+use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -602,6 +602,12 @@ pub struct LaunderingDraft {
 pub enum LaunderingError {
     #[error("laundering amount must be positive")]
     NonPositiveAmount,
+    #[error("laundering amount is too small to produce the authored front fee")]
+    AmountTooSmallForFee,
+    #[error("laundering organization {0} does not exist")]
+    MissingOrganization(crate::core::id::OrganizationId),
+    #[error("laundering organization {0} is not a criminal organization")]
+    InvalidOrganizationKind(crate::core::id::OrganizationId),
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
     #[error("account {account} is not owned by organization {organization}")]
@@ -709,6 +715,7 @@ impl ValidatedLaundering {
         crate::economy::business_economy_system::apply_laundering_capacity_preflighted(
             state,
             self.business,
+            id,
             self.new_cycle_total,
         );
         Ok(id)
@@ -727,6 +734,13 @@ pub fn validate_launder_funds(
 ) -> Result<ValidatedLaundering, LaunderingError> {
     if draft.amount.cents() <= 0 {
         return Err(LaunderingError::NonPositiveAmount);
+    }
+    let organization = state
+        .world
+        .get_organization(draft.organization)
+        .ok_or(LaunderingError::MissingOrganization(draft.organization))?;
+    if organization.kind() != OrganizationKind::Criminal {
+        return Err(LaunderingError::InvalidOrganizationKind(draft.organization));
     }
     let street = state
         .finance
@@ -815,6 +829,13 @@ pub fn validate_launder_funds(
     // Fee split: the front keeps the authored cut as legitimate revenue.
     let fee = resolve_basis_point_share(draft.amount, registry.laundering().fee_basis_points())
         .ok_or(LaunderingError::ArithmeticOverflow)?;
+    if fee == Money::ZERO {
+        // Every laundering transfer must materially use the selected front. Apart from making
+        // tiny transfers economically nonsensical, a zero fee would omit the business
+        // operating-account posting and make the ledger unable to prove which front absorbed
+        // the transfer during restore validation.
+        return Err(LaunderingError::AmountTooSmallForFee);
+    }
     let credited = draft
         .amount
         .checked_sub(fee)
@@ -831,12 +852,10 @@ pub fn validate_launder_funds(
             amount: credited,
         },
     ];
-    if fee > Money::ZERO {
-        postings.push(LedgerPosting {
-            account: economy.operating_account(),
-            amount: fee,
-        });
-    }
+    postings.push(LedgerPosting {
+        account: economy.operating_account(),
+        amount: fee,
+    });
     let business_name = business_record.name().to_owned();
     let transaction = validate_record_transaction(
         state,

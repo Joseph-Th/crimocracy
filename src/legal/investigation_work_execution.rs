@@ -849,6 +849,16 @@ impl ValidatedInvestigationWorkResolution {
             }
             InvestigationWorkOutcome::Inconclusive => None,
         };
+        if let Some(draft) = &derived_evidence_draft {
+            crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+                state,
+                draft.investigation,
+                draft.subject,
+                draft.strength,
+                draft.reliability,
+                draft.admissibility,
+            )?;
+        }
         // Successful witness interviews record the testimony through the canonical
         // witness-statement path validated during plan validation.
         let interview_statement_outcome = match self.interview_statement {
@@ -1216,6 +1226,26 @@ pub fn validate_investigation_work_resolution_plan(
     } else {
         None
     };
+    if plan.outcome == InvestigationWorkOutcome::Developed
+        && work.kind() == InvestigationWorkKind::EvidenceReview
+    {
+        let source = state
+            .legal
+            .get_evidence(
+                work.focus()
+                    .evidence_id()
+                    .expect("evidence-review focus must reference evidence"),
+            )
+            .expect("validated evidence-review source must exist");
+        crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+            state,
+            work.investigation(),
+            source.subject(),
+            source.strength(),
+            resolve_improved_evidence_reliability(source.reliability()),
+            source.admissibility(),
+        )?;
+    }
     Ok(ValidatedInvestigationWorkResolution {
         plan,
         interview_statement,

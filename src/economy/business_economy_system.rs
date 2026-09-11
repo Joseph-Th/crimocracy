@@ -895,9 +895,12 @@ fn resolve_basis_point_variance(
 pub(crate) fn apply_laundering_capacity_preflighted(
     state: &mut AppState,
     business: BusinessId,
+    transaction: crate::core::id::LedgerTransactionId,
     total: Money,
 ) {
-    state.economy.set_laundered_this_cycle(business, total);
+    state
+        .economy
+        .set_laundered_this_cycle(business, transaction, total);
 }
 
 /// Canonical sabotage-damage mutation: extends the target's disruption horizon through an

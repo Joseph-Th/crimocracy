@@ -100,6 +100,12 @@ impl LegalState {
                 self.indexes.investigations.active.insert(id);
                 self.indexes
                     .investigations
+                    .active_by_owner
+                    .entry(investigation.owner())
+                    .or_default()
+                    .insert(id);
+                self.indexes
+                    .investigations
                     .cases_by_last_activity
                     .entry(investigation.last_activity_at())
                     .or_default()

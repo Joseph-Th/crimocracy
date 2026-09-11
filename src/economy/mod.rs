@@ -43,6 +43,10 @@ pub struct BusinessEconomyRecord {
     /// laundering plausibility budget is per cycle, so splitting one large sum into many
     /// transfers cannot hide more than the front's authored share of legitimate earnings.
     laundered_this_cycle: Money,
+    /// Canonical ledger transactions that contributed to `laundered_this_cycle` in the
+    /// current operating window. The total remains a fast decision input, while these durable
+    /// links make that total re-derivable at restore instead of trusting an unauditable counter.
+    laundering_transactions_this_cycle: BTreeSet<LedgerTransactionId>,
     version: u32,
 }
 
@@ -79,6 +83,9 @@ impl BusinessEconomyRecord {
     }
     pub fn laundered_this_cycle(&self) -> Money {
         self.laundered_this_cycle
+    }
+    pub(crate) fn laundering_transactions_this_cycle(&self) -> &BTreeSet<LedgerTransactionId> {
+        &self.laundering_transactions_this_cycle
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -302,6 +309,7 @@ impl EconomyState {
         record.next_cycle_at = next_cycle_at;
         // A new operating cycle starts a fresh laundering plausibility window.
         record.laundered_this_cycle = Money::ZERO;
+        record.laundering_transactions_this_cycle.clear();
         record.version = advance_version_preflighted(record.version);
         if let Some(next_cycle_at) = next_cycle_at {
             self.active_by_next_cycle
@@ -359,8 +367,17 @@ impl EconomyState {
             .expect("validated business economy disappeared before status commit");
         record.status = status;
         record.next_cycle_at = next_cycle_at;
+        let resets_operating_cycle = loss_streak_anchor.is_some();
         if let Some(anchor) = loss_streak_anchor {
             record.loss_streak_anchor = Some(anchor);
+        }
+        if resets_operating_cycle {
+            // Resume and acquisition restart both schedule a complete new operating cycle.
+            // Carrying the prior window's laundering volume into that new cycle would make the
+            // buyer/resumed operator inherit capacity consumption from a cycle that no longer
+            // exists.
+            record.laundered_this_cycle = Money::ZERO;
+            record.laundering_transactions_this_cycle.clear();
         }
         record.version = advance_version_preflighted(record.version);
     }
@@ -383,11 +400,23 @@ impl EconomyState {
     /// The economy owner keeps the running total so laundering plausibility stays a per-cycle
     /// budget rather than a per-transfer allowance; callers pass a pre-validated total so the
     /// write is total and cannot half-apply behind a ledger commit.
-    fn set_laundered_this_cycle(&mut self, business: BusinessId, total: Money) {
+    fn set_laundered_this_cycle(
+        &mut self,
+        business: BusinessId,
+        transaction: LedgerTransactionId,
+        total: Money,
+    ) {
         let record = self
             .businesses
             .get_mut(&business)
             .expect("validated front business economy disappeared before laundering commit");
+        let inserted = record
+            .laundering_transactions_this_cycle
+            .insert(transaction);
+        debug_assert!(
+            inserted,
+            "one laundering transaction must not be applied twice to the same operating window"
+        );
         record.laundered_this_cycle = total;
         record.version = advance_version_preflighted(record.version);
     }
@@ -495,6 +524,7 @@ fn build_business_economy_record(
         disrupted_through: None,
         loss_streak_anchor: None,
         laundered_this_cycle: Money::ZERO,
+        laundering_transactions_this_cycle: BTreeSet::new(),
         version: 1,
     }
 }

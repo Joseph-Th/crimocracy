@@ -21,7 +21,7 @@ use crate::operations::operation_execution::{
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
-    blocker_matches_objective, effective_objective_outcome,
+    blocker_matches_objective, character_objective_target, effective_objective_outcome,
 };
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
@@ -102,22 +102,27 @@ fn validate_active_participant_bookings(
                 if !(first_start < second_end && second_start < first_end) {
                     continue;
                 }
-                // A decision pause may legitimately grow into a booking that was non-overlapping
-                // when authorized. Prove that historical fact instead of trusting the current
-                // status pair: otherwise a forged AwaitingDecision flag could hide an overlap that
-                // canonical authorization would always have rejected.
-                let pause_overlap =
+                // A live operation may legitimately grow into a later authorized booking when
+                // its begin was delayed or a decision pause extended it. Canonical admission
+                // preserves the older reservation and leaves the later operation queued. Prove
+                // that the pair was disjoint when the later authorization happened instead of
+                // trusting status alone; two authorized records never get this exception because
+                // their projected windows are immutable.
+                let dynamic_overlap =
                     matches!(
                         (first.status(), second.status()),
-                        (
-                            OperationStatus::AwaitingDecision,
-                            OperationStatus::Authorized
-                        ) | (
-                            OperationStatus::Authorized,
-                            OperationStatus::AwaitingDecision
-                        )
+                        (OperationStatus::InProgress, OperationStatus::Authorized)
+                            | (OperationStatus::Authorized, OperationStatus::InProgress)
+                            | (
+                                OperationStatus::AwaitingDecision,
+                                OperationStatus::Authorized
+                            )
+                            | (
+                                OperationStatus::Authorized,
+                                OperationStatus::AwaitingDecision
+                            )
                     ) && bookings_were_disjoint_at_later_authorization(registry, first, second);
-                if pause_overlap {
+                if dynamic_overlap {
                     continue;
                 }
                 return Err(StateValidationError::ActiveOperationParticipantOverlap {
@@ -254,6 +259,14 @@ fn validate_authored_operation_plan(
                 })
         })
     });
+    let objective_target_is_participant = character_objective_target(operation.objective())
+        .is_some_and(|target| operation.participants().contains(&target));
+    let responsible_organization_is_criminal = state
+        .world
+        .get_organization(operation.responsible_organization())
+        .is_some_and(|organization| {
+            organization.kind() == crate::world::OrganizationKind::Criminal
+        });
     if !definition
         .supported_approaches()
         .contains(&operation.approach())
@@ -286,6 +299,8 @@ fn validate_authored_operation_plan(
         || !police_response_matches_authorship
         || !business_target_is_valid
         || !required_intelligence_is_usable
+        || objective_target_is_participant
+        || !responsible_organization_is_criminal
     {
         return Err(invalid_operation_definition(operation));
     }

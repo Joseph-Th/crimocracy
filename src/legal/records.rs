@@ -522,6 +522,9 @@ pub enum InvestigationWorkStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvestigationWorkCancellationReason {
     InvestigatorDetained(ArrestId),
+    /// Actionable evidence made the assigned investigator a subject of the case they were
+    /// working. The evidence remains authoritative; the conflicted work and lead seat do not.
+    InvestigatorBecameCaseSubject(EvidenceId),
     /// Later case development made the interview target an arrest-eligible subject of the same
     /// investigation. The witness registration remains historical, but unfinished interview work
     /// cannot continue across that conflict.
@@ -1446,6 +1449,9 @@ impl PoliceResponseRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct InvestigationIndexes {
     pub(super) by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
+    /// Active cases grouped by owner so handler-specific recurring legal work does not scan
+    /// unrelated active institutions or historical case records.
+    pub(super) active_by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationId>>,
     pub(super) active_without_lead: BTreeSet<InvestigationId>,

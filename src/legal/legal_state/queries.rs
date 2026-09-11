@@ -455,6 +455,22 @@ impl LegalState {
                     .expect("investigation-owner index must reference an investigation")
             })
     }
+    pub(crate) fn active_investigations_for_owner(
+        &self,
+        owner: OrganizationId,
+    ) -> impl Iterator<Item = &InvestigationRecord> {
+        self.indexes
+            .investigations
+            .active_by_owner
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("active investigation-owner index must reference an investigation")
+            })
+    }
     pub(crate) fn active_investigation_for_investigator(
         &self,
         investigator: CharacterId,
@@ -494,6 +510,25 @@ impl LegalState {
                 .get(id)
                 .expect("active-investigation index must reference an investigation")
         })
+    }
+    /// Active cases currently tracking the subject, in stable investigation-id order. This uses
+    /// the subject index so consumers interested in one entity do not scan every live case.
+    pub(crate) fn active_investigations_for_subject(
+        &self,
+        subject: EntityRef,
+    ) -> impl Iterator<Item = &InvestigationRecord> {
+        self.indexes
+            .investigations
+            .investigations_by_subject
+            .get(&subject)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("investigation-subject index must reference an investigation")
+            })
+            .filter(|investigation| investigation.status() == InvestigationStatus::Active)
     }
     pub(crate) fn investigation_work(&self) -> impl Iterator<Item = &InvestigationWorkRecord> {
         self.investigation_work.values()

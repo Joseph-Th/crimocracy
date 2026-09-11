@@ -139,7 +139,13 @@ fn validate_reviewing_case(
         || case.resolution_report().is_some()
         || case.resolution_prosecutor().is_some()
         || assigned.is_some_and(|(prosecutor, lead)| {
-            lead.organization() != Some(case.prosecutor_office())
+            prosecutor == case.defendant()
+                || state
+                    .legal
+                    .case_witness_for(case.source_investigation(), prosecutor)
+                    .is_some()
+                || refs_source_investigation_contains_prosecutor(state, case, prosecutor)
+                || lead.organization() != Some(case.prosecutor_office())
                 || lead.capability(CapabilityKind::LegalKnowledge).is_none()
                 || state
                     .legal
@@ -157,6 +163,21 @@ fn validate_reviewing_case(
     Ok(())
 }
 
+fn refs_source_investigation_contains_prosecutor(
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+    prosecutor: crate::core::id::CharacterId,
+) -> bool {
+    state
+        .legal
+        .get_investigation(case.source_investigation())
+        .is_some_and(|investigation| {
+            investigation
+                .subjects()
+                .contains(&EntityRef::Character(prosecutor))
+        })
+}
+
 fn validate_resolved_case(
     state: &AppState,
     case: &ProsecutionCaseRecord,
@@ -168,14 +189,20 @@ fn validate_resolved_case(
         return Err(invalid());
     }
     let resolution_prosecutor = case.resolution_prosecutor().ok_or_else(invalid)?;
+    let resolved_at = case.resolved_at().ok_or_else(invalid)?;
     let lead = state
         .world
         .get_character(resolution_prosecutor)
         .ok_or_else(invalid)?;
-    if lead.capability(CapabilityKind::LegalKnowledge).is_none() {
+    if resolution_prosecutor == case.defendant()
+        || state
+            .legal
+            .case_witness_for(case.source_investigation(), resolution_prosecutor)
+            .is_some_and(|witness| witness.registered_at() < resolved_at)
+        || lead.capability(CapabilityKind::LegalKnowledge).is_none()
+    {
         return Err(invalid());
     }
-    let resolved_at = case.resolved_at().ok_or_else(invalid)?;
     let information_id = case.resolution_information().ok_or_else(invalid)?;
     let report_id = case.resolution_report().ok_or_else(invalid)?;
     let information = state
@@ -317,6 +344,11 @@ fn validate_referral(
         || referral.source_investigation() != case.source_investigation()
         || referral.source_authority() != case.source_authority()
         || referral.prosecutor_office() != case.prosecutor_office()
+        || referral.prosecutor() == case.defendant()
+        || state
+            .legal
+            .case_witness_for(case.source_investigation(), referral.prosecutor())
+            .is_some_and(|witness| witness.registered_at() < referral.referred_at())
         || prosecutor
             .capability(CapabilityKind::LegalKnowledge)
             .is_none()

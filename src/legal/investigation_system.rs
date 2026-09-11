@@ -3,7 +3,7 @@
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     ArrestId, CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
-    InvestigationWorkId, OrganizationId,
+    InvestigationWorkId, OrganizationId, ProsecutionCaseId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -51,6 +51,14 @@ pub enum InvestigationError {
     InvestigatorIsCaseSubject {
         investigation: InvestigationId,
         investigator: CharacterId,
+    },
+    #[error(
+        "character {investigator} is named witness {witness} in investigation {investigation} and cannot lead it"
+    )]
+    InvestigatorIsCaseWitness {
+        investigation: InvestigationId,
+        investigator: CharacterId,
+        witness: CaseWitnessId,
     },
     #[error("character {0} has no Investigation capability")]
     MissingInvestigationCapability(CharacterId),
@@ -134,6 +142,19 @@ pub enum InvestigationError {
     },
     #[error("character {character} is a subject of this case and cannot be its named witness")]
     WitnessIsCaseSubject { character: CharacterId },
+    #[error("named witness {character} cannot simultaneously lead investigation {investigation}")]
+    WitnessIsLeadInvestigator {
+        investigation: InvestigationId,
+        character: CharacterId,
+    },
+    #[error(
+        "named witness {character} cannot simultaneously prosecute case {case} sourced from investigation {investigation}"
+    )]
+    WitnessIsAssignedProsecutor {
+        investigation: InvestigationId,
+        character: CharacterId,
+        case: ProsecutionCaseId,
+    },
     #[error("named witness {character} cannot be bound to unrelated incident subject {subject:?}")]
     WitnessSubjectOutsideIncident {
         character: CharacterId,
@@ -269,6 +290,33 @@ pub(crate) fn evidence_assessment_is_actionable_case_lead(
     strength != crate::legal::EvidenceStrength::Weak
         && reliability != crate::legal::EvidenceReliability::Questionable
         && admissibility != crate::legal::Admissibility::Inadmissible
+}
+
+/// Evidence is authoritative even when it creates an institutional conflict. Before any evidence
+/// mutation, preflight the prosecution-case versions that would need to release a prosecutor who
+/// becomes an actionable subject of the same source investigation.
+pub(crate) fn ensure_evidence_prosecution_recusal_capacity(
+    state: &AppState,
+    investigation: InvestigationId,
+    subject: EntityRef,
+    strength: crate::legal::EvidenceStrength,
+    reliability: crate::legal::EvidenceReliability,
+    admissibility: crate::legal::Admissibility,
+) -> Result<(), VersionCapacityError> {
+    let EntityRef::Character(character) = subject else {
+        return Ok(());
+    };
+    if !evidence_assessment_is_actionable_case_lead(strength, reliability, admissibility) {
+        return Ok(());
+    }
+    for case in state
+        .legal
+        .reviewing_prosecution_cases_for_prosecutor(character)
+        .filter(|case| case.source_investigation() == investigation)
+    {
+        ensure_version_can_advance(case.version(), "prosecution case")?;
+    }
+    Ok(())
 }
 
 pub(crate) fn evidence_is_actionable_case_lead(evidence: &crate::legal::EvidenceRecord) -> bool {
@@ -769,6 +817,10 @@ pub(crate) fn apply_autonomous_investigator_staffing(
                     && !investigation
                         .subjects()
                         .contains(&EntityRef::Character(record.id()))
+                    && state
+                        .legal
+                        .case_witness_for(investigation_id, record.id())
+                        .is_none()
             })
             .filter_map(|record| {
                 record
@@ -821,6 +873,16 @@ fn validate_investigator_assignment_dependencies(
         return Err(InvestigationError::InvestigatorIsCaseSubject {
             investigation: investigation_id,
             investigator: investigator_id,
+        });
+    }
+    if let Some(witness) = state
+        .legal
+        .case_witness_for(investigation_id, investigator_id)
+    {
+        return Err(InvestigationError::InvestigatorIsCaseWitness {
+            investigation: investigation_id,
+            investigator: investigator_id,
+            witness: witness.id(),
         });
     }
     if investigator.organization() != Some(investigation.owner()) {
@@ -990,6 +1052,14 @@ fn validate_evidence_draft(
     if draft.discovered_at > state.now() {
         return Err(InvestigationError::DiscoveryInFuture);
     }
+    ensure_evidence_prosecution_recusal_capacity(
+        state,
+        draft.investigation,
+        draft.subject,
+        draft.strength,
+        draft.reliability,
+        draft.admissibility,
+    )?;
     Ok(())
 }
 
@@ -1060,6 +1130,44 @@ impl ValidatedIncidentIntake {
                     witness: witness.character,
                     existing: existing.id(),
                 });
+            }
+            if let Some(witness) = &self.draft.witness {
+                match crate::legal::witness_system::case_witness_role_conflict(
+                    state,
+                    shelf,
+                    witness.character,
+                ) {
+                    Some(
+                        crate::legal::witness_system::CaseWitnessRoleConflict::LeadInvestigator,
+                    ) => {
+                        return Err(InvestigationError::WitnessIsLeadInvestigator {
+                            investigation: shelf,
+                            character: witness.character,
+                        });
+                    }
+                    Some(
+                        crate::legal::witness_system::CaseWitnessRoleConflict::AssignedProsecutor(
+                            case,
+                        ),
+                    ) => {
+                        return Err(InvestigationError::WitnessIsAssignedProsecutor {
+                            investigation: shelf,
+                            character: witness.character,
+                            case,
+                        });
+                    }
+                    None => {}
+                }
+            }
+            for evidence in &self.draft.evidence {
+                ensure_evidence_prosecution_recusal_capacity(
+                    state,
+                    shelf,
+                    evidence.subject,
+                    evidence.strength,
+                    evidence.reliability,
+                    evidence.admissibility,
+                )?;
             }
             let adds_incident_context = self
                 .draft

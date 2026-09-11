@@ -6,9 +6,10 @@ use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+use crate::legal::witness_system::{WitnessError, validate_register_case_witness};
 use crate::legal::{
-    Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    InvestigationDraft,
+    Admissibility, ArrestDraft, CaseWitnessDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+    EvidenceStrength, InvestigationDraft, WitnessCooperation,
 };
 use crate::registry::Registry;
 use crate::world::world_system::{
@@ -138,11 +139,24 @@ struct ArrestRecordWire {
 #[test]
 fn prosecution_referrals_reject_evidence_about_another_person_in_the_same_police_case() {
     let mut fixture = fixture();
+    let unrelated_character = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unrelated Case Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("unrelated character fixture should validate");
     let unrelated = add_evidence(
         &mut fixture.state,
         fixture.police,
         fixture.investigation,
-        fixture.lead,
+        unrelated_character,
         EvidenceKind::Surveillance,
     );
     let opening_error = match validate_open_prosecution_case(
@@ -517,6 +531,421 @@ fn open_case(fixture: &mut Fixture) -> ProsecutionCaseId {
         .expect("prosecution case should validate")
         .commit(&mut fixture.state)
         .expect("prosecution case should commit")
+}
+
+#[test]
+fn prosecution_rejects_defendant_as_their_own_prosecutor() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x5E1F_C45E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Conflict Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let office = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Conflict Prosecutor".to_owned(),
+            kind: OrganizationKind::Prosecutor,
+        },
+    )
+    .expect("prosecutor fixture should validate");
+    let defendant = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Prosecutor Defendant".to_owned(),
+            organization: Some(office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(90))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("defendant fixture should validate");
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Prosecutor self-conflict case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(defendant)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    let first = add_evidence(
+        &mut state,
+        police,
+        investigation,
+        defendant,
+        EvidenceKind::Document,
+    );
+    let second = add_evidence(
+        &mut state,
+        police,
+        investigation,
+        defendant,
+        EvidenceKind::KnownAssociation,
+    );
+    let arrest = validate_arrest(
+        &registry,
+        &state,
+        ArrestDraft {
+            character: defendant,
+            investigation,
+            evidence: BTreeSet::from([first, second]),
+        },
+    )
+    .expect("arrest should validate")
+    .commit(&mut state)
+    .expect("arrest should commit");
+
+    assert_eq!(
+        validate_open_prosecution_case(
+            &state,
+            ProsecutionCaseDraft {
+                arrest,
+                prosecutor_office: office,
+                prosecutor: defendant,
+                evidence: BTreeSet::from([first, second]),
+            },
+        )
+        .err()
+        .expect("a defendant must never prosecute their own case"),
+        ProsecutionError::ProsecutorIsDefendant {
+            prosecutor: defendant,
+            defendant,
+        }
+    );
+    validate_state(&state).expect("rejected self-prosecution must preserve valid state");
+    validate_invariants(&state);
+}
+
+#[test]
+fn source_case_subject_cannot_open_prosecution_as_prosecutor() {
+    let mut fixture = fixture();
+    add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.lead,
+        EvidenceKind::Surveillance,
+    );
+
+    assert_eq!(
+        validate_open_prosecution_case(&fixture.state, opening_draft(&fixture))
+            .err()
+            .expect("an actionable source-case subject cannot prosecute the same case"),
+        ProsecutionError::ProsecutorIsCaseSubject {
+            prosecutor: fixture.lead,
+            investigation: fixture.investigation,
+        }
+    );
+    validate_state(&fixture.state)
+        .expect("rejected subject-prosecutor conflict must preserve canonical state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn named_source_case_witness_cannot_open_prosecution_as_prosecutor() {
+    let mut fixture = fixture();
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.lead,
+            subject: EntityRef::Character(fixture.defendant),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("prosecutor may be a factual witness before taking a prosecution role")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+
+    assert_eq!(
+        validate_open_prosecution_case(&fixture.state, opening_draft(&fixture))
+            .err()
+            .expect("a source-case witness cannot prosecute that case"),
+        ProsecutionError::ProsecutorIsCaseWitness {
+            prosecutor: fixture.lead,
+            investigation: fixture.investigation,
+        }
+    );
+    validate_state(&fixture.state).expect("rejected witness-prosecutor conflict must stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn assigned_prosecutor_cannot_be_registered_as_source_case_witness() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+
+    assert_eq!(
+        validate_register_case_witness(
+            &fixture.state,
+            CaseWitnessDraft {
+                investigation: fixture.investigation,
+                witness: fixture.lead,
+                subject: EntityRef::Character(fixture.defendant),
+                cooperation: WitnessCooperation::Reluctant,
+            },
+        )
+        .expect_err("an assigned prosecutor cannot become a factual witness in the source case"),
+        WitnessError::WitnessIsAssignedProsecutor {
+            investigation: fixture.investigation,
+            witness: fixture.lead,
+            case,
+        }
+    );
+    validate_state(&fixture.state).expect("rejected prosecutor-witness conflict must stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn actionable_evidence_against_assigned_prosecutor_recuses_review_for_restaffing() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    let backup = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Conflict-Free Backup Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(70))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("backup prosecutor fixture should validate");
+
+    let conflict_evidence = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.lead,
+        EvidenceKind::Surveillance,
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("source investigation should persist")
+            .subjects()
+            .contains(&EntityRef::Character(fixture.lead)),
+        "actionable evidence must promote the prosecutor into the source case subject set"
+    );
+    let reviewing = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("prosecution review should persist");
+    assert_eq!(reviewing.assigned_prosecutor(), None);
+    assert_eq!(reviewing.version(), 2);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .all(|reviewing| reviewing.id() != case)
+    );
+    assert_eq!(
+        validate_supplement_prosecution_case(
+            &fixture.state,
+            ProsecutionReferralDraft {
+                prosecution_case: case,
+                evidence: BTreeSet::from([fixture.supplemental_evidence]),
+            },
+        )
+        .err()
+        .expect("recused review cannot perform prosecution work until restaffed"),
+        ProsecutionError::CaseUnstaffed { case }
+    );
+
+    let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
+        .expect("office should deterministically restaff after evidence-driven recusal");
+    assert_eq!(staffed, vec![(case, backup)]);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("restaffed case should persist")
+            .assigned_prosecutor(),
+        Some(backup)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_evidence(conflict_evidence)
+            .is_some(),
+        "the causative evidence remains authoritative after recusal"
+    );
+    validate_state(&fixture.state).expect("evidence-driven prosecutor recusal must stay valid");
+    validate_invariants(&fixture.state);
+
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("recused and restaffed prosecution should build a save"),
+    )
+    .expect("recused and restaffed prosecution should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_prosecution_case(case)
+            .expect("restored prosecution should persist")
+            .assigned_prosecutor(),
+        Some(backup)
+    );
+    validate_state(&restored).expect("restored prosecutor recusal state must remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn former_prosecutor_may_become_source_case_witness_after_review_ends_in_same_minute() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    validate_decline_prosecution_case(&fixture.state, case)
+        .expect("prosecution decline should validate")
+        .commit(&mut fixture.state)
+        .expect("prosecution decline should commit");
+
+    let witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.lead,
+            subject: EntityRef::Character(fixture.defendant),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("a former prosecutor may become a witness after the current review role ends")
+    .commit(&mut fixture.state)
+    .expect("post-review witness registration should commit");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .case_witness_for(fixture.investigation, fixture.lead)
+            .map(|record| record.id()),
+        Some(witness)
+    );
+    validate_state(&fixture.state)
+        .expect("same-minute post-review witness history must remain persistence-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn prosecution_staffing_and_autonomy_skip_source_case_witnesses() {
+    let mut fixture = fixture();
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.lead,
+            subject: EntityRef::Character(fixture.defendant),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("lead prosecutor may be a witness before any prosecution assignment")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let opening_prosecutor = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Opening Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(60))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("opening prosecutor fixture should validate");
+    let backup = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Independent Backup Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(70))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("backup prosecutor fixture should validate");
+    let case = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest: fixture.arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: opening_prosecutor,
+            evidence: arrest_evidence_set(&fixture),
+        },
+    )
+    .expect("non-witness prosecutor should open the case")
+    .commit(&mut fixture.state)
+    .expect("case opening should commit");
+
+    fixture
+        .state
+        .legal
+        .release_prosecution_case_prosecutor_for_detention(case, opening_prosecutor);
+    assert_eq!(
+        validate_assign_prosecutor(&fixture.state, case, fixture.lead)
+            .expect_err("direct staffing must reject the source-case witness"),
+        ProsecutionStaffingError::ProsecutorIsCaseWitness {
+            case,
+            prosecutor: fixture.lead,
+        }
+    );
+    let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
+        .expect("autonomous staffing should skip witness-conflicted prosecutors");
+    assert_eq!(staffed, vec![(case, backup)]);
+    validate_state(&fixture.state).expect("restaffed witness-conflict state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_prosecution_staffing_prefers_lower_active_caseload_before_skill() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    let backup = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Available Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(70))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("backup prosecutor should validate");
+    let record = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("staffed prosecution case should persist");
+
+    assert_eq!(
+        find_autonomous_prosecutor(&fixture.state, record),
+        Some(backup),
+        "an idle qualified prosecutor should be preferred over a stronger attorney already carrying review work"
+    );
+    validate_invariants(&fixture.state);
 }
 
 #[test]

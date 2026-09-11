@@ -14,6 +14,28 @@ use crate::operations::{
 };
 use crate::world::BusinessOwner;
 
+/// A person who is the direct subject of the operation. These objectives require the crew and
+/// target to be distinct people: surveillance, coercion, and extraction cannot meaningfully use
+/// the subject as one of the actors carrying out the same operation.
+pub(crate) const fn character_objective_target(
+    objective: &OperationObjective,
+) -> Option<CharacterId> {
+    match objective {
+        OperationObjective::GatherInformation {
+            target: EntityRef::Character(character),
+        }
+        | OperationObjective::Frighten {
+            target: EntityRef::Character(character),
+        } => Some(*character),
+        OperationObjective::FreeDetainee { target } => Some(*target),
+        OperationObjective::AcquireProperty { .. }
+        | OperationObjective::GatherInformation { .. }
+        | OperationObjective::ObtainCash { .. }
+        | OperationObjective::Frighten { .. }
+        | OperationObjective::DisruptBusiness { .. } => None,
+    }
+}
+
 /// Effective objective result after applying a practical blocker. A blocker is only authored for
 /// a base result that would otherwise achieve something; tactical failure remains tactical
 /// failure and therefore carries no redundant practical-failure explanation.

@@ -536,6 +536,16 @@ impl LegalState {
             {
                 return false;
             }
+            if self
+                .indexes
+                .investigations
+                .active_by_owner
+                .get(&investigation.owner())
+                .is_some_and(|ids| ids.contains(&investigation.id()))
+                != (investigation.status() == InvestigationStatus::Active)
+            {
+                return false;
+            }
             if let Some(investigator) = investigation.lead_investigator()
                 && !self
                     .indexes
@@ -545,6 +555,19 @@ impl LegalState {
                     .is_some_and(|ids| ids.contains(&investigation.id()))
             {
                 return false;
+            }
+        }
+        for (owner, investigations) in &self.indexes.investigations.active_by_owner {
+            for investigation in investigations {
+                if !self
+                    .investigations
+                    .get(investigation)
+                    .is_some_and(|record| {
+                        record.status() == InvestigationStatus::Active && record.owner() == *owner
+                    })
+                {
+                    return false;
+                }
             }
         }
         true

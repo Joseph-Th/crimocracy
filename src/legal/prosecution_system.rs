@@ -49,6 +49,23 @@ pub enum ProsecutionError {
         prosecutor: CharacterId,
         office: OrganizationId,
     },
+    #[error("prosecutor {prosecutor} cannot prosecute defendant {defendant}")]
+    ProsecutorIsDefendant {
+        prosecutor: CharacterId,
+        defendant: CharacterId,
+    },
+    #[error("prosecutor {prosecutor} is a named witness in source investigation {investigation}")]
+    ProsecutorIsCaseWitness {
+        prosecutor: CharacterId,
+        investigation: InvestigationId,
+    },
+    #[error(
+        "prosecutor {prosecutor} is an actionable subject of source investigation {investigation}"
+    )]
+    ProsecutorIsCaseSubject {
+        prosecutor: CharacterId,
+        investigation: InvestigationId,
+    },
     #[error("prosecutor {0} is detained")]
     DetainedProsecutor(CharacterId),
     #[error("prosecutor {0} has no LegalKnowledge capability")]
@@ -154,6 +171,25 @@ pub enum ProsecutionStaffingError {
     },
     #[error("character {0} is not an eligible prosecutor for this case")]
     InvalidProsecutor(CharacterId),
+    #[error("character {prosecutor} cannot prosecute themself in case {case}")]
+    ProsecutorIsDefendant {
+        case: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    },
+    #[error(
+        "character {prosecutor} is a named witness in the source investigation for case {case}"
+    )]
+    ProsecutorIsCaseWitness {
+        case: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    },
+    #[error(
+        "character {prosecutor} is an actionable subject of the source investigation for case {case}"
+    )]
+    ProsecutorIsCaseSubject {
+        case: ProsecutionCaseId,
+        prosecutor: CharacterId,
+    },
     #[error("character {0} is detained and cannot staff a prosecution case")]
     DetainedProsecutor(CharacterId),
     #[error("prosecution case {case} changed after staffing validation")]
@@ -301,6 +337,27 @@ fn validate_prosecutor_assignment_dependencies(
             prosecutor: assigned,
         });
     }
+    if prosecutor == case_record.defendant() {
+        return Err(ProsecutionStaffingError::ProsecutorIsDefendant { case, prosecutor });
+    }
+    if state
+        .legal
+        .case_witness_for(case_record.source_investigation(), prosecutor)
+        .is_some()
+    {
+        return Err(ProsecutionStaffingError::ProsecutorIsCaseWitness { case, prosecutor });
+    }
+    if state
+        .legal
+        .get_investigation(case_record.source_investigation())
+        .is_some_and(|investigation| {
+            investigation
+                .subjects()
+                .contains(&EntityRef::Character(prosecutor))
+        })
+    {
+        return Err(ProsecutionStaffingError::ProsecutorIsCaseSubject { case, prosecutor });
+    }
     let record = state
         .world
         .get_character(prosecutor)
@@ -329,27 +386,11 @@ pub(crate) fn apply_autonomous_prosecution_staffing(
         .collect();
     let mut staffed = Vec::new();
     for case in cases {
-        let office = state
+        let case_record = state
             .legal
             .get_prosecution_case(case)
-            .ok_or(ProsecutionStaffingError::MissingCase(case))?
-            .prosecutor_office();
-        let prosecutor = state
-            .world
-            .characters_in_organization(office)
-            .filter(|record| {
-                state
-                    .legal
-                    .active_arrest_for_character(record.id())
-                    .is_none()
-            })
-            .filter_map(|record| {
-                record
-                    .capability(CapabilityKind::LegalKnowledge)
-                    .map(|rating| (record.id(), rating.value()))
-            })
-            .min_by_key(|(prosecutor, capability)| (Reverse(*capability), *prosecutor))
-            .map(|(prosecutor, _)| prosecutor);
+            .ok_or(ProsecutionStaffingError::MissingCase(case))?;
+        let prosecutor = find_autonomous_prosecutor(state, case_record);
         let Some(prosecutor) = prosecutor else {
             continue;
         };
@@ -357,6 +398,57 @@ pub(crate) fn apply_autonomous_prosecution_staffing(
         staffed.push((case, prosecutor));
     }
     Ok(staffed)
+}
+
+/// Deterministic office staffing prefers the least-loaded eligible prosecutor, then legal
+/// capability, then stable character identity. This keeps one highly skilled attorney from
+/// absorbing every reviewing case while equally available colleagues remain idle, without
+/// inventing an unsupported hard caseload cap.
+fn find_autonomous_prosecutor(
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+) -> Option<CharacterId> {
+    state
+        .world
+        .characters_in_organization(case.prosecutor_office())
+        .filter(|record| record.id() != case.defendant())
+        .filter(|record| {
+            state
+                .legal
+                .case_witness_for(case.source_investigation(), record.id())
+                .is_none()
+        })
+        .filter(|record| {
+            state
+                .legal
+                .get_investigation(case.source_investigation())
+                .is_some_and(|investigation| {
+                    !investigation
+                        .subjects()
+                        .contains(&EntityRef::Character(record.id()))
+                })
+        })
+        .filter(|record| {
+            state
+                .legal
+                .active_arrest_for_character(record.id())
+                .is_none()
+        })
+        .filter_map(|record| {
+            record
+                .capability(CapabilityKind::LegalKnowledge)
+                .map(|rating| {
+                    let workload = state
+                        .legal
+                        .reviewing_prosecution_cases_for_prosecutor(record.id())
+                        .count();
+                    (record.id(), rating.value(), workload)
+                })
+        })
+        .min_by_key(|(prosecutor, capability, workload)| {
+            (*workload, Reverse(*capability), *prosecutor)
+        })
+        .map(|(prosecutor, _, _)| prosecutor)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -558,7 +650,13 @@ fn validate_opening_dependencies(
             draft.prosecutor_office,
         ));
     }
-    let prosecutor_record = validate_prosecutor(state, draft.prosecutor_office, draft.prosecutor)?;
+    let prosecutor_record = validate_prosecutor(
+        state,
+        draft.prosecutor_office,
+        draft.prosecutor,
+        arrest.character(),
+        arrest.investigation(),
+    )?;
     Ok(ReferralDependencies {
         defendant: arrest.character(),
         source_investigation: arrest.investigation(),
@@ -783,7 +881,13 @@ fn validate_source_case_and_office(
         ));
     }
     let prosecutor = assigned_prosecutor(case)?;
-    validate_prosecutor(state, case.prosecutor_office(), prosecutor)?;
+    validate_prosecutor(
+        state,
+        case.prosecutor_office(),
+        prosecutor,
+        case.defendant(),
+        case.source_investigation(),
+    )?;
     Ok(())
 }
 
@@ -796,6 +900,8 @@ fn validate_prosecutor(
     state: &AppState,
     office: OrganizationId,
     prosecutor: CharacterId,
+    defendant: CharacterId,
+    source_investigation: InvestigationId,
 ) -> Result<&crate::world::CharacterRecord, ProsecutionError> {
     let lead = state
         .world
@@ -803,6 +909,36 @@ fn validate_prosecutor(
         .ok_or(ProsecutionError::MissingProsecutor(prosecutor))?;
     if lead.organization() != Some(office) {
         return Err(ProsecutionError::InvalidProsecutor { prosecutor, office });
+    }
+    if prosecutor == defendant {
+        return Err(ProsecutionError::ProsecutorIsDefendant {
+            prosecutor,
+            defendant,
+        });
+    }
+    if state
+        .legal
+        .case_witness_for(source_investigation, prosecutor)
+        .is_some()
+    {
+        return Err(ProsecutionError::ProsecutorIsCaseWitness {
+            prosecutor,
+            investigation: source_investigation,
+        });
+    }
+    if state
+        .legal
+        .get_investigation(source_investigation)
+        .is_some_and(|investigation| {
+            investigation
+                .subjects()
+                .contains(&EntityRef::Character(prosecutor))
+        })
+    {
+        return Err(ProsecutionError::ProsecutorIsCaseSubject {
+            prosecutor,
+            investigation: source_investigation,
+        });
     }
     if state
         .legal
@@ -1065,7 +1201,13 @@ fn validate_resolution_dependencies(
         ));
     }
     let prosecutor = assigned_prosecutor(case)?;
-    validate_prosecutor(state, case.prosecutor_office(), prosecutor)?;
+    validate_prosecutor(
+        state,
+        case.prosecutor_office(),
+        prosecutor,
+        case.defendant(),
+        case.source_investigation(),
+    )?;
     // Resolving the case emits defendant-named artifacts; an inactive defendant cannot be
     // meaningfully reviewed, so resolution must not proceed against one.
     let _ = state

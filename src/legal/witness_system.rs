@@ -3,7 +3,7 @@
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
-    WitnessStatementId,
+    ProsecutionCaseId, WitnessStatementId,
 };
 use crate::core::state::AppState;
 use crate::core::version::{
@@ -39,6 +39,21 @@ pub enum WitnessError {
     WitnessIsCaseSubject {
         investigation: InvestigationId,
         witness: CharacterId,
+    },
+    #[error(
+        "character {witness} leads investigation {investigation} and cannot also be its named witness"
+    )]
+    WitnessIsLeadInvestigator {
+        investigation: InvestigationId,
+        witness: CharacterId,
+    },
+    #[error(
+        "character {witness} is assigned to prosecution case {case} sourced from investigation {investigation} and cannot also be its named witness"
+    )]
+    WitnessIsAssignedProsecutor {
+        investigation: InvestigationId,
+        witness: CharacterId,
+        case: ProsecutionCaseId,
     },
     #[error(
         "character {witness} cannot be registered to testify about unrelated subject {subject:?} in investigation {investigation}"
@@ -227,6 +242,22 @@ fn validate_registration_dependencies(
             witness: draft.witness,
         });
     }
+    match case_witness_role_conflict(state, draft.investigation, draft.witness) {
+        Some(CaseWitnessRoleConflict::LeadInvestigator) => {
+            return Err(WitnessError::WitnessIsLeadInvestigator {
+                investigation: draft.investigation,
+                witness: draft.witness,
+            });
+        }
+        Some(CaseWitnessRoleConflict::AssignedProsecutor(case)) => {
+            return Err(WitnessError::WitnessIsAssignedProsecutor {
+                investigation: draft.investigation,
+                witness: draft.witness,
+                case,
+            });
+        }
+        None => {}
+    }
     if !is_entity_present(state, draft.subject) {
         return Err(WitnessError::MissingEntity(draft.subject));
     }
@@ -248,6 +279,34 @@ fn validate_registration_dependencies(
         });
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaseWitnessRoleConflict {
+    LeadInvestigator,
+    AssignedProsecutor(ProsecutionCaseId),
+}
+
+/// Current institutional roles that conflict with acting as a named factual witness in the same
+/// investigation. Historical investigator/prosecutor participation is not represented here:
+/// once the current role ends, a later witness registration may be legitimate.
+pub(crate) fn case_witness_role_conflict(
+    state: &AppState,
+    investigation: InvestigationId,
+    character: CharacterId,
+) -> Option<CaseWitnessRoleConflict> {
+    if state
+        .legal
+        .get_investigation(investigation)
+        .is_some_and(|record| record.lead_investigator() == Some(character))
+    {
+        return Some(CaseWitnessRoleConflict::LeadInvestigator);
+    }
+    state
+        .legal
+        .reviewing_prosecution_cases_for_prosecutor(character)
+        .find(|case| case.source_investigation() == investigation)
+        .map(|case| CaseWitnessRoleConflict::AssignedProsecutor(case.id()))
 }
 
 #[derive(Debug)]
@@ -339,8 +398,24 @@ impl ValidatedWitnessStatement {
             .legal
             .get_investigation(case_witness.investigation())
             .expect("validated witness investigation must exist");
-        ensure_version_can_advance_by(investigation.version(), 2, "investigation")
-            .map_err(Into::into)
+        ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
+        crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+            state,
+            case_witness.investigation(),
+            case_witness.subject(),
+            resolve_witness_strength(
+                self.testimony,
+                self.draft.confidence,
+                case_witness.cooperation(),
+            ),
+            resolve_witness_reliability(
+                self.testimony,
+                self.draft.confidence,
+                case_witness.cooperation(),
+            ),
+            Admissibility::Unknown,
+        )?;
+        Ok(())
     }
 
     pub fn commit(self, state: &mut AppState) -> Result<WitnessStatementOutcome, WitnessError> {
@@ -464,6 +539,22 @@ pub fn validate_record_witness_statement(
         .get_investigation(case_witness.investigation())
         .expect("validated witness investigation must exist");
     ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
+    crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+        state,
+        case_witness.investigation(),
+        case_witness.subject(),
+        resolve_witness_strength(
+            registry.legal().witness_testimony(),
+            draft.confidence,
+            case_witness.cooperation(),
+        ),
+        resolve_witness_reliability(
+            registry.legal().witness_testimony(),
+            draft.confidence,
+            case_witness.cooperation(),
+        ),
+        Admissibility::Unknown,
+    )?;
     Ok(ValidatedWitnessStatement {
         draft,
         testimony: registry.legal().witness_testimony(),

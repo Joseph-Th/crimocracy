@@ -12,8 +12,9 @@ use crate::legal::investigation_work_execution::{
     validate_investigation_work_resolution_plan, validate_schedule_investigation_work,
 };
 use crate::legal::{
-    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength, InvestigationWorkDraft,
-    InvestigationWorkFocus, InvestigationWorkKind,
+    Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength,
+    InvestigationWorkCancellationReason, InvestigationWorkDraft, InvestigationWorkFocus,
+    InvestigationWorkKind, InvestigationWorkStatus,
 };
 use crate::world::world_system::{
     WorldError, insert_character, insert_organization, validate_reassign_character,
@@ -235,6 +236,153 @@ fn incident_intake_does_not_surface_case_knowledge_to_origin_organization() {
         "institutional intake alone must not notify the organization that caused the incident"
     );
     validate_invariants(&state);
+}
+
+#[test]
+fn actionable_evidence_against_current_lead_recuses_them_and_cancels_pending_work() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1A2D_1934);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Evidence Conflict Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let suspect = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Evidence Conflict Suspect".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("suspect fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Conflicted Detective", 90);
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Developing internal conflict".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(suspect)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    let source = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("source evidence should validate")
+    .commit(&mut state)
+    .expect("source evidence should commit");
+    validate_assign_investigator(&state, investigation, detective)
+        .expect("detective assignment should validate")
+        .commit(&mut state)
+        .expect("detective assignment should commit");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &state,
+        InvestigationWorkDraft {
+            investigation,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::Evidence(source),
+        },
+    )
+    .expect("detective work should validate")
+    .commit(&mut state)
+    .expect("detective work should commit");
+
+    let promotion = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(detective),
+            origin: None,
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("conflict-producing evidence should still be admissible case development")
+    .commit(&mut state)
+    .expect("evidence should atomically recuse the conflicted lead");
+
+    let investigation_record = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("investigation should persist");
+    assert_eq!(investigation_record.lead_investigator(), None);
+    assert!(
+        investigation_record
+            .subjects()
+            .contains(&EntityRef::Character(detective))
+    );
+    assert!(
+        state
+            .legal()
+            .active_investigations_without_lead()
+            .any(|candidate| candidate == investigation)
+    );
+    let cancelled = state
+        .legal()
+        .get_investigation_work(work)
+        .expect("pending work should persist as cancelled history");
+    assert_eq!(cancelled.status(), InvestigationWorkStatus::Cancelled);
+    assert_eq!(
+        cancelled
+            .cancellation()
+            .expect("conflicted work should record cancellation provenance")
+            .reason(),
+        InvestigationWorkCancellationReason::InvestigatorBecameCaseSubject(promotion)
+    );
+    validate_state(&state).expect("evidence-driven recusal must preserve canonical state");
+    validate_invariants(&state);
+
+    let save = build_save(&registry, &state).expect("evidence-driven recusal should build a save");
+    let restored = restore_save(&registry, save).expect("evidence-driven recusal should restore");
+    let restored_work = restored
+        .legal()
+        .get_investigation_work(work)
+        .expect("cancelled work should survive restore");
+    assert_eq!(restored_work.status(), InvestigationWorkStatus::Cancelled);
+    assert_eq!(
+        restored_work
+            .cancellation()
+            .expect("restored conflicted work should retain cancellation provenance")
+            .reason(),
+        InvestigationWorkCancellationReason::InvestigatorBecameCaseSubject(promotion)
+    );
+    assert_eq!(
+        restored
+            .legal()
+            .get_investigation(investigation)
+            .expect("restored investigation should persist")
+            .lead_investigator(),
+        None
+    );
+    validate_invariants(&restored);
 }
 
 #[test]

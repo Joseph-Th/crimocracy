@@ -145,6 +145,10 @@ fn validate_investigation_staffing(
         || investigation
             .subjects()
             .contains(&EntityRef::Character(investigator))
+        || state
+            .legal
+            .case_witness_for(investigation.id(), investigator)
+            .is_some()
     {
         return Err(invalid_investigation_staffing(investigation));
     }
@@ -455,6 +459,14 @@ fn validate_cancelled_work(
                     && arrest.arrested_at() == cancellation.cancelled_at()
             })
         }
+        crate::legal::InvestigationWorkCancellationReason::InvestigatorBecameCaseSubject(
+            evidence_id,
+        ) => state.legal.get_evidence(evidence_id).is_some_and(|evidence| {
+            evidence.investigation() == work.investigation()
+                && evidence.subject() == EntityRef::Character(work.investigator())
+                && crate::legal::investigation_system::evidence_is_actionable_case_lead(evidence)
+                && evidence.discovered_at() <= cancellation.cancelled_at()
+        }),
         crate::legal::InvestigationWorkCancellationReason::WitnessBecameCaseSubject(evidence_id) => {
             work.kind() == InvestigationWorkKind::WitnessInterview
                 && work
@@ -577,6 +589,12 @@ pub(super) fn validate_case_witnesses(
             || !case_witness_subject_was_relevant_at_registration(state, investigation, witness)
             || witness.registered_at() < investigation.opened_at()
             || witness.registered_at() > state.now()
+            || crate::legal::witness_system::case_witness_role_conflict(
+                state,
+                witness.investigation(),
+                witness.witness(),
+            )
+            .is_some()
             || witness.statements().len() > 1
             || u32::from(witness.interview_attempts()) != completed_interviews
             // Registration starts at version 1. Every completed interview and every persisted
