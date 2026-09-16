@@ -777,6 +777,8 @@ impl RegistryBuilder {
                 kind,
             ));
         }
+        // Exhaustive over both work kinds so a new kind forces an explicit interview-outcome
+        // contract here instead of silently falling into a rejection arm.
         match (kind, spec.interview_outcome) {
             (InvestigationWorkKind::WitnessInterview, Some(interview))
                 if spec.connected_margin < interview.medium_margin
@@ -785,10 +787,12 @@ impl RegistryBuilder {
                     && interview.low_confidence < interview.medium_confidence
                     && interview.medium_confidence < interview.high_confidence
                     && interview.high_confidence <= 100 => {}
-            (InvestigationWorkKind::EvidenceReview, None) => {}
-            _ => {
+            (InvestigationWorkKind::WitnessInterview, Some(_))
+            | (InvestigationWorkKind::WitnessInterview, None)
+            | (InvestigationWorkKind::EvidenceReview, Some(_)) => {
                 return Err(RegistryBuildError::InvalidInvestigationWorkInterviewOutcome(kind));
             }
+            (InvestigationWorkKind::EvidenceReview, None) => {}
         }
         if self
             .investigation_work

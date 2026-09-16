@@ -66,11 +66,11 @@ fn validate_before_start_abort(
     seen: &mut AbortArtifactSets<'_>,
 ) -> Result<(), StateValidationError> {
     match (abort.cause(), abort.artifacts()) {
-        (OperationAbortCause::AuthorityOrder, None) => {
+        (OperationAbortCause::AuthorityOrder, Some(artifacts)) => {
             if operation.started_at().is_some() || operation.resolution_due_at().is_some() {
                 return Err(invalid_abort(operation));
             }
-            Ok(())
+            validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
         }
         (OperationAbortCause::DeadlineMissed, Some(artifacts)) => {
             if operation.started_at().is_some()
@@ -116,10 +116,10 @@ fn validate_before_start_abort(
             }
             validate_operation_abort_artifacts(state, operation, abort, artifacts, seen)
         }
-        (OperationAbortCause::AuthorityOrder, Some(_))
-        | (OperationAbortCause::DeadlineMissed, None)
+        (OperationAbortCause::DeadlineMissed, None)
         | (OperationAbortCause::OpportunityExpired(_), None)
         | (OperationAbortCause::ObjectiveUnavailable(_), None)
+        | (OperationAbortCause::AuthorityOrder, None)
         | (OperationAbortCause::Decision(_), _)
         | (OperationAbortCause::PoliceArrival(_), _)
         | (OperationAbortCause::ParticipantDetained(_), None) => Err(invalid_abort(operation)),

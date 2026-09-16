@@ -377,9 +377,9 @@ fn observe_investigation_and_arrests(
         u32::try_from(outcome.resolved_investigation_work.len()).unwrap_or(u32::MAX),
     );
 
-    // Witness interviews are institutional work against the case's named witness: hidden
-    // from the organization until its channels read the case, but counted as audit evidence
-    // of the testimony chain.
+    // [DEV AUDIT] Witness interviews are institutional work against the case's named
+    // witness: hidden from the organization until its channels read the case, but counted
+    // as audit evidence of the testimony chain.
     metrics.witness_interviews_scheduled = metrics.witness_interviews_scheduled.saturating_add(
         u32::try_from(outcome.scheduled_witness_interviews.len()).unwrap_or(u32::MAX),
     );

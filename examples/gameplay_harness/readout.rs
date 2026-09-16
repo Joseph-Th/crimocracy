@@ -351,7 +351,9 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
         );
     }
     // Player-visible street standing so a leader can see what the city thinks.
-    // Only touched impressions exist; absent means unremarkable baseline.
+    // Only touched impressions exist; absent means unremarkable baseline. Scores print as
+    // qualitative bands, never exact numerics: the player learns standing through Standing
+    // report prose, not through a hidden-subsystem dashboard.
     let registry = scenario.registry;
     for audience in [
         crimocracy::reputation::AudienceKind::Underworld,
@@ -373,7 +375,22 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
             );
             let baseline = registry.reputation().baseline();
             if score != baseline {
-                println!("  - Standing {audience:?}/{dimension:?}: {score} (baseline {baseline})");
+                let band = match score.cmp(&baseline) {
+                    std::cmp::Ordering::Greater => match score - baseline {
+                        1..=3 => "slightly elevated",
+                        4..=7 => "markedly elevated",
+                        _ => "severely elevated",
+                    },
+                    std::cmp::Ordering::Less => match baseline - score {
+                        1..=3 => "slightly diminished",
+                        4..=7 => "markedly diminished",
+                        _ => "severely diminished",
+                    },
+                    std::cmp::Ordering::Equal => {
+                        unreachable!("touched standing differs from baseline")
+                    }
+                };
+                println!("  - Standing {audience:?}/{dimension:?}: {band}.");
             }
         }
     }

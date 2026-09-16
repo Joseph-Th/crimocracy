@@ -14,7 +14,9 @@ use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
 };
-use crate::operations::operation_economics::{resolve_cash_proceeds, resolve_property_proceeds};
+use crate::operations::operation_economics::{
+    downgrade_empty_take_outcome, resolve_cash_proceeds, resolve_property_proceeds,
+};
 use crate::operations::operation_execution::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
     resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
@@ -399,14 +401,24 @@ fn validate_authored_operation_resolution(
     let expected_police_response_arrived =
         has_police_response_arrived_by(state, operation, resolution.resolved_at());
     let expected_property_proceeds =
-        resolve_property_proceeds(registry, state, operation, resolution.objective_outcome())
+        resolve_property_proceeds(registry, state, operation, expected_outcome)
             .map_err(|_| invalid_operation_definition(operation))?;
     let expected_cash_proceeds =
-        resolve_cash_proceeds(registry, state, operation, resolution.objective_outcome()).map_err(
-            |_| StateValidationError::InvalidOperationCashProceeds {
+        resolve_cash_proceeds(registry, state, operation, expected_outcome).map_err(|_| {
+            StateValidationError::InvalidOperationCashProceeds {
                 operation: operation.id(),
-            },
-        )?;
+            }
+        })?;
+    // An empty-handed take persists `Partial` while its proceeds re-derive from the
+    // pre-downgrade tactical outcome. Mirror the planning rule exactly: the downgrade
+    // consumes the proceeds derived above, and the comparisons below keep checking those
+    // proceeds rather than a partial-basis re-derivation that would contradict them.
+    let expected_outcome = downgrade_empty_take_outcome(
+        execution,
+        expected_outcome,
+        expected_property_proceeds.proceeds.as_ref(),
+        expected_cash_proceeds.proceeds.as_ref(),
+    );
     if factors.variance().unsigned_abs() > execution.variance_limit()
         || factors.time_pressure() > execution.max_time_pressure()
         || factors.approach_adjustment()

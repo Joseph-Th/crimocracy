@@ -22,6 +22,27 @@ pub enum EntityRef {
     Enterprise(EnterpriseId),
 }
 
+impl EntityRef {
+    /// The character this reference names, if it names one. Centralizes the character-vs-other
+    /// split so new variants fail review at one site instead of drifting across duplicated
+    /// eleven-arm matches in every consumer.
+    pub(crate) const fn as_character(self) -> Option<CharacterId> {
+        match self {
+            Self::Character(character) => Some(character),
+            Self::Organization(_)
+            | Self::Neighborhood(_)
+            | Self::Business(_)
+            | Self::Operation(_)
+            | Self::Investigation(_)
+            | Self::Evidence(_)
+            | Self::FinancialAccount(_)
+            | Self::DecisionRequest(_)
+            | Self::Mandate(_)
+            | Self::Enterprise(_) => None,
+        }
+    }
+}
+
 pub(crate) fn is_entity_present(state: &AppState, entity: EntityRef) -> bool {
     match entity {
         EntityRef::Organization(id) => state.world.get_organization(id).is_some(),

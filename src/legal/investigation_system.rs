@@ -17,6 +17,7 @@ use crate::legal::{
 };
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -279,9 +280,11 @@ pub fn validate_open_investigation(
 }
 
 /// Evidence quality sufficient to turn a referenced entity into an actionable case subject.
-/// This is intentionally below the custody corroboration bar, but material the
-/// institution itself still considers Questionable is only a lead to develop, not enough to
-/// keep a person permanently tracked as an identified suspect.
+/// The per-record floor matches the custody quality floor; custody additionally demands the
+/// authored independent-source count with at least one Strong source, so actionability is the
+/// tracking gate while corroboration remains the detention gate. Material the institution
+/// itself still considers Questionable is only a lead to develop, not enough to keep a person
+/// permanently tracked as an identified suspect.
 pub(crate) fn evidence_assessment_is_actionable_case_lead(
     strength: crate::legal::EvidenceStrength,
     reliability: crate::legal::EvidenceReliability,
@@ -559,14 +562,22 @@ pub(crate) fn apply_cold_case_decay(
         // its subjects are held. An at-large lead does not defeat the inactivity rule forever;
         // without new evidence or work for the authored window, the file shelves and releases
         // its investigator seat until a later incident reactivates it.
+        //
+        // Custody is scoped to this case's own arrests: a subject detained under an unrelated
+        // file does not clear this investigation's live work. A case with live custody of its
+        // own cannot suspend either, so it defers to a later pass instead of aborting the
+        // whole batch on one detained file.
+        let detained_here: BTreeSet<_> = state
+            .legal
+            .arrests_for_investigation(investigation)
+            .filter(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
+            .map(|arrest| arrest.character())
+            .collect();
         let identified_subjects = actionable_character_subjects(state, record);
         if !identified_subjects.is_empty()
-            && identified_subjects.iter().all(|character| {
-                state
-                    .legal
-                    .active_arrest_for_character(*character)
-                    .is_some()
-            })
+            && identified_subjects
+                .iter()
+                .all(|character| detained_here.contains(character))
         {
             validate_transition_investigation(
                 state,
@@ -575,6 +586,11 @@ pub(crate) fn apply_cold_case_decay(
             )?
             .commit(state)?;
             closed.push(investigation);
+            continue;
+        }
+        if !detained_here.is_empty() {
+            // Live custody under this file blocks suspension, so the case waits for custody
+            // to resolve instead of aborting the whole decay batch on one detained file.
             continue;
         }
         validate_transition_investigation(state, investigation, InvestigationTransition::Suspend)?
@@ -600,19 +616,7 @@ fn actionable_character_subjects(
             if !evidence_is_actionable_case_lead(evidence) {
                 return None;
             }
-            match evidence.subject() {
-                EntityRef::Character(character) => Some(character),
-                EntityRef::Organization(_)
-                | EntityRef::Neighborhood(_)
-                | EntityRef::Business(_)
-                | EntityRef::Operation(_)
-                | EntityRef::Investigation(_)
-                | EntityRef::Evidence(_)
-                | EntityRef::FinancialAccount(_)
-                | EntityRef::DecisionRequest(_)
-                | EntityRef::Mandate(_)
-                | EntityRef::Enterprise(_) => None,
-            }
+            evidence.subject().as_character()
         })
         .collect()
 }

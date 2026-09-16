@@ -1581,7 +1581,10 @@ fn delegated_recruitment_token_rejects_organization_policy_aba_without_mutation(
     let error = token
         .commit(&mut fixture.state)
         .expect_err("stale delegated recruitment must not survive change-away-and-back ABA");
-    assert_eq!(error, RecruitmentError::StaleRecruitmentPolicy);
+    assert!(
+        matches!(error, RecruitmentError::StaleRecruitmentPolicy { .. }),
+        "stale policy rejection must name the superseded authority, got {error:?}"
+    );
     assert_eq!(
         fixture
             .state

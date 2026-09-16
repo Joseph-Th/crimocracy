@@ -499,6 +499,118 @@ fn repeat_scores_on_one_target_deplete_and_recover_after_the_recency_window() {
 }
 
 #[test]
+fn fully_depleted_target_downgrades_achieved_take_to_partial() {
+    let (registry, mut state, _police, _neighborhood, first) =
+        make_exposed_business_operation_fixture(false);
+    let organization = state
+        .operations()
+        .get_operation(first)
+        .expect("first operation should persist")
+        .responsible_organization();
+    let (business, leader, specialist) = {
+        let record = state
+            .operations()
+            .get_operation(first)
+            .expect("first operation should persist");
+        let OperationObjective::AcquireProperty {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("fixture operation must target business property");
+        };
+        let specialist = *record
+            .roles()
+            .get(&RoleKind::EntrySpecialist)
+            .expect("fixture entry specialist should persist");
+        (*business, record.leader(), specialist)
+    };
+
+    // Resolve the fixture operation first so the depletion index has its opening entry.
+    run_tick(&registry, &mut state);
+    state.advance_clock(SimDuration::from_minutes(45));
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("first take should resolve");
+    validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("first take should validate")
+        .commit(&mut state)
+        .expect("first take should commit");
+
+    // Grind the same target with immediate follow-ups. Each unrecovered hit compounds the
+    // authored penalty, so repeated farming must eventually leave nothing to carry home.
+    let mut emptied_plan = None;
+    for index in 0..40 {
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: format!("Depleting burglary {index}"),
+                kind: OperationKind::Burglary,
+                responsible_organization: organization,
+                leader,
+                objective: OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(business),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([
+                    (RoleKind::Coordinator, leader),
+                    (RoleKind::EntrySpecialist, specialist),
+                ]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            },
+        )
+        .expect("follow-up burglary should validate")
+        .commit(&mut state)
+        .expect("follow-up burglary should commit");
+        run_tick(&registry, &mut state);
+        state.advance_clock(SimDuration::from_minutes(45));
+        let plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(12, 0),
+        )
+        .expect("follow-up take should resolve");
+        if plan.outcome.property_proceeds_plan.proceeds.is_none() {
+            emptied_plan = Some(plan);
+            break;
+        }
+        validate_operation_resolution_plan(&registry, &state, plan)
+            .expect("depleting take should validate")
+            .commit(&mut state)
+            .expect("depleting take should commit");
+    }
+    let emptied = emptied_plan.expect("repeated takes must eventually empty the target");
+    // Tactical execution still succeeded, but with no proceeds the recorded outcome is
+    // Partial rather than an Achieved score that carried nothing home.
+    assert_eq!(
+        emptied.outcome.objective_outcome,
+        OperationObjectiveOutcome::Partial
+    );
+    assert!(
+        emptied
+            .outcome
+            .property_proceeds_plan
+            .depleted_by_recent_take
+    );
+    assert!(emptied.narrative.summary.contains("lighter than usual"));
+    validate_operation_resolution_plan(&registry, &state, emptied)
+        .expect("emptied take should validate")
+        .commit(&mut state)
+        .expect("emptied take should commit");
+    validate_state_against_registry(&registry, &state)
+        .expect("emptied take history should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn zero_value_repeat_score_does_not_create_phantom_depletion() {
     let (registry, mut state, _police, _neighborhood, first) =
         make_exposed_business_operation_fixture(false);

@@ -27,7 +27,9 @@ pub enum ReputationError {
 
 /// The single canonical reputation mutation: applies one clamped delta to one dimension of
 /// one audience's impression of one organization. Records are created at the authored
-/// baseline on first touch; zero-delta calls leave state untouched.
+/// baseline on first touch; zero-delta calls leave state untouched. This is the allowed
+/// single-owner direct mutation: consequence passes compose through it on one thread with no
+/// interleaving version to pin, so no `Validated*` token is needed.
 pub fn apply_reputation_delta(
     registry: &Registry,
     state: &mut AppState,
@@ -169,14 +171,18 @@ pub(crate) fn apply_operation_reputation_consequences(
             OperationExposureLevel::None | OperationExposureLevel::Trace
         )
     {
-        shifts.extend(resolve_shift(
-            registry,
-            state,
-            organization,
-            AudienceKind::Businesses,
-            ReputationDimension::Fear,
-            config.violent_businesses_fear(),
-        ));
+        // Visible violence frightens the street as well as its shops: residents who saw it
+        // carry the same fear business owners do.
+        for audience in [AudienceKind::Businesses, AudienceKind::Residents] {
+            shifts.extend(resolve_shift(
+                registry,
+                state,
+                organization,
+                audience,
+                ReputationDimension::Fear,
+                config.violent_businesses_fear(),
+            ));
+        }
     }
     commit_consequence_shifts(
         registry,

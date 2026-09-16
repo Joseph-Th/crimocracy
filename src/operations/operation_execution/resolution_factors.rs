@@ -310,7 +310,9 @@ pub(crate) fn resolve_investigation_target_neighborhoods(
             // manager subjects make one enterprise inquiry tax unrelated districts.
             resolve_target_neighborhoods(state, vec![EntityRef::Enterprise(origin)])
         }
-        _ => {
+        // Institution-authored files carry no origination link, and no other origin shape
+        // reaches this derivation validated: fall back to the case's tracked subjects.
+        None | Some(_) => {
             resolve_target_neighborhoods(state, investigation.subjects().iter().copied().collect())
         }
     }

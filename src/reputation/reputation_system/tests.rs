@@ -167,7 +167,7 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
         })
         .map(|record| record.audience())
         .collect();
-    assert_eq!(touched.len(), 3);
+    assert_eq!(touched.len(), 4);
     for audience in &touched {
         let record = state
             .reputation
@@ -184,12 +184,12 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
                 registry.reputation().baseline()
                     + registry.reputation().identifying_exposure_police_fear() as u8
             ),
-            AudienceKind::Businesses => assert_eq!(
+            AudienceKind::Businesses | AudienceKind::Residents => assert_eq!(
                 record.score(ReputationDimension::Fear),
                 registry.reputation().baseline()
                     + registry.reputation().violent_businesses_fear() as u8
             ),
-            AudienceKind::Residents | AudienceKind::Political | AudienceKind::Press => {
+            AudienceKind::Political | AudienceKind::Press => {
                 panic!("violent success must not touch {:?}", record.audience())
             }
         }
@@ -736,7 +736,7 @@ fn non_player_organizations_keep_their_standing_private() {
 
     // The reputation moved, but no Standing report exists: this organization is not
     // the player, and rival street standing is not free information.
-    assert_eq!(state.reputation.records().count(), 3);
+    assert_eq!(state.reputation.records().count(), 4);
     assert_eq!(standing_reports(&state, organization), 0);
     validate_invariants(&state);
 }

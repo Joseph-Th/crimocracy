@@ -205,19 +205,7 @@ impl LegalState {
         let investigation_id = record.investigation();
         let evidence_id = record.id();
         let actionable_character = if evidence_is_actionable_case_lead(&record) {
-            match record.subject() {
-                EntityRef::Character(character) => Some(character),
-                EntityRef::Organization(_)
-                | EntityRef::Neighborhood(_)
-                | EntityRef::Business(_)
-                | EntityRef::Operation(_)
-                | EntityRef::Investigation(_)
-                | EntityRef::Evidence(_)
-                | EntityRef::FinancialAccount(_)
-                | EntityRef::DecisionRequest(_)
-                | EntityRef::Mandate(_)
-                | EntityRef::Enterprise(_) => None,
-            }
+            record.subject().as_character()
         } else {
             None
         };

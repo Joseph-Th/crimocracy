@@ -112,6 +112,11 @@ pub enum FinanceError {
     },
 }
 
+/// Opens one zero-balance account after checking its owner exists. This is the finance
+/// owner's single-record primitive (like the relationship setter): multi-account openings
+/// for composite transactions go through `validate_open_accounts` so a stale plan cannot
+/// strand half-opened books. Adapters, setup, and tests use this same path; there is no
+/// separate test-only mint.
 pub fn insert_account(
     state: &mut AppState,
     draft: FinancialAccountDraft,

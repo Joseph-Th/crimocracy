@@ -279,9 +279,10 @@ fn capture_witness_pressure_outcome(
                         | crimocracy::legal::WitnessCooperation::Hostile
                 )
             });
-        // Cooperation is intentionally audit-only here. The player-facing after-action above can
-        // report what the crew attempted and observed, but no information channel reveals the
-        // witness owner's hidden cooperation state after the pressure operation.
+        // [DEV AUDIT] Cooperation is intentionally audit-only here. The player-facing
+        // after-action above can report what the crew attempted and observed, but no
+        // information channel reveals the witness owner's hidden cooperation state after
+        // the pressure operation.
     }
     Ok(())
 }
@@ -723,6 +724,9 @@ fn capture_initial_case_diagnostics(
     }
 }
 
+/// [DEV AUDIT] Diagnostic contract metrics only. These reads observe hidden world truth
+/// (rival enterprise counts, cycle economics, case work) for run validation and must never
+/// feed acting policy, which decides from player-visible information alone.
 fn capture_campaign_audit_metrics(scenario: &Scenario, metrics: &mut RunMetrics) {
     metrics.rival_home_enterprises =
         resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)

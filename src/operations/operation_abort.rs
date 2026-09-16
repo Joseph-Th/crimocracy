@@ -101,6 +101,22 @@ pub struct ValidatedOperationAbort {
     history: Option<ValidatedHistoryEvent>,
 }
 
+impl std::fmt::Debug for ValidatedOperationAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedOperationAbort")
+            .field("operation", &self.operation)
+            .field(
+                "expected_operation_version",
+                &self.expected_operation_version,
+            )
+            .field("expected_status", &self.expected_status)
+            .field("aborted_at", &self.aborted_at)
+            .field("phase", &self.phase)
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ValidatedOperationAbort {
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = Vec::new();
@@ -219,14 +235,21 @@ impl ValidatedOperationAbort {
                 cause: self.cause,
             });
         }
-        if let OperationAbortCause::ParticipantDetained(character) = self.cause
-            && !record.participants().contains(&character)
-        {
-            return Err(OperationError::InvalidAbortCause {
-                operation: self.operation,
-                status: record.status(),
-                cause: self.cause,
-            });
+        if let OperationAbortCause::ParticipantDetained(character) = self.cause {
+            // Abort causality must name a real detention, not merely a participant:
+            // persistence validation independently requires an arrest of this character at
+            // the abort minute, so a cause without live custody would commit now and fail
+            // restore later. The canonical arrest path commits the arrest immediately
+            // before this token, so custody is live here even though it postdates the
+            // earlier validation-time phase mapping.
+            let detained = state.legal.active_arrest_for_character(character).is_some();
+            if !record.participants().contains(&character) || !detained {
+                return Err(OperationError::InvalidAbortCause {
+                    operation: self.operation,
+                    status: record.status(),
+                    cause: self.cause,
+                });
+            }
         }
         if let OperationAbortCause::OpportunityExpired(opportunity) = self.cause
             && !opportunity_expiry_can_abort(state, record, opportunity)
@@ -365,12 +388,10 @@ fn validate_operation_abort(
     };
 
     let (information, police_activity_information, report, history) = match (phase, cause) {
-        (OperationAbortPhase::BeforeStart, OperationAbortCause::AuthorityOrder) => {
-            (None, None, None, None)
-        }
         (
             OperationAbortPhase::BeforeStart,
-            OperationAbortCause::DeadlineMissed
+            OperationAbortCause::AuthorityOrder
+            | OperationAbortCause::DeadlineMissed
             | OperationAbortCause::OpportunityExpired(_)
             | OperationAbortCause::ObjectiveUnavailable(_)
             | OperationAbortCause::ParticipantDetained(_),
@@ -503,10 +524,21 @@ fn build_abort_summary(
     cause: OperationAbortCause,
 ) -> Result<String, OperationError> {
     match cause {
-        OperationAbortCause::AuthorityOrder => Ok(format!(
-            "{} was aborted by leadership after execution began. Objective resolution was not completed.",
-            operation.title()
-        )),
+        OperationAbortCause::AuthorityOrder => {
+            // A pre-start cancellation never reached the objective, so it reads as a
+            // stand-down rather than an interrupted execution.
+            if operation.status() == OperationStatus::Authorized {
+                Ok(format!(
+                    "{} was cancelled by leadership before execution began. The crew stood down without attempting the objective.",
+                    operation.title()
+                ))
+            } else {
+                Ok(format!(
+                    "{} was aborted by leadership after execution began. Objective resolution was not completed.",
+                    operation.title()
+                ))
+            }
+        }
         OperationAbortCause::Decision(decision) => {
             let decision = state.decisions.get_decision(decision).ok_or(
                 OperationError::InvalidAbortArtifacts {

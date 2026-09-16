@@ -85,7 +85,7 @@ fn is_payroll_due(now: SimTime) -> bool {
 }
 
 /// Autonomous payroll pass over every active criminal organization, in stable organization-ID
-/// order. A short treasury is distributed evenly across active members, to the cent, instead of
+/// order. A short treasury is distributed evenly across current organization members, to the cent, instead of
 /// turning an almost-funded payroll into a total nonpayment. Financial mutation remains atomic.
 ///
 /// Unexpected validation or allocation failures are propagated. Silently skipping an owed
@@ -126,17 +126,14 @@ fn apply_organization_payroll(
     funding: &[FinancialAccountId],
 ) -> Result<Option<PayrollOutcome>, PayrollError> {
     let upkeep = registry.upkeep();
-    // Detained members cannot work and are excluded from the wage bill, matching how every
-    // other custody-facing system treats detention; wages resume on release.
+    // Payroll is a standing membership cost, not compensation sampled from the member's exact
+    // availability at midnight. Custody blocks work while it lasts, but it does not end
+    // membership or erase the day's wage obligation. Filtering on current detention here would
+    // make a one-minute arrest spanning the boundary forgive a full day's wage while an all-day
+    // detention ending one minute earlier would owe the full amount.
     let mut members: Vec<(CharacterId, Option<CharacterId>)> = state
         .world
         .characters_in_organization(organization)
-        .filter(|record| {
-            state
-                .legal
-                .active_arrest_for_character(record.id())
-                .is_none()
-        })
         .map(|record| (record.id(), record.supervisor()))
         .collect();
     members.sort_unstable_by_key(|(member, _)| *member);
@@ -311,7 +308,9 @@ fn allocate_member_payments(
 
 /// First member eligible for a remainder cent on this payroll day. Day one begins at the
 /// lowest stable member ID; later days advance one slot, so no persistent CharacterId ordering
-/// advantage survives repeated sub-cent-per-member shortfalls.
+/// advantage survives repeated sub-cent-per-member shortfalls. The rotation is keyed to the
+/// current headcount, so joining or leaving members reset the fairness window rather than
+/// inheriting rounding history from a different crew size.
 fn payroll_remainder_offset(now: SimTime, member_count: usize) -> usize {
     debug_assert!(member_count > 0);
     debug_assert!(is_payroll_due(now));
@@ -433,6 +432,9 @@ fn validate_shortfall_consequences(
     let maximum_increment = registry.upkeep().shortfall_resentment();
     let mut relationships = Vec::new();
     for (member, supervisor, paid) in members {
+        // Leadership absorbs its own shortfall: the boss has no supervisor to resent, as the
+        // residual claimant of an underfunded organization. Only supervised members convert
+        // an uncovered wage share into supervisor-directed resentment.
         let Some(supervisor) = supervisor else {
             continue;
         };

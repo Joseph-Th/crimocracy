@@ -23,6 +23,16 @@ pub struct AttentionSettings {
     pub(crate) auto_pause: BTreeSet<AttentionClass>,
 }
 
+impl AttentionClass {
+    /// Attention classes that may interrupt the player. Routine and Notable surface in reports;
+    /// only Exception and Crisis may pause the game. One owner for the allowlist so the
+    /// preference setter, stored-preference validation, and decision-attention checks cannot
+    /// drift apart when the vocabulary grows.
+    pub const fn can_auto_pause(self) -> bool {
+        matches!(self, Self::Exception | Self::Crisis)
+    }
+}
+
 impl AttentionSettings {
     pub fn is_auto_pause_enabled(&self, attention: AttentionClass) -> bool {
         self.auto_pause.contains(&attention)

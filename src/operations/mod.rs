@@ -277,6 +277,9 @@ pub enum OperationConstraint {
 }
 
 /// Standing reactions backed by police-response and leadership-follow-up mechanics.
+/// A plan with no police contingency pushes through an arrival silently: the arrival still
+/// applies its difficulty and exposure penalties, but the crew neither aborts nor asks
+/// leadership. Silence is therefore consent to absorb police pressure, not immunity to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationContingency {
     AbortOnPoliceArrivalBeforeEntry,

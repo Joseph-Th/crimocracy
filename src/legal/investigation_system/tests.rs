@@ -3338,6 +3338,193 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
 }
 
 #[test]
+fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xDECA_7717);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Scoped Custody Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Scoped Custody Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let member = |state: &mut AppState, name: &str| {
+        insert_character(
+            state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: Some(criminal),
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("member fixture should validate")
+    };
+    let held = member(&mut state, "Held Member");
+    let partner = member(&mut state, "At Large Partner");
+    let cleared = member(&mut state, "Cleared Member");
+    let unrelated = member(&mut state, "Unrelated Member");
+    let origin = crate::operations::operation_system::validate_authorize_operation(
+        &registry,
+        &state,
+        crate::operations::OperationDraft {
+            title: "Origin surveillance".to_owned(),
+            kind: crate::operations::OperationKind::Surveillance,
+            responsible_organization: criminal,
+            leader: held,
+            objective: crate::operations::OperationObjective::GatherInformation {
+                target: EntityRef::Organization(criminal),
+            },
+            approach: crate::operations::OperationApproach::Covert,
+            roles: BTreeMap::from([(crate::operations::RoleKind::Surveillance, held)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("origin operation should validate")
+    .commit(&mut state)
+    .expect("origin operation should commit");
+    // One originated case per subject set, each with actionable evidence behind its subjects.
+    let open_case = |state: &mut AppState,
+                     title: &str,
+                     subjects: Vec<CharacterId>|
+     -> crate::core::id::InvestigationId {
+        let evidence = subjects
+            .iter()
+            .map(|subject| crate::legal::IncidentEvidenceDraft {
+                subject: EntityRef::Character(*subject),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::KnownAssociation,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: state.now(),
+            })
+            .collect();
+        validate_incident_intake(
+            state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: title.to_owned(),
+                subjects: subjects
+                    .iter()
+                    .copied()
+                    .map(EntityRef::Character)
+                    .chain(std::iter::once(EntityRef::Operation(origin)))
+                    .collect(),
+                evidence,
+                origin: Some(EntityRef::Operation(origin)),
+                witness: None,
+            },
+        )
+        .expect("identified incident intake should validate")
+        .commit(state)
+        .expect("identified incident intake should commit")
+        .investigation
+    };
+    let partial = open_case(&mut state, "Partial custody inquiry", vec![held, partner]);
+    let cleared_case = open_case(&mut state, "Cleared inquiry", vec![cleared, unrelated]);
+    let borrowed = open_case(&mut state, "Borrowed custody inquiry", vec![unrelated]);
+    let arrest_under = |state: &mut AppState,
+                        investigation: crate::core::id::InvestigationId,
+                        subject: CharacterId| {
+        let evidence: BTreeSet<_> = state
+            .legal()
+            .get_investigation(investigation)
+            .expect("case should persist")
+            .evidence()
+            .iter()
+            .copied()
+            .filter(|evidence| {
+                state
+                    .legal()
+                    .get_evidence(*evidence)
+                    .is_some_and(|record| record.subject() == EntityRef::Character(subject))
+            })
+            .collect();
+        assert!(evidence.len() >= 1, "arrest requires case evidence to cite");
+        // A second independent exhibit supplies the corroboration the custody bar needs.
+        let corroborating = validate_add_evidence(
+            state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(subject),
+                origin: Some(EntityRef::Operation(origin)),
+                kind: EvidenceKind::FinancialRecord,
+                strength: EvidenceStrength::Corroborating,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: state.now(),
+            },
+        )
+        .expect("corroborating arrest evidence should validate")
+        .commit(state)
+        .expect("corroborating arrest evidence should commit");
+        let mut cited = evidence;
+        cited.insert(corroborating);
+        crate::legal::arrest_system::validate_arrest(
+            &registry,
+            state,
+            crate::legal::ArrestDraft {
+                character: subject,
+                investigation,
+                evidence: cited,
+            },
+        )
+        .expect("evidence-backed arrest should validate")
+        .commit(state)
+        .expect("evidence-backed arrest should commit")
+    };
+    // `held` is detained under the partial case while `partner` stays at large; `cleared`
+    // is detained under its own case; `unrelated` is detained under the cleared case, so
+    // the borrowed file holds no custody of its own.
+    arrest_under(&mut state, partial, held);
+    arrest_under(&mut state, cleared_case, cleared);
+    arrest_under(&mut state, cleared_case, unrelated);
+
+    state.advance_clock(SimDuration::from_minutes(121));
+    let decayed = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect("detained files must defer without poisoning the decay batch");
+    assert_eq!(decayed.closed, vec![cleared_case]);
+    assert_eq!(decayed.suspended, vec![borrowed]);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(partial)
+            .map(|record| record.status()),
+        Some(InvestigationStatus::Active),
+        "a case with live custody of its own waits for custody to resolve"
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(borrowed)
+            .map(|record| record.status()),
+        Some(InvestigationStatus::Suspended),
+        "custody under an unrelated file does not clear this investigation"
+    );
+    validate_state(&state).expect("scoped-custody decay state should validate");
+    validate_invariants(&state);
+}
+
+#[test]
 fn weak_evidence_does_not_promote_a_character_to_identified_suspect() {
     let registry = build_registry();
     let mut state = AppState::new(0x0DD_555);

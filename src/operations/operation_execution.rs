@@ -46,7 +46,8 @@ use crate::legal::jurisdiction_system::{
 use crate::legal::patrol_system::PatrolPresenceSnapshot;
 use crate::operations::operation_economics::{
     CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, depleted_take_clause,
-    held_cash_clause, held_property_clause, resolve_cash_proceeds, resolve_property_proceeds,
+    downgrade_empty_take_outcome, held_cash_clause, held_property_clause, resolve_cash_proceeds,
+    resolve_property_proceeds,
 };
 use crate::operations::operation_objective::{
     blocker_clause, effective_objective_outcome, pressureable_witness_targets,
@@ -401,6 +402,12 @@ pub(crate) fn decide_operation_resolution(
     let property_proceeds_plan =
         resolve_property_proceeds(registry, state, record, objective_outcome)?;
     let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
+    let objective_outcome = downgrade_empty_take_outcome(
+        registry.get_operation(record.kind()).execution(),
+        objective_outcome,
+        property_proceeds_plan.proceeds.as_ref(),
+        cash_proceeds_plan.proceeds.as_ref(),
+    );
     let surveillance =
         decide_surveillance_intelligence(registry, state, record, objective_outcome)?;
     // Every after-action summary leads with the operation title so executive-brief entries stay

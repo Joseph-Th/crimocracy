@@ -18,7 +18,34 @@ use crate::finance::helpers::apply_basis_point_multiplier;
 use crate::operations::{
     OperationKind, OperationObjective, OperationObjectiveOutcome, OperationPropertyProceedsRecord,
 };
-use crate::registry::Registry;
+use crate::registry::{OperationExecutionDefinition, Registry};
+
+/// A take that carries nothing home is not a full achievement even when the crew executed
+/// cleanly: depletion (or dust rounding) left no proceeds to hold. Downgrades an `Achieved`
+/// take-kind outcome to `Partial` so the outcome, reputation, and narrative agree the crew came
+/// home empty-handed. Kinds without authored take economics keep their tactical outcome.
+///
+/// One owner for the rule: resolution planning and registry-aware invariant re-derivation both
+/// consume it, so a persisted downgraded outcome re-derives exactly. Proceeds themselves stay
+/// derived from the pre-downgrade outcome — re-deriving them from `Partial` would apply the
+/// partial-recovery basis and contradict the persisted empty haul.
+pub(crate) fn downgrade_empty_take_outcome(
+    execution: &OperationExecutionDefinition,
+    outcome: OperationObjectiveOutcome,
+    property_proceeds: Option<&OperationPropertyProceedsRecord>,
+    cash_proceeds: Option<&crate::operations::OperationCashProceedsRecord>,
+) -> OperationObjectiveOutcome {
+    let takes = execution.property_proceeds().is_some() || execution.cash_proceeds().is_some();
+    if takes
+        && outcome == OperationObjectiveOutcome::Achieved
+        && property_proceeds.is_none()
+        && cash_proceeds.is_none()
+    {
+        OperationObjectiveOutcome::Partial
+    } else {
+        outcome
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TakeEconomics {

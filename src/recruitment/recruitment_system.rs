@@ -173,8 +173,13 @@ pub enum RecruitmentError {
         manager: CharacterId,
         policy: ApprovalPolicy,
     },
-    #[error("independent recruitment policy changed after validation")]
-    StaleRecruitmentPolicy,
+    #[error(
+        "independent recruitment policy changed after validation; expected {expected:?}, found {found:?}"
+    )]
+    StaleRecruitmentPolicy {
+        expected: ResolvedPolicy,
+        found: ResolvedPolicy,
+    },
     #[error(transparent)]
     Delegation(#[from] DelegationError),
     #[error(transparent)]
@@ -695,12 +700,18 @@ impl ValidatedRecruitmentAttempt {
                 PolicyKind::IndependentRecruitment,
             )?;
             if current_policy != guard.policy {
-                return Err(RecruitmentError::StaleRecruitmentPolicy);
+                return Err(RecruitmentError::StaleRecruitmentPolicy {
+                    expected: guard.policy,
+                    found: current_policy,
+                });
             }
             if current_policy.setting
                 != PolicySetting::IndependentRecruitment(guard.required_policy)
             {
-                return Err(RecruitmentError::StaleRecruitmentPolicy);
+                return Err(RecruitmentError::StaleRecruitmentPolicy {
+                    expected: guard.policy,
+                    found: current_policy,
+                });
             }
         }
         validate_plan_state_snapshot(state, &self.plan)?;

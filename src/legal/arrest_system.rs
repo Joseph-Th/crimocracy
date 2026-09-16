@@ -100,7 +100,7 @@ pub enum ArrestError {
         arrest: ArrestId,
     },
     #[error(
-        "character {character} was released from arrest {prior_arrest} in investigation {investigation} at {released_at:?}; renewed custody requires a later custody minute and qualifying evidence from the release minute or later"
+        "character {character} was released from arrest {prior_arrest} in investigation {investigation} at {released_at:?}; renewed custody requires a later custody minute and qualifying evidence from the release minute or later that the prior detention never cited"
     )]
     RepeatCustodyWithoutNewEvidence {
         character: CharacterId,
@@ -276,12 +276,6 @@ impl ValidatedArrest {
         )?;
         self.prosecution_release.ensure_current(state)?;
         self.counsel_representation_ends.ensure_current(state)?;
-        for preemption in &self.operation_preemptions {
-            if let Some(decision) = &preemption.decision_cancellation {
-                decision.ensure_current(state)?;
-            }
-            preemption.abort.ensure_current(state)?;
-        }
 
         let mut id_budget = vec![(IdKind::Arrest, 1)];
         for preemption in &self.operation_preemptions {
@@ -294,6 +288,30 @@ impl ValidatedArrest {
             .ids
             .next_arrest()
             .expect("arrest ID was preflighted before custody mutation");
+        // Custody becomes live before its preemptions commit: operation detention aborts
+        // re-check custody at commit time, and persistence validation independently requires
+        // an arrest of the detainee at the abort minute. Landing the arrest first keeps the
+        // composed transaction internally consistent — a preemption token can never commit
+        // against custody that does not exist yet. Only this commit's own insert intervenes
+        // between the stability checks above and the freshness checks below, so a failure
+        // here means the canonical state contract is broken rather than merely stale.
+        state.legal.insert_arrest(ArrestRecord {
+            id,
+            character: self.draft.character,
+            authority,
+            investigation: self.draft.investigation,
+            evidence: self.draft.evidence,
+            arrested_at: state.now(),
+            released_at: None,
+            status: ArrestStatus::Detained,
+            version: 1,
+        });
+        for preemption in &self.operation_preemptions {
+            if let Some(decision) = &preemption.decision_cancellation {
+                decision.ensure_current(state)?;
+            }
+            preemption.abort.ensure_current(state)?;
+        }
         for preemption in self.operation_preemptions {
             if let Some(decision) = preemption.decision_cancellation {
                 decision.commit_preflighted(state);
@@ -308,17 +326,6 @@ impl ValidatedArrest {
         }
         self.prosecution_release.commit_preflighted(state);
         self.counsel_representation_ends.commit_preflighted(state);
-        state.legal.insert_arrest(ArrestRecord {
-            id,
-            character: self.draft.character,
-            authority,
-            investigation: self.draft.investigation,
-            evidence: self.draft.evidence,
-            arrested_at: state.now(),
-            released_at: None,
-            status: ArrestStatus::Detained,
-            version: 1,
-        });
         Ok(id)
     }
 }
@@ -512,7 +519,7 @@ fn latest_released_arrest_for_case_character(
         .filter(|arrest| {
             arrest.character() == character && arrest.status() == ArrestStatus::Released
         })
-        .max_by_key(|arrest| arrest.id())
+        .max_by_key(|arrest| (arrest.released_at(), arrest.id()))
 }
 
 fn validate_repeat_custody_evidence(
@@ -545,14 +552,20 @@ fn repeat_custody_without_new_evidence(
     let released_at = prior
         .released_at()
         .expect("released arrest must retain its release instant");
-    (state.now() <= released_at
-        || !evidence.iter().any(|evidence| {
-            state
+    // Renewed custody needs materially new material: at least one cited record that the prior
+    // detention never cited, carrying a fresh observation claim from the release minute or
+    // later. Identity alone would let a held-back pre-release exhibit chain detentions, and
+    // freshness alone would let the same cited set re-arm custody whenever its timestamps
+    // cluster on the release minute. Both properties are caller-visible and unforgable through
+    // this path: new records arrive only through canonical evidence creation.
+    let novel = evidence.iter().any(|evidence| {
+        !prior.evidence().contains(evidence)
+            && state
                 .legal
                 .get_evidence(*evidence)
                 .is_some_and(|record| record.discovered_at() >= released_at)
-        }))
-    .then_some((prior.id(), released_at))
+    });
+    (state.now() <= released_at || !novel).then_some((prior.id(), released_at))
 }
 
 /// Custody is a stronger consequence than adding a subject to a case graph. Weak material or a
@@ -702,9 +715,30 @@ fn resolve_autonomous_arrest_candidate(
                 .map_or(evidence.id(), crate::legal::EvidenceRecord::id),
             None => evidence.id(),
         };
+        // Among several qualifying records from one source, cite the strongest account, not
+        // merely the oldest: a Corroborating record must not stand in for a Strong one from
+        // the same source. Evidence IDs break only exact strength/reliability ties.
+        let rank = (
+            evidence.strength(),
+            evidence.reliability(),
+            std::cmp::Reverse(evidence.id()),
+        );
         citations
             .entry(source)
-            .and_modify(|current| *current = (*current).min(citation))
+            .and_modify(|current| {
+                let current_record = state
+                    .legal
+                    .get_evidence(*current)
+                    .expect("autonomous citation must reference persisted evidence");
+                let current_rank = (
+                    current_record.strength(),
+                    current_record.reliability(),
+                    std::cmp::Reverse(current_record.id()),
+                );
+                if rank > current_rank {
+                    *current = citation;
+                }
+            })
             .or_insert(citation);
     }
     if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
@@ -749,9 +783,16 @@ pub(crate) fn arrest_evidence_meets_threshold(
 /// Single semantic predicate for evidence that may support custody. Runtime arrest validation,
 /// autonomous arrest selection, and persistence invariants all consume this owner so a save can
 /// never restore an arrest that the canonical transaction would reject.
+///
+/// Multi-source analysis adds no new independent fact (corroboration drops it), so it cannot
+/// qualify individually either: accepting it per-record while dropping it from the independent
+/// count would fail the same arrest with a confusing per-record pass followed by an aggregate
+/// rejection. Single-source derivatives still qualify on their own assessment; corroboration
+/// maps them back to their source.
 pub(crate) fn evidence_qualifies_for_custody(evidence: &crate::legal::EvidenceRecord) -> bool {
     evidence.admissibility() != crate::legal::Admissibility::Inadmissible
         && has_minimum_custody_quality(evidence.strength(), evidence.reliability())
+        && evidence.derived_from().len() <= 1
 }
 
 fn preemptible_operation_bookings_for_character(
@@ -893,24 +934,11 @@ pub fn apply_autonomous_evidence_arrests(
             continue;
         }
         let investigation_id = investigation.id();
-        case_subjects.extend(
-            investigation
-                .subjects()
-                .iter()
-                .filter_map(|subject| match subject {
-                    EntityRef::Character(character) => Some((investigation_id, *character)),
-                    EntityRef::Organization(_)
-                    | EntityRef::Neighborhood(_)
-                    | EntityRef::Business(_)
-                    | EntityRef::Operation(_)
-                    | EntityRef::Investigation(_)
-                    | EntityRef::Evidence(_)
-                    | EntityRef::FinancialAccount(_)
-                    | EntityRef::DecisionRequest(_)
-                    | EntityRef::Mandate(_)
-                    | EntityRef::Enterprise(_) => None,
-                }),
-        );
+        case_subjects.extend(investigation.subjects().iter().filter_map(|subject| {
+            subject
+                .as_character()
+                .map(|character| (investigation_id, character))
+        }));
     }
     if case_subjects.is_empty() {
         return Ok(Vec::new());

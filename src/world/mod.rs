@@ -57,6 +57,8 @@ impl OrganizationRecord {
     /// its monotone version. `ApprovalPolicy` is binary and policy versions advance only on real
     /// changes, so every increment is necessarily a toggle. Keeping this derivation with the
     /// organization record gives every historical authority validator the same rule.
+    /// A third `ApprovalPolicy` variant would silently break the parity inference below: it
+    /// must replace this derivation with a version-to-value journal instead.
     pub(crate) fn independent_recruitment_policy_at_version(
         &self,
         historical_version: u32,

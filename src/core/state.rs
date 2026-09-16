@@ -194,10 +194,7 @@ impl AppState {
         attention: AttentionClass,
         enabled: bool,
     ) -> Result<(), crate::core::attention::AttentionSettingsError> {
-        if !matches!(
-            attention,
-            AttentionClass::Exception | AttentionClass::Crisis
-        ) {
+        if !attention.can_auto_pause() {
             return Err(crate::core::attention::AttentionSettingsError::UnsupportedAutoPauseClass);
         }
         if enabled {

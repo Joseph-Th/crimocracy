@@ -6,6 +6,12 @@ use crate::build_registry;
 use crate::core::invariants::validate_invariants;
 use crate::core::time::{SimDuration, SimTime};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
+use crate::legal::arrest_system::validate_arrest;
+use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+use crate::legal::{
+    Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
+    InvestigationDraft,
+};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -187,6 +193,110 @@ fn funded_payroll_moves_wages_into_member_pockets() {
 }
 
 #[test]
+fn detention_does_not_erase_standing_daily_wage_obligation() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Payroll Custody Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Payroll custody test".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.member)]),
+        },
+    )
+    .expect("payroll custody investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("payroll custody investigation should commit");
+    let mut evidence = BTreeSet::new();
+    for kind in [EvidenceKind::Document, EvidenceKind::Fingerprint] {
+        let id = validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(fixture.member),
+                origin: None,
+                kind,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("payroll custody evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("payroll custody evidence should commit");
+        evidence.insert(id);
+    }
+    validate_arrest(
+        &registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.member,
+            investigation,
+            evidence,
+        },
+    )
+    .expect("payroll member detention should validate")
+    .commit(&mut fixture.state)
+    .expect("payroll member detention should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.member)
+            .is_some(),
+        "fixture member must still be detained when payroll runs"
+    );
+
+    let per_member = registry.upkeep().per_member_daily();
+    let owed = per_member.checked_mul(2).expect("two wages must fit money");
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        owed.cents(),
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.member)
+            .is_some(),
+        "fixture member must still be detained at the payroll boundary"
+    );
+
+    let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("detention must not invalidate standing payroll")
+        .into_iter()
+        .find(|outcome| outcome.organization() == fixture.organization)
+        .expect("staffed criminal organization must run payroll");
+    assert_eq!(outcome.owed(), owed);
+    assert_eq!(outcome.paid(), owed);
+    assert_eq!(outcome.short(), Money::ZERO);
+    let member_pocket = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.member))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("detained rostered member still receives the standing daily wage");
+    assert_eq!(member_pocket.balance(), per_member);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn accounted_funds_are_available_for_payroll_but_settlement_balances_are_not() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
@@ -303,7 +413,7 @@ fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
         "fresh resentment edge carries exactly the authored increment"
     );
 
-    // The available ten cents are split evenly across the two active members.
+    // The available ten cents are split evenly across the two current organization members.
     let pocket = fixture
         .state
         .finance
@@ -434,7 +544,7 @@ fn half_paid_wage_causes_half_of_full_shortfall_resentment() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
     let per_member = registry.upkeep().per_member_daily();
-    // Two active members split one wage evenly, leaving each exactly half paid. The boss has
+    // Two current organization members split one wage evenly, leaving each exactly half paid. The boss has
     // no supervisor, while the subordinate's relationship consequence should reflect the
     // severity of their own shortage rather than treating all underpayment as nonpayment.
     credit_account(

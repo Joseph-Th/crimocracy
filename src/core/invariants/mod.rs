@@ -416,10 +416,7 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
 
 fn validate_campaign(state: &AppState) -> Result<(), StateValidationError> {
     for attention in state.attention_settings().auto_pause.iter().copied() {
-        if !matches!(
-            attention,
-            AttentionClass::Exception | AttentionClass::Crisis
-        ) {
+        if !attention.can_auto_pause() {
             return Err(StateValidationError::InvalidAttentionPreference { attention });
         }
     }

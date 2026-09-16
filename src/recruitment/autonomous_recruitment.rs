@@ -214,6 +214,8 @@ fn prepare_recruitment_authorities(
 /// candidate vector is already ordered by relationship support and CharacterId, so finding its
 /// first live candidate is cheap and deterministic. The global comparison is repeated after every
 /// action because a consumed prospect can expose a materially weaker fallback for one manager.
+/// Highest relationship support acts first; manager, organization, and mandate IDs break only
+/// exact ties, so cross-organization contention is deterministic without favoring any side.
 fn select_next_recruitment_action(
     state: &AppState,
     authorities: &[PreparedRecruitmentAuthority],
@@ -235,16 +237,16 @@ fn select_next_recruitment_action(
             })?;
             Some((
                 (
-                    Reverse(candidate.relationship_support),
-                    authority.manager,
-                    authority.organization,
-                    authority.mandate,
+                    candidate.relationship_support,
+                    Reverse(authority.manager),
+                    Reverse(authority.organization),
+                    Reverse(authority.mandate),
                 ),
                 index,
                 candidate.character,
             ))
         })
-        .min_by_key(|(priority, _, _)| *priority)
+        .max_by_key(|(priority, _, _)| *priority)
         .map(|(_, index, candidate)| (index, candidate))
 }
 

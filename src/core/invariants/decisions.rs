@@ -1,6 +1,5 @@
 //! Release-safe structural validation for the decisions and delegation subsystems.
 
-use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::OperationId;
 use crate::core::invariants::StateValidationError;
@@ -93,13 +92,10 @@ fn validate_decision_definition(
             decision: decision.id(),
         });
     }
-    match decision.attention() {
-        AttentionClass::Exception | AttentionClass::Crisis => {}
-        AttentionClass::Routine | AttentionClass::Notable => {
-            return Err(StateValidationError::InvalidDecisionAttention {
-                decision: decision.id(),
-            });
-        }
+    if !decision.attention().can_auto_pause() {
+        return Err(StateValidationError::InvalidDecisionAttention {
+            decision: decision.id(),
+        });
     }
     if decision.requested_at() > state.now() {
         return Err(invalid_decision_chronology(decision));

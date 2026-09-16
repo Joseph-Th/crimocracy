@@ -26,6 +26,9 @@ pub enum ContactStatus {
     Terminated,
 }
 
+/// The social basis a contact was established on. This is an audit trail, not a live gate:
+/// disclosure validates the contact's own version and status, so a drifted relationship does
+/// not silently revoke the channel — termination is the explicit canonical path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactRelationshipSnapshot {
     from: CharacterId,

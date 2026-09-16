@@ -2060,3 +2060,217 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
     }
     crate::core::invariants::validate_invariants(&state);
 }
+
+#[test]
+fn owner_sweep_moves_till_cash_into_accounted_funds() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted destination should validate");
+    // Fund the till the way settlement does: credit operating against the settlement sink.
+    let seed = Money::from_cents(25_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seed till cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: seed.checked_neg().expect("seed must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: seed,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("till seed should validate")
+    .commit(&mut fixture.state)
+    .expect("till seed should commit");
+    let sweep = Money::from_cents(10_000);
+    validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: sweep,
+        },
+    )
+    .expect("owner sweep should validate")
+    .commit(&mut fixture.state)
+    .expect("owner sweep should commit");
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.operating)
+            .expect("operating account should persist")
+            .balance(),
+        Money::from_cents(15_000)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(destination)
+            .expect("destination account should persist")
+            .balance(),
+        sweep
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("swept economy should validate against the registry");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn profit_sweep_rejections_leave_state_unchanged() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted destination should validate");
+    let foreign_destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(fixture.business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("foreign destination should validate");
+    // Empty till: any positive sweep exceeds real liquidity. Validation is read-only,
+    // so these assertions pin balances rather than whole-state equality.
+    let balances_before: Vec<(FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    let error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: Money::from_cents(1),
+        },
+    )
+    .expect_err("sweep beyond till liquidity must reject");
+    assert!(matches!(
+        error,
+        BusinessProfitSweepError::InsufficientTillCash { .. }
+    ));
+    let error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: Money::ZERO,
+        },
+    )
+    .expect_err("non-positive sweep must reject");
+    assert!(matches!(error, BusinessProfitSweepError::NonPositiveAmount));
+    let error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination: foreign_destination,
+            amount: Money::from_cents(1),
+        },
+    )
+    .expect_err("sweep into a business-owned account must reject");
+    assert!(matches!(
+        error,
+        BusinessProfitSweepError::DestinationOwnerMismatch { .. }
+    ));
+    let balances_after: Vec<(FinancialAccountId, i64)> = fixture
+        .state
+        .finance()
+        .accounts()
+        .map(|account| (account.id(), account.balance().cents()))
+        .collect();
+    assert_eq!(balances_before, balances_after);
+}
+
+#[test]
+fn profit_sweep_rejects_stale_economy_after_settlement() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted destination should validate");
+    let seed = Money::from_cents(50_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seed till cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: seed.checked_neg().expect("seed must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: seed,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("till seed should validate")
+    .commit(&mut fixture.state)
+    .expect("till seed should commit");
+    let validated = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: Money::from_cents(5_000),
+        },
+    )
+    .expect("sweep should validate against a funded till");
+    // A cycle settling under the held token bumps the economy version, so commit must
+    // reject rather than withdraw against a moved window.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("cycle should decide");
+    validate_business_cycle_plan(&fixture.state, plan)
+        .expect("cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("cycle should commit");
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("stale sweep must reject after settlement");
+    assert!(matches!(
+        error,
+        BusinessProfitSweepError::StaleEconomy { .. }
+    ));
+}

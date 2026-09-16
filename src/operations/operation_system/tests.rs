@@ -15,11 +15,14 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::operation_abort::validate_authority_abort_operation;
+use crate::operations::operation_abort::validate_deadline_missed_operation;
+use crate::operations::operation_abort::validate_participant_detention_abort_operation;
 use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, validate_operation_resolution_plan,
 };
 use crate::operations::operation_scheduling::{
     find_due_authorized_operations, find_due_operations_with_missed_deadlines,
+    has_missed_operation_deadline,
 };
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationApproach, OperationDraft, OperationKind,
@@ -1304,7 +1307,7 @@ fn expired_planning_information_is_not_reported_as_covered() {
 }
 
 #[test]
-fn pre_start_cancellation_records_cause_without_fabricating_execution_artifacts() {
+fn pre_start_cancellation_records_cause_with_stand_down_artifacts() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let mut draft = make_test_draft(organization, leader, target);
     draft.scheduled_for = SimTime::from_minutes(30);
@@ -1313,13 +1316,8 @@ fn pre_start_cancellation_records_cause_without_fabricating_execution_artifacts(
         .commit(&mut state)
         .expect("future operation should commit");
 
-    // A pre-start cancellation creates no information, report, or history record. Its
-    // transaction must therefore remain usable even when an unrelated optional ID stream is
-    // exhausted.
-    state
-        .ids
-        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
-
+    // A leadership cancellation before start is a visible decision, not a silent deletion:
+    // the crew stood down and the organization keeps the causal record like any other abort.
     validate_authority_abort_operation(&state, operation)
         .expect("authorized operation should accept a leadership cancellation")
         .commit(&mut state)
@@ -1336,12 +1334,124 @@ fn pre_start_cancellation_records_cause_without_fabricating_execution_artifacts(
     assert_eq!(abort.aborted_at(), SimTime::ZERO);
     assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
     assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
-    assert!(abort.artifacts().is_none());
+    let artifacts = abort
+        .artifacts()
+        .expect("pre-start cancellation should persist stand-down artifacts");
+    let information = state
+        .intelligence()
+        .get_information(artifacts.information())
+        .expect("cancellation information should persist");
+    assert!(
+        information
+            .summary()
+            .contains("cancelled by leadership before execution began")
+    );
     assert!(record.started_at().is_none());
     assert!(record.resolution_due_at().is_none());
-    assert_eq!(state.reports().reports_for(organization).count(), 0);
+    assert_eq!(state.reports().reports_for(organization).count(), 1);
     validate_state(&state).expect("pre-start cancellation should be structurally valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn detention_abort_without_live_custody_rejects_at_commit() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.scheduled_for = SimTime::from_minutes(30);
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("future operation should validate")
+        .commit(&mut state)
+        .expect("future operation should commit");
+
+    // The leader is a participant but holds no custody: naming them in a detention abort
+    // must fail rather than persist a cause no arrest can corroborate at restore.
+    let error = validate_participant_detention_abort_operation(&state, operation, leader)
+        .expect("participant membership alone should validate the abort shape")
+        .commit(&mut state)
+        .expect_err("detention abort without live custody must reject");
+    assert!(matches!(error, OperationError::InvalidAbortCause { .. }));
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected abort should leave the operation persisted");
+    assert_eq!(record.status(), OperationStatus::Authorized);
+    assert!(record.abort_record().is_none());
+}
+
+#[test]
+fn live_operation_keeps_its_deadline_minute_while_authorized_work_misses_it() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let duration = u32::try_from(
+        registry
+            .get_operation(OperationKind::Intimidation)
+            .execution()
+            .duration()
+            .as_minutes(),
+    )
+    .expect("authored intimidation duration must fit SimDuration");
+    // Begin on minute 1 with a deadline exactly at the natural resolution minute.
+    let deadline = SimTime::from_minutes(u64::from(1 + duration));
+    let mut draft = make_test_draft(organization, leader, target);
+    draft.constraints = vec![crate::operations::OperationConstraint::CompleteBy(deadline)];
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("deadline-aligned operation should validate")
+        .commit(&mut state)
+        .expect("deadline-aligned operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+        .expect("operation should begin");
+
+    // The deadline minute itself remains available to live work: it may still resolve
+    // on that minute, matching the automatic overdue cleanup which only sweeps strictly
+    // past deadlines. An authorized operation with no executable minute is already missed.
+    state.advance_clock(SimDuration::from_minutes(duration));
+    assert_eq!(state.now(), deadline);
+    assert!(!has_missed_operation_deadline(&registry, &state, operation));
+    let error = validate_deadline_missed_operation(&registry, &state, operation)
+        .expect_err("live work on its deadline minute must not miss");
+    assert_eq!(error, OperationError::DeadlineNotMissed { operation });
+
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    assert!(has_missed_operation_deadline(&registry, &state, operation));
+    validate_deadline_missed_operation(&registry, &state, operation)
+        .expect("live work past its deadline must miss")
+        .commit(&mut state)
+        .expect("overdue live work must abort");
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("aborted operation should persist");
+    assert_eq!(record.status(), OperationStatus::Aborted);
+    validate_invariants(&state);
+}
+
+#[test]
+fn pre_start_cancellation_fails_atomically_when_artifact_ids_are_exhausted() {
+    let (registry, mut state, _organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(_organization, leader, target);
+    draft.scheduled_for = SimTime::from_minutes(30);
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("future operation should validate")
+        .commit(&mut state)
+        .expect("future operation should commit");
+
+    // Stand-down artifacts consume Information, Report, and HistoryEvent IDs. When that
+    // budget cannot be reserved, the cancellation must reject before mutating the operation.
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
+
+    let error = validate_authority_abort_operation(&state, operation)
+        .expect("authorized operation should accept a leadership cancellation")
+        .commit(&mut state)
+        .expect_err("exhausted artifact IDs must reject the cancellation");
+    assert!(matches!(error, OperationError::IdExhaustion(_)));
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("rejected cancellation should leave the operation persisted");
+    assert_eq!(record.status(), OperationStatus::Authorized);
+    assert!(record.abort_record().is_none());
 }
 
 #[test]

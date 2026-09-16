@@ -224,6 +224,11 @@ pub(crate) fn resolve_earliest_operation_deadline(record: &OperationRecord) -> O
 }
 
 /// True once an operation can no longer satisfy its earliest completion deadline.
+/// An authorized operation misses its deadline on the deadline minute itself because beginning
+/// then could never resolve before it. Live work keeps the deadline minute: an in-progress or
+/// decision-paused operation may still resolve on that minute, and only a deadline that passes
+/// without resolution is a miss. This matches the automatic overdue cleanup, so a manual
+/// deadline abort and the tick pass can never disagree about the deadline minute.
 pub(crate) fn has_missed_operation_deadline(
     registry: &Registry,
     state: &AppState,
@@ -235,18 +240,18 @@ pub(crate) fn has_missed_operation_deadline(
     let Some(deadline) = resolve_earliest_operation_deadline(record) else {
         return false;
     };
-    if state.now() >= deadline {
-        return true;
+    if record.status() == OperationStatus::Authorized {
+        if state.now() >= deadline {
+            return true;
+        }
+        return resolve_deadline_without_execution_window(
+            registry.get_operation(record.kind()).execution(),
+            state.now(),
+            record.constraints(),
+        )
+        .is_some();
     }
-    if record.status() != OperationStatus::Authorized {
-        return false;
-    }
-    resolve_deadline_without_execution_window(
-        registry.get_operation(record.kind()).execution(),
-        state.now(),
-        record.constraints(),
-    )
-    .is_some()
+    state.now() > deadline
 }
 
 /// True only after the completion deadline has fully passed. The deadline minute itself remains
