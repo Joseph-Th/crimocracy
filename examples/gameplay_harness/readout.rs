@@ -12,7 +12,7 @@ use crimocracy::operations::{
     OperationAbortCause, OperationAbortPhase, OperationObjectiveBlocker, OperationObjectiveOutcome,
 };
 use crimocracy::reports::{ReportKind, ReportRecord};
-use crimocracy::world::{CapabilityKind, Rating};
+use crimocracy::world::{CapabilityKind, OrganizationKind, Rating};
 use std::collections::BTreeMap;
 use std::error::Error;
 
@@ -251,6 +251,35 @@ pub fn print_starting_player_view(scenario: &Scenario) {
     println!(
         "[STATE] {handler_name} keeps a standing Police-channel contact with {contact_name} inside {police_name}; a quiet word costs no street exposure."
     );
+    // Counsel posture from contacts leadership actually holds: an arrest without a
+    // legal channel means scrambling for representation under custody pressure, so a
+    // boss should know before the cuffs whether that channel exists.
+    {
+        let has_legal_contact = scenario
+            .state
+            .contacts()
+            .contacts_for_sponsor(scenario.player)
+            .any(|record| {
+                scenario
+                    .state
+                    .world()
+                    .get_character(record.contact())
+                    .and_then(|character| character.organization())
+                    .and_then(|organization| scenario.state.world().get_organization(organization))
+                    .is_some_and(|organization| {
+                        organization.kind() == OrganizationKind::LegalServices
+                    })
+            });
+        if has_legal_contact {
+            println!(
+                "[STATE] The organization holds a legal channel: counsel can be retained through production representation if anyone is taken."
+            );
+        } else {
+            println!(
+                "[STATE] No standing legal contact exists: an arrest would force direct retention from scratch while the detainee's one-time cooperation decision ticks. A single job rarely carries custody on its own - repeated heat is what builds a file - but leadership has no counsel lined up."
+            );
+        }
+    }
     let replacement = scenario
         .state
         .world()

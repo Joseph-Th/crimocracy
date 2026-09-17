@@ -161,7 +161,7 @@ pub fn launder_through_front(
             }
             if narrative {
                 println!(
-                    "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash.",
+                    "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
                     format_cents(capacity_cents),
                     format_cents(requested_cents),
                 );
@@ -343,6 +343,9 @@ fn prepare_initial_burglary_plan(
             println!(
                 "[DECIDE]  Order surveillance before committing the burglary. The goal is to learn venue access and police rhythm."
             );
+            println!(
+                "[DECIDE]  Casing carries its own exposure - looking is also doing. A skilled scout in a quiet district keeps that price low; leadership accepts it to avoid walking blind into the score."
+            );
         }
         let surveillance = authorize_surveillance(scenario)?;
         run_until_operation_terminal(scenario, surveillance, narrative, metrics)?;
@@ -424,7 +427,7 @@ fn prepare_initial_burglary_plan(
         let clock = format_day_minute(scheduled_for.as_minutes());
         match strategy {
             Strategy::Rush => println!(
-                "[DECIDE]  Move immediately on the opportunity at {clock}, using only the original street information."
+                "[DECIDE]  Move immediately on the opportunity at {clock}, using only the original street information. Speed over certainty: if police arrive before entry, the standing abort walks the crew away and the debrief still teaches the district's rhythm."
             ),
             Strategy::Press => println!(
                 "[DECIDE]  Hit {} at {clock} and press on through a police response unless leadership later orders otherwise.",

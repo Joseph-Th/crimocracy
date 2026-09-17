@@ -10,6 +10,7 @@ use crimocracy::intelligence::intelligence_system::validate_information_transfer
 use crimocracy::intelligence::{
     InformationSignal, InformationTopic, InformationTransferDraft, KnowledgeHolder,
 };
+use crimocracy::reports::ReportKind;
 use std::error::Error;
 
 use crate::*;
@@ -469,6 +470,7 @@ fn narrate_resolutions_and_enterprise_cycles(
 
     narrate_routine_cycle_summary(scenario, outcome);
     narrate_notable_enterprise_cycles(scenario, outcome);
+    narrate_standing_reports(scenario, outcome);
 }
 
 fn narrate_routine_cycle_summary(scenario: &Scenario, outcome: &TickOutcome) {
@@ -577,6 +579,39 @@ fn narrate_notable_enterprise_cycles(scenario: &Scenario, outcome: &TickOutcome)
             stamp(outcome.now.as_minutes()),
             summary,
         );
+    }
+}
+
+/// Word on the street, as the organization hears it: reputation shifts arrive as
+/// player-visible Standing reports, so narrate their notable entries when they land
+/// instead of leaving standing changes to the closing bands. Other organizations'
+/// standing is their business, never ours.
+fn narrate_standing_reports(scenario: &Scenario, outcome: &TickOutcome) {
+    for report in scenario
+        .state
+        .reports()
+        .reports_for(scenario.player)
+        .filter(|report| {
+            report.kind() == ReportKind::Standing && report.generated_at() == outcome.now
+        })
+    {
+        for entry in report
+            .entries()
+            .iter()
+            .filter(|entry| !matches!(entry.attention, AttentionClass::Routine))
+        {
+            let marker = match entry.attention {
+                AttentionClass::Routine => "routine",
+                AttentionClass::Notable => "notable",
+                AttentionClass::Exception => "EXCEPTION",
+                AttentionClass::Crisis => "CRISIS",
+            };
+            println!(
+                "[STANDING] {}: [{marker}] {}",
+                stamp(outcome.now.as_minutes()),
+                entry.summary
+            );
+        }
     }
 }
 

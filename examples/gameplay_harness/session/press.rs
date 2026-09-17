@@ -1,6 +1,7 @@
 //! PRESS strategy response arc built only from player-visible information and canonical game APIs.
 
 use super::*;
+use crimocracy::world::territory_influence::resolve_neighborhood_influence;
 
 pub(super) fn run_press_response(
     scenario: &mut Scenario,
@@ -38,13 +39,11 @@ pub(super) fn run_press_response(
         let case_open_minute = metrics
             .case_open_minute
             .expect("press consequence arc requires the surfaced case-open minute");
-        let cold_window_for_heat_check =
-            scenario.registry.legal().cold_case_window().as_minutes() as u64;
-        // Heat check lands well inside the authored cold window (about 1/36th of it, bounded
-        // to [30,90] minutes) so the read always precedes any possible shelf no matter how
-        // authors tune the window. The check never overlaps earlier scout work: it follows
-        // the clock, not just the anchor.
-        let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
+        // Player tradecraft, not institutional math: look at the precinct itself the next
+        // morning, about 90 minutes after the case opened. An originated street case takes
+        // days of inactivity to go cold, so a next-morning read always precedes any possible
+        // shelf; the check never overlaps earlier scout work because it follows the clock.
+        let heat_check_delay = 90_u64;
         let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay)
             .max(scenario.state.now() + SimDuration::from_minutes(1));
         let heat_check_lag = heat_check_at.as_minutes().saturating_sub(case_open_minute);
@@ -416,22 +415,12 @@ fn run_stand_down_and_diversify(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
-    let case_open_minute = metrics
-        .case_open_minute
-        .expect("press consequence arc requires the surfaced case-open minute");
-    let cold_case_window = scenario.registry.legal().cold_case_window();
-    // The shelf cannot land before the authored inactivity window plus the initial
-    // evidence review that extends the case's activity instant; start daily polling
-    // from there and keep polling until the channel carries the shelved read.
-    let longest_work = scenario
-        .registry
-        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
-        .duration();
-    let poll_at = SimTime::from_minutes(
-        case_open_minute
-            + u64::from(cold_case_window.as_minutes())
-            + u64::from(longest_work.as_minutes()),
-    );
+    // Every campaign day the organization launders the racket's till through its
+    // front's books and asks its standing precinct contact whether anything moved on
+    // the case - daily tradecraft, not calendar math: leadership cannot know when the
+    // file will go cold, so it keeps asking until the channel itself carries the
+    // shelved read. The loop is bounded (40 days) well past any authored cold window,
+    // so both waits terminate through production disclosures.
     // PRESS notices the reopened second score at the same canonical minute every narrative
     // branch does, while it is still standing down. The branch then deliberately schedules
     // nothing on it: the discipline that protects the open case is also an opportunity cost.
@@ -468,11 +457,11 @@ fn run_stand_down_and_diversify(
             "[DECIDE]  Standing down does not mean standing still: build clean money day by day, then buy the harbor club and open a second book the home case cannot touch."
         );
     }
-    // Bounded daily loop: the authored cold-case decay guarantees a deterministic
+    // Bounded daily loop: institutional cold-case decay guarantees a deterministic
     // shelf, and laundering accumulates accounted funds at the front's authored
-    // pace, so both waits terminate. Every campaign day launders the racket's till
-    // (keeping a working-capital floor) and retries the purchase once the books can
-    // cover it; the precinct channel is only asked once the shelf could have landed.
+    // pace, so both waits terminate. Every campaign day launders the racket's till,
+    // retries the harbor purchase once the books can cover it, and asks the standing
+    // precinct contact whether anything moved on the case.
     // A till authored as concealed cash stays exactly that: hidden money cannot
     // route through the front's ledgers without exposing it, so the beat leaves
     // it parked and launders only what sits in street cash. Narration follows
@@ -497,8 +486,8 @@ fn run_stand_down_and_diversify(
             run_until(scenario, day_at, narrative, metrics)?;
         }
         run_daily_capital_management(scenario, police_name, narrative, metrics, &mut stand_down)?;
-        let read = poll_case_activity(scenario, burglary, poll_at, narrative, metrics)?;
-        narrate_stand_down_heartbeat(scenario, poll_at, &read, narrative, metrics, &stand_down);
+        let read = poll_case_activity(scenario, burglary, narrative, metrics)?;
+        narrate_stand_down_heartbeat(scenario, &read, narrative, metrics, &stand_down);
         if cold_case_wait_is_complete(narrative, metrics, &mut stand_down) {
             break;
         }
@@ -517,13 +506,14 @@ fn run_stand_down_and_diversify(
 fn poll_case_activity(
     scenario: &mut Scenario,
     burglary: OperationId,
-    poll_at: SimTime,
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<Option<(bool, String)>, Box<dyn Error>> {
-    if scenario.state.now() < poll_at {
-        return Ok(None);
-    }
+    // Leadership asks its standing contact every day, the way a player checks a live
+    // threat: through the channel, not the calendar. The query only produces a fresh
+    // disclosure when the institution actually has new word (an active read early, the
+    // shelved read once the file goes cold); otherwise it returns nothing and the
+    // organization holds dark on the last thing it heard.
     let read = read_police_contact(scenario, EntityRef::Operation(burglary), narrative, metrics)?;
     if matches!(read, Some((false, _))) {
         metrics.cold_case_confirmed = Some(true);
@@ -538,7 +528,6 @@ fn poll_case_activity(
 
 fn narrate_stand_down_heartbeat(
     scenario: &Scenario,
-    poll_at: SimTime,
     read: &Option<(bool, String)>,
     narrative: bool,
     metrics: &RunMetrics,
@@ -557,20 +546,43 @@ fn narrate_stand_down_heartbeat(
         .get_account(scenario.accounted_funds)
         .expect("accounted-funds account must persist")
         .balance();
+    // Both sides of the money loop, from books leadership actually holds: washed
+    // money accumulating toward the harbor price, and street cash still waiting.
+    let till_cents = scenario
+        .state
+        .enterprises()
+        .get_enterprise(scenario.enterprise)
+        .and_then(|record| scenario.state.finance().get_account(record.cash_account()))
+        .map(|account| account.balance().cents())
+        .unwrap_or_default()
+        .max(0);
+    // The governed underworld keeps moving while the organization waits: rival
+    // posture from the player-visible territory surface, not hidden rival books.
+    let rival_rackets: u32 = resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)
+        .map(|influence| {
+            influence
+                .standings
+                .into_iter()
+                .filter(|standing| standing.organization != scenario.player)
+                .map(|standing| standing.active_enterprises)
+                .sum()
+        })
+        .unwrap_or_default();
     let channel_line = match read {
-        Some((true, _)) => "the channel still reads the case as actively developing",
+        Some((true, _)) => "the channel still reads the case as actively developing - holding dark",
         Some((false, _)) => "the channel confirms the case has cooled",
-        None if scenario.state.now() < poll_at => {
-            "the channel cannot yet know - the case cannot have shelved"
-        }
-        _ => "the channel has nothing fresh to share yet",
+        // Leadership cannot know when the file will go cold; until the channel says
+        // otherwise the last confirmed read stands and the district stays dark.
+        None => "no fresh word from the channel - last read stands, holding dark",
     };
     println!(
-        "[WAIT] {}: {}; {} laundry day(s) so far, accounted books at {}.",
+        "[WAIT] {}: {}; {} laundry day(s) so far, accounted books at {}, street till waiting at {}; rivals hold {} home-district racket(s).",
         stamp(scenario.state.now().as_minutes()),
         channel_line,
         stand_down.laundry_days,
         format_cents(accounted.cents()),
+        format_cents(till_cents),
+        rival_rackets,
     );
 }
 
