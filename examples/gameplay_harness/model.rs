@@ -1048,6 +1048,9 @@ pub struct EnterpriseLine {
     pub label: String,
     pub cycle_count: usize,
     pub net_cents: i64,
+    /// Total district-heat surcharge paid across the line's observed cycles: the
+    /// aggregated price of operating while district casework stays active.
+    pub heat_cents: i64,
     pub cash_cents: i64,
 }
 

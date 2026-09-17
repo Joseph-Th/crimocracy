@@ -125,9 +125,12 @@ fn run_smoke(
         println!(
             "\n[SMOKE LOOP] Observe→Plan→Delegate→Consequence: info leverage {} | consequence {} | personnel departures {}/{}/{}.",
             if info_leverage {
-                "PASS (RECON 3 intel > RUSH 1)"
+                format!(
+                    "PASS (RECON {} intel > RUSH {})",
+                    recon.planning_information_count, rush.planning_information_count
+                )
             } else {
-                "fail"
+                "fail".to_owned()
             },
             if consequence { "PASS" } else { "fail" },
             rush.player_personnel_departures,

@@ -9,7 +9,8 @@ use crimocracy::enterprises::EnterpriseLocation;
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
 use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
 use crimocracy::operations::{
-    OperationAbortCause, OperationAbortPhase, OperationObjectiveBlocker, OperationObjectiveOutcome,
+    OperationAbortCause, OperationAbortPhase, OperationExposureLevel, OperationObjectiveBlocker,
+    OperationObjectiveOutcome,
 };
 use crimocracy::reports::{ReportKind, ReportRecord};
 use crimocracy::world::{CapabilityKind, OrganizationKind, Rating};
@@ -396,12 +397,29 @@ pub fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
             )
             .filter(|information| information.subject() == EntityRef::Operation(burglary))
             .collect();
+        // A clean resolution teaches nothing about the case file, so reporting a zero here
+        // is noise. The gap matters only when the crew saw or left evidence that could
+        // support a case: then leadership must learn it through a channel, not the debrief.
+        let exposed = operation.resolution().is_some_and(|resolution| {
+            matches!(
+                resolution.exposure().level(),
+                OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
+            )
+        });
+        if legal_information.is_empty() && !exposed {
+            return;
+        }
         println!(
             "[KNOWLEDGE] Player organization has {} LegalActivity information record(s) about this burglary after resolution.",
             legal_information.len(),
         );
-        for information in legal_information {
+        for information in &legal_information {
             println!("  - [PLAYER] {}", information.summary());
+        }
+        if exposed && legal_information.is_empty() {
+            println!(
+                "  - [PLAYER] No case fact arrived with the resolution itself; any case knowledge must come through a contact or casing channel."
+            );
         }
     }
 }
@@ -466,6 +484,101 @@ pub fn print_organization_closing_view(
             enterprise_label(scenario, record.id()),
             cycles,
         );
+    }
+    // Delegated authority a boss can actually inspect: who holds the lieutenant's mandate,
+    // at what version, over which scopes. PRESS revises this to two districts; the other
+    // branches keep the single home-district grant.
+    if let Some(mandate) = scenario
+        .state
+        .delegation()
+        .get_mandate(scenario.lieutenant_mandate)
+    {
+        let manager = scenario
+            .state
+            .world()
+            .get_character(mandate.manager())
+            .map(|record| record.name().to_owned())
+            .unwrap_or_else(|| "?".to_owned());
+        let mut scopes: Vec<String> = mandate
+            .scopes()
+            .iter()
+            .map(|scope| match scope {
+                crimocracy::delegation::ResponsibilityScope::Neighborhood(id) => scenario
+                    .state
+                    .world()
+                    .get_neighborhood(*id)
+                    .map(|record| record.name().to_owned())
+                    .unwrap_or_else(|| "unknown district".to_owned()),
+                crimocracy::delegation::ResponsibilityScope::Business(id) => scenario
+                    .state
+                    .world()
+                    .get_business(*id)
+                    .map(|record| record.name().to_owned())
+                    .unwrap_or_else(|| "unknown venue".to_owned()),
+                crimocracy::delegation::ResponsibilityScope::Function(function) => {
+                    format!("{function:?}")
+                }
+            })
+            .collect();
+        scopes.sort();
+        println!(
+            "  - Mandate v{} ({:?}) held by {} over {}.",
+            mandate.version(),
+            mandate.status(),
+            manager,
+            if scopes.is_empty() {
+                "no scopes".to_owned()
+            } else {
+                scopes.join(", ")
+            },
+        );
+    }
+    // What the organization actually knows: held information grouped by topic, with the
+    // patrol pattern spelled out when the organization holds one. Reports narrate beats;
+    // this is the accumulated stock a boss plans from.
+    {
+        let mut by_topic: BTreeMap<InformationTopic, usize> = BTreeMap::new();
+        let mut patrol_windows: Vec<(u64, u64)> = Vec::new();
+        for record in scenario
+            .state
+            .intelligence()
+            .information_for_holder(KnowledgeHolder::Organization(scenario.player))
+        {
+            *by_topic.entry(record.topic()).or_default() += 1;
+            if record.topic() == InformationTopic::PoliceActivity
+                && let Some(signal) = record.signal()
+                && let crimocracy::intelligence::InformationSignal::PatrolPattern { intervals } =
+                    signal
+            {
+                for interval in intervals {
+                    patrol_windows.push((
+                        u64::from(interval.start_minute()),
+                        u64::from(interval.end_minute()),
+                    ));
+                }
+            }
+        }
+        let held: Vec<String> = by_topic
+            .iter()
+            .map(|(topic, count)| format!("{count}x {topic:?}"))
+            .collect();
+        println!(
+            "  - Holds {} information item(s){}.",
+            by_topic.values().sum::<usize>(),
+            if held.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", held.join(", "))
+            },
+        );
+        if !patrol_windows.is_empty() {
+            patrol_windows.sort();
+            patrol_windows.dedup();
+            println!(
+                "  - Known patrol rhythm: {}.",
+                format_patrol_windows(&patrol_windows)
+            );
+        }
     }
     let standing_reports = scenario
         .state
@@ -651,10 +764,19 @@ pub fn resolve_financial_view(
             .cycles_for(id)
             .try_fold(Money::ZERO, |sum, cycle| sum.checked_add(cycle.net_cash()))
             .expect("enterprise totals must fit money range");
+        let heat = scenario
+            .state
+            .enterprises()
+            .cycles_for(id)
+            .try_fold(Money::ZERO, |sum, cycle| {
+                sum.checked_add(cycle.investigation_heat())
+            })
+            .expect("enterprise heat totals must fit money range");
         enterprise_lines.push(EnterpriseLine {
             label: enterprise_label(scenario, id),
             cycle_count: scenario.state.enterprises().cycles_for(id).count(),
             net_cents: net.cents(),
+            heat_cents: heat.cents(),
             cash_cents: scenario
                 .state
                 .finance()
@@ -760,12 +882,20 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     );
     for line in &view.enterprise_lines {
         println!(
-            "  Delegated gambling, {}: {} cycle(s), net {}, racket till (street, awaiting wash or float) {} (avg {} /day).",
+            "  Delegated gambling, {}: {} cycle(s), net {}, racket till (street, awaiting wash or float) {} (avg {} /day){}.",
             line.label,
             line.cycle_count,
             format_cents(line.net_cents),
             format_cents(line.cash_cents),
             format_cents(line.net_cents / (line.cycle_count.max(1) as i64)),
+            if line.heat_cents > 0 {
+                format!(
+                    " including {} of district-heat surcharge",
+                    format_cents(line.heat_cents)
+                )
+            } else {
+                String::new()
+            },
         );
     }
     if view.enterprise_lines.is_empty() {
@@ -1219,18 +1349,23 @@ pub fn print_experience_readout(
         if social { "PASS" } else { "fail" },
     );
     println!("Evidence coverage (not a game-quality score):");
-    print_loop_checkpoint(
+    let mut missing = 0u32;
+    let mut checkpoint = |label: &str, present: bool, evidence: &str| {
+        missing += u32::from(!present);
+        print_loop_checkpoint(label, present, evidence);
+    };
+    checkpoint(
         "learn",
         recon.discovered_surveillance_information > 0,
         "surveillance produces actionable patrol and target information",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "plan",
         recon.planning_information_count > rush.planning_information_count
             && recon.outcome == Some(OperationObjectiveOutcome::Achieved),
         "the player can make a better plan from organization-held intelligence",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "failure teaches",
         rush.aborted
             && rush.player_police_activity_information > 0
@@ -1243,50 +1378,50 @@ pub fn print_experience_readout(
         && press.outcome.is_some()
         && press.decision_requests > 0
         && press.player_police_activity_information > 0;
-    print_loop_checkpoint(
+    checkpoint(
         "choice",
         response_choice_changed_consequence,
         "a player response to the same police exception changes whether the operation aborts or resolves",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "delegate",
         recon.burglary.is_some() && recon.outcome.is_some(),
         "the plan resolves through assigned people and authored capabilities",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "respond",
         press.decision_requests > 0 && press.player_police_activity_information > 0,
         "an exception pauses the plan and a field report returns to the organization",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "consequences",
         press.player_legal_activity_information > 0 && recon.property_realized_cash_cents.is_some(),
         "the same operation system can create legal pressure or recover value into cash",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "follow-up",
         press.counterintelligence_outcome.is_some()
             && press.counterintelligence_information > 0
             && press.followup_case_active == Some(true),
         "a player-visible legal report can seed a precinct check that reads whether the case is still hot",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "survive",
         press.cold_case_confirmed == Some(true),
         "standing down and outlasting the investigation resolves the consequence through the player's own police channel",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "organization",
         rush.player_personnel_departures > 0,
         "a police-exposed crew member can be courted away by a rival without a scripted event",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "rebuild",
         rush.replacement_recruited
             && rush.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
         "a crew member lost to rival pressure can be replaced through a player-authored executive recruitment, and the rebuilt crew works a second score safely",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "second wind",
         recon.second_act_recon_information > 0
             && (recon.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
@@ -1296,24 +1431,24 @@ pub fn print_experience_readout(
                     && recon.second_opportunity_expired)),
         "fresh planning changes the next move: RECON takes the reopened score when clear and gives it up when its own casing creates a case the channel cannot affirmatively clear",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "own heat",
         recon.self_heat_case_opened
             && recon.self_heat_case_active != Some(false)
             && recon.second_burglary.is_none(),
         "casing carries risk both ways: after the organization's own surveillance draws a case, it checks that case through its standing police contact and stands down unless the channel explicitly says it is shelved",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "counterplay",
         press.witness_pressure_attempted,
         "a witnessed after-action can trigger a player-authored pressure operation against the publicly known shopkeeper; it either lands or visibly encounters enough police risk to justify walking away",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "discipline cost",
         press.second_opportunity_expired && press.second_burglary.is_none(),
         "choosing to stand down has a real price: the second score lapses while the hot case stays protected",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "diversify",
         press.expansion_established
             && press.expansion_net_cents.is_some_and(|net| net > 0)
@@ -1323,7 +1458,7 @@ pub fn print_experience_readout(
     let defector_trail_shown = rush.defector_trail_confirmed == Some(true)
         && press.defector_trail_confirmed == Some(true)
         && recon.defector_trail_confirmed.is_none();
-    print_loop_checkpoint(
+    checkpoint(
         "defector trail",
         defector_trail_shown,
         "after a departure, the organization can confirm where the defector landed through its own canonical surveillance channel instead of the report leaking the rival",
@@ -1332,7 +1467,7 @@ pub fn print_experience_readout(
         && press.win_back_attempted
         && rush.win_back_accepted.is_some()
         && !recon.win_back_attempted;
-    print_loop_checkpoint(
+    checkpoint(
         "win-back",
         win_back_shown,
         "after confirming where a defector landed, leadership can make one canonical executive re-approach and the pitch resolves through production recruitment scoring",
@@ -1380,12 +1515,12 @@ pub fn print_experience_readout(
         && long_case_nets
             .iter()
             .any(|heated| all_nets.iter().any(|net| net > heated));
-    print_loop_checkpoint(
+    checkpoint(
         "routine",
         legitimate_isolated,
         "legitimate front continues identically while leadership focuses on exceptions",
     );
-    print_loop_checkpoint(
+    checkpoint(
         "heat cost",
         enterprise_heat_shown,
         "a case that stayed open across the whole matched window taxes the delegated enterprise every cycle, visibly earning less than branches whose districts stayed clean longer",
@@ -1397,7 +1532,7 @@ pub fn print_experience_readout(
         .unwrap_or(false)
         || recon.property_realized_cash_cents.is_some()
             && press.property_realized_cash_cents.is_none();
-    print_loop_checkpoint(
+    checkpoint(
         "venue choice",
         liquidation_varies || recon.property_realized_cash_cents.is_some(),
         "liquidated resale value reflects the venue's district police presence",
@@ -1408,7 +1543,7 @@ pub fn print_experience_readout(
         && [rush, press, recon]
             .iter()
             .all(|run| run.laundered_gross_cents - run.launder_fee_cents > 0);
-    print_loop_checkpoint(
+    checkpoint(
         "clean money",
         laundering_shown,
         "street earnings pass through an owned front's books into accounted funds, and the front's plausible-volume ceiling visibly caps how fast dirty money becomes clean",
@@ -1416,7 +1551,7 @@ pub fn print_experience_readout(
     let wealth_loop_shown = press.front_acquired
         && press.acquisition_price_cents.is_some()
         && press.acquisition_rejections > 0;
-    print_loop_checkpoint(
+    checkpoint(
         "legit wealth",
         wealth_loop_shown,
         "accounted wealth converts into an owned legitimate asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
@@ -1425,11 +1560,16 @@ pub fn print_experience_readout(
         || [rush, press, recon]
             .iter()
             .any(|run| run.vice_inquiries_drawn > 0);
-    print_loop_checkpoint(
+    checkpoint(
         "vice heat",
         any_vice,
         "sustained district casework can convert into a dedicated vice inquiry on a racket itself: the manager reports that new pressure, while lying low or diversifying districts remain available counters",
     );
+    if missing > 0 {
+        println!(
+            "[NOTE] {missing} checkpoint(s) missing this seed (listed above); stochastic reachability is covered across rotation/batch sets, not forced in every sample."
+        );
+    }
     println!("Observed decision leverage:");
     println!(
         "  - Information leverage: RECON selected {} planning item(s) versus RUSH's {} and finished as {} versus {}.",
@@ -1456,7 +1596,7 @@ pub fn print_experience_readout(
     println!(
         "  - Witness counterplay: PRESS's after-action says the score was witnessed, leadership answers with one pressure operation against the publicly known shopkeeper, and that operation visibly {}.",
         if press.witness_pressure_aborted {
-            "aborts when another police response arrives - quiet counter-play in a watched district gambles: the response follows active casework in the district, so no guessed hour is safe while the case is hot; walking away is the disciplined play, and the RECON second act proves the mirror image by standing down whenever its own casing creates heat the contact cannot clear"
+            "aborts when another police response arrives - quiet counter-play inside standing patrol windows gambles: a blind guess in a watched district risks a response whether or not the case machinery is active, so walking away is the disciplined play, and the RECON second act proves the mirror image by standing down whenever its own casing creates heat the contact cannot clear"
         } else {
             match press.witness_pressure_outcome {
                 Some(OperationObjectiveOutcome::Achieved) => "achieves its objective",
@@ -1524,13 +1664,14 @@ pub fn print_experience_readout(
     );
 }
 
-pub fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) {
+pub fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) -> bool {
     println!(
         "  [{:>12}] {:<5} - {}",
         label,
         if present { "shown" } else { "missing" },
         evidence,
     );
+    present
 }
 
 pub fn terminal_label(metrics: &RunMetrics) -> String {
