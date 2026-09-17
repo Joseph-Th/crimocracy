@@ -532,7 +532,7 @@ pub fn print_organization_closing_view(
             if metrics.replacement_recruited {
                 "; rebuilt through an executive recruitment".to_owned()
             } else if metrics.win_back_accepted == Some(true) {
-                "; the departed member subsequently returned after a successful win-back".to_owned()
+                "; the departed member subsequently returned after a successful win-back and resumed his lieutenant's reporting line".to_owned()
             } else {
                 String::new()
             },

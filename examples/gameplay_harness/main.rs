@@ -23,6 +23,7 @@ mod options;
 mod posture;
 mod probes;
 mod readout;
+mod retention;
 mod rival_intelligence;
 mod scenario;
 mod session;
@@ -338,6 +339,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         primary_seeds,
         Some(&artifact_dir),
     )?;
+
+    println!("\n--- PERSONNEL RETENTION PROBE ---");
+    retention::run_retention_probe(&registry, primary_seeds, &artifact_dir)?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;

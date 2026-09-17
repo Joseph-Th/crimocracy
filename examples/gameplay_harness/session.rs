@@ -870,6 +870,20 @@ pub(crate) fn run_initial_burglary(
     Ok(Some(burglary))
 }
 
+pub(crate) fn run_personnel_recovery(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    if metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
+        defector::run_defector_trail(scenario, narrative, metrics)?;
+    }
+    if metrics.defector_trail_confirmed == Some(true) && !metrics.win_back_attempted {
+        defector::run_win_back_attempt(scenario, narrative, metrics)?;
+    }
+    Ok(())
+}
+
 fn run_post_burglary_campaign(
     scenario: &mut Scenario,
     strategy: Strategy,
@@ -910,13 +924,24 @@ fn run_post_burglary_campaign(
         }
         discover_second_opportunity(scenario, narrative, metrics)?;
     }
-    if full_arc && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
-        defector::run_defector_trail(scenario, narrative, metrics)?;
-    }
-    if full_arc && metrics.defector_trail_confirmed == Some(true) {
-        defector::run_win_back_attempt(scenario, narrative, metrics)?;
-    }
     if full_arc {
+        run_personnel_recovery(scenario, narrative, metrics)?;
+        if metrics.win_back_accepted == Some(true) {
+            let member = metrics.defector.expect("accepted recovery names a member");
+            crate::retention::restore_reporting_line(scenario, member)?;
+            if narrative {
+                let member_name = scenario.state.world().get_character(member).unwrap().name();
+                let manager_name = scenario
+                    .state
+                    .world()
+                    .get_character(scenario.lieutenant)
+                    .unwrap()
+                    .name();
+                println!(
+                    "[REORGANIZE] {member_name} returns to {manager_name}'s reporting line. The boss won him back, but his strongest existing bond is with his lieutenant. Keep that bond in charge; a successful pitch alone does not guarantee retention, and fresh exposure can renew his fear."
+                );
+            }
+        }
         second_act::run_second_act(scenario, strategy, narrative, metrics)?;
     }
     if scenario.state.now() < observation_end {

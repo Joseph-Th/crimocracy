@@ -17,7 +17,9 @@ pub(super) fn register_recruitment(builder: &mut RegistryBuilder) {
             timing: RecruitmentTimingDefinition {
                 cooldown: SimDuration::from_minutes(10_080),
                 autonomous_attempt_cadence: DAY_DURATION,
-                perceived_legal_pressure_max_age: SimDuration::from_minutes(20_160),
+                // A single encounter should not dominate a trusted reporting relationship
+                // through several rival retry windows. Fresh exposure renews pressure.
+                perceived_legal_pressure_max_age: SimDuration::from_minutes(10_080),
             },
             scoring: RecruitmentScoringDefinition {
                 base_willingness: 20,

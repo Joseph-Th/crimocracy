@@ -67,53 +67,8 @@ pub(super) fn run_defector_trail(
             BTreeSet::new(),
         )?;
         run_until_operation_terminal(scenario, operation, narrative, metrics)?;
-        let resolution = scenario
-            .state
-            .operations()
-            .get_operation(operation)
-            .expect("personnel watch must persist")
-            .resolution()
-            .expect("completed personnel watch must have a resolution");
-        let found = resolution
-            .discovered_information()
-            .iter()
-            .any(|information| {
-                scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .is_some_and(|record| {
-                        record.topic() == InformationTopic::Personnel
-                            && record.subject() == EntityRef::Organization(rival)
-                            && matches!(
-                                record.signal(),
-                                Some(InformationSignal::PersonnelPresence { characters })
-                                    if characters.contains(&defector)
-                            )
-                    })
-            });
-        if found {
+        if observe_defector_watch(scenario, operation, rival, defector, narrative) {
             resurfaced_at = Some(rival);
-        }
-        if narrative {
-            for information in resolution.discovered_information() {
-                let record = scenario
-                    .state
-                    .intelligence()
-                    .get_information(*information)
-                    .expect("personnel-watch information must persist");
-                if record.topic() == InformationTopic::Personnel
-                    && (record.subject() == EntityRef::Organization(rival)
-                        || matches!(record.subject(), EntityRef::Enterprise(_)))
-                {
-                    println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
-                        record.summary()
-                    );
-                }
-            }
         }
     }
     metrics.defector_trail_confirmed = Some(resurfaced_at.is_some());
@@ -132,11 +87,73 @@ pub(super) fn run_defector_trail(
                 );
             }
             None => println!(
-                "[VERIFY DEFECTOR] None of the watched rivals showed {defector_name}; the personnel watch did not directly confirm where the member landed."
+                "[VERIFY DEFECTOR] The personnel watches did not confirm where {defector_name} landed; failed or aborted observation does not establish the member's absence."
             ),
         }
     }
     Ok(())
+}
+
+/// A terminal watch confirms only typed personnel observations held by the player. An abort
+/// supplies no such observation; it does not establish that the defector is absent from the rival.
+fn observe_defector_watch(
+    scenario: &Scenario,
+    operation: OperationId,
+    rival: OrganizationId,
+    defector: crimocracy::core::id::CharacterId,
+    narrative: bool,
+) -> bool {
+    let watch = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .expect("personnel watch must persist");
+    if watch.status() == OperationStatus::Aborted {
+        if narrative {
+            println!(
+                "[LEARN]   {} was aborted; it did not confirm where the departed member landed.",
+                watch.title()
+            );
+        }
+        return false;
+    }
+    let resolution = watch
+        .resolution()
+        .expect("completed personnel watch must have a resolution");
+    let mut found = false;
+    for information in resolution.discovered_information() {
+        let record = scenario
+            .state
+            .intelligence()
+            .get_information(*information)
+            .expect("personnel-watch information must persist");
+        if record.holder() != KnowledgeHolder::Organization(scenario.player)
+            || record.topic() != InformationTopic::Personnel
+        {
+            continue;
+        }
+        if record.subject() == EntityRef::Organization(rival)
+            && matches!(
+                record.signal(),
+                Some(InformationSignal::PersonnelPresence { characters })
+                    if characters.contains(&defector)
+            )
+        {
+            found = true;
+        }
+        if narrative
+            && (record.subject() == EntityRef::Organization(rival)
+                || matches!(record.subject(), EntityRef::Enterprise(_)))
+        {
+            println!(
+                "[LEARN]   {:?} / {:?}: {}",
+                record.reliability(),
+                record.specificity(),
+                record.summary()
+            );
+        }
+    }
+    found
 }
 
 /// One personal re-approach through canonical executive recruitment after the player's own trail
@@ -210,9 +227,8 @@ pub(super) fn run_win_back_attempt(
     metrics.win_back_margin = Some(record.margin());
     if narrative {
         println!(
-            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance. Leadership sees acceptance or refusal, never the scoring margin; matching the pitch to what the candidate wants is what moves it.",
+            "[NARRATION] Leadership made a {:?} pitch based on what it knows of {defector_name}. It sees acceptance or refusal, not the scoring margin or the strength of the candidate's ties elsewhere.",
             record.approach(),
-            rival_name,
         );
     }
     if accepted {
@@ -229,7 +245,7 @@ pub(super) fn run_win_back_attempt(
         );
         if narrative {
             println!(
-                "[WIN BACK]  {defector_name} came home to {player_name}. Membership moved through the production reassignment path; the crew that left in fear is whole again - and both organizations now know exactly how much his loyalty is worth."
+                "[WIN BACK]  {defector_name} accepted the offer and rejoined {player_name}. This confirms the return, not a guarantee of future loyalty or what the rival knows."
             );
         }
         return Ok(());
@@ -296,4 +312,55 @@ fn choose_win_back_approach(
         return RecruitmentApproach::Advancement;
     }
     RecruitmentApproach::PersonalAppeal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crimocracy::operations::operation_system::{OperationTransition, apply_transition};
+
+    #[test]
+    fn defector_watch_is_unconfirmed_when_canonical_watch_aborts() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let rival = scenario.rival;
+        let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
+        let watch = authorize_surveillance_target(
+            &mut scenario,
+            EntityRef::Organization(rival),
+            "Aborted personnel watch",
+            scheduled_for,
+            BTreeSet::new(),
+        )
+        .unwrap();
+        apply_transition(
+            &registry,
+            &mut scenario.state,
+            watch,
+            OperationTransition::Abort,
+        )
+        .unwrap();
+        let record = scenario.state.operations().get_operation(watch).unwrap();
+        assert_eq!(record.status(), OperationStatus::Aborted);
+        assert!(record.resolution().is_none());
+        let before = bincode::serialize(&scenario.state).unwrap();
+        let mut metrics = RunMetrics::default();
+        run_until_operation_terminal(&mut scenario, watch, false, &mut metrics).unwrap();
+        for narrative in [false, true] {
+            assert!(!observe_defector_watch(
+                &scenario,
+                watch,
+                rival,
+                scenario.burglar,
+                narrative,
+            ));
+        }
+        assert!(!metrics.win_back_attempted);
+        assert_eq!(bincode::serialize(&scenario.state).unwrap(), before);
+    }
 }

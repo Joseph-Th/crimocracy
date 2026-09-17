@@ -552,6 +552,7 @@ impl ScenarioTimeline {
     }
 }
 
+#[derive(Clone)]
 pub struct Scenario<'registry> {
     pub registry: &'registry Registry,
     pub state: AppState,
