@@ -128,7 +128,12 @@ enum SurveillanceTargetSnapshot {
         status: InvestigationStatus,
         lead: Option<(CharacterId, String)>,
     },
-    Enterprise(EnterpriseSnapshot),
+    Enterprise {
+        enterprise: EnterpriseSnapshot,
+        // Direct observation earns local patrol knowledge; broad organization discovery does not.
+        neighborhood_name: String,
+        patrol: PatrolPatternSnapshot,
+    },
     Operation {
         id: OperationId,
         organization: OrganizationId,
@@ -500,9 +505,23 @@ fn resolve_target_snapshot(
                 .enterprises
                 .get_enterprise(id)
                 .ok_or(SurveillanceError::MissingTarget(target))?;
-            Ok(SurveillanceTargetSnapshot::Enterprise(
-                resolve_enterprise_snapshot(state, enterprise),
-            ))
+            let neighborhood =
+                crate::enterprises::enterprise_execution::resolve_location_neighborhood(
+                    state,
+                    enterprise.location(),
+                )
+                .map_err(|_| SurveillanceError::MissingTarget(target))?;
+            let neighborhood_name = state
+                .world
+                .get_neighborhood(neighborhood)
+                .expect("enterprise surveillance neighborhood must exist")
+                .name()
+                .to_owned();
+            Ok(SurveillanceTargetSnapshot::Enterprise {
+                enterprise: resolve_enterprise_snapshot(state, enterprise),
+                neighborhood_name,
+                patrol: resolve_patrol_pattern(state, neighborhood, at),
+            })
         }
         EntityRef::Operation(id) => {
             let operation = state
@@ -706,9 +725,28 @@ fn build_observations(
             summary: investigation_summary(title, owner_name, *status, lead.as_ref(), outcome),
             finding: format!("the status of {title}"),
         }],
-        SurveillanceTargetSnapshot::Enterprise(enterprise) => {
-            vec![enterprise_observation(enterprise, reliability, specificity)]
-        }
+        SurveillanceTargetSnapshot::Enterprise {
+            enterprise,
+            neighborhood_name,
+            patrol,
+        } => vec![
+            enterprise_observation(enterprise, reliability, specificity),
+            SurveillanceObservation {
+                topic: InformationTopic::PoliceActivity,
+                subject: EntityRef::Neighborhood(patrol.neighborhood),
+                reliability,
+                specificity,
+                signal: patrol_pattern_signal(patrol, outcome, patrol_bucket_minutes),
+                summary: patrol_summary(
+                    neighborhood_name,
+                    patrol,
+                    outcome,
+                    observed_at,
+                    patrol_bucket_minutes,
+                ),
+                finding: format!("police activity around {neighborhood_name}"),
+            },
+        ],
         SurveillanceTargetSnapshot::Operation {
             id,
             organization_name,

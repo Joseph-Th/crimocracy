@@ -83,6 +83,20 @@ fn make_test_enterprise(
         },
     )
     .unwrap();
+    make_test_enterprise_at(
+        fixture,
+        rival,
+        authority,
+        EnterpriseLocation::Neighborhood(neighborhood),
+    )
+}
+
+fn make_test_enterprise_at(
+    fixture: &mut Fixture,
+    rival: OrganizationId,
+    authority: MandateAuthority,
+    location: EnterpriseLocation,
+) -> EnterpriseId {
     let cash = insert_account(
         &mut fixture.state,
         FinancialAccountDraft {
@@ -106,7 +120,7 @@ fn make_test_enterprise(
             kind: EnterpriseKind::Protection,
             organization: rival,
             authority,
-            location: EnterpriseLocation::Neighborhood(neighborhood),
+            location,
             supporting_businesses: BTreeSet::new(),
             cash_account: cash,
             settlement_account: settlement,
@@ -115,6 +129,31 @@ fn make_test_enterprise(
     .unwrap()
     .commit(&mut fixture.state)
     .unwrap()
+}
+
+fn make_test_hosted_enterprise(
+    fixture: &mut Fixture,
+    rival: OrganizationId,
+    authority: MandateAuthority,
+) -> EnterpriseId {
+    let business = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Rival Club".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([BusinessFunction::MeetingSpace]),
+            neighborhood: fixture.neighborhood,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .unwrap();
+    make_test_enterprise_at(
+        fixture,
+        rival,
+        authority,
+        EnterpriseLocation::Business(business),
+    )
 }
 
 fn surveillance_draft(fixture: &Fixture, target: EntityRef) -> OperationDraft {
@@ -317,6 +356,19 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         )
         .unwrap();
     assert_eq!(information.subject(), EntityRef::Enterprise(enterprises[1]));
+    assert_eq!(followup_resolution.discovered_information().len(), 2);
+    let police = followup_resolution
+        .discovered_information()
+        .iter()
+        .map(|id| restored.intelligence().get_information(*id).unwrap())
+        .find(|information| information.topic() == InformationTopic::PoliceActivity)
+        .unwrap();
+    assert_eq!(police.signal(), None);
+    assert!(
+        police
+            .summary()
+            .contains("No stable daily patrol deployment pattern was confirmed around Zulu Ward")
+    );
     assert_eq!(
         information.summary(),
         "Activity at Zulu Ward appears active under Rival Manager for Visible Rival."
@@ -332,6 +384,261 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
     )
     .unwrap();
     validate_state(&fixture.state).unwrap();
+}
+
+#[test]
+fn direct_enterprise_surveillance_adds_neighborhood_patrol_intelligence() {
+    let mut fixture = fixture(100, false);
+    let (rival, authority) = make_test_rival(&mut fixture);
+    let enterprise = make_test_enterprise(&mut fixture, rival, authority, "Watched Ward");
+    let neighborhood = crate::enterprises::enterprise_execution::resolve_location_neighborhood(
+        &fixture.state,
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .unwrap()
+            .location(),
+    )
+    .unwrap();
+    validate_set_jurisdiction(
+        &fixture.state,
+        JurisdictionDraft {
+            organization: fixture.police,
+            neighborhoods: BTreeSet::from([fixture.neighborhood, neighborhood]),
+            case_intake_priority: rating(80),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_establish_patrol_deployment(
+        &fixture.state,
+        PatrolDeploymentDraft {
+            organization: fixture.police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(DayMinute::try_new(600).unwrap(), 120, rating(80)).unwrap(),
+            ],
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let discovery = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    resolve_with_zero_variance(&mut fixture, discovery);
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Enterprise(enterprise));
+    resolve_with_zero_variance(&mut fixture, operation);
+    let record = fixture.state.operations().get_operation(operation).unwrap();
+    let resolution = record.resolution().unwrap();
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Achieved
+    );
+    let observations = resolution
+        .discovered_information()
+        .iter()
+        .map(|id| fixture.state.intelligence().get_information(*id).unwrap())
+        .collect::<Vec<_>>();
+    let police = observations
+        .iter()
+        .find(|information| information.topic() == InformationTopic::PoliceActivity)
+        .expect("direct enterprise surveillance must add neighborhood police activity");
+    assert_eq!(observations.len(), 2);
+    assert_eq!(police.subject(), EntityRef::Neighborhood(neighborhood));
+    assert_eq!(
+        police.signal(),
+        Some(&InformationSignal::PatrolPattern {
+            intervals: BTreeSet::from([PatrolIntervalSignal::try_new(600, 720).unwrap()]),
+        })
+    );
+    assert!(police.summary().contains("roughly 10:00-12:00"));
+    assert!(is_valid_persisted_surveillance_information(record, police));
+    assert!(
+        fixture
+            .state
+            .intelligence()
+            .get_information(resolution.after_action_information())
+            .unwrap()
+            .summary()
+            .contains("police activity around Watched Ward")
+    );
+    let envelope = build_save(&fixture.registry, &fixture.state).unwrap();
+    let decoded = bincode::deserialize(&bincode::serialize(&envelope).unwrap()).unwrap();
+    let restored = restore_save(&fixture.registry, decoded).unwrap();
+    assert_eq!(
+        bincode::serialize(&restored).unwrap(),
+        bincode::serialize(&fixture.state).unwrap()
+    );
+}
+
+#[test]
+fn hosted_enterprise_watch_bounds_patrol_knowledge_by_outcome() {
+    for (skill, expected_outcome, count) in [
+        (100, OperationObjectiveOutcome::Achieved, 2),
+        (35, OperationObjectiveOutcome::Partial, 2),
+        (0, OperationObjectiveOutcome::Failed, 0),
+    ] {
+        let mut fixture = fixture(skill, true);
+        let (rival, authority) = make_test_rival(&mut fixture);
+        let enterprise = make_test_hosted_enterprise(&mut fixture, rival, authority);
+        validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(fixture.crew),
+                source_kind: InformationSourceKind::Surveillance,
+                topic: InformationTopic::Personnel,
+                source_entity: Some(EntityRef::Character(fixture.observer)),
+                subject: EntityRef::Enterprise(enterprise),
+                observed_at: fixture.state.now(),
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary: "Known enterprise at the club.".to_owned(),
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        let operation = authorize_surveillance(&mut fixture, EntityRef::Enterprise(enterprise));
+        resolve_with_zero_variance(&mut fixture, operation);
+        let record = fixture.state.operations().get_operation(operation).unwrap();
+        let resolution = record.resolution().unwrap();
+        assert_eq!(resolution.objective_outcome(), expected_outcome);
+        assert_eq!(resolution.discovered_information().len(), count);
+        if expected_outcome != OperationObjectiveOutcome::Failed {
+            let police = resolution
+                .discovered_information()
+                .iter()
+                .map(|id| fixture.state.intelligence().get_information(*id).unwrap())
+                .find(|information| information.topic() == InformationTopic::PoliceActivity)
+                .unwrap();
+            assert_eq!(
+                police.subject(),
+                EntityRef::Neighborhood(fixture.neighborhood)
+            );
+            if expected_outcome == OperationObjectiveOutcome::Achieved {
+                assert_eq!(
+                    police.signal(),
+                    Some(&InformationSignal::PatrolPattern {
+                        intervals: BTreeSet::from([
+                            PatrolIntervalSignal::try_new(120, 240).unwrap(),
+                            PatrolIntervalSignal::try_new(1320, 1440).unwrap(),
+                        ]),
+                    })
+                );
+            } else {
+                assert_eq!(police.signal(), None);
+                assert_eq!(police.reliability(), Reliability::Mixed);
+                assert_eq!(police.specificity(), Specificity::General);
+                assert!(
+                    police
+                        .summary()
+                        .contains("a dependable daily patrol pattern was not established")
+                );
+                assert!(!police.summary().contains("roughly"));
+            }
+            assert!(is_valid_persisted_surveillance_information(record, police));
+        } else {
+            assert!(resolution.surveillance_signatures().is_empty());
+        }
+        restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn direct_enterprise_watch_rejects_changed_patrol_snapshot() {
+    let mut fixture = fixture(100, true);
+    let (rival, authority) = make_test_rival(&mut fixture);
+    let enterprise = make_test_hosted_enterprise(&mut fixture, rival, authority);
+    let discovery = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    resolve_with_zero_variance(&mut fixture, discovery);
+    let discovery_record = fixture.state.operations().get_operation(discovery).unwrap();
+    assert!(
+        discovery_record
+            .resolution()
+            .unwrap()
+            .discovered_information()
+            .iter()
+            .all(|id| fixture
+                .state
+                .intelligence()
+                .get_information(*id)
+                .unwrap()
+                .topic()
+                == InformationTopic::Personnel)
+    );
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Enterprise(enterprise));
+    run_tick(&fixture.registry, &mut fixture.state);
+    fixture.state.advance_clock(SimDuration::from_minutes(120));
+    let record = fixture.state.operations().get_operation(operation).unwrap();
+    let snapshot = decide_surveillance_intelligence(
+        &fixture.registry,
+        &fixture.state,
+        record,
+        OperationObjectiveOutcome::Achieved,
+    )
+    .unwrap()
+    .unwrap();
+    let plan = decide_operation_resolution(
+        &fixture.registry,
+        &fixture.state,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .unwrap();
+    let validated =
+        validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan.clone())
+            .unwrap();
+    let deployment = fixture
+        .state
+        .legal()
+        .active_patrol_deployments_for_neighborhood(fixture.neighborhood)
+        .next()
+        .unwrap()
+        .id();
+    // Change only a future window, not presence during this watch. The frozen direct snapshot
+    // must still reject the now-different recurring pattern that it was going to publish.
+    crate::legal::patrol_system::validate_revise_patrol_deployment(
+        &fixture.state,
+        deployment,
+        vec![
+            PatrolWindow::try_new(DayMinute::try_new(120).unwrap(), 120, rating(80)).unwrap(),
+            PatrolWindow::try_new(DayMinute::try_new(1200).unwrap(), 120, rating(60)).unwrap(),
+        ],
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        validate_surveillance_plan_snapshot(&fixture.state, &snapshot),
+        Err(SurveillanceError::StaleTarget(EntityRef::Enterprise(
+            enterprise
+        )))
+    );
+    // The execution-level historical police guard may reject before surveillance's own guard.
+    let error = validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error,
+            OperationResolutionError::StalePoliceDeploymentContext { operation: id } if id == operation
+        ) || error
+            == OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
+                EntityRef::Enterprise(enterprise)
+            ))
+    );
+    assert_eq!(validated.commit(&mut fixture.state).unwrap_err(), error);
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]

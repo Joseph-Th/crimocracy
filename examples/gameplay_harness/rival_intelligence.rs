@@ -4,7 +4,8 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{InformationId, OperationId};
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::intelligence::{
-    InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
 };
 use crimocracy::operations::{OperationExposureLevel, OperationObjectiveOutcome, OperationStatus};
 use crimocracy::registry::Registry;
@@ -31,6 +32,7 @@ struct Observation {
     derived_from: BTreeSet<InformationId>,
     reliability: Reliability,
     specificity: Specificity,
+    signal: Option<InformationSignal>,
     summary: String,
 }
 
@@ -198,6 +200,7 @@ fn observe_information(
         derived_from: information.derived_from().clone(),
         reliability: information.reliability(),
         specificity: information.specificity(),
+        signal: information.signal().cloned(),
         // Quote the persisted observation exactly. Do not supplement a missing racket kind,
         // location, manager, or financial detail from the foreign enterprise's hidden record.
         summary: information.summary().to_owned(),
@@ -333,6 +336,28 @@ mod tests {
             item.subject == first.subject
                 && item.source_entity == Some(EntityRef::Operation(followup.operation))
         }));
+        let patrol = followup
+            .observations
+            .iter()
+            .find(|item| item.topic == InformationTopic::PoliceActivity)
+            .expect("a focused racket watch adds local police intelligence");
+        assert!(matches!(patrol.subject, EntityRef::Neighborhood(_)));
+        assert_eq!(
+            patrol.source_entity,
+            Some(EntityRef::Operation(followup.operation))
+        );
+        assert!(matches!(
+            patrol.signal,
+            Some(InformationSignal::PatrolPattern { .. })
+        ));
+        assert!(
+            visible
+                .discovery
+                .observations
+                .iter()
+                .all(|item| { item.topic != InformationTopic::PoliceActivity }),
+            "broad discovery must not disclose patrols at every rival location"
+        );
         assert!(first.observed_minute <= followup.scheduled_minute);
         assert_eq!(visible.absence, None);
 
