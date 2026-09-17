@@ -600,9 +600,8 @@ pub fn print_organization_closing_view(
             "  - Word on the street moved {standing_reports} time(s) this session (Standing reports)."
         );
     }
-    // Rival posture from the player-visible territory surface: the underworld the
-    // organization actually competes with, not hidden rival books. Rival growth (or its
-    // absence) is background by scope, but a boss can always see who holds the home district.
+    // The fixture establishes rival identities, not knowledge of their live racket counts.
+    // Territory aggregation remains diagnostic evidence unless a player channel reveals it.
     {
         let home_district = scenario
             .state
@@ -626,8 +625,7 @@ pub fn print_organization_closing_view(
             .name()
             .to_owned();
         println!(
-            "  - Underworld around {home_district}: {rival_name} and {second_rival_name} operate {} racket(s) between them in this district.",
-            metrics.rival_home_enterprises,
+            "  - Known rivals around {home_district}: {rival_name} and {second_rival_name}. Their current racket totals have not been reported through our channels.",
         );
     }
     // Wage runway from the books the organization actually holds: headcount is a standing

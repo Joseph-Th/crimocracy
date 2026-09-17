@@ -68,6 +68,8 @@ use crate::legal::jurisdiction_system::{
     resolve_case_intake_authority_snapshot, validate_case_intake_authority_snapshot,
 };
 use crate::registry::{EnterpriseDefinition, Registry};
+use crate::reports::report_system::validate_record_report;
+use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{
     BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, OrganizationKind,
 };
@@ -670,6 +672,9 @@ impl ValidatedEnterpriseCycle {
         if self.information.is_some() {
             budget.push((IdKind::Information, 1));
         }
+        if self.plan.economics.attention == AttentionClass::Notable {
+            budget.push((IdKind::Report, 1));
+        }
         if let Some(incident) = &self.incident {
             budget.push((
                 IdKind::Investigation,
@@ -763,6 +768,40 @@ impl ValidatedEnterpriseCycle {
                 .commit(state)
                 .expect("enterprise-cycle information ID was preflighted before mutation")
         });
+        // Only notable cycles carry manager information. Reuse its exact observed account:
+        // executive briefs consume reports, not raw information or hidden legal records.
+        // All references were checked above and the report ID is in the settlement budget.
+        if let Some(source) = information {
+            let record = state
+                .enterprises
+                .get_enterprise(self.plan.snapshot.enterprise)
+                .expect("preflighted enterprise persists during settlement");
+            let observed = state
+                .intelligence
+                .get_information(source)
+                .expect("just-committed manager information persists");
+            validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: record.organization(),
+                    kind: ReportKind::Financial,
+                    title: "Enterprise cycle report".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: self.plan.economics.attention,
+                        summary: observed.summary().to_owned(),
+                        sources: vec![source],
+                        entities: BTreeSet::from([
+                            EntityRef::Enterprise(record.id()),
+                            EntityRef::Character(record.manager()),
+                        ]),
+                        decision: None,
+                    }],
+                },
+            )
+            .expect("preflighted enterprise and its own information support the report")
+            .commit(state)
+            .expect("enterprise report ID was preflighted before mutation");
+        }
         let vice_investigation = self.incident.map(|incident| {
             incident
                 .commit(state)

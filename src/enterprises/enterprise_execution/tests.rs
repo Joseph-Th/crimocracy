@@ -51,6 +51,100 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
 
+#[test]
+fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
+    use crate::reports::ReportKind;
+    use crate::reports::executive_brief::{decide_executive_brief, validate_executive_brief_plan};
+
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let variance = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .notable_variance_basis_points() as i16;
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(variance, u16::MAX),
+    )
+    .unwrap();
+    let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let information = fixture
+        .state
+        .enterprises()
+        .get_cycle(cycle)
+        .unwrap()
+        .information()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .pending_for_recipient(fixture.organization)
+            .count(),
+        0
+    );
+    let plan = decide_executive_brief(&registry, &fixture.state, fixture.organization).unwrap();
+    let brief = validate_executive_brief_plan(&fixture.state, plan)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let report = fixture.state.reports().get_report(brief).unwrap();
+    assert_eq!(report.kind(), ReportKind::ExecutiveBrief);
+    assert!(
+        report
+            .entries()
+            .iter()
+            .any(|entry| entry.sources.contains(&information)),
+        "manager's notable settlement must reach the executive brief"
+    );
+}
+
+#[test]
+fn report_id_exhaustion_rejects_notable_settlement_before_any_mutation() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let variance = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .notable_variance_basis_points() as i16;
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(variance, u16::MAX),
+    )
+    .unwrap();
+    let validated = validate_enterprise_cycle_plan(&fixture.state, plan).unwrap();
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX);
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        validated.commit(&mut fixture.state),
+        Err(EnterpriseError::IdExhaustion(
+            IdExhaustionError::Exhausted {
+                kind: "report",
+                next: u32::MAX
+            }
+        ))
+    ));
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+}
+
 struct EnterpriseFixture {
     state: AppState,
     authority: MandateAuthority,
@@ -1703,15 +1797,30 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
     open_case(&mut fixture, "First ward inquiry");
     let first_hot = settle_cycle(&mut fixture);
     assert_eq!(first_hot, AttentionClass::Notable);
+    let financial_report_count = |fixture: &EnterpriseFixture| {
+        fixture
+            .state
+            .reports()
+            .reports_for(fixture.organization)
+            .filter(|report| report.kind() == crate::reports::ReportKind::Financial)
+            .count()
+    };
+    assert_eq!(financial_report_count(&fixture), 1);
 
     // The next cycle pays the same surcharge while the case stays open. The cost is known
     // news by now, so it settles as routine instead of repeating an identical report.
     let second_hot = settle_cycle(&mut fixture);
     assert_eq!(second_hot, AttentionClass::Routine);
+    assert_eq!(
+        financial_report_count(&fixture),
+        1,
+        "unchanged heat must not spam reports"
+    );
 
     open_case(&mut fixture, "Second ward inquiry");
     let escalated = settle_cycle(&mut fixture);
     assert_eq!(escalated, AttentionClass::Notable);
+    assert_eq!(financial_report_count(&fixture), 2);
 
     validate_state(&fixture.state).expect("sustained heat state should validate");
     validate_invariants(&fixture.state);

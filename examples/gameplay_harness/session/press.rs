@@ -1,7 +1,6 @@
 //! PRESS strategy response arc built only from player-visible information and canonical game APIs.
 
 use super::*;
-use crimocracy::world::territory_influence::resolve_neighborhood_influence;
 
 pub(super) fn run_press_response(
     scenario: &mut Scenario,
@@ -860,18 +859,6 @@ fn narrate_stand_down_heartbeat(
         .map(|account| account.balance().cents())
         .unwrap_or_default()
         .max(0);
-    // The governed underworld keeps moving while the organization waits: rival
-    // posture from the player-visible territory surface, not hidden rival books.
-    let rival_rackets: u32 = resolve_neighborhood_influence(&scenario.state, scenario.neighborhood)
-        .map(|influence| {
-            influence
-                .standings
-                .into_iter()
-                .filter(|standing| standing.organization != scenario.player)
-                .map(|standing| standing.active_enterprises)
-                .sum()
-        })
-        .unwrap_or_default();
     let channel_line = match read {
         Some((true, _)) => "the case is still developing - no new street jobs, racket still open",
         Some((false, _)) => "the channel confirms the case has cooled",
@@ -880,13 +867,12 @@ fn narrate_stand_down_heartbeat(
         None => "no fresh word - no new street jobs, racket still open",
     };
     println!(
-        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}; rivals hold {} home-district racket(s).",
+        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}.",
         stamp(scenario.state.now().as_minutes()),
         channel_line,
         stand_down.capital_review_days,
         format_cents(accounted.cents()),
         format_cents(till_cents),
-        rival_rackets,
     );
 }
 
