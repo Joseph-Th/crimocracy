@@ -212,7 +212,7 @@ pub fn validate_strategy_evidence(
 /// Statistical batches validate event reachability at the aggregate level instead of requiring
 /// one stochastic/world-dependent consequence in every run. Small batches are valid bounded
 /// samples but cannot establish coverage, so only the same three-variation threshold used by the
-/// fixture contract upgrades absence into a regression failure.
+/// fixture contract upgrades absence into a contract failure.
 pub fn validate_batch_strategy_coverage(
     profile: ScenarioProfile,
     samples: u64,

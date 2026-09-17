@@ -8,7 +8,7 @@ Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rul
 
 `content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-Consequential mutation goes through the owning system's `validate_* → commit` or `decide_* → validate_* → commit` path. Tests, examples, adapters, and tools use those same production paths. Do not construct authoritative `*Record` values or patch owner-private state as a shortcut.
+Consequential mutation goes through the owning system's `validate_* → commit` or `decide_* → apply_*` path (some owners validate the decided plan before applying it). Tests, examples, adapters, and tools use those same production paths. Do not construct authoritative `*Record` values or patch owner-private state as a shortcut.
 
 ## Reading order
 

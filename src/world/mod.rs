@@ -1,4 +1,7 @@
 //! Persistent city and organization records; `world_system` owns their canonical mutation paths.
+//!
+//! `stores` owns the record collections; `payroll_execution` owns the daily wage pass;
+//! `territory_influence`, `rating`, and `vocabulary` are read-only derivation.
 
 pub mod payroll_execution;
 pub mod rating;

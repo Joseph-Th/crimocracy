@@ -106,8 +106,8 @@ No bypasses. If you are constructing a `*Record` literal, stop — use the owner
 
 1. **Locate the owner.** Find the `AppState` field (`src/core/state.rs`) and the
    `ARCHITECTURE.md` source map. Read the `//!` header of that `src/*/mod.rs`.
-2. **Read the focused tests.** Open `src/<owner>/tests.rs` or `#[cfg(test)]` in the
-   owning module. They are the executable contract.
+2. **Read the focused tests.** Open `src/<owner>/tests.rs` first, falling back to `#[cfg(test)]`
+   in the owning `*_system.rs`. They are the executable contract.
 3. **Name the canonical operation.** Search for `validate_*` or `decide_*` in the
    owner's `*_system.rs`. Do not invent `create_*`/`make_*`/`execute_*`.
 4. **Implement through the owner.** Validate before mutation; commit atomically;

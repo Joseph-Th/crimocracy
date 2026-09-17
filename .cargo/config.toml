@@ -37,6 +37,8 @@ test-delegation = ["test", "--locked", "--lib", "--quiet", "delegation"]
 # ── gameplay harness ──────────────────────────────────────────────────────────
 # Harness execution uses [profile.harness] so gameplay runs keep a separate cache.
 # The harness itself owns narrative output; Cargo build logging stays quiet.
+# Windows: if rebuilds feel pathological, exclude the repository target directory
+# from Defender real-time scanning.
 harness = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness"]
 harness-rush = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
 harness-press = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]

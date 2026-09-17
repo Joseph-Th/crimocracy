@@ -486,9 +486,8 @@ pub fn validate_invariants(state: &AppState) {
     // lifecycle, provenance, index, and balance coherence — including every subsystem's
     // derived-index consistency (`validate_indexes`), finance balance agreement, and the
     // reputation index check inside `validate_reputations`. Keep them authoritative here
-    // instead of re-running reduced-fidelity copies alongside them, which has historically
-    // drifted from the release-safe checks (for example, the supervision-cycle walk must
-    // detect multi-character cycles rather than only self-reference).
+    // instead of re-running reduced-fidelity copies alongside them: copies diverge (the
+    // supervision-cycle walk must detect multi-character cycles rather than only self-reference).
     if let Err(error) = validate_state(state) {
         panic!("State Runtime Validity: release-safe structural validation failed: {error:?}");
     }

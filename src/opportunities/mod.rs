@@ -1,4 +1,4 @@
-//! Persistent provenance-backed strategic opportunities; sibling systems own discovery and lifecycle transactions.
+//! Persistent provenance-backed strategic opportunities; `opportunity_system` owns discovery and lifecycle transactions.
 
 pub mod opportunity_system;
 

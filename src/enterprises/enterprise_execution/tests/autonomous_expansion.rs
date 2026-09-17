@@ -467,7 +467,7 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
             &fixture.state,
             LedgerTransactionDraft {
                 occurred_at: fixture.state.now(),
-                memo: "Normalize stale-pressure regression runway".to_owned(),
+                memo: "Normalize stale-pressure contract runway".to_owned(),
                 postings: vec![
                     LedgerPosting {
                         account: fixture.cash,
@@ -1308,7 +1308,7 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
     assert_eq!(
         stale_expansion.len(),
         1,
-        "the regression requires a genuinely eligible expansion under the old posture"
+        "this check requires a genuinely eligible expansion under the prior posture"
     );
     assert!(
         stale_posture_control

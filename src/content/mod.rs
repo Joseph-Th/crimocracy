@@ -1,4 +1,7 @@
 //! Code-owned authored definitions assembled into the immutable startup registry.
+//!
+//! `build_registry` composes the `businesses`, `enterprises`, `governance`, `legal`,
+//! `operations`, and `recruitment` siblings and stamps `CURRENT_CONTENT_REVISION`.
 
 mod businesses;
 mod enterprises;

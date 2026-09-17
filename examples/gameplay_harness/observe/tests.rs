@@ -1,4 +1,4 @@
-//! Decision ownership regressions through canonical requests and resolution.
+//! Decision ownership contracts through canonical requests and resolution.
 
 use super::*;
 use crimocracy::core::simulation::run_tick;

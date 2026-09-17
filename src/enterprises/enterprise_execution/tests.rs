@@ -1214,10 +1214,9 @@ fn establish_alcohol_distribution(
 
 #[test]
 fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
-    // Regression: the persisted notability rule includes drawn vice attention, but the
-    // registry-relative invariant re-derivation omitted that disjunct — so a settlement
-    // whose only notability trigger was a successful visibility roll committed Notable and
-    // then failed every later save/load against the authored content.
+    // Notability parity: the persisted notability rule and the registry-relative invariant
+    // re-derivation both include drawn vice attention, so a settlement whose only notability
+    // trigger is a visibility draw stays registry-valid across save/load.
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -1368,7 +1367,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             neighborhood,
         ),
         Some(replacement_police),
-        "replacement bureau must actually own new intake before the handoff regression runs"
+        "replacement bureau must actually own new intake before the handoff assertion runs"
     );
 
     // The inquiry opened above now contributes to district heat itself. Even a guaranteed
@@ -1423,7 +1422,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
     assert_eq!(active_racket_inquiries, 1);
 
     // The persisted artifact must satisfy the authored-content validator that every save and
-    // load runs — the exact check the missing disjunct used to fail.
+    // load runs.
     validate_state_against_registry(&registry, &fixture.state)
         .expect("a vice-drawn notable cycle must stay registry-valid");
 
@@ -3757,7 +3756,7 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
             .get_cycle(first_cycle)
             .expect("first peer cycle should persist")
             .drew_vice_attention(),
-        "the first peer should create the same-minute vice inquiry used by this regression"
+        "the first peer should create the same-minute vice inquiry asserted by this check"
     );
 
     let second_plan = decide_enterprise_cycle(

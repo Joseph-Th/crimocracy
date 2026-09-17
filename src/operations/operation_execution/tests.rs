@@ -907,9 +907,9 @@ fn make_exposed_operation_fixture_with_constraints(
 
 #[test]
 fn trace_exposing_sabotage_resolves_and_opens_a_case_through_canonical_intake() {
-    // Regression: authored sabotage exposure once carried the ForensicAnalysis evidence kind,
-    // which the legal intake gate rejects, so any trace-exposing sabotage panicked the tick
-    // at plan validation. Sabotage now leaves physical-trace evidence like other scene work.
+    // Intake compatibility: sabotage leaves physical-trace evidence that the legal intake
+    // gate accepts, like other scene work, so trace-exposing sabotage resolves through
+    // canonical intake.
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture(OperationKind::Sabotage, true, Vec::new());
     let started = run_tick(&registry, &mut state);

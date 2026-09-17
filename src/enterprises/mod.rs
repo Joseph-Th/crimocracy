@@ -1,4 +1,4 @@
-//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement.
+//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement, `autonomous_expansion` owns the daily delegated expansion pass, `enterprise_reporting` is read-only aggregation.
 
 pub mod autonomous_expansion;
 pub mod enterprise_execution;

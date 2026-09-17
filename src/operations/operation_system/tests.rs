@@ -466,7 +466,7 @@ fn gambling_event_fails_if_the_sponsor_loses_the_venue_before_payout() {
         &registry,
         &state,
         OperationDraft {
-            title: "Venue control regression".to_owned(),
+            title: "Venue control check".to_owned(),
             kind: OperationKind::GamblingEvent,
             responsible_organization: organization,
             leader,

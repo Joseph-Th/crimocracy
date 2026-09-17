@@ -1,5 +1,4 @@
 //! Player-facing record integrity: report holders and history-event references.
-
 //! Release-safe structural validation for the legal subsystems plus persisted reports and history.
 
 use crate::core::entity::{EntityRef, is_entity_present};

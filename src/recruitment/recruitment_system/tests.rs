@@ -3188,7 +3188,7 @@ fn autonomous_contention_recomputes_priority_after_a_manager_loses_their_first_c
         first_choice_score > original_fixture_score
             && original_fixture_score > live_fallback_score
             && live_fallback_score > weak_fallback_score,
-        "fixture must reproduce the stale-priority ordering that the regression protects"
+        "fixture must preserve the stale-priority ordering asserted by this contention guard"
     );
 
     fixture

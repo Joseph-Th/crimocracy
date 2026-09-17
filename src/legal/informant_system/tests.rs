@@ -459,7 +459,7 @@ fn informant_disclosure_refreshes_all_matching_originated_cases_before_cold_deca
     let first_leader = make_leader(&mut state, "First Parallel Observer");
     let second_leader = make_leader(&mut state, "Second Parallel Observer");
 
-    // Offset setup from the day boundary so the regression isolates legal phase ordering.
+    // Offset setup from the day boundary so this assertion isolates legal phase ordering.
     state.advance_clock(SimDuration::ONE_MINUTE);
     let informant = validate_establish_informant(
         &state,

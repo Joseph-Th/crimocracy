@@ -145,7 +145,7 @@ fn validated_transaction_cannot_commit_after_simulation_time_advances() {
 }
 
 #[test]
-fn restore_rejects_ledger_transaction_time_regression() {
+fn restore_rejects_backdated_ledger_transaction() {
     let registry = build_registry();
     let (mut state, _, funding, destination) = make_test_budget();
     state.advance_clock(SimDuration::from_minutes(1));
@@ -207,7 +207,7 @@ fn restore_rejects_ledger_transaction_time_regression() {
             &corrupted,
         ),
     )
-    .expect_err("ledger chronology regression must fail restore");
+    .expect_err("backdated ledger chronology must fail restore");
 
     assert!(matches!(
         error,

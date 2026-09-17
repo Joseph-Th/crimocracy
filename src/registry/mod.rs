@@ -2,7 +2,8 @@
 //!
 //! Sibling files: `definitions.rs` owns the authored definition types; `builder.rs` owns
 //! registration and completeness validation; `operation_validation.rs` owns operation-specific
-//! authoring contracts; this module owns the `Registry` lookup surface.
+//! authoring contracts; `recruitment_validation.rs` owns recruitment-specific authoring
+//! contracts; this module owns the `Registry` lookup surface.
 
 mod builder;
 mod definitions;

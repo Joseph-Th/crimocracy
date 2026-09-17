@@ -1,4 +1,8 @@
-//! Semantic operation plans, execution state, and outcomes; sibling systems own authorization and resolution.
+//! Semantic operation plans, execution state, and outcomes; `operation_system` owns
+//! authorization and lifecycle, `operation_execution` owns deterministic resolution,
+//! `operation_scheduling` owns timing and due-work projections, `operation_state` owns
+//! storage, and the remaining siblings own abort, objective, economics, intelligence,
+//! surveillance, police-response, and disposition facets.
 
 pub(crate) mod operation_abort;
 pub(crate) mod operation_economics;

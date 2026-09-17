@@ -596,9 +596,8 @@ fn custody_cancelled_evidence_review_is_retryable_after_restaffing() {
 
 #[test]
 fn witness_interview_scheduling_stops_after_the_authored_attempt_limit() {
-    // Regression: a completed interview produces a statement only when it connects, so a
-    // hostile witness facing an incapable investigator used to be re-scheduled forever,
-    // consuming institutional work and refreshing the case's cold-case clock each cycle.
+    // Attempt bound: a non-connecting interview still consumes the attempt, so scheduling
+    // terminates instead of re-queuing the same witness and refreshing the cold-case clock.
     let registry = build_registry();
     let mut fixture = make_fixture(
         0,
@@ -1197,8 +1196,8 @@ fn late_reviewable_evidence_is_scheduled_after_case_was_already_staffed() {
     .expect("witness registration should commit");
 
     // The first authoritative minute staffs the case and schedules its witness interview, but
-    // there is no reviewable evidence yet. This is exactly the state that used to strand a later
-    // fingerprint because initial reviews only inspected the `staffed_investigations` output.
+    // there is no reviewable evidence yet. Later evidence must still become reviewable even
+    // when the first scheduling pass ran before any reviewable source existed.
     let first_tick = run_tick(&registry, &mut state);
     assert_eq!(
         first_tick.staffed_investigations,
