@@ -4,7 +4,7 @@ use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::simulation::TickOutcome;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::decisions::decision_system::validate_resolve_decision;
-use crimocracy::decisions::{DecisionContext, DecisionResponse};
+use crimocracy::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crimocracy::finance::{AccountKind, FinancialOwner};
 use crimocracy::intelligence::intelligence_system::validate_information_transfer;
 use crimocracy::intelligence::{
@@ -14,6 +14,9 @@ use crimocracy::reports::ReportKind;
 use std::error::Error;
 
 use crate::*;
+
+#[cfg(test)]
+mod tests;
 
 pub fn observe_tick(
     scenario: &mut Scenario,
@@ -214,12 +217,18 @@ fn resolve_decision_requests(
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     for request in &outcome.decision_requests {
-        metrics.decision_requests += 1;
         let decision = scenario
             .state
             .decisions()
             .get_decision(request.decision)
             .expect("surfaced decision must persist");
+        // Tick outcomes include NPC approvals already resolved by their own leadership.
+        // Observing a request grants neither authority over its owner nor permission to
+        // replay a terminal decision. Only our pending queue consumes player attention.
+        if decision.recipient() != scenario.player || decision.status() != DecisionStatus::Pending {
+            continue;
+        }
+        metrics.decision_requests += 1;
         if narrative {
             println!(
                 "[EXCEPTION] {}: {}",
@@ -247,7 +256,7 @@ fn resolve_decision_requests(
             scenario.registry,
             &scenario.state,
             request.decision,
-            decision.recipient(),
+            scenario.player,
             response,
         )?
         .commit(&mut scenario.state)?;

@@ -609,11 +609,32 @@ pub struct Scenario<'registry> {
     pub wait_slack_minutes: u32,
 }
 
+/// Player-visible assessment of a terminal casing operation, never hidden case intake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum CasingAssessment {
+    Clean,
+    Shelved,
+    Active,
+    Unknown,
+    Aborted,
+}
+
+impl CasingAssessment {
+    pub fn permits_burglary(self) -> bool {
+        matches!(self, Self::Clean | Self::Shelved)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunMetrics {
     pub strategy: Option<Strategy>,
     pub variation: Option<FixtureVariation>,
     pub burglary: Option<OperationId>,
+    pub opening_scout: Option<OperationId>,
+    pub opening_casing_assessment: Option<CasingAssessment>,
+    pub opening_stood_down: bool,
+    pub second_scout: Option<OperationId>,
+    pub second_casing_assessment: Option<CasingAssessment>,
     pub outcome: Option<OperationObjectiveOutcome>,
     pub aborted: bool,
     pub abort_phase: Option<OperationAbortPhase>,
@@ -801,6 +822,7 @@ pub struct Aggregate {
     pub failed: u64,
     pub aborted: u64,
     pub unresolved: u64,
+    pub opening_standdowns: u64,
     pub police_dispatched: u64,
     pub police_arrived: u64,
     pub decisions: u64,
@@ -853,6 +875,7 @@ impl Aggregate {
             Some(OperationObjectiveOutcome::Partial) => self.partial += 1,
             Some(OperationObjectiveOutcome::Failed) => self.failed += 1,
             None if metrics.aborted => self.aborted += 1,
+            None if metrics.opening_stood_down => self.opening_standdowns += 1,
             // A run that reached neither a resolution nor an abort is an unresolved breakage; count
             // it explicitly so the outcome percentages never silently stop summing to the sample
             // count.
@@ -965,7 +988,7 @@ impl Aggregate {
         // not the internal cent accounting.
         println!(
             "{label:<6} samples {:>2}  fixtures {:?}
-       outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}
+       outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  opening standdown {:>5.1}%  unresolved {:>2}
        pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
        economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {} -> {} cash @ {:>5.0}m
@@ -979,6 +1002,7 @@ impl Aggregate {
             self.percent(self.partial),
             self.percent(self.failed),
             self.percent(self.aborted),
+            self.percent(self.opening_standdowns),
             self.unresolved,
             self.percent(self.standing_contingency_aborts),
             self.percent(self.police_arrived),

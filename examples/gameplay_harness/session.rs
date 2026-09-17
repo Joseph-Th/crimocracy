@@ -5,6 +5,9 @@ mod defector;
 mod press;
 mod second_act;
 
+#[cfg(test)]
+mod casing_tests;
+
 use crimocracy::contacts::contact_system::{
     find_pending_disclosure_sources, validate_contact_disclosure,
 };
@@ -325,6 +328,63 @@ pub(crate) fn discover_initial_opportunity(
     Ok(opportunity)
 }
 
+/// Apply the same player-visible risk boundary to both opening and second-score casing.
+/// Aborts have no objective resolution; observed exposure requires a canonical contact read.
+pub(crate) fn assess_casing(
+    scenario: &mut Scenario,
+    scout: OperationId,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<CasingAssessment, Box<dyn Error>> {
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(scout)
+        .expect("authorized scout persists");
+    if record.status() == OperationStatus::Aborted {
+        if narrative {
+            println!(
+                "[DECIDE]  Casing aborted. RECON stands down without authorizing a burglary; an incomplete scout is not clearance."
+            );
+        }
+        return Ok(CasingAssessment::Aborted);
+    }
+    let resolution = record
+        .resolution()
+        .ok_or("casing assessment requires a terminal scout")?;
+    if resolution.exposure().level() == crimocracy::operations::OperationExposureLevel::None {
+        return Ok(CasingAssessment::Clean);
+    }
+    if narrative {
+        println!(
+            "[DECIDE]  Casing reported exposure, not proof of a case. Ask the standing police contact before another job."
+        );
+    }
+    let assessment =
+        match read_police_contact(scenario, EntityRef::Operation(scout), narrative, metrics)? {
+            Some((false, _)) => CasingAssessment::Shelved,
+            Some((true, _)) => CasingAssessment::Active,
+            None => CasingAssessment::Unknown,
+        };
+    if narrative {
+        match assessment {
+            CasingAssessment::Shelved => println!(
+                "[VERIFY]  The channel explicitly says this casing matter is shelved; continue evaluating the score."
+            ),
+            CasingAssessment::Active => println!(
+                "[VERIFY]  The casing case is active. Stand down without authorizing another burglary."
+            ),
+            CasingAssessment::Unknown => println!(
+                "[VERIFY]  No dependable clearing read. Stand down without authorizing another burglary."
+            ),
+            CasingAssessment::Clean | CasingAssessment::Aborted => {
+                unreachable!("contact read has only case assessments")
+            }
+        }
+    }
+    Ok(assessment)
+}
+
 struct InitialBurglaryPlan {
     scheduled_for: SimTime,
     intelligence: BTreeSet<InformationId>,
@@ -335,7 +395,7 @@ fn prepare_initial_burglary_plan(
     strategy: Strategy,
     narrative: bool,
     metrics: &mut RunMetrics,
-) -> Result<InitialBurglaryPlan, Box<dyn Error>> {
+) -> Result<Option<InitialBurglaryPlan>, Box<dyn Error>> {
     let mut intelligence = BTreeSet::from([scenario.opportunity_information]);
     let mut learned_patrol_information = None;
     if strategy == Strategy::Recon {
@@ -348,38 +408,48 @@ fn prepare_initial_burglary_plan(
             );
         }
         let surveillance = authorize_surveillance(scenario)?;
+        metrics.opening_scout = Some(surveillance);
         run_until_operation_terminal(scenario, surveillance, narrative, metrics)?;
+        let assessment = assess_casing(scenario, surveillance, narrative, metrics)?;
+        metrics.opening_casing_assessment = Some(assessment);
+        metrics.opening_stood_down = !assessment.permits_burglary();
+        // Learning narration happens before any standdown return: what the scout gathered
+        // stays organizational knowledge even when its legal consequence ends the score.
         let resolution = scenario
             .state
             .operations()
             .get_operation(surveillance)
             .expect("surveillance must remain queryable")
-            .resolution()
-            .expect("completed surveillance must have a resolution");
-        metrics.discovered_surveillance_information = resolution.discovered_information().len();
-        for information in resolution.discovered_information() {
-            let record = scenario
-                .state
-                .intelligence()
-                .get_information(*information)
-                .expect("surveillance information must persist");
-            if narrative {
-                println!(
-                    "[LEARN]   {:?} / {:?}: {}",
-                    record.reliability(),
-                    record.specificity(),
-                    record.summary()
-                );
+            .resolution();
+        if let Some(resolution) = resolution {
+            metrics.discovered_surveillance_information = resolution.discovered_information().len();
+            for information in resolution.discovered_information() {
+                let record = scenario
+                    .state
+                    .intelligence()
+                    .get_information(*information)
+                    .expect("surveillance information must persist");
+                if narrative {
+                    println!(
+                        "[LEARN]   {:?} / {:?}: {}",
+                        record.reliability(),
+                        record.specificity(),
+                        record.summary()
+                    );
+                }
+                if record.topic() == InformationTopic::PoliceActivity
+                    && matches!(
+                        record.signal(),
+                        Some(InformationSignal::PatrolPattern { .. })
+                    )
+                {
+                    learned_patrol_information = Some(*information);
+                }
+                intelligence.insert(*information);
             }
-            if record.topic() == InformationTopic::PoliceActivity
-                && matches!(
-                    record.signal(),
-                    Some(InformationSignal::PatrolPattern { .. })
-                )
-            {
-                learned_patrol_information = Some(*information);
-            }
-            intelligence.insert(*information);
+        }
+        if metrics.opening_stood_down {
+            return Ok(None);
         }
     }
 
@@ -444,10 +514,10 @@ fn prepare_initial_burglary_plan(
         )
         .into());
     }
-    Ok(InitialBurglaryPlan {
+    Ok(Some(InitialBurglaryPlan {
         scheduled_for,
         intelligence,
-    })
+    }))
 }
 
 fn authorize_initial_burglary(
@@ -787,27 +857,30 @@ pub(crate) fn run_initial_burglary(
     strategy: Strategy,
     narrative: bool,
     metrics: &mut RunMetrics,
-) -> Result<OperationId, Box<dyn Error>> {
+) -> Result<Option<OperationId>, Box<dyn Error>> {
     let opportunity = discover_initial_opportunity(scenario, narrative)?;
-    let plan = prepare_initial_burglary_plan(scenario, strategy, narrative, metrics)?;
+    let Some(plan) = prepare_initial_burglary_plan(scenario, strategy, narrative, metrics)? else {
+        return Ok(None);
+    };
     let burglary =
         authorize_initial_burglary(scenario, strategy, opportunity, plan, narrative, metrics)?;
     resolve_initial_burglary(scenario, strategy, burglary, narrative, metrics)?;
     liquidate_initial_property(scenario, burglary, narrative, metrics)?;
     capture_initial_case_diagnostics(scenario, burglary, narrative, metrics);
-    Ok(burglary)
+    Ok(Some(burglary))
 }
 
 fn run_post_burglary_campaign(
     scenario: &mut Scenario,
     strategy: Strategy,
-    burglary: OperationId,
+    burglary: Option<OperationId>,
     full_arc: bool,
     narrative: bool,
     campaign_day_minutes: u64,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     if strategy == Strategy::Press {
+        let burglary = burglary.ok_or("PRESS requires its opening burglary")?;
         press::run_press_response(
             scenario,
             burglary,

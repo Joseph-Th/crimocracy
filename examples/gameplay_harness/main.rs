@@ -96,9 +96,9 @@ fn run_smoke(
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4}m | {} | police {} | evidence {} | intel legal {} / police {} / burglary {} | counter-intel {} | follow-up case {} | cold case {} | recruitment {} attempts / {} departures",
+            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {} | intel legal {} / police {} / burglary {} | counter-intel {} | follow-up case {} | cold case {} | recruitment {} attempts / {} departures",
             strategy.label(),
-            metrics.burglary_terminal_minute.unwrap_or_default(),
+            optional_minute(metrics.burglary_terminal_minute),
             terminal_label(&metrics),
             if metrics.police_arrived {
                 "arrived"
@@ -443,14 +443,14 @@ fn persist_narrative_artifacts(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds, FixtureVariation,
-        HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
+        CasingAssessment, DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds,
+        FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
         NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
         Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
         format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
         play_session, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe, stamp,
         validate_batch_strategy_coverage, validate_branch_financial_isolation,
-        validate_press_witness_counterplay, validate_second_act_evidence,
+        validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
         validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
@@ -1205,6 +1205,60 @@ mod tests {
         inconclusive.self_heat_case_active = None;
         validate_second_act_evidence(&inconclusive)
             .expect("an uncleared casing case must also make cautious recon stand down");
+    }
+
+    #[test]
+    fn recon_opening_or_second_casing_standdown_records_honest_assessment_without_burglary() {
+        // Opening casing aborted: no burglary, no outcome, and the abort provenance fields
+        // stay empty because the opening never reached a terminal burglary.
+        let mut opening_abort = branch_metrics(Strategy::Recon, false, None);
+        opening_abort.opening_scout = Some(persisted_operation_id(90));
+        opening_abort.opening_casing_assessment = Some(CasingAssessment::Aborted);
+        opening_abort.opening_stood_down = true;
+        opening_abort.second_opportunity_discovered = true;
+        opening_abort.second_opportunity_expired = true;
+        validate_run_metrics(&opening_abort, false)
+            .expect("an opening standdown needs no fabricated burglary terminal state");
+        validate_strategy_evidence(ScenarioProfile::NightTrap, &opening_abort)
+            .expect("an aborted opening scout is observed absence, not a contract failure");
+
+        // Opening casing reported exposure with no clearing read: standdown with no
+        // subsequent burglary, and the second act may not compound the risk.
+        let mut opening_unknown = branch_metrics(Strategy::Recon, false, None);
+        opening_unknown.opening_scout = Some(persisted_operation_id(91));
+        opening_unknown.opening_casing_assessment = Some(CasingAssessment::Unknown);
+        opening_unknown.opening_stood_down = true;
+        opening_unknown.second_opportunity_discovered = true;
+        opening_unknown.second_opportunity_expired = true;
+        validate_run_metrics(&opening_unknown, false)
+            .expect("an uncleared opening casing must pass terminal validation as a standdown");
+        validate_strategy_evidence(ScenarioProfile::NightTrap, &opening_unknown)
+            .expect("an uncleared opening casing must keep RECON from working any score");
+        validate_second_act_evidence(&opening_unknown)
+            .expect("withheld second act after an uncleared opening must close its arc");
+
+        // A completed clean second scout keeps the normal recovered path available.
+        let mut second_clean = branch_metrics(Strategy::Recon, false, None);
+        second_clean.second_opportunity_discovered = true;
+        second_clean.second_act_recon_information = 2;
+        second_clean.second_scout = Some(persisted_operation_id(92));
+        second_clean.second_casing_assessment = Some(CasingAssessment::Clean);
+        second_clean.second_burglary = Some(persisted_operation_id(93));
+        second_clean.second_burglary_outcome = Some(OperationObjectiveOutcome::Achieved);
+        second_clean.second_burglary_terminal_minute = Some(2_095);
+        validate_second_act_evidence(&second_clean)
+            .expect("a clean second assessment must still permit the patrol-safe second burglary");
+
+        // An aborted second scout records its standdown instead of panicking on a missing
+        // resolution and never fabricates a second burglary.
+        let mut second_abort = branch_metrics(Strategy::Recon, false, None);
+        second_abort.second_opportunity_discovered = true;
+        second_abort.second_opportunity_expired = true;
+        second_abort.second_act_recon_information = 0;
+        second_abort.second_scout = Some(persisted_operation_id(94));
+        second_abort.second_casing_assessment = Some(CasingAssessment::Aborted);
+        validate_second_act_evidence(&second_abort)
+            .expect("an aborted second scout must stand down without resolution access");
     }
 
     #[test]

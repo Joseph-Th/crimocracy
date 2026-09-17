@@ -82,6 +82,20 @@ pub fn known_racket_observations(scenario: &Scenario) -> Vec<KnownRacketObservat
 
 pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: &RunMetrics) {
     let target = scenario.variation.alternate_target_name();
+    if metrics.opening_stood_down
+        || metrics.second_casing_assessment == Some(CasingAssessment::Aborted)
+    {
+        println!(
+            "\n[ACT 2] {target} remains unworked: casing was not cleared ({:?}); no second burglary was authorized. Opportunity expired: {}.",
+            if metrics.opening_stood_down {
+                metrics.opening_casing_assessment
+            } else {
+                metrics.second_casing_assessment
+            },
+            metrics.second_opportunity_expired
+        );
+        return;
+    }
     match strategy {
         Strategy::Rush | Strategy::Recon => {
             if strategy == Strategy::Recon
@@ -1542,7 +1556,12 @@ pub fn print_experience_readout(
             "[WATCH] The burglary file cooled. That is not a district-wide all-clear; racket warnings and street surcharges have their own continuation."
         );
     }
-    if !recon.self_heat_case_opened {
+    if !recon.self_heat_case_opened
+        && !matches!(
+            recon.opening_casing_assessment,
+            Some(CasingAssessment::Active | CasingAssessment::Shelved)
+        )
+    {
         println!(
             "[WATCH] No casing case was disclosed to RECON in this run. That is missing knowledge, not proof that surveillance left no trace."
         );
@@ -1624,15 +1643,15 @@ pub fn print_experience_readout(
         "second wind",
         recon.second_act_recon_information > 0
             && (recon.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
-                || (recon.self_heat_case_opened
+                || (recon.self_heat_check_required
                     && recon.self_heat_case_active != Some(false)
                     && recon.second_burglary.is_none()
                     && recon.second_opportunity_expired)),
-        "fresh planning changes the next move: RECON takes the reopened score when clear and gives it up when its own casing creates a case the channel cannot affirmatively clear",
+        "fresh planning changes the next move: RECON takes the reopened score when clear and gives it up when its own casing reports exposure the channel cannot affirmatively clear",
     );
     checkpoint(
         "own heat",
-        recon.self_heat_case_opened
+        recon.self_heat_check_required
             && recon.self_heat_case_active != Some(false)
             && recon.second_burglary.is_none(),
         "casing carries risk both ways: when the crew's own casing reports exposure, leadership asks its standing police contact whether a file exists and stands down unless the channel explicitly says the matter is shelved",
@@ -1779,10 +1798,29 @@ pub fn print_experience_readout(
     );
     println!(
         "  - Information risk: {} (contact case read: {:?}). No disclosed file is not proof of no institutional attention.",
-        if recon.self_heat_check_required {
-            "the second casing reported exposure, so RECON checked its contact before authorizing another score"
-        } else {
-            "the second casing reported no exposure; RECON had no crew-observed trigger for a case query"
+        match recon.second_casing_assessment {
+            Some(CasingAssessment::Active) =>
+                "the second casing reported exposure and the contact confirmed an active case; RECON stood down",
+            Some(CasingAssessment::Shelved) =>
+                "the second casing reported exposure but the contact read the casing matter as shelved, so RECON continued",
+            Some(CasingAssessment::Unknown) =>
+                "the second casing reported exposure but the contact could not dependably clear it; RECON stood down",
+            Some(CasingAssessment::Aborted) =>
+                "the second casing itself aborted; RECON stood down without authorizing another score",
+            Some(CasingAssessment::Clean) =>
+                "the second casing reported no exposure; RECON had no crew-observed trigger for a case query",
+            None if recon.opening_stood_down => match recon.opening_casing_assessment {
+                Some(CasingAssessment::Active) =>
+                    "the opening casing reported exposure and the contact confirmed an active case; RECON stood down before the first score",
+                Some(CasingAssessment::Unknown) =>
+                    "the opening casing reported exposure but the contact could not dependably clear it; RECON stood down before the first score",
+                Some(CasingAssessment::Aborted) =>
+                    "the opening casing itself aborted; RECON stood down without authorizing the first score",
+                Some(CasingAssessment::Clean) | Some(CasingAssessment::Shelved) | None =>
+                    "casing risk stood the opening down; the second score was withheld as well",
+            },
+            None =>
+                "no casing exposure was observed this run; RECON had no crew-observed trigger for a case query",
         },
         recon.self_heat_case_active,
     );
@@ -1878,6 +1916,12 @@ pub fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) -> bool
 }
 
 pub fn terminal_label(metrics: &RunMetrics) -> String {
+    if metrics.opening_stood_down {
+        return format!(
+            "opening stood down ({:?}); no burglary authorized",
+            metrics.opening_casing_assessment
+        );
+    }
     if metrics.aborted {
         let phase = metrics
             .abort_phase

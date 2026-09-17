@@ -16,15 +16,40 @@ pub fn validate_run_metrics(
     let strategy = metrics
         .strategy
         .ok_or(HarnessContractError::MissingStrategy)?;
-    if metrics.burglary.is_none() {
+    let opening_standdown = strategy == Strategy::Recon
+        && metrics.opening_stood_down
+        && metrics.opening_scout.is_some()
+        && metrics
+            .opening_casing_assessment
+            .is_some_and(|assessment| !assessment.permits_burglary());
+    if metrics.opening_stood_down
+        && (!opening_standdown
+            || metrics.burglary.is_some()
+            || metrics.outcome.is_some()
+            || metrics.aborted
+            || metrics.abort_phase.is_some()
+            || metrics.abort_cause.is_some()
+            || metrics.burglary_terminal_minute.is_some()
+            || metrics.property_acquired_value_cents.is_some()
+            || metrics.property_realized_cash_cents.is_some()
+            || metrics.second_burglary.is_some())
+    {
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "opening standdown must retain its casing assessment without inventing a burglary or proceeds",
+        });
+    }
+    if metrics.burglary.is_none() && !opening_standdown {
         return Err(HarnessContractError::MissingBurglary { strategy });
     }
-    if metrics.burglary_terminal_minute.is_none() {
+    if metrics.burglary_terminal_minute.is_none() && !opening_standdown {
         return Err(HarnessContractError::MissingTerminalState { strategy });
     }
-    if metrics.aborted == metrics.outcome.is_some()
-        || metrics.aborted != (metrics.abort_phase.is_some() && metrics.abort_cause.is_some())
-        || (!metrics.aborted && (metrics.abort_phase.is_some() || metrics.abort_cause.is_some()))
+    if !opening_standdown
+        && (metrics.aborted == metrics.outcome.is_some()
+            || metrics.aborted != (metrics.abort_phase.is_some() && metrics.abort_cause.is_some())
+            || (!metrics.aborted
+                && (metrics.abort_phase.is_some() || metrics.abort_cause.is_some())))
     {
         return Err(HarnessContractError::InconsistentTerminalState {
             strategy,
@@ -117,6 +142,9 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             }
         }
         Strategy::Recon => {
+            if metrics.opening_stood_down {
+                return validate_run_metrics(metrics, false);
+            }
             if metrics.discovered_surveillance_information >= 2
                 && metrics.planning_information_count >= 3
                 && metrics
@@ -345,7 +373,18 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 && metrics.self_heat_case_active != Some(false)
                 && metrics.second_burglary.is_none()
                 && metrics.second_opportunity_expired;
-            if recovered_when_clear || stood_down_on_self_heat {
+            let stood_down_after_abort = metrics.second_scout.is_some()
+                && metrics.second_casing_assessment == Some(CasingAssessment::Aborted);
+            let opening_risk_continued = metrics.opening_stood_down
+                && metrics
+                    .opening_casing_assessment
+                    .is_some_and(|assessment| !assessment.permits_burglary());
+            let withheld = (stood_down_after_abort || opening_risk_continued)
+                && metrics.second_opportunity_discovered
+                && metrics.second_opportunity_expired
+                && metrics.second_burglary.is_none()
+                && metrics.second_burglary_outcome.is_none();
+            if recovered_when_clear || stood_down_on_self_heat || withheld {
                 None
             } else {
                 Some(

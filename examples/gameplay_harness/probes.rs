@@ -1031,6 +1031,9 @@ pub fn persist_run_artifact(
     });
     let operation = serde_json::json!({
         "burglary": metrics.burglary.map(|id| format!("{id:?}")),
+        "opening_scout": metrics.opening_scout.map(|id| format!("{id:?}")),
+        "opening_casing_assessment": metrics.opening_casing_assessment,
+        "opening_stood_down": metrics.opening_stood_down,
         "outcome": metrics.outcome.map(|o| format!("{o:?}")),
         "aborted": metrics.aborted,
         "abort_phase": metrics.abort_phase.map(|p| format!("{p:?}")),
@@ -1100,6 +1103,8 @@ pub fn persist_run_artifact(
         "second_burglary_outcome": metrics.second_burglary_outcome.map(|outcome| format!("{outcome:?}")),
         "second_burglary_terminal_minute": metrics.second_burglary_terminal_minute,
         "second_act_recon_information": metrics.second_act_recon_information,
+        "second_scout": metrics.second_scout.map(|id| format!("{id:?}")),
+        "second_casing_assessment": metrics.second_casing_assessment,
         "second_scout_scheduled_minute": metrics.second_scout_scheduled_minute,
         "second_scout_attached_patrol": metrics.second_scout_attached_patrol,
         "second_scout_topics_covered": metrics.second_scout_topics_covered,

@@ -15,6 +15,14 @@ pub(super) fn run_second_act(
     let Some(opportunity) = metrics.second_opportunity else {
         return Err("act 2 cannot run before the second opportunity is discovered".into());
     };
+    if strategy == Strategy::Recon && metrics.opening_stood_down {
+        if narrative {
+            println!(
+                "[DECIDE]  Opening casing was not cleared. Keep the reopened score unworked rather than treating a new opportunity as permission to ignore that risk."
+            );
+        }
+        return Ok(());
+    }
     let roster_current = scenario
         .state
         .world()
@@ -190,7 +198,23 @@ fn run_recon_second_act(
             .scheduled_for()
             .as_minutes(),
     );
+    metrics.second_scout = Some(recon);
     run_until_operation_terminal(scenario, recon, narrative, metrics)?;
+    let assessment = assess_casing(scenario, recon, narrative, metrics)?;
+    metrics.second_casing_assessment = Some(assessment);
+    metrics.self_heat_check_required = matches!(
+        assessment,
+        CasingAssessment::Active | CasingAssessment::Unknown | CasingAssessment::Shelved
+    );
+    metrics.self_heat_case_active = match assessment {
+        CasingAssessment::Active => Some(true),
+        CasingAssessment::Shelved => Some(false),
+        CasingAssessment::Clean | CasingAssessment::Unknown | CasingAssessment::Aborted => None,
+    };
+    metrics.self_heat_case_opened = metrics.self_heat_case_active.is_some();
+    if assessment == CasingAssessment::Aborted {
+        return Ok(());
+    }
     let resolution = scenario
         .state
         .operations()
@@ -201,10 +225,6 @@ fn run_recon_second_act(
     metrics.second_scout_topics_covered = Some(resolution.factors().intelligence_topics_covered());
     let discovered_information = resolution.discovered_information().clone();
     metrics.second_act_recon_information = discovered_information.len();
-    // The crew knows its exposure, not whether institutional intake opened a file.
-    // Query on observed risk; waiting for case intel here would make this branch unreachable.
-    metrics.self_heat_check_required =
-        resolution.exposure().level() != crimocracy::operations::OperationExposureLevel::None;
     let mut burglary_intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
     let mut learned_patrol_information = None;
     for information in &discovered_information {
@@ -232,9 +252,7 @@ fn run_recon_second_act(
         burglary_intelligence.insert(*information);
     }
 
-    if metrics.self_heat_check_required
-        && !recon_case_is_cool_enough_to_continue(scenario, recon, narrative, metrics)?
-    {
+    if !assessment.permits_burglary() {
         return Ok(());
     }
     let patrol_information = learned_patrol_information.ok_or(
@@ -306,63 +324,6 @@ fn run_recon_second_act(
     run_until_operation_terminal(scenario, burglary, narrative, metrics)?;
     record_second_act_burglary_terminal(scenario, burglary, metrics);
     liquidate_second_act_property(scenario, burglary, narrative, metrics)
-}
-
-fn recon_case_is_cool_enough_to_continue(
-    scenario: &mut Scenario,
-    recon: OperationId,
-    narrative: bool,
-    metrics: &mut RunMetrics,
-) -> Result<bool, Box<dyn Error>> {
-    let police_name = scenario
-        .state
-        .world()
-        .get_organization(scenario.police)
-        .expect("police organization must persist")
-        .name()
-        .to_owned();
-    let neighborhood_name = scenario
-        .state
-        .world()
-        .get_neighborhood(scenario.neighborhood)
-        .expect("neighborhood must persist")
-        .name()
-        .to_owned();
-    if narrative {
-        println!(
-            "[DECIDE]  Our scout reported exposure during casing. That does not prove a case exists. Before another job touches {neighborhood_name}, ask the contact inside {police_name}."
-        );
-    }
-    metrics.self_heat_case_active =
-        read_police_contact(scenario, EntityRef::Operation(recon), narrative, metrics)?
-            .map(|(sightline, _)| sightline);
-    metrics.self_heat_case_opened = metrics.self_heat_case_active.is_some();
-    match metrics.self_heat_case_active {
-        Some(false) => {
-            if narrative {
-                println!(
-                    "[VERIFY]  The channel says {police_name} has already shelved the casing case. RECON can keep evaluating the score from the information it gathered."
-                );
-            }
-            Ok(true)
-        }
-        Some(true) => {
-            if narrative {
-                println!(
-                    "[VERIFY]  Detectives are actively developing the case our casing opened. RECON stands down; the second score will lapse rather than compound fresh heat."
-                );
-            }
-            Ok(false)
-        }
-        None => {
-            if narrative {
-                println!(
-                    "[VERIFY]  The channel gave no dependable read on the casing case. RECON treats uncertainty as risk and stands down; the second score will lapse."
-                );
-            }
-            Ok(false)
-        }
-    }
 }
 
 fn run_press_second_act(scenario: &Scenario, narrative: bool, metrics: &RunMetrics) {
