@@ -374,17 +374,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     // Persist per-run seeds and raw metrics beneath aggregate diagnostics.
     // Full mode always writes artifacts; the directory defaults to target/harness-runs.
     println!("\n--- ARTIFACTS ---");
-    let narrative_runs = [&rush, &press, &recon];
-    for metrics in narrative_runs {
-        if let Ok(path) = persist_run_artifact(
-            &artifact_dir,
-            primary_seeds,
-            ScenarioProfile::NightTrap,
-            metrics,
-        ) {
-            println!("[ARTIFACT] wrote {}", path.display());
-        }
-    }
+    persist_narrative_artifacts(&artifact_dir, &narrative_sets)?;
     // Also capture the batch aggregate summary.
     {
         fs::create_dir_all(&artifact_dir)?;
@@ -410,6 +400,23 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         artifact_dir.display()
     );
 
+    Ok(())
+}
+
+fn persist_narrative_artifacts(
+    artifact_dir: &std::path::Path,
+    narrative_sets: &[(EvaluationSeeds, RunMetrics, RunMetrics, RunMetrics)],
+) -> Result<(), Box<dyn Error>> {
+    // Filenames encode seeds/profile/strategy/variation, not the observation window.
+    // Keep full narratives separate from overlapping one-day batch runs.
+    let narrative_dir = artifact_dir.join("narrative");
+    for (seeds, rush, press, recon) in narrative_sets {
+        for metrics in [rush, press, recon] {
+            let path =
+                persist_run_artifact(&narrative_dir, *seeds, ScenarioProfile::NightTrap, metrics)?;
+            println!("[ARTIFACT] wrote {}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -440,6 +447,104 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn narrative_artifacts_retain_rotated_sets_and_propagate_write_errors() {
+        struct TestDirectory(std::path::PathBuf);
+        impl Drop for TestDirectory {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).expect("remove task-owned artifact fixtures");
+            }
+        }
+        let parent =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/agent-output");
+        std::fs::create_dir_all(&parent).expect("create ignored test output parent");
+        let dir = parent.join(format!(
+            "narrative-artifacts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock must follow epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).expect("create unique test directory without reusing files");
+        let dir = TestDirectory(dir);
+        let sets: Vec<_> = (0..NARRATIVE_SEED_ROTATION)
+            .map(|offset| {
+                let seeds = EvaluationSeeds::new(
+                    DEFAULT_WORLD_SEED.wrapping_add(offset),
+                    DEFAULT_POLICY_SEED,
+                );
+                let metrics = |strategy| RunMetrics {
+                    strategy: Some(strategy),
+                    variation: Some(FixtureVariation::from_seed(seeds.world)),
+                    burglary_terminal_minute: Some(2_880 + offset),
+                    ..RunMetrics::default()
+                };
+                (
+                    seeds,
+                    metrics(Strategy::Rush),
+                    metrics(Strategy::Press),
+                    metrics(Strategy::Recon),
+                )
+            })
+            .collect();
+        // A matching batch identity must coexist without losing its shorter-window evidence.
+        let (seeds, rush, _, _) = &sets[1];
+        let batch = RunMetrics {
+            burglary_terminal_minute: Some(1_440),
+            ..rush.clone()
+        };
+        let batch_path =
+            super::persist_run_artifact(&dir.0, *seeds, ScenarioProfile::NightTrap, &batch)
+                .expect("persist matching batch artifact");
+        let batch_bytes = std::fs::read(&batch_path).expect("read batch artifact");
+
+        super::persist_narrative_artifacts(&dir.0, &sets)
+            .expect("persist every full narrative set");
+        let narrative_dir = dir.0.join("narrative");
+        assert_eq!(
+            std::fs::read_dir(&narrative_dir).unwrap().count(),
+            sets.len() * 3
+        );
+        for (seeds, rush, press, recon) in &sets {
+            for metrics in [rush, press, recon] {
+                let filename = format!(
+                    "night-trap-w{:016x}-p{:016x}-{}-{}.json",
+                    seeds.world,
+                    seeds.policy,
+                    metrics.strategy.unwrap().label().to_lowercase(),
+                    metrics.variation.unwrap().label().to_lowercase(),
+                );
+                let payload: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(narrative_dir.join(filename)).expect("read narrative artifact"),
+                )
+                .expect("parse narrative artifact");
+                assert_eq!(payload["identity"]["world_seed_dec"], seeds.world);
+                assert_eq!(payload["identity"]["policy_seed_dec"], seeds.policy);
+                assert_eq!(
+                    payload["identity"]["strategy"],
+                    metrics.strategy.unwrap().label()
+                );
+                assert_eq!(
+                    payload["player_visible"]["operation"]["burglary_terminal_minute"],
+                    metrics.burglary_terminal_minute.unwrap()
+                );
+            }
+        }
+        assert_eq!(std::fs::read(batch_path).unwrap(), batch_bytes);
+
+        let blocked = dir.0.join("blocked");
+        std::fs::create_dir(&blocked).expect("create error fixture directory");
+        std::fs::write(blocked.join("narrative"), b"not a directory")
+            .expect("block the narrative output directory");
+        let error = super::persist_narrative_artifacts(&blocked, &sets)
+            .expect_err("artifact IO failure must reach the full-mode caller");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]
@@ -748,6 +853,15 @@ mod tests {
         .expect_err("planning must respect the player-visible opportunity deadline");
 
         assert!(matches!(error, HarnessContractError::NoSafeOperationWindow));
+    }
+
+    #[test]
+    fn repeat_take_probe_accepts_production_cent_rounding() {
+        super::run_repeat_take_probe(
+            &crimocracy::build_registry(),
+            EvaluationSeeds::new(DEFAULT_WORLD_SEED + 1, DEFAULT_POLICY_SEED + 3),
+        )
+        .expect("fractional-cent recovery rounds rather than truncates");
     }
 
     #[test]

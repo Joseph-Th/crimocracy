@@ -48,8 +48,8 @@ pub fn validate_run_metrics(
         });
     }
     // The money state contract: whatever the organization routed through its front's books
-    // must reconcile exactly. Accounted funds are laundering gross minus the front's authored
-    // fee, minus legitimate acquisition spend, minus the exact wage debits that payroll's
+    // must reconcile exactly. Accounted funds are laundering gross plus actual owner
+    // withdrawals, minus the front's fee, acquisition spend, and the wage debits that payroll's
     // ledger took from accounted-funds accounts. Payroll is organization-level and can draw
     // any spendable liquidity, so subtracting the whole wage bill would be just as wrong as
     // pretending clean money can never fund wages. A branch that liquidated stolen property
@@ -57,7 +57,7 @@ pub fn validate_run_metrics(
     // exposed street cash.
     if let Some(balance) = metrics.accounted_balance_cents
         && balance
-            != metrics.laundered_gross_cents
+            != metrics.laundered_gross_cents + metrics.business_profits_swept_cents
                 - metrics.launder_fee_cents
                 - metrics.acquisition_spent_cents
                 - metrics.payroll_accounted_spent_cents
@@ -65,6 +65,7 @@ pub fn validate_run_metrics(
         return Err(HarnessContractError::InconsistentLaunderingEvidence {
             strategy,
             gross: metrics.laundered_gross_cents,
+            sweeps: metrics.business_profits_swept_cents,
             fee: metrics.launder_fee_cents,
             acquisition: metrics.acquisition_spent_cents,
             payroll: metrics.payroll_accounted_spent_cents,
@@ -378,15 +379,14 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
 /// surface as a canonical rejection), revise the mandate, capitalize a second-district
 /// float, and open a diversified enterprise the hot home case cannot tax, with positive
 /// harbor earnings by session end. Rotated sets run the same production paths on worlds
-/// whose authored economics may legitimately stall conversion (a concealed till, or a
-/// young racket whose heat-taxed float never accumulates); there the contract requires an
+/// whose authored economics may legitimately stall accumulation; concealed reserves
+/// do not prohibit purchases financed by legitimate owner withdrawals. The contract requires an
 /// honest ending - the cooled read confirmed through the contact channel, and if a purchase
 /// did happen, the full chain behind it.
 pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
     }
-    let concealed_till = metrics.enterprise_till_concealed == Some(true);
     let acquisition_complete = metrics.front_acquired
         && metrics.acquisition_price_cents.is_some_and(|price| price > 0)
         && metrics.acquisition_spent_cents == metrics.acquisition_price_cents.unwrap_or_default()
@@ -410,15 +410,6 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
         return Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
             evidence: "the rotated standing-down wait must end honestly: the cooled read confirmed, with either the survival ending or a consistent diversification chain",
-        });
-    }
-    if concealed_till {
-        if survived {
-            return Ok(());
-        }
-        return Err(HarnessContractError::MissingStrategyEvidence {
-            strategy: Strategy::Press,
-            evidence: "a concealed-till standing-down wait must end in survival: the shelved read confirmed through the contact channel and no purchase attempted, because hidden money cannot be cleaned",
         });
     }
     if diversified {

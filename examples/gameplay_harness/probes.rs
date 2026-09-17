@@ -189,9 +189,12 @@ pub fn run_repeat_take_probe(
     let unrecovered = recovery_window.saturating_sub(age);
     let expected_basis_points =
         10_000_u64.saturating_sub(depletion_span.saturating_mul(unrecovered) / recovery_window);
-    let expected_second =
-        i64::try_from(i128::from(first_take) * i128::from(expected_basis_points) / 10_000_i128)
-            .expect("bounded repeat-take probe value must fit i64");
+    // Positive proceeds round to nearest cent (half away from zero), like the
+    // production money rule. Truncation fabricates a one-cent failure on other worlds.
+    let expected_second = i64::try_from(
+        (i128::from(first_take) * i128::from(expected_basis_points) + 5_000) / 10_000,
+    )
+    .expect("bounded repeat-take probe value must fit i64");
     if second_take != expected_second || second_take >= first_take {
         return Err(format!(
             "immediate re-score expected authored gradual recovery to {expected_second}c, observed {first_take}c then {second_take}c"
@@ -876,9 +879,8 @@ pub fn run_strategy_batch(
             // Batch runs summarize persistence instead of printing one line per file: the
             // per-run seeds and raw metrics land on disk either way.
             for metrics in [&rush, &press, &recon] {
-                if persist_run_artifact(dir, sample_seeds, profile, metrics).is_ok() {
-                    artifacts_written += 1;
-                }
+                persist_run_artifact(dir, sample_seeds, profile, metrics)?;
+                artifacts_written += 1;
             }
         }
         rush_aggregate.add(&rush);
@@ -1079,12 +1081,15 @@ pub fn persist_run_artifact(
         "expansion_heat_cents": metrics.expansion_heat_cents,
         "front_acquired": metrics.front_acquired,
         "acquisition_price_cents": metrics.acquisition_price_cents,
+        "acquisition_spent_cents": metrics.acquisition_spent_cents,
         "acquisition_rejections": metrics.acquisition_rejections,
         "laundered_gross_cents": metrics.laundered_gross_cents,
         "launder_fee_cents": metrics.launder_fee_cents,
+        "business_profits_swept_cents": metrics.business_profits_swept_cents,
         "laundering_capacity_rejections": metrics.laundering_capacity_rejections,
         "accounted_balance_cents": metrics.accounted_balance_cents,
         "payroll_paid_cents": metrics.payroll_paid_cents,
+        "payroll_accounted_spent_cents": metrics.payroll_accounted_spent_cents,
         "payroll_short_cents": metrics.payroll_short_cents,
     });
     let second_act = serde_json::json!({

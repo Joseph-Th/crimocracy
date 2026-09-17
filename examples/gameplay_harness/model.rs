@@ -244,11 +244,12 @@ pub enum HarnessContractError {
     #[error("no safe operation window was derivable from the surveillance report")]
     NoSafeOperationWindow,
     #[error(
-        "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c minus fee {fee}c minus acquisition spend {acquisition}c minus accounted-funds payroll {payroll}c does not equal the accounted balance {balance:?}c"
+        "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c plus owner withdrawals {sweeps}c minus fee {fee}c minus acquisition spend {acquisition}c minus accounted-funds payroll {payroll}c does not equal the accounted balance {balance:?}c"
     )]
     InconsistentLaunderingEvidence {
         strategy: Strategy,
         gross: i64,
+        sweeps: i64,
         fee: i64,
         acquisition: i64,
         payroll: i64,
@@ -722,9 +723,8 @@ pub struct RunMetrics {
     /// chain deterministically; rotated sets accept whatever ending their authored
     /// economy honestly produced.
     pub primary_narrative_set: bool,
-    /// Whether this session's racket float is authored as concealed cash. Concealed money
-    /// cannot route through a front's ledgers, so a concealed-till PRESS world legitimately
-    /// ends its standing-down wait in survival rather than clean-money diversification.
+    /// Whether the racket uses concealed cash. It cannot be laundered directly;
+    /// legitimate front profits remain an independent source of acquisition funds.
     pub enterprise_till_concealed: Option<bool>,
     pub expansion_net_cents: Option<i64>,
     /// Total street surcharge actually paid by the second-district enterprise across its
@@ -772,6 +772,7 @@ pub struct RunMetrics {
     pub laundered_gross_cents: i64,
     /// The front's authored cut of everything it absorbed.
     pub launder_fee_cents: i64,
+    pub business_profits_swept_cents: i64,
     /// Times the books refused a request because it exceeded the cycle's plausible volume:
     /// the player-visible shape of the laundering constraint.
     pub laundering_capacity_rejections: u32,
@@ -1041,6 +1042,7 @@ pub struct FinancialView {
     /// Money-state evidence: what the organization routed through its front's books.
     pub laundered_gross_cents: i64,
     pub launder_fee_cents: i64,
+    pub business_profits_swept_cents: i64,
     pub laundering_capacity_rejections: u32,
     /// Session-to-date wage costs from observed payroll outcomes.
     pub payroll_paid_cents: i64,

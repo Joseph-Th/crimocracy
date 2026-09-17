@@ -1064,6 +1064,7 @@ pub fn resolve_financial_view(
         cash_position,
         laundered_gross_cents: metrics.laundered_gross_cents,
         launder_fee_cents: metrics.launder_fee_cents,
+        business_profits_swept_cents: metrics.business_profits_swept_cents,
         laundering_capacity_rejections: metrics.laundering_capacity_rejections,
         payroll_paid_cents: metrics.payroll_paid_cents,
         payroll_short_cents: metrics.payroll_short_cents,
@@ -1076,7 +1077,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         stamp(scenario.state.now().as_minutes())
     );
     println!(
-        "  Cash states: street cash spends on the street but cannot buy legitimacy; accounted funds are washed money that can buy businesses; legitimate operating cash belongs to the fronts' own books."
+        "  Cash states: street cash can fund wages and rackets but cannot buy businesses; accounted funds from laundering and legitimate owner withdrawals can buy businesses; legitimate operating cash remains on the fronts' own books until withdrawn."
     );
     let member_count = scenario
         .state
@@ -1113,7 +1114,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         println!("  No enterprise books.");
     }
     println!(
-        "  Fence proceeds (street cash, awaiting wash): {}.",
+        "  General street treasury (starting reserve plus fence receipts, less spending and laundering): {} current balance.",
         format_cents(view.liquidation_cash_cents),
     );
     println!(
@@ -1139,22 +1140,26 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
             lines.join(", "),
         );
     }
+    let laundering_net = view.laundered_gross_cents - view.launder_fee_cents;
     if view.laundered_gross_cents > 0 || view.laundering_capacity_rejections > 0 {
         println!(
-            "  Laundered to date: {} gross through the front's books, {} kept as booked revenue{}; the books refused {} over-capacity request(s).",
+            "  Laundered to date: {} gross through the front's books, {} booked as front fees, {} cumulative net credited to accounted funds (not the current balance); the books refused {} over-capacity request(s).",
             format_cents(view.laundered_gross_cents),
             format_cents(view.launder_fee_cents),
-            if view.laundered_gross_cents > 0 {
-                format!(
-                    ", {} now accounted",
-                    format_cents(view.laundered_gross_cents - view.launder_fee_cents)
-                )
-            } else {
-                String::new()
-            },
+            format_cents(laundering_net),
             view.laundering_capacity_rejections,
         );
     }
+    println!(
+        "  Owner withdrawals to date: {} actually transferred from earned front surplus (legitimate trade and booked fees) into accounted funds; opening business capital is not swept.",
+        format_cents(view.business_profits_swept_cents),
+    );
+    println!(
+        "  Accounted-funds sources to date: {} laundering net + {} owner withdrawals = {} credited before acquisition and payroll spending. Current balances are shown in the cash position above.",
+        format_cents(laundering_net),
+        format_cents(view.business_profits_swept_cents),
+        format_cents(laundering_net + view.business_profits_swept_cents),
+    );
     let payroll_status = if view.payroll_short_cents > 0 {
         format!(
             "SHORTFALL — crew resentment rising ({} unpaid)",
@@ -1365,9 +1370,12 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (house fee {}, accounted-payroll spend {}, accounted balance {}), books refused {} over-capacity request(s), vice inquiries drawn {}",
+        "        money: laundered {} gross through the front's books (house fee {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books refused {} over-capacity request(s), vice inquiries drawn {}",
         optional_dollars(Some(metrics.laundered_gross_cents)),
         optional_dollars(Some(metrics.launder_fee_cents)),
+        format_cents(metrics.laundered_gross_cents - metrics.launder_fee_cents),
+        format_cents(metrics.business_profits_swept_cents),
+        format_cents(metrics.acquisition_spent_cents),
         optional_dollars(Some(metrics.payroll_accounted_spent_cents)),
         optional_dollars(metrics.accounted_balance_cents),
         metrics.laundering_capacity_rejections,
@@ -1667,7 +1675,7 @@ pub fn print_experience_readout(
     checkpoint(
         "legit wealth",
         wealth_loop_shown,
-        "accounted wealth converts into an owned legitimate asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
+        "accounted wealth from laundering and legitimate owner withdrawals converts into an owned asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
     );
     let any_vice = vice_demonstrated
         || [rush, press, recon]
@@ -1752,12 +1760,16 @@ pub fn print_experience_readout(
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
-        "  - Money-state leverage: resale cash can pay wages and capitalize rackets, but only accounted funds can buy legitimate businesses; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed - not desire - limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
+        "  - Money-state leverage: resale cash can pay wages and capitalize rackets, but only accounted funds can buy legitimate businesses; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS credited {} laundering net plus {} actual owner withdrawals from earned front surplus, then spent {} on acquisition and {} on accounted-funded payroll, leaving {} accounted. Laundering capacity limits dirty-money conversion, while legitimate withdrawals also help finance acquisition; clean wealth is not supplied by laundering alone.",
         optional_dollars(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections
             + recon.laundering_capacity_rejections,
-        optional_dollars(press.acquisition_price_cents),
+        format_cents(press.laundered_gross_cents - press.launder_fee_cents),
+        format_cents(press.business_profits_swept_cents),
+        format_cents(press.acquisition_spent_cents),
+        format_cents(press.payroll_accounted_spent_cents),
+        optional_dollars(press.accounted_balance_cents),
     );
     println!(
         "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Going dark or moving districts are the honest counters.",

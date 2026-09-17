@@ -624,7 +624,11 @@ pub fn build_scenario(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
-            kind: AccountKind::StreetCash,
+            kind: if seeds.world.is_multiple_of(2) {
+                AccountKind::StreetCash
+            } else {
+                AccountKind::ConcealedCash
+            },
         },
     )?;
     let enterprise_settlement = insert_account(
@@ -1270,42 +1274,7 @@ pub fn acquire_harbor_front(
         .filter(|account| account.kind() == AccountKind::AccountedFunds)
         .map(|account| account.id())
         .collect();
-    let accounted_cents = funding_accounts
-        .iter()
-        .map(|account| {
-            scenario
-                .state
-                .finance()
-                .get_account(*account)
-                .expect("accounted-funds index must resolve")
-                .balance()
-                .cents()
-                .max(0)
-        })
-        .fold(0_i128, |total, cents| {
-            (total + i128::from(cents)).min(i128::from(price.cents()))
-        });
-    if accounted_cents < i128::from(price.cents()) {
-        if metrics.acquisition_rejections == 0 && narrative {
-            println!(
-                "[ACQUIRE] The seller wants {} for the harbor club; our accounted books hold only {}. The deal waits for clean money.",
-                format_cents(price.cents()),
-                format_cents(
-                    i64::try_from(accounted_cents).expect("accounted total is price-bounded")
-                ),
-            );
-        }
-        metrics.acquisition_rejections = metrics.acquisition_rejections.saturating_add(1);
-        return Ok(false);
-    }
-    let front_name = scenario
-        .state
-        .world()
-        .get_business(scenario.expansion_front)
-        .expect("expansion venue must persist")
-        .name()
-        .to_owned();
-    validate_acquire_business(
+    let purchase = validate_acquire_business(
         scenario.registry,
         &scenario.state,
         BusinessAcquisitionDraft {
@@ -1313,8 +1282,30 @@ pub fn acquire_harbor_front(
             business: scenario.expansion_front,
             funding_accounts,
         },
-    )?
-    .commit(&mut scenario.state)?;
+    );
+    let purchase = match purchase {
+        Ok(purchase) => purchase,
+        Err(crimocracy::economy::business_acquisition::BusinessAcquisitionError::InsufficientFunds { available_cents, price_cents }) => {
+        if metrics.acquisition_rejections == 0 && narrative {
+            println!(
+                "[ACQUIRE] The seller wants {} for the harbor club; our accounted books hold only {}. The deal waits for clean money.",
+                format_cents(price_cents),
+                format_cents(available_cents),
+            );
+        }
+        metrics.acquisition_rejections = metrics.acquisition_rejections.saturating_add(1);
+        return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let front_name = scenario
+        .state
+        .world()
+        .get_business(scenario.expansion_front)
+        .expect("expansion venue must persist")
+        .name()
+        .to_owned();
+    purchase.commit(&mut scenario.state)?;
     // The purchase must read back through production state: ownership moved, and the
     // acquired venue's first operating economy is live.
     assert_eq!(
@@ -1340,7 +1331,8 @@ pub fn acquire_harbor_front(
     metrics.acquisition_spent_cents = price.cents();
     if narrative {
         println!(
-            "[ACQUIRE] {front_name} purchased outright for {}. Dirty money became a legitimate address.",
+            "[ACQUIRE] {}: {front_name} purchased outright for {} from accounted funds: owner withdrawals and washed earnings both build legitimate wealth.",
+            stamp(scenario.state.now().as_minutes()),
             format_cents(price.cents()),
         );
     }

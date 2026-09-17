@@ -288,8 +288,246 @@ fn schedule_witness_pressure(
     Ok(pending_witness_pressure)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn laundering_preserves_reserve_even_when_capacity_exceeds_surplus() {
+        use crimocracy::finance::finance_system::validate_record_transaction;
+        use crimocracy::finance::{LedgerPosting, LedgerTransactionDraft};
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let mut metrics = RunMetrics::default();
+        run_until(
+            &mut scenario,
+            SimTime::from_minutes(1_440),
+            false,
+            &mut metrics,
+        )
+        .unwrap();
+        let till = scenario
+            .state
+            .enterprises()
+            .get_enterprise(scenario.enterprise)
+            .unwrap()
+            .cash_account();
+        let balance = scenario
+            .state
+            .finance()
+            .get_account(till)
+            .unwrap()
+            .balance()
+            .cents();
+        // A controlled lean till, made by moving earned cash into the other owned
+        // reserve through the same ledger path as player capitalization.
+        validate_record_transaction(
+            &scenario.state,
+            LedgerTransactionDraft {
+                occurred_at: scenario.state.now(),
+                memo: "Reserve cash outside the laundry till".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: till,
+                        amount: Money::from_cents(6_000 - balance),
+                    },
+                    LedgerPosting {
+                        account: scenario.expansion_cash,
+                        amount: Money::from_cents(balance - 6_000),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut scenario.state)
+        .unwrap();
+        assert_eq!(
+            launder_enterprise_till(&mut scenario, false, &mut metrics).unwrap(),
+            Some(1_000)
+        );
+        assert_eq!(
+            scenario
+                .state
+                .finance()
+                .get_account(till)
+                .unwrap()
+                .balance()
+                .cents(),
+            5_000
+        );
+        let before = scenario.state.clone();
+        assert_eq!(
+            launder_enterprise_till(&mut scenario, false, &mut metrics).unwrap(),
+            None
+        );
+        assert_eq!(
+            bincode::serialize(&scenario.state).unwrap(),
+            bincode::serialize(&before).unwrap(),
+            "the reserve is not available to subsequent laundry calls"
+        );
+    }
+
+    #[test]
+    fn owner_draw_uses_earnings_once_and_leaves_opening_capital() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let mut metrics = RunMetrics::default();
+        let operating = scenario
+            .state
+            .economy()
+            .get_business_economy(scenario.front)
+            .unwrap()
+            .operating_account();
+        let opening = scenario
+            .state
+            .finance()
+            .get_account(operating)
+            .unwrap()
+            .balance();
+        let before = scenario.state.clone();
+        sweep_front_profits(&mut scenario, false, &mut metrics).unwrap();
+        assert_eq!(
+            bincode::serialize(&scenario.state).unwrap(),
+            bincode::serialize(&before).unwrap()
+        );
+        run_until(
+            &mut scenario,
+            SimTime::from_minutes(1_440),
+            false,
+            &mut metrics,
+        )
+        .unwrap();
+        let earned: i64 = scenario
+            .state
+            .economy()
+            .cycles_for(scenario.front)
+            .map(|cycle| cycle.net_cash().cents())
+            .sum();
+        sweep_front_profits(&mut scenario, false, &mut metrics).unwrap();
+        assert_eq!(metrics.business_profits_swept_cents, earned);
+        assert_eq!(
+            scenario
+                .state
+                .finance()
+                .get_account(operating)
+                .unwrap()
+                .balance(),
+            opening
+        );
+        let before = scenario.state.clone();
+        sweep_front_profits(&mut scenario, false, &mut metrics).unwrap();
+        assert_eq!(
+            bincode::serialize(&scenario.state).unwrap(),
+            bincode::serialize(&before).unwrap(),
+            "earnings cannot be withdrawn twice"
+        );
+    }
+
+    #[test]
+    fn concealed_reserve_does_not_prevent_legitimate_profit_financed_expansion() {
+        let registry = crimocracy::build_registry();
+        let mut metrics = play_session(
+            &registry,
+            Strategy::Press,
+            ScenarioProfile::NightTrap,
+            EvaluationSeeds::new(DEFAULT_WORLD_SEED + 1, DEFAULT_POLICY_SEED),
+            SessionRunMode::FullQuiet,
+        )
+        .unwrap();
+        assert_eq!(metrics.enterprise_till_concealed, Some(true));
+        assert_eq!(metrics.laundered_gross_cents, 0);
+        assert!(metrics.business_profits_swept_cents >= metrics.acquisition_spent_cents);
+        assert!(metrics.acquisition_rejections > 0);
+        assert!(metrics.front_acquired && metrics.expansion_established);
+        metrics.primary_narrative_set = true;
+        validate_run_metrics(&metrics, true).unwrap();
+        validate_press_expansion_evidence(&metrics).unwrap();
+    }
+
+    #[test]
+    fn short_purchase_is_a_canonical_rejection_without_state_mutation() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let mut metrics = RunMetrics::default();
+        let before = scenario.state.clone();
+        assert!(!acquire_harbor_front(&mut scenario, false, &mut metrics).unwrap());
+        assert_eq!(metrics.acquisition_rejections, 1);
+        assert_eq!(
+            bincode::serialize(&scenario.state).unwrap(),
+            bincode::serialize(&before).unwrap()
+        );
+    }
+
+    #[test]
+    fn purchase_day_preserves_fifty_dollar_opening_float() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .expect("scenario builds");
+        let mut metrics = RunMetrics::default();
+        let mut stand_down = StandDownState::new(false);
+        // Actual daily settlement and the live launder -> buy -> capitalize policy,
+        // not a synthetic balance or a separate test implementation of that policy.
+        for day in 1..=10 {
+            run_until(
+                &mut scenario,
+                SimTime::from_minutes(day * 1_440),
+                false,
+                &mut metrics,
+            )
+            .expect("daily books settle");
+            run_daily_capital_management(
+                &mut scenario,
+                "Central Precinct",
+                false,
+                &mut metrics,
+                &mut stand_down,
+            )
+            .expect("daily capital management completes");
+            if metrics.front_acquired {
+                assert!(
+                    metrics.expansion_established,
+                    "purchase must open the book that day"
+                );
+                assert_eq!(
+                    scenario
+                        .state
+                        .finance()
+                        .get_account(scenario.expansion_cash)
+                        .expect("expansion account persists")
+                        .balance()
+                        .cents(),
+                    5_000,
+                    "laundering must not consume the intended $50 opening float",
+                );
+                return;
+            }
+        }
+        panic!("settled books never funded the purchase");
+    }
+}
+
 struct StandDownState {
-    laundry_days: u32,
+    capital_review_days: u32,
     last_absorbed: Option<i64>,
     final_purchase_beat: bool,
     till_concealed: bool,
@@ -298,7 +536,7 @@ struct StandDownState {
 impl StandDownState {
     fn new(till_concealed: bool) -> Self {
         Self {
-            laundry_days: 0,
+            capital_review_days: 0,
             last_absorbed: None,
             final_purchase_beat: false,
             till_concealed,
@@ -326,6 +564,9 @@ fn launder_enterprise_till(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<Option<i64>, Box<dyn Error>> {
+    if till_is_concealed(scenario) {
+        return Ok(None);
+    }
     let cash_account = scenario
         .state
         .enterprises()
@@ -338,6 +579,7 @@ fn launder_enterprise_till(
         .get_account(cash_account)
         .map(|account| account.balance().cents())
         .unwrap_or_default()
+        .saturating_sub(LAUNDERING_FLOAT_FLOOR_CENTS)
         .max(0);
     if launderable <= 0 {
         return Ok(None);
@@ -345,12 +587,82 @@ fn launder_enterprise_till(
     launder_through_front(scenario, narrative, metrics, cash_account, launderable)
 }
 
+/// Withdraw only settled legitimate earnings and front fees, never the opening
+/// capital. The production sweep checks real liquidity and ownership; this policy
+/// caps the draw to earned surplus so profitable books remain operating assets.
+fn sweep_front_profits(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    use crimocracy::economy::business_economy_system::{
+        BusinessProfitSweepDraft, validate_sweep_business_profits,
+    };
+    let economy = scenario
+        .state
+        .economy()
+        .get_business_economy(scenario.front)
+        .expect("owned front economy persists");
+    let earned: i64 = scenario
+        .state
+        .economy()
+        .cycles_for(scenario.front)
+        .map(|cycle| cycle.net_cash().cents())
+        .sum();
+    let available = scenario
+        .state
+        .finance()
+        .get_account(economy.operating_account())
+        .expect("front till persists")
+        .balance()
+        .cents()
+        .max(0);
+    let amount = (earned + metrics.launder_fee_cents - metrics.business_profits_swept_cents)
+        .max(0)
+        .min(available);
+    if amount == 0 {
+        return Ok(());
+    }
+    let before = scenario
+        .state
+        .finance()
+        .get_account(scenario.accounted_funds)
+        .expect("accounted books persist")
+        .balance()
+        .cents();
+    validate_sweep_business_profits(
+        &scenario.state,
+        BusinessProfitSweepDraft {
+            organization: scenario.player,
+            business: scenario.front,
+            destination: scenario.accounted_funds,
+            amount: Money::from_cents(amount),
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let after = scenario
+        .state
+        .finance()
+        .get_account(scenario.accounted_funds)
+        .expect("accounted books persist")
+        .balance()
+        .cents();
+    metrics.business_profits_swept_cents += after - before;
+    if narrative {
+        println!(
+            "[OWNER DRAW] Withdraw {} of earned front profits into accounted funds. Legitimate trade can finance the purchase too; opening capital stays in the business.",
+            format_cents(after - before)
+        );
+    }
+    Ok(())
+}
+
 fn record_daily_laundering(
     absorbed: Option<i64>,
     narrative: bool,
     stand_down: &mut StandDownState,
 ) {
-    stand_down.laundry_days += 1;
+    stand_down.capital_review_days += 1;
     // Daily amounts move with the till balance, not just the books' ceiling, so printing every
     // small change buries the story. The [WAIT] heartbeat already quotes the accounted total;
     // say something here only when the wash stalls and street cash starts pooling.
@@ -369,15 +681,13 @@ fn run_daily_capital_management(
     metrics: &mut RunMetrics,
     stand_down: &mut StandDownState,
 ) -> Result<(), Box<dyn Error>> {
-    let first_laundry = stand_down.laundry_days == 0;
-    if stand_down.till_concealed {
-        if metrics.front_acquired && !metrics.expansion_established {
-            // Concealed-till worlds normally cannot acquire, but a pre-owned venue still needs
-            // its canonical capitalization attempt.
-            establish_harbor_expansion(scenario, narrative, metrics)?;
-        }
-        return Ok(());
+    let first_laundry = stand_down.capital_review_days == 0;
+    // Inspect the real purchase gate before raising capital, once. A short book is
+    // validator evidence, not a scripted balance comparison masquerading as rejection.
+    if !metrics.front_acquired && metrics.acquisition_rejections == 0 {
+        acquire_harbor_front(scenario, narrative, metrics)?;
     }
+    sweep_front_profits(scenario, narrative && first_laundry, metrics)?;
 
     if metrics.front_acquired && !metrics.expansion_established {
         // Capitalize before sweeping fresh income. Otherwise the same till funds laundering
@@ -388,9 +698,9 @@ fn run_daily_capital_management(
         return Ok(());
     }
 
-    if narrative && first_laundry {
+    if narrative && first_laundry && !stand_down.till_concealed {
         println!(
-            "[DECIDE]  Quiet streets are for the books: each day, put the whole till through the ledgers until they can carry the second-district purchase."
+            "[DECIDE]  Keep a $50 street reserve for the new book; wash only the surplus. Withdraw earned front profits as well: legitimate income and washed money both buy the harbor venue."
         );
     }
     let absorbed = launder_enterprise_till(scenario, narrative && first_laundry, metrics)?;
@@ -457,22 +767,16 @@ fn run_stand_down_and_diversify(
             "[DECIDE]  Standing down does not mean standing still: build clean money day by day, then buy the harbor club and open a second book the home case cannot touch."
         );
     }
-    // Bounded daily loop: institutional cold-case decay guarantees a deterministic
-    // shelf, and laundering accumulates accounted funds at the front's authored
-    // pace, so both waits terminate. Every campaign day launders the racket's till,
-    // retries the harbor purchase once the books can cover it, and asks the standing
-    // precinct contact whether anything moved on the case.
-    // A till authored as concealed cash stays exactly that: hidden money cannot
-    // route through the front's ledgers without exposing it, so the beat leaves
-    // it parked and launders only what sits in street cash. Narration follows
-    // report discipline: full detail on the first beat and on every change, a
-    // one-line heartbeat otherwise.
+    // Bounded daily capital reviews combine legitimate owner draws with surplus
+    // street-cash laundering. Concealed reserves stay concealed until capitalization;
+    // no fake conversion is needed to make legitimate trade useful. Case status still
+    // comes only from the contact. Routine accounting is summarized by the heartbeat.
     let mut day_at = scenario.state.now();
     let mut stand_down = StandDownState::new(till_is_concealed(scenario));
     metrics.enterprise_till_concealed = Some(stand_down.till_concealed);
     if narrative && stand_down.till_concealed {
         println!(
-            "[DECIDE]  The racket's till sits in concealed cash, and hidden money cannot touch {}'s ledgers without exposing it. With no clean money to build on, leadership holds to one job this arc: outlast the case.",
+            "[DECIDE]  The racket's concealed reserve cannot be laundered directly through {}. Leave it concealed; withdraw the front's legitimate profits to buy the harbor venue instead. The reserve can still capitalize its racket.",
             scenario
                 .state
                 .world()
@@ -534,9 +838,9 @@ fn narrate_stand_down_heartbeat(
     stand_down: &StandDownState,
 ) {
     let should_heartbeat = narrative
-        && (stand_down.laundry_days > 1 || stand_down.till_concealed)
+        && (stand_down.capital_review_days > 1 || stand_down.till_concealed)
         && metrics.cold_case_confirmed.is_none()
-        && (read.is_some() || stand_down.laundry_days.is_multiple_of(2));
+        && (read.is_some() || stand_down.capital_review_days.is_multiple_of(2));
     if !should_heartbeat {
         return;
     }
@@ -576,10 +880,10 @@ fn narrate_stand_down_heartbeat(
         None => "no fresh word from the channel - last read stands, holding dark",
     };
     println!(
-        "[WAIT] {}: {}; {} laundry day(s) so far, accounted books at {}, street till waiting at {}; rivals hold {} home-district racket(s).",
+        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}; rivals hold {} home-district racket(s).",
         stamp(scenario.state.now().as_minutes()),
         channel_line,
-        stand_down.laundry_days,
+        stand_down.capital_review_days,
         format_cents(accounted.cents()),
         format_cents(till_cents),
         rival_rackets,
@@ -594,7 +898,7 @@ fn cold_case_wait_is_complete(
     if metrics.cold_case_confirmed != Some(true) {
         return false;
     }
-    if metrics.front_acquired || stand_down.till_concealed {
+    if metrics.front_acquired {
         return true;
     }
     if stand_down.final_purchase_beat {
