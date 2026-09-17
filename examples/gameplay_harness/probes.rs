@@ -1098,6 +1098,7 @@ pub fn persist_run_artifact(
         "second_act_property_realized_cash_cents": metrics.second_act_property_realized_cash_cents,
         "second_act_planning_topics": metrics.second_act_planning_topics.iter().map(|topic| format!("{topic:?}")).collect::<Vec<_>>(),
         "self_heat_case_opened": metrics.self_heat_case_opened,
+        "self_heat_check_required": metrics.self_heat_check_required,
         "self_heat_case_active": metrics.self_heat_case_active,
     });
     let feedback = serde_json::json!({

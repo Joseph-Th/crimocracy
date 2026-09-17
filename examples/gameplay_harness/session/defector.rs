@@ -248,11 +248,7 @@ pub(super) fn run_win_back_attempt(
         println!(
             "[WIN BACK]  {defector_name} stayed with {rival_name}. The re-approach failed and membership did not move."
         );
-        if leaked {
-            println!(
-                "[WIN BACK]  Reaching out cost intelligence: {rival_name} now holds a production loyalty report naming {boss_name} as the recruiter who came calling."
-            );
-        }
+        println!("[WIN BACK]  Leadership cannot know what the rival was told about the approach.");
     }
     Ok(())
 }

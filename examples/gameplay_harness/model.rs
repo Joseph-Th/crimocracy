@@ -638,10 +638,11 @@ pub struct RunMetrics {
     /// case, so branch-heating contracts must use this session-wide signal rather than the
     /// burglary's own resolution record.
     pub session_case_staffed: bool,
-    /// Whether the organization received player-visible LegalActivity information that its own
-    /// act-2 surveillance drew a police case. This is an acting-policy signal, not a hidden audit
-    /// read from the operation resolution.
+    /// Whether a canonical contact disclosure confirmed a file concerning act-2 surveillance.
+    /// Distinct from observed exposure, which triggers the query without assuming a file exists.
     pub self_heat_case_opened: bool,
+    /// Casing exposure observed by the crew requires a contact check even without a disclosed file.
+    pub self_heat_check_required: bool,
     /// What the organization's player-visible channel read about that self-inflicted case
     /// before the window closed: Some(true) still active, Some(false) shelved, None no read.
     pub self_heat_case_active: Option<bool>,
@@ -1046,6 +1047,7 @@ pub struct FinancialView {
 #[derive(Clone)]
 pub struct EnterpriseLine {
     pub label: String,
+    pub cash_kind: AccountKind,
     pub cycle_count: usize,
     pub net_cents: i64,
     /// Total district-heat surcharge paid across the line's observed cycles: the

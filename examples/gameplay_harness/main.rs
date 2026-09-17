@@ -666,6 +666,41 @@ mod tests {
             metrics.win_back_margin.is_some_and(|margin| margin >= 0),
             "the accepted win-back must carry a non-negative production margin"
         );
+        assert!(
+            !metrics.replacement_recruited,
+            "do not hire a redundant specialist after recovery"
+        );
+        assert_eq!(metrics.replacement, None);
+        assert_eq!(
+            metrics.payroll_paid_cents, 25_600,
+            "four members, two payroll days"
+        );
+        validate_second_act_evidence(&metrics).expect("a returned crew closes the recovery arc");
+    }
+
+    #[test]
+    fn recon_observed_trace_checks_contact_before_committing_another_score() {
+        let registry = crimocracy::build_registry();
+        let metrics = play_session(
+            &registry,
+            Strategy::Recon,
+            ScenarioProfile::NightTrap,
+            EvaluationSeeds::defaults(),
+            SessionRunMode::FullQuiet,
+        )
+        .expect("full recon session completes");
+        assert!(
+            metrics.self_heat_check_required,
+            "default second casing reports trace exposure"
+        );
+        assert!(
+            metrics.self_heat_case_opened,
+            "contact discloses the casing file"
+        );
+        assert_eq!(metrics.self_heat_case_active, Some(true));
+        assert!(metrics.contact_reads > 0);
+        assert_eq!(metrics.second_burglary, None);
+        assert!(metrics.second_opportunity_expired);
     }
 
     #[test]
@@ -1020,7 +1055,8 @@ mod tests {
         inconclusive.second_opportunity_discovered = true;
         inconclusive.second_opportunity_expired = true;
         inconclusive.second_act_recon_information = 2;
-        inconclusive.self_heat_case_opened = true;
+        inconclusive.self_heat_check_required = true;
+        inconclusive.self_heat_case_opened = false;
         inconclusive.self_heat_case_active = None;
         validate_second_act_evidence(&inconclusive)
             .expect("an uncleared casing case must also make cautious recon stand down");

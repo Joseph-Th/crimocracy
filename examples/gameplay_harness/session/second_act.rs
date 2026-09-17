@@ -15,6 +15,22 @@ pub(super) fn run_second_act(
     let Some(opportunity) = metrics.second_opportunity else {
         return Err("act 2 cannot run before the second opportunity is discovered".into());
     };
+    let roster_current = scenario
+        .state
+        .world()
+        .characters_in_organization(scenario.player)
+        .any(|record| record.id() == scenario.burglar);
+    if strategy == Strategy::Rush {
+        if roster_current {
+            if narrative {
+                println!(
+                    "[DECIDE]  The entry crew is whole again after the win-back; no replacement hire is needed."
+                );
+            }
+        } else {
+            recruit_replacement(scenario, narrative, metrics)?;
+        }
+    }
     match strategy {
         Strategy::Rush => run_rush_second_act(scenario, opportunity, narrative, metrics),
         Strategy::Recon => run_recon_second_act(scenario, opportunity, narrative, metrics),
@@ -31,7 +47,13 @@ fn run_rush_second_act(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
-    let replacement = recruit_replacement(scenario, narrative, metrics)?;
+    let replacement = if metrics.replacement_recruited {
+        metrics
+            .replacement
+            .expect("a recorded replacement must persist")
+    } else {
+        scenario.burglar
+    };
     let scheduled_for = scenario.timeline.rush_second_act_at;
     let title = format!(
         "{} second-score burglary",
@@ -51,8 +73,13 @@ fn run_rush_second_act(
         })
         .collect();
     if narrative {
+        let crew_note = if metrics.replacement_recruited {
+            "The rebuilt crew"
+        } else {
+            "The returned crew"
+        };
         println!(
-            "[DECIDE]  Rebuild is in hand. Shift the second score on {} to {}, away from the overnight hour the crew now knows drew a response. Carry that debriefed police read into the rebuilt crew's plan rather than pretending it revealed a full patrol schedule.",
+            "[DECIDE]  {crew_note} is ready. Shift the second score on {} to {}, away from the overnight hour the crew now knows drew a response. Carry that debriefed police read into the plan rather than pretending it revealed a full patrol schedule.",
             scenario.variation.alternate_target_name(),
             format_day_minute(scheduled_for.as_minutes()),
         );
@@ -106,14 +133,10 @@ fn run_recon_second_act(
         .expect("completed second-score surveillance must have a resolution");
     let discovered_information = resolution.discovered_information().clone();
     metrics.second_act_recon_information = discovered_information.len();
-    metrics.self_heat_case_opened = scenario
-        .state
-        .intelligence()
-        .information_for_holder_by_topic(
-            KnowledgeHolder::Organization(scenario.player),
-            InformationTopic::LegalActivity,
-        )
-        .any(|information| information.subject() == EntityRef::Operation(recon));
+    // The crew knows its exposure, not whether institutional intake opened a file.
+    // Query on observed risk; waiting for case intel here would make this branch unreachable.
+    metrics.self_heat_check_required =
+        resolution.exposure().level() != crimocracy::operations::OperationExposureLevel::None;
     let mut burglary_intelligence = BTreeSet::from([scenario.alternate_opportunity_information]);
     let mut learned_patrol_information = None;
     for information in &discovered_information {
@@ -141,7 +164,7 @@ fn run_recon_second_act(
         burglary_intelligence.insert(*information);
     }
 
-    if metrics.self_heat_case_opened
+    if metrics.self_heat_check_required
         && !recon_case_is_cool_enough_to_continue(scenario, recon, narrative, metrics)?
     {
         return Ok(());
@@ -239,12 +262,13 @@ fn recon_case_is_cool_enough_to_continue(
         .to_owned();
     if narrative {
         println!(
-            "[DECIDE]  The after-action on our own casing says it drew a case. Before another job touches {neighborhood_name}, leadership uses its channel inside {police_name}."
+            "[DECIDE]  Our scout reported exposure during casing. That does not prove a case exists. Before another job touches {neighborhood_name}, ask the contact inside {police_name}."
         );
     }
     metrics.self_heat_case_active =
         read_police_contact(scenario, EntityRef::Operation(recon), narrative, metrics)?
             .map(|(sightline, _)| sightline);
+    metrics.self_heat_case_opened = metrics.self_heat_case_active.is_some();
     match metrics.self_heat_case_active {
         Some(false) => {
             if narrative {

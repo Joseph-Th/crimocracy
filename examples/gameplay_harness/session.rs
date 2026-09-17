@@ -820,7 +820,7 @@ fn run_post_burglary_campaign(
     if full_arc && metrics.defector.is_some() && metrics.defector_trail_confirmed.is_none() {
         defector::run_defector_trail(scenario, narrative, metrics)?;
     }
-    if full_arc && metrics.defector_trail_confirmed.is_some() {
+    if full_arc && metrics.defector_trail_confirmed == Some(true) {
         defector::run_win_back_attempt(scenario, narrative, metrics)?;
     }
     if full_arc {

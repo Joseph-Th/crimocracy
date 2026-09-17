@@ -24,7 +24,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
     match strategy {
         Strategy::Rush | Strategy::Recon => {
             if strategy == Strategy::Recon
-                && metrics.self_heat_case_opened
+                && metrics.self_heat_check_required
                 && metrics.self_heat_case_active != Some(false)
                 && metrics.second_burglary.is_none()
             {
@@ -42,7 +42,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                     "the police contact could not give a dependable clearing read"
                 };
                 println!(
-                    "\n[ACT 2] {target} second score lapsed at minute {lapsed_at}: fresh surveillance opened a case, {case_read}, and RECON declined to compound the heat."
+                    "\n[ACT 2] {target} second score lapsed at minute {lapsed_at}: fresh surveillance reported exposure, {case_read}, and RECON declined to compound the heat."
                 );
                 println!(
                     "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s); its legal consequence changed the decision before another burglary was authorized.",
@@ -65,13 +65,20 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                 realized
             );
             if strategy == Strategy::Rush {
-                println!(
-                    "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the retry moved away from the failed overnight hour and carried {} planning topic(s), including the debriefed police-response observation.",
-                    metrics.second_act_planning_topics.len()
-                );
+                if metrics.replacement_recruited {
+                    println!(
+                        "[ACT 2] Rebuild evidence: replacement recruited through executive recruitment; no fresh recon was used; the retry moved away from the failed overnight hour and carried {} planning topic(s), including the debriefed police-response observation.",
+                        metrics.second_act_planning_topics.len()
+                    );
+                } else {
+                    println!(
+                        "[ACT 2] Crew evidence: the win-back restored the original crew before the second score; no fresh recon was used; the retry moved away from the failed overnight hour and carried {} planning topic(s), including the debriefed police-response observation.",
+                        metrics.second_act_planning_topics.len()
+                    );
+                }
             } else {
                 println!(
-                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s), its case check cleared, and the burglary used a patrol-safe window.",
+                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s); no uncleared exposure check blocked the burglary, which used a patrol-safe window.",
                     metrics.second_act_recon_information
                 );
             }
@@ -449,6 +456,8 @@ pub fn print_organization_closing_view(
             metrics.player_personnel_departures,
             if metrics.replacement_recruited {
                 "; rebuilt through an executive recruitment".to_owned()
+            } else if metrics.win_back_accepted == Some(true) {
+                "; the departed member subsequently returned after a successful win-back".to_owned()
             } else {
                 String::new()
             },
@@ -628,11 +637,14 @@ pub fn print_organization_closing_view(
         let member_count = members.len().max(1);
         let daily_wage =
             scenario.registry.upkeep().per_member_daily().cents() * member_count as i64;
-        let days = financials
-            .legitimate_cycle_count
-            .max(financials.enterprise_cycle_count as u32)
-            .max(1) as i64;
-        let daily_net = (financials.legitimate_net_cents + financials.enterprise_net_cents) / days;
+        let (front_daily, racket_daily, unsettled) = latest_daily_earnings(scenario);
+        let daily_net = front_daily + racket_daily;
+        println!(
+            "  - Latest settled active books: fronts {} /day + rackets {} /day; {} active book(s) not yet settled. Estimates, not guaranteed income or cash available for wages.",
+            format_cents(front_daily),
+            format_cents(racket_daily),
+            unsettled,
+        );
         let cover = daily_net as f64 / daily_wage.max(1) as f64;
         println!(
             "  - Wages {} /day across {} member(s); recent books net ~{} /day ({:.1}x cover) - {}.",
@@ -695,6 +707,126 @@ pub fn print_organization_closing_view(
             }
         }
     }
+}
+
+/// Normalize each active book separately: parallel books are additive, not extra elapsed days.
+/// Only cycles settled under this owner contribute; an acquired seller's history is not our income.
+pub fn latest_daily_earnings(scenario: &Scenario) -> (i64, i64, usize) {
+    let mut fronts = 0;
+    let mut rackets = 0;
+    let mut unsettled = 0;
+    for business in scenario
+        .state
+        .world()
+        .businesses_owned_by_organization(scenario.player)
+    {
+        let Some(economy) = scenario.state.economy().get_business_economy(business.id()) else {
+            continue;
+        };
+        if economy.status() != crimocracy::economy::BusinessOperatingStatus::Active {
+            continue;
+        }
+        if let Some(cycle) = scenario
+            .state
+            .economy()
+            .latest_cycle(business.id())
+            .filter(|cycle| {
+                cycle.owner() == crimocracy::world::BusinessOwner::Organization(scenario.player)
+            })
+        {
+            fronts += daily_rate(
+                cycle.net_cash().cents(),
+                scenario
+                    .registry
+                    .get_business(business.kind())
+                    .economics()
+                    .cycle()
+                    .as_minutes()
+                    .into(),
+            );
+        } else {
+            unsettled += 1;
+        }
+    }
+    for enterprise in scenario
+        .state
+        .enterprises()
+        .enterprises_for_organization(scenario.player)
+    {
+        if enterprise.status() != crimocracy::enterprises::EnterpriseStatus::Active {
+            continue;
+        }
+        if let Some(cycle) = scenario.state.enterprises().latest_cycle(enterprise.id()) {
+            rackets += daily_rate(
+                cycle.net_cash().cents(),
+                scenario
+                    .registry
+                    .get_enterprise(enterprise.kind())
+                    .economics()
+                    .cycle()
+                    .as_minutes()
+                    .into(),
+            );
+        } else {
+            unsettled += 1;
+        }
+    }
+    (fronts, rackets, unsettled)
+}
+
+#[cfg(test)]
+mod earnings_tests {
+    use super::*;
+
+    #[test]
+    fn rates_normalize_duration_without_treating_parallel_books_as_days() {
+        assert_eq!(daily_rate(10_000, 720) + daily_rate(15_000, 1_440), 35_000);
+        assert_eq!(daily_rate(-5_000, 2_880), -2_500);
+    }
+
+    #[test]
+    fn latest_owned_books_include_every_active_front_and_racket() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        assert_eq!(latest_daily_earnings(&scenario), (0, 0, 2));
+        let mut metrics = RunMetrics::default();
+        run_until(
+            &mut scenario,
+            SimTime::from_minutes(1_440),
+            false,
+            &mut metrics,
+        )
+        .unwrap();
+        let front = scenario
+            .state
+            .economy()
+            .latest_cycle(scenario.front)
+            .unwrap()
+            .net_cash()
+            .cents();
+        let racket = scenario
+            .state
+            .enterprises()
+            .latest_cycle(scenario.enterprise)
+            .unwrap()
+            .net_cash()
+            .cents();
+        assert_eq!(latest_daily_earnings(&scenario), (front, racket, 0));
+    }
+}
+
+fn daily_rate(cents: i64, cycle_minutes: u64) -> i64 {
+    assert!(
+        cycle_minutes > 0,
+        "authored cycles must have positive duration"
+    );
+    i64::try_from(i128::from(cents) * 1_440 / i128::from(cycle_minutes))
+        .expect("daily earnings must fit money range")
 }
 
 pub fn enterprise_label(scenario: &Scenario, enterprise: EnterpriseId) -> String {
@@ -774,6 +906,12 @@ pub fn resolve_financial_view(
             .expect("enterprise heat totals must fit money range");
         enterprise_lines.push(EnterpriseLine {
             label: enterprise_label(scenario, id),
+            cash_kind: scenario
+                .state
+                .finance()
+                .get_account(record.cash_account())
+                .expect("enterprise cash account must exist")
+                .kind(),
             cycle_count: scenario.state.enterprises().cycles_for(id).count(),
             net_cents: net.cents(),
             heat_cents: heat.cents(),
@@ -870,22 +1008,18 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         .count();
     let per_member = scenario.registry.upkeep().per_member_daily();
     let daily_wage = per_member.cents() * member_count as i64;
-    let days = view
-        .legitimate_cycle_count
-        .max(view.enterprise_cycle_count as u32)
-        .max(1);
     println!(
-        "  Legitimate front: {} cycle(s), net {} (avg {} /day).",
+        "  Legitimate businesses: {} settled cycle(s), total net {}. Parallel business cycles are not elapsed campaign days.",
         view.legitimate_cycle_count,
         format_cents(view.legitimate_net_cents),
-        format_cents(view.legitimate_net_cents / days as i64),
     );
     for line in &view.enterprise_lines {
         println!(
-            "  Delegated gambling, {}: {} cycle(s), net {}, racket till (street, awaiting wash or float) {} (avg {} /day){}.",
+            "  Enterprise at {}: {} cycle(s), net {}, racket till ({:?}) {} (avg {} /settled cycle){}.",
             line.label,
             line.cycle_count,
             format_cents(line.net_cents),
+            line.cash_kind,
             format_cents(line.cash_cents),
             format_cents(line.net_cents / (line.cycle_count.max(1) as i64)),
             if line.heat_cents > 0 {
@@ -899,12 +1033,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         );
     }
     if view.enterprise_lines.is_empty() {
-        println!(
-            "  Delegated gambling: {} cycle(s), net {} (avg {} /day).",
-            view.enterprise_cycle_count,
-            format_cents(view.enterprise_net_cents),
-            format_cents(view.enterprise_net_cents / days as i64),
-        );
+        println!("  No enterprise books.");
     }
     println!(
         "  Fence proceeds (street cash, awaiting wash): {}.",
@@ -1237,117 +1366,24 @@ pub fn print_experience_readout(
     println!(
         "Core fantasy: learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
     );
-    // Compact fantasy scorecard for quick scannability before the detailed loop.
-    let info_leverage = recon.planning_information_count > rush.planning_information_count;
-    let delegated = recon.burglary.is_some() && recon.outcome.is_some();
-    let consequential =
-        press.player_legal_activity_information > 0 && recon.property_realized_cash_cents.is_some();
-    let survivable = press.cold_case_confirmed == Some(true);
-    let social = rush.player_personnel_departures > 0 && rush.replacement_recruited;
-    // Direct verdict for the player's six questions: concise, actionable, not hidden in 20 checkpoints.
     println!(
-        "\n[VERDICT] Player fantasy: {}",
-        if info_leverage && delegated && consequential {
-            "CAPTURED — every branch shows information changing outcomes, delegated managers settling cycles, and consequences persisting as cases, heat, and lost/gained personnel."
-        } else {
-            "PARTIAL — some fantasy beats did not fire this seed; see checkpoints below."
-        }
+        "Read this as a decision trace, not a quality grade: compare what leadership knew, what it chose, what it paid, and what remains unresolved."
     );
-    println!(
-        "[VERDICT] Game loop: {}",
-        if survivable && social {
-            "COHERENT — Observe→Interpret→Decide→Delegate→Resolve→Consequence cycles compose across the campaign, with the second act proving that waiting is also a decision."
-        } else {
-            "NEEDS ATTENTION — survival or personnel consequence did not resolve this seed."
-        }
-    );
-    let working = [
-        ("surveillance→plan leverage", info_leverage),
-        (
-            "enterprise heat tax",
-            rush.matched_enterprise_net_cents.is_some()
-                && press.matched_enterprise_net_cents.is_some(),
-        ),
-        (
-            "laundering→acquisition",
-            press.front_acquired || recon.laundered_gross_cents > 0,
-        ),
-        (
-            "district diversification",
-            press.expansion_established && press.expansion_heat_cents == Some(0),
-        ),
-        (
-            "personnel pressure",
-            rush.player_personnel_departures > 0 && recon.player_personnel_departures == 0,
-        ),
-    ];
-    let struggling = working
-        .iter()
-        .filter(|(_, ok)| !ok)
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>();
-    if struggling.is_empty() {
+    if rush.win_back_accepted == Some(true) {
         println!(
-            "[VERDICT] Systems working well: {}",
-            working
-                .iter()
-                .map(|(n, _)| *n)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    } else {
-        println!(
-            "[VERDICT] Systems struggling this seed: {}",
-            struggling.join(", ")
+            "[WATCH] RUSH recovered its specialist through a drive-matched pitch. A replacement is unnecessary unless that recovery fails; adding headcount would add wages, not repair a missing capability."
         );
     }
-    println!(
-        "[VERDICT] Emergent interaction: {}",
-        if press.player_legal_activity_information > 0
-            && press.player_personnel_departures > 0
-            && press.matched_enterprise_net_cents < recon.matched_enterprise_net_cents
-        {
-            "YES — one noisy operation becomes an organization-wide problem: visible police exposure creates a case, taxes the home racket, makes an exposed crew member easier for a rival to poach, and changes where leadership is willing to work next."
-        } else {
-            "LIMITED this seed — the operation consequence did not propagate across enough player-visible systems."
-        }
-    );
-    let feedback_surface = [rush, press, recon]
-        .iter()
-        .all(|run| run.player_report_count > 0 && run.executive_brief_count > 0)
-        && press.decision_requests > 0
-        && recon.discovered_surveillance_information > 0;
-    println!(
-        "[VERDICT] Harness feedback surface: {}",
-        if feedback_surface {
-            "STRONG — the run exposes organization-held intelligence, surfaced exceptions, reports/briefs, operation outcomes, personnel changes, opportunity loss, and financial consequences used by the player loop."
-        } else {
-            "INCOMPLETE this seed — one or more player-facing feedback channels did not produce evidence."
-        }
-    );
-    let recon_adapted_second_act = recon.second_burglary.is_some()
-        || (recon.self_heat_case_opened
-            && recon.second_burglary.is_none()
-            && recon.second_opportunity_expired);
-    println!(
-        "[VERDICT] Dynamic experience: {}",
-        if rush.second_burglary.is_some()
-            && press.second_opportunity_expired
-            && recon_adapted_second_act
-        {
-            "YES — the same city diverges by policy: RUSH turns failure into a rebuild, PRESS gives up a score to manage consequences and diversify, and RECON re-invests in information then either acts on a clean read or stands down when the scouting itself creates heat."
-        } else {
-            "PARTIAL — second-act divergence incomplete this seed."
-        }
-    );
-    println!(
-        "Fantasy scorecard: Information {} | Delegation {} | Consequence {} | Survival {} | People {}",
-        if info_leverage { "PASS" } else { "fail" },
-        if delegated { "PASS" } else { "fail" },
-        if consequential { "PASS" } else { "fail" },
-        if survivable { "PASS" } else { "fail" },
-        if social { "PASS" } else { "fail" },
-    );
+    if press.cold_case_confirmed == Some(true) {
+        println!(
+            "[WATCH] The burglary file cooled. That is not a district-wide all-clear; racket warnings and street surcharges have their own continuation."
+        );
+    }
+    if !recon.self_heat_case_opened {
+        println!(
+            "[WATCH] No casing case was disclosed to RECON in this run. That is missing knowledge, not proof that surveillance left no trace."
+        );
+    }
     println!("Evidence coverage (not a game-quality score):");
     let mut missing = 0u32;
     let mut checkpoint = |label: &str, present: bool, evidence: &str| {
@@ -1408,7 +1444,7 @@ pub fn print_experience_readout(
     checkpoint(
         "survive",
         press.cold_case_confirmed == Some(true),
-        "standing down and outlasting the investigation resolves the consequence through the player's own police channel",
+        "the contact confirms the burglary file shelved; this does not clear separate racket pressure",
     );
     checkpoint(
         "organization",
@@ -1417,9 +1453,9 @@ pub fn print_experience_readout(
     );
     checkpoint(
         "rebuild",
-        rush.replacement_recruited
+        (rush.replacement_recruited || rush.win_back_accepted == Some(true))
             && rush.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved),
-        "a crew member lost to rival pressure can be replaced through a player-authored executive recruitment, and the rebuilt crew works a second score safely",
+        "leadership restores its entry capability through win-back or replacement, then works the next score without a redundant hire",
     );
     checkpoint(
         "second wind",
@@ -1436,7 +1472,7 @@ pub fn print_experience_readout(
         recon.self_heat_case_opened
             && recon.self_heat_case_active != Some(false)
             && recon.second_burglary.is_none(),
-        "casing carries risk both ways: after the organization's own surveillance draws a case, it checks that case through its standing police contact and stands down unless the channel explicitly says it is shelved",
+        "casing carries risk both ways: when the crew's own casing reports exposure, leadership asks its standing police contact whether a file exists and stands down unless the channel explicitly says the matter is shelved",
     );
     checkpoint(
         "counterplay",
@@ -1567,7 +1603,7 @@ pub fn print_experience_readout(
     );
     if missing > 0 {
         println!(
-            "[NOTE] {missing} checkpoint(s) missing this seed (listed above); stochastic reachability is covered across rotation/batch sets, not forced in every sample."
+            "[NOTE] {missing} checkpoint(s) absent in this comparison. Check rotated runs and explicit probes; absence here is neither a failure nor proof of coverage elsewhere."
         );
     }
     println!("Observed decision leverage:");
@@ -1579,11 +1615,11 @@ pub fn print_experience_readout(
         terminal_label(rush),
     );
     println!(
-        "  - Information risk: RECON's own casing can be made - surveillance base exposure means a weak scout in a heavily patrolled district draws police attention while gathering it{}; the branch then reads that self-inflicted case through its police contact rather than more street work (own-heat read: {:?}).",
-        if recon.self_heat_case_opened {
-            "; this fixture's recon run drew exactly that kind of case from its own surveillance"
+        "  - Information risk: {} (contact case read: {:?}). No disclosed file is not proof of no institutional attention.",
+        if recon.self_heat_check_required {
+            "the second casing reported exposure, so RECON checked its contact before authorizing another score"
         } else {
-            ", which this fixture's skilled scout in a quiet district avoided"
+            "the second casing reported no exposure; RECON had no crew-observed trigger for a case query"
         },
         recon.self_heat_case_active,
     );
@@ -1639,7 +1675,7 @@ pub fn print_experience_readout(
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
-        "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed - not desire - limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
+        "  - Money-state leverage: resale cash can pay wages and capitalize rackets, but only accounted funds can buy legitimate businesses; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed - not desire - limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
         optional_dollars(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections

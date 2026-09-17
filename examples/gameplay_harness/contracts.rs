@@ -299,9 +299,14 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
         .ok_or(HarnessContractError::MissingStrategy)?;
     let evidence = match strategy {
         Strategy::Rush => {
-            if metrics.second_opportunity_discovered
-                && metrics.replacement_recruited
+            let rebuilt = metrics.replacement_recruited
                 && metrics.replacement.is_some()
+                && metrics.win_back_accepted != Some(true);
+            let restored = !metrics.replacement_recruited
+                && metrics.player_personnel_departures > 0
+                && metrics.win_back_accepted == Some(true);
+            if metrics.second_opportunity_discovered
+                && (rebuilt || restored)
                 && metrics.second_burglary.is_some()
                 && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
                 && metrics.second_act_recon_information == 0
@@ -315,9 +320,13 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                     .contains(&InformationTopic::PoliceActivity)
             {
                 None
+            } else if rebuilt || restored {
+                Some(
+                    "the RUSH second act must work the reopened score with a whole entry crew (either the canonical executive replacement or the win-back-restored burglar), move the retry away from the known-hot overnight hour, and carry the debriefed PoliceActivity information in the plan without pretending it is a full patrol pattern",
+                )
             } else {
                 Some(
-                    "the RUSH second act must discover the reopened score, debrief the aborted crew's police observation into organizational knowledge, rebuild through the canonical executive path, move the retry away from the known-hot overnight hour, and carry that debriefed PoliceActivity information in the plan without pretending it is a full patrol pattern",
+                    "the RUSH second act must discover the reopened score, debrief the aborted crew's police observation into organizational knowledge, restore a whole entry crew (win-back first, canonical executive replacement only while the defector stays away), move the retry away from the known-hot overnight hour, and carry that debriefed PoliceActivity information in the plan without pretending it is a full patrol pattern",
                 )
             }
         }
@@ -327,10 +336,11 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
                 && metrics.second_act_recon_information > 0
                 && metrics.second_burglary_terminal_minute.is_some()
-                && (!metrics.self_heat_case_opened || metrics.self_heat_case_active == Some(false));
+                && (!(metrics.self_heat_check_required || metrics.self_heat_case_opened)
+                    || metrics.self_heat_case_active == Some(false));
             let stood_down_on_self_heat = metrics.second_opportunity_discovered
                 && metrics.second_act_recon_information > 0
-                && metrics.self_heat_case_opened
+                && (metrics.self_heat_check_required || metrics.self_heat_case_opened)
                 && metrics.self_heat_case_active != Some(false)
                 && metrics.second_burglary.is_none()
                 && metrics.second_opportunity_expired;

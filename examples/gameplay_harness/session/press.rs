@@ -519,7 +519,7 @@ fn poll_case_activity(
         metrics.cold_case_confirmed = Some(true);
         if narrative {
             println!(
-                "[CONSEQUENCE RESOLVED] The channel confirms the precinct shelved the case. The standing-down worked: the organization absorbed the exposure, kept the district quiet, and outlasted the investigation without touching hidden case state."
+                "[CASE UPDATE] The channel confirms the burglary file is shelved. This clears that file only, not the district: any racket surcharge or manager warning about vice attention remains a separate reason for caution."
             );
         }
     }
