@@ -42,17 +42,20 @@ pub(super) fn run_press_response(
             scenario.registry.legal().cold_case_window().as_minutes() as u64;
         // Heat check lands well inside the authored cold window (about 1/36th of it, bounded
         // to [30,90] minutes) so the read always precedes any possible shelf no matter how
-        // authors tune the window.
+        // authors tune the window. The check never overlaps earlier scout work: it follows
+        // the clock, not just the anchor.
         let heat_check_delay = (cold_window_for_heat_check / 36).clamp(30, 90);
-        let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay);
+        let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay)
+            .max(scenario.state.now() + SimDuration::from_minutes(1));
+        let heat_check_lag = heat_check_at.as_minutes().saturating_sub(case_open_minute);
         if narrative {
             println!(
                 "[DECIDE]  A case is open and the crew's field report is back. Hold back on further street work in {neighborhood_name} until leadership knows whether {police_name} is still developing it."
             );
             println!(
                 "[DECIDE]  Watch {police_name} itself at {}, {} minutes after the case opened, to read whether detectives are still actively working the matter.",
-                format_minute_of_day(heat_check_at.as_minutes()),
-                heat_check_delay
+                format_day_minute(heat_check_at.as_minutes()),
+                heat_check_lag
             );
         }
         metrics.counterintelligence_scheduled_at = Some(heat_check_at.as_minutes());
@@ -265,12 +268,12 @@ fn schedule_witness_pressure(
             if police_activity_information.is_some() {
                 println!(
                     "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
-                    format_minute_of_day(pressure_at.as_minutes())
+                    format_day_minute(pressure_at.as_minutes())
                 );
             } else {
                 println!(
                     "[INTERPRET] No patrol pattern is held, so the quiet-word time at {} is a blind guess inside a watched district, not a patrol-safe plan. If a response arrives, the abort is the lesson: blind counter-play in a hot district gambles.",
-                    format_minute_of_day(pressure_at.as_minutes())
+                    format_day_minute(pressure_at.as_minutes())
                 );
             }
         }

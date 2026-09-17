@@ -278,7 +278,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         } else {
             for metrics in [&rush, &press, &recon] {
                 println!(
-                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act-2 burglary {}",
+                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act-2 burglary {} ({:?}), self-heat read {:?}",
                     metrics.strategy.expect("strategy must be set").label(),
                     terminal_label(metrics),
                     metrics.police_arrived,
@@ -286,6 +286,8 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                     metrics.player_personnel_departures,
                     metrics.win_back_accepted,
                     metrics.second_burglary.is_some(),
+                    metrics.second_burglary_outcome,
+                    metrics.self_heat_case_active,
                 );
             }
         }
@@ -414,9 +416,9 @@ mod tests {
         DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds, FixtureVariation,
         HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
         NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
-        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal,
-        format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
-        run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
+        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
+        format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
+        play_session, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe, stamp,
         validate_batch_strategy_coverage, validate_branch_financial_isolation,
         validate_press_witness_counterplay, validate_second_act_evidence,
         validate_strategy_evidence,
@@ -625,6 +627,16 @@ mod tests {
             format_patrol_windows(&[(60, 270), (1_200, 1_380)]),
             "01:00-04:30, 20:00-23:00"
         );
+    }
+
+    #[test]
+    fn formats_day_anchored_stamps_for_multi_day_arcs() {
+        assert_eq!(format_day_minute(160), "Day 1 02:40");
+        assert_eq!(format_day_minute(1_440), "Day 2 00:00");
+        assert_eq!(format_day_minute(11_820), "Day 9 05:00");
+        assert_eq!(stamp(160), "minute 160, Day 1 02:40");
+        assert_eq!(format_avg_dollars(39_017.5), "$390.18");
+        assert_eq!(format_avg_dollars(-61_885.0), "-$618.85");
     }
 
     #[test]

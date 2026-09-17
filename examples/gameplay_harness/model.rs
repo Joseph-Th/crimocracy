@@ -951,16 +951,18 @@ impl Aggregate {
         };
         // Block layout instead of one wide line: outcomes and legal pressure on the first band,
         // intelligence and economics on the second, so a strategy row stays scannable.
+        // Money prints as dollars: this is the same player-facing unit the financial view uses,
+        // not the internal cent accounting.
         println!(
             "{label:<6} samples {:>2}  fixtures {:?}
        outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  unresolved {:>2}
        pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
                  surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
-       economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {:>8.0}c -> {:>8.0}c cash @ {:>5.0}m
+       economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {} -> {} cash @ {:>5.0}m
        rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}  vice hits {:>3}
-                 payroll paid {:>7.0}c  unpaid {:>6.0}c
+                 payroll paid {}  unpaid {}
        witness:  named cases {}  pressure runs {}  testimony sessions {}  member arrests {}  rival rackets {:>4.1}  acquisitions {}
-       money:    laundered {:>8.0}c gross  accounted balance {:>7.0}c",
+       money:    laundered {} gross  accounted balance {}",
             self.samples,
             self.fixture_variations,
             self.percent(self.achieved),
@@ -981,8 +983,8 @@ impl Aggregate {
             avg_exposure,
             avg_intelligence,
             avg_terminal_minute,
-            avg_acquired_property,
-            avg_realized_property,
+            format_avg_dollars(avg_acquired_property),
+            format_avg_dollars(avg_realized_property),
             avg_liquidation_minute,
             self.player_report_total,
             self.executive_brief_total,
@@ -991,22 +993,28 @@ impl Aggregate {
             self.player_personnel_departures,
             self.contact_reads,
             self.vice_inquiries,
-            self.payroll_paid_total_cents as f64 / self.samples as f64,
-            self.payroll_short_total_cents as f64 / self.samples as f64,
+            format_avg_dollars(self.payroll_paid_total_cents as f64 / self.samples as f64),
+            format_avg_dollars(self.payroll_short_total_cents as f64 / self.samples as f64),
             self.witness_cases,
             self.witness_pressure_attempts,
             self.witness_testimony_sessions,
             self.player_member_arrests,
             self.rival_home_enterprises_total as f64 / self.samples as f64,
             self.front_acquisitions,
-            self.laundered_gross_total_cents as f64 / self.samples as f64,
-            if self.accounted_balance_samples == 0 {
+            format_avg_dollars(self.laundered_gross_total_cents as f64 / self.samples as f64),
+            format_avg_dollars(if self.accounted_balance_samples == 0 {
                 0.0
             } else {
                 self.accounted_balance_total_cents as f64 / self.accounted_balance_samples as f64
-            },
+            }),
         );
     }
+}
+
+/// Renders an averaged cent value as player-facing dollars, e.g. `39017.5` -> `$390.18`.
+pub fn format_avg_dollars(cents: f64) -> String {
+    let sign = if cents < 0.0 { "-" } else { "" };
+    format!("{sign}${:.2}", cents.abs() / 100.0)
 }
 
 #[derive(Clone)]

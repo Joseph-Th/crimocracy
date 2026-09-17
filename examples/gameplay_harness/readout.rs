@@ -380,7 +380,11 @@ pub fn print_player_knowledge_gap(scenario: &Scenario, burglary: OperationId) {
 /// The closing counterpart to the starting player view: what the organization actually looks
 /// like after the session, assembled only from state a boss can see - roster, mandates,
 /// holdings, and the reports the organization received.
-pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics) {
+pub fn print_organization_closing_view(
+    scenario: &Scenario,
+    metrics: &RunMetrics,
+    financials: &FinancialView,
+) {
     let members = scenario
         .state
         .world()
@@ -394,10 +398,15 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
     );
     if metrics.player_personnel_departures > 0 {
         println!(
-            "  - Lost {} member(s) to rival recruitment this session{}",
+            "  - Lost {} member(s) to rival recruitment this session{}{}",
             metrics.player_personnel_departures,
             if metrics.replacement_recruited {
                 "; rebuilt through an executive recruitment".to_owned()
+            } else {
+                String::new()
+            },
+            if metrics.police_arrived {
+                ". The departed crew saw police at the score, and fear made the outside offer land where loyalty might otherwise have held".to_owned()
             } else {
                 String::new()
             },
@@ -438,6 +447,66 @@ pub fn print_organization_closing_view(scenario: &Scenario, metrics: &RunMetrics
     if standing_reports > 0 {
         println!(
             "  - Word on the street moved {standing_reports} time(s) this session (Standing reports)."
+        );
+    }
+    // Rival posture from the player-visible territory surface: the underworld the
+    // organization actually competes with, not hidden rival books. Rival growth (or its
+    // absence) is background by scope, but a boss can always see who holds the home district.
+    {
+        let home_district = scenario
+            .state
+            .world()
+            .get_neighborhood(scenario.neighborhood)
+            .expect("home neighborhood must persist")
+            .name()
+            .to_owned();
+        let rival_name = scenario
+            .state
+            .world()
+            .get_organization(scenario.rival)
+            .expect("rival must persist")
+            .name()
+            .to_owned();
+        let second_rival_name = scenario
+            .state
+            .world()
+            .get_organization(scenario.second_rival)
+            .expect("second rival must persist")
+            .name()
+            .to_owned();
+        println!(
+            "  - Underworld around {home_district}: {rival_name} and {second_rival_name} operate {} racket(s) between them in this district.",
+            metrics.rival_home_enterprises,
+        );
+    }
+    // Wage runway from the books the organization actually holds: headcount is a standing
+    // carrying cost, and growth (or heat-taxed income) is what makes it bind. Early sessions
+    // run slack; every added member and every heat surcharge narrows the cover.
+    {
+        let member_count = members.len().max(1);
+        let daily_wage =
+            scenario.registry.upkeep().per_member_daily().cents() * member_count as i64;
+        let days = financials
+            .legitimate_cycle_count
+            .max(financials.enterprise_cycle_count as u32)
+            .max(1) as i64;
+        let daily_net = (financials.legitimate_net_cents + financials.enterprise_net_cents) / days;
+        let cover = daily_net as f64 / daily_wage.max(1) as f64;
+        println!(
+            "  - Wages {} /day across {} member(s); recent books net ~{} /day ({:.1}x cover) - {}.",
+            format_cents(daily_wage),
+            member_count,
+            format_cents(daily_net),
+            cover,
+            if financials.payroll_short_cents > 0 {
+                "payroll already slipped and the crew remembers"
+            } else if cover >= 2.0 {
+                "payroll comfortable at this headcount"
+            } else if cover >= 1.0 {
+                "payroll covered but growth or heat would tighten it"
+            } else {
+                "payroll uncovered at this burn rate"
+            },
         );
     }
     // Player-visible street standing so a leader can see what the city thinks.
@@ -641,7 +710,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         stamp(scenario.state.now().as_minutes())
     );
     println!(
-        "  Money states: street cash spends on the street but cannot buy legitimacy; accounted funds are washed money that can buy businesses; legitimate operating cash belongs to the fronts' own books. Fence proceeds sit as street cash until washed through the front's per-cycle plausibility ceiling."
+        "  Cash states: street cash spends on the street but cannot buy legitimacy; accounted funds are washed money that can buy businesses; legitimate operating cash belongs to the fronts' own books."
     );
     let member_count = scenario
         .state
@@ -862,8 +931,8 @@ pub fn print_executive_briefs<'a>(reports: impl Iterator<Item = &'a ReportRecord
 }
 
 pub fn print_metrics(metrics: &RunMetrics) {
-    let property_acquired = optional_cents(metrics.property_acquired_value_cents);
-    let property_realized = optional_cents(metrics.property_realized_cash_cents);
+    let property_acquired = optional_dollars(metrics.property_acquired_value_cents);
+    let property_realized = optional_dollars(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
     println!(
         "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (follow-up hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
@@ -902,11 +971,11 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.autonomous_recruitment_attempts,
         metrics.player_poach_warnings,
         metrics.player_personnel_departures,
-        optional_cents(metrics.legitimate_net_cents),
-        optional_cents(metrics.enterprise_net_cents),
+        optional_dollars(metrics.legitimate_net_cents),
+        optional_dollars(metrics.enterprise_net_cents),
         optional_minute(metrics.matched_financial_boundary_minute),
-        optional_cents(metrics.matched_legitimate_net_cents),
-        optional_cents(metrics.matched_enterprise_net_cents),
+        optional_dollars(metrics.matched_legitimate_net_cents),
+        optional_dollars(metrics.matched_enterprise_net_cents),
     );
     println!(
         "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}, self-heat case opened {} read {:?}",
@@ -918,24 +987,24 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.second_burglary_outcome,
         metrics.second_burglary_aborted,
         metrics.second_act_recon_information,
-        optional_cents(metrics.second_act_property_acquired_value_cents),
-        optional_cents(metrics.second_act_property_realized_cash_cents),
+        optional_dollars(metrics.second_act_property_acquired_value_cents),
+        optional_dollars(metrics.second_act_property_realized_cash_cents),
         metrics.self_heat_case_opened,
         metrics.self_heat_case_active,
     );
     if metrics.expansion_established {
         println!(
             "        diversification: second-district enterprise established, net {}, unrelated-case heat {}",
-            optional_cents(metrics.expansion_net_cents),
-            optional_cents(metrics.expansion_heat_cents),
+            optional_dollars(metrics.expansion_net_cents),
+            optional_dollars(metrics.expansion_heat_cents),
         );
     }
     println!(
         "        money: laundered {} gross through the front's books (house fee {}, accounted-payroll spend {}, accounted balance {}), books refused {} over-capacity request(s), vice inquiries drawn {}",
-        optional_cents(Some(metrics.laundered_gross_cents)),
-        optional_cents(Some(metrics.launder_fee_cents)),
-        optional_cents(Some(metrics.payroll_accounted_spent_cents)),
-        optional_cents(metrics.accounted_balance_cents),
+        optional_dollars(Some(metrics.laundered_gross_cents)),
+        optional_dollars(Some(metrics.launder_fee_cents)),
+        optional_dollars(Some(metrics.payroll_accounted_spent_cents)),
+        optional_dollars(metrics.accounted_balance_cents),
         metrics.laundering_capacity_rejections,
         metrics.vice_inquiries_drawn,
     );
@@ -960,10 +1029,6 @@ pub fn print_metrics(metrics: &RunMetrics) {
             metrics.win_back_accepted, metrics.win_back_margin,
         );
     }
-}
-
-pub fn optional_cents(value: Option<i64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |cents| format!("{cents}c"))
 }
 
 /// A sensitivity profile earns its place by making at least one policy treatment behave
@@ -1362,7 +1427,7 @@ pub fn print_experience_readout(
     println!(
         "  - Witness counterplay: PRESS's after-action says the score was witnessed, leadership answers with one pressure operation against the publicly known shopkeeper, and that operation visibly {}.",
         if press.witness_pressure_aborted {
-            "aborts when another police response arrives"
+            "aborts when another police response arrives - quiet counter-play in a watched district gambles: the response follows active casework in the district, so no guessed hour is safe while the case is hot; walking away is the disciplined play, and the RECON second act proves the mirror image by standing down whenever its own casing creates heat the contact cannot clear"
         } else {
             match press.witness_pressure_outcome {
                 Some(OperationObjectiveOutcome::Achieved) => "achieves its objective",
@@ -1378,17 +1443,25 @@ pub fn print_experience_readout(
         recon.player_personnel_departures,
     );
     println!(
-        "  - Consequence leverage: PRESS received {} legal-activity information item(s), read the burglary case as still hot at minute ~{}, then later confirmed that same case shelved through its police channel; over the matched campaign window the heated gambling book earned {} versus {} in the cleaner comparison branch; RECON realized {} of resale cash via a low-police venue.",
+        "  - Consequence leverage: PRESS received {} legal-activity information item(s), read the burglary case as still hot at {}, then later confirmed that same case shelved through its police channel; over the matched campaign window the heated gambling book earned {} versus {} in the cleaner comparison branch; RECON realized {} of resale cash via a low-police venue.",
         press.player_legal_activity_information,
-        press.counterintelligence_scheduled_at.unwrap_or_default(),
+        press
+            .counterintelligence_scheduled_at
+            .map(stamp)
+            .unwrap_or_else(|| "-".to_owned()),
         optional_dollars(enterprise_window(press)),
         optional_dollars(enterprise_window(rush).or_else(|| enterprise_window(recon))),
         optional_dollars(recon.property_realized_cash_cents),
     );
     println!(
-        "  - Time tradeoff: RECON finished at minute {} versus RUSH at minute {}; the extra planning time bought lower exposure and liquid value in this matched fixture.",
-        recon.burglary_terminal_minute.unwrap_or_default(),
-        rush.burglary_terminal_minute.unwrap_or_default(),
+        "  - Time tradeoff: RECON finished at {} versus RUSH at {}; the extra planning time bought lower exposure and liquid value in this matched fixture.",
+        recon
+            .burglary_terminal_minute
+            .map(stamp)
+            .unwrap_or_else(|| "-".to_owned()),
+        rush.burglary_terminal_minute
+            .map(stamp)
+            .unwrap_or_else(|| "-".to_owned()),
     );
     println!(
         "  - Diversification leverage: while the case stayed hot, PRESS bought its harbor venue outright with clean money and converted idle street cash into a second-district book earning {} with {} of unrelated-case heat, versus the canal book's heat-taxed window net of {}.",
@@ -1398,7 +1471,7 @@ pub fn print_experience_readout(
     );
     println!(
         "  - Money-state leverage: resale cash is not spendable money until it is laundered; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS then spent its accumulated accounted funds on the harbor venue ({}), so conversion speed - not desire - limits how fast dirty money becomes clean, and clean money has a real purchase waiting.",
-        optional_cents(Some(recon.laundered_gross_cents)),
+        optional_dollars(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections
             + recon.laundering_capacity_rejections,
@@ -1517,6 +1590,17 @@ pub fn format_minute_of_day(minute: u64) -> String {
     format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
 }
 
+/// Renders an absolute campaign minute as the day-anchored clock time the player would
+/// see on a report, e.g. `minute 160, Day 1 02:40`. Multi-day arcs (the PRESS stand-down)
+/// stay temporally anchored instead of collapsing to a bare clock time.
+pub fn format_day_minute(minute: u64) -> String {
+    format!(
+        "Day {} {}",
+        minute / 1_440 + 1,
+        format_minute_of_day(minute)
+    )
+}
+
 /// Renders patrol windows as the clock ranges a player reads in a surveillance report,
 /// e.g. `01:00-04:30, 20:00-23:00`, instead of raw minute tuples.
 pub fn format_patrol_windows(windows: &[(u64, u64)]) -> String {
@@ -1533,9 +1617,10 @@ pub fn format_patrol_windows(windows: &[(u64, u64)]) -> String {
         .join(", ")
 }
 
-/// Renders a player-facing tick beat as minute plus clock, e.g. `minute 160 (02:40)`.
+/// Renders a player-facing tick beat as minute plus day-anchored clock, e.g.
+/// `minute 160, Day 1 02:40`.
 pub fn stamp(minute: u64) -> String {
-    format!("minute {} ({})", minute, format_minute_of_day(minute))
+    format!("minute {}, {}", minute, format_day_minute(minute))
 }
 
 /// Renders cents as a player-facing dollar amount, e.g. `23019` -> `$230.19`.

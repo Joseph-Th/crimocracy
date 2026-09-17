@@ -54,7 +54,7 @@ fn run_rush_second_act(
         println!(
             "[DECIDE]  Rebuild is in hand. Shift the second score on {} to {}, away from the overnight hour the crew now knows drew a response. Carry that debriefed police read into the rebuilt crew's plan rather than pretending it revealed a full patrol schedule.",
             scenario.variation.alternate_target_name(),
-            format_minute_of_day(scheduled_for.as_minutes()),
+            format_day_minute(scheduled_for.as_minutes()),
         );
     }
     let burglary = authorize_burglary(
@@ -173,12 +173,11 @@ fn run_recon_second_act(
     if narrative {
         let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
         println!(
-            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
+            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, window stays outside heavy presence.",
             patrol_record.summary(),
             crate::readout::format_patrol_windows(&windows),
             duration.as_minutes(),
-            scheduled_for.as_minutes(),
-            format_minute_of_day(scheduled_for.as_minutes())
+            crate::readout::stamp(scheduled_for.as_minutes())
         );
     }
     let title = format!(

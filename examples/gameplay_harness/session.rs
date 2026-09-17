@@ -410,19 +410,18 @@ fn prepare_initial_burglary_plan(
             if narrative {
                 let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
-                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose minute {} ({}), window stays outside heavy presence.",
+                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, window stays outside heavy presence.",
                     patrol_record.summary(),
                     crate::readout::format_patrol_windows(&windows),
                     duration.as_minutes(),
-                    chosen.as_minutes(),
-                    crate::readout::format_minute_of_day(chosen.as_minutes())
+                    crate::readout::stamp(chosen.as_minutes())
                 );
             }
             chosen
         }
     };
     if narrative && matches!(strategy, Strategy::Rush | Strategy::Press) {
-        let clock = format_minute_of_day(scheduled_for.as_minutes());
+        let clock = format_day_minute(scheduled_for.as_minutes());
         match strategy {
             Strategy::Rush => println!(
                 "[DECIDE]  Move immediately on the opportunity at {clock}, using only the original street information."
@@ -490,8 +489,8 @@ fn authorize_initial_burglary(
         .collect();
     if narrative {
         println!(
-            "[COMMIT]  Burglary authorized for minute {} with {:?} approach and {} planning information item(s).",
-            plan.scheduled_for.as_minutes(),
+            "[COMMIT]  Burglary authorized for {} with {:?} approach and {} planning information item(s).",
+            stamp(plan.scheduled_for.as_minutes()),
             record.approach(),
             record.intelligence().len(),
         );
@@ -835,7 +834,7 @@ fn run_post_burglary_campaign(
     metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
     capture_campaign_audit_metrics(scenario, metrics);
     if narrative {
-        print_organization_closing_view(scenario, metrics);
+        print_organization_closing_view(scenario, metrics, &financials);
         print_second_act_recap(scenario, strategy, metrics);
         print_financial_view(scenario, financials);
         print_executive_briefs(

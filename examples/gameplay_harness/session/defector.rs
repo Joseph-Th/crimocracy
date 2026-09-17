@@ -29,7 +29,7 @@ pub(super) fn run_defector_trail(
     if narrative {
         let departed_at = metrics
             .defection_minute
-            .map(|minute| format!(" at minute {minute}"))
+            .map(|minute| format!(" at {}", stamp(minute)))
             .unwrap_or_default();
         println!(
             "[DECIDE]  {player_name} knows {defector_name} left{departed_at}. Watch the district's known rivals for where a defector resurfaces."
@@ -208,10 +208,9 @@ pub(super) fn run_win_back_attempt(
     metrics.win_back_margin = Some(record.margin());
     if narrative {
         println!(
-            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance. Documentary margin {} (leadership sees acceptance or refusal, not the number); matching the pitch to what the candidate wants is what moves it.",
+            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance. Leadership sees acceptance or refusal, never the scoring margin; matching the pitch to what the candidate wants is what moves it.",
             record.approach(),
             rival_name,
-            record.margin(),
         );
     }
     if accepted {

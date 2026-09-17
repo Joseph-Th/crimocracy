@@ -1085,7 +1085,7 @@ pub fn discover_second_opportunity(
         );
         println!(
             "          The second score expires at {}.",
-            format_minute_of_day(valid_until.as_minutes())
+            format_day_minute(valid_until.as_minutes())
         );
     }
     Ok(opportunity)

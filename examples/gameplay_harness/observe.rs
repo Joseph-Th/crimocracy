@@ -360,6 +360,26 @@ fn observe_recruitment(
                     entry.summary
                 );
             }
+            // The departure report names no destination and no cause. The organization can
+            // still read the obvious: a crew member who just saw police take an outside
+            // offer is fear talking, while a clean crew member who leaves is something else.
+            if narrative
+                && matches!(
+                    attempt.outcome(),
+                    crimocracy::recruitment::RecruitmentOutcome::Accepted
+                )
+                && metrics.police_arrived
+            {
+                let name = scenario
+                    .state
+                    .world()
+                    .get_character(attempt.candidate())
+                    .map(|character| character.name().to_owned())
+                    .unwrap_or_else(|| "The departed member".to_owned());
+                println!(
+                    "[INTERPRET] {name} saw police at the score; fear made the outside offer land where loyalty might otherwise have held."
+                );
+            }
         }
     }
 }

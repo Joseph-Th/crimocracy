@@ -1365,15 +1365,15 @@ pub fn run_organizational_capacity_probe(
         .into());
     }
     validate_harness_state(registry, &scenario.state)?;
+    let specialist_name = scenario
+        .state
+        .world()
+        .get_character(scenario.burglar)
+        .expect("capacity-probe specialist must persist")
+        .name()
+        .to_owned();
     println!(
-        "[CAPACITY] {} was reserved for the first burglary; the overlapping second plan was rejected as {:?} without changing authoritative state.",
-        scenario
-            .state
-            .world()
-            .get_character(scenario.burglar)
-            .expect("capacity-probe specialist must persist")
-            .name(),
-        overlapping_debug,
+        "[CAPACITY] {specialist_name} was reserved for the first burglary; the overlapping second plan was rejected ({specialist_name} is already booked on that crew) without changing authoritative state."
     );
 
     let mut first_metrics = RunMetrics {
