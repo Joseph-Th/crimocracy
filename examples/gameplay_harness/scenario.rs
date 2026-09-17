@@ -1241,7 +1241,7 @@ pub fn establish_harbor_expansion(
             format_cents(expansion_float_cents)
         );
         println!(
-            "[NARRATION] {expansion_neighborhood_name} sits outside {police_name}'s jurisdiction: the open case that taxes the {neighborhood_name} racket cannot reach this one."
+            "[NARRATION] The open case has taxed every {neighborhood_name} cycle with a street surcharge while {expansion_neighborhood_name} cycles settle clean: leadership reads the district boundary in the books, not in a jurisdiction file it cannot see. {police_name} pressure stays where the case lives."
         );
     }
     Ok(())

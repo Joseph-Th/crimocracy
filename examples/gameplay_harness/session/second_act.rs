@@ -173,9 +173,9 @@ fn run_recon_second_act(
     if narrative {
         let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
         println!(
-            "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
+            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {} ({}), window stays outside heavy presence.",
             patrol_record.summary(),
-            windows,
+            crate::readout::format_patrol_windows(&windows),
             duration.as_minutes(),
             scheduled_for.as_minutes(),
             format_minute_of_day(scheduled_for.as_minutes())

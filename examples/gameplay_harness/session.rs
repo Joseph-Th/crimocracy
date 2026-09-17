@@ -410,9 +410,9 @@ fn prepare_initial_burglary_plan(
             if narrative {
                 let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
-                    "[INTERPRET] Patrol report \"{}\" -> windows {:?} (minutes), burglary {}m +60m buffer -> chose minute {} ({}), window stays outside heavy presence.",
+                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose minute {} ({}), window stays outside heavy presence.",
                     patrol_record.summary(),
-                    windows,
+                    crate::readout::format_patrol_windows(&windows),
                     duration.as_minutes(),
                     chosen.as_minutes(),
                     crate::readout::format_minute_of_day(chosen.as_minutes())

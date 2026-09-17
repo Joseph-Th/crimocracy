@@ -8,6 +8,8 @@
 //! Narrative sessions also run a player-earned defector watch after an accepted defection: the
 //! organization watches every known rival through canonical surveillance and confirms where the
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
+//! The follow-up win-back pitch matches the candidate's visible drives and traits the way a
+//! player matches a pitch, rather than rolling a random approach.
 //! Timeline anchors are derived from the authored registry (operation duration, autonomous
 //! recruitment cadence, and cold-case window) so session timing tracks the game instead of a
 //! second hard-coded ruleset. World/simulation and evaluation-policy seeds are independent; scenario
@@ -412,11 +414,12 @@ mod tests {
         DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds, FixtureVariation,
         HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
         NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
-        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, parse_options,
-        patrol_intervals_from_signal, play_session, run_opportunity_portfolio_probe, run_smoke,
-        run_vice_attention_probe, validate_batch_strategy_coverage,
-        validate_branch_financial_isolation, validate_press_witness_counterplay,
-        validate_second_act_evidence, validate_strategy_evidence,
+        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal,
+        format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
+        run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe,
+        validate_batch_strategy_coverage, validate_branch_financial_isolation,
+        validate_press_witness_counterplay, validate_second_act_evidence,
+        validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -617,6 +620,40 @@ mod tests {
     }
 
     #[test]
+    fn formats_patrol_windows_as_player_clock_ranges() {
+        assert_eq!(
+            format_patrol_windows(&[(60, 270), (1_200, 1_380)]),
+            "01:00-04:30, 20:00-23:00"
+        );
+    }
+
+    #[test]
+    fn drive_matched_win_back_brings_a_frightened_defector_home() {
+        let registry = crimocracy::build_registry();
+        let metrics = play_session(
+            &registry,
+            Strategy::Rush,
+            ScenarioProfile::NightTrap,
+            EvaluationSeeds::defaults(),
+            SessionRunMode::FullQuiet,
+        )
+        .expect("full quiet rush session should complete");
+        assert_eq!(
+            metrics.player_personnel_departures, 1,
+            "the exposed crew member must still be poached so the win-back has something to answer"
+        );
+        assert_eq!(
+            metrics.win_back_accepted,
+            Some(true),
+            "a Protection pitch matched to a Safety-driven, EasilyFrightened defector must succeed through production scoring"
+        );
+        assert!(
+            metrics.win_back_margin.is_some_and(|margin| margin >= 0),
+            "the accepted win-back must carry a non-negative production margin"
+        );
+    }
+
+    #[test]
     fn chooses_a_buffered_window_from_player_visible_patrol_signal() {
         let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
         let chosen = choose_safe_start_from_patrol_signal(
@@ -713,12 +750,14 @@ mod tests {
     fn policy_choice_avalanches_across_adjacent_policy_seeds_and_salts() {
         // Adjacent policy seeds must not replay one decision sequence: over a window of eight
         // values both binary outcomes must appear, and different salts must not agree.
+        // Salts below are the live evaluation-policy salts (defector-watch order, blind
+        // witness-pressure delay); the win-back pitch itself is drive-matched, not salted.
         let outcomes: Vec<u64> = (0..8)
-            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x5EED, 2))
+            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x0DEF, 2))
             .collect();
         assert!(outcomes.contains(&0) && outcomes.contains(&1));
         let other_salt: Vec<u64> = (0..8)
-            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x0DEF, 2))
+            .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0xA11CE, 2))
             .collect();
         assert_ne!(outcomes, other_salt);
     }

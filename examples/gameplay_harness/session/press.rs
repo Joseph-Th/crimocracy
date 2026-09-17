@@ -261,11 +261,18 @@ fn schedule_witness_pressure(
             let delay = 50 + bounded_policy_choice(scenario.seeds.policy, 0xA11CE, 30);
             SimTime::from_minutes(case_open_minute + delay)
         };
-        if narrative && police_activity_information.is_some() {
-            println!(
-                "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
-                format_minute_of_day(pressure_at.as_minutes())
-            );
+        if narrative {
+            if police_activity_information.is_some() {
+                println!(
+                    "[INTERPRET] Quiet-word timing chosen from crew's patrol report to land inside the morning lull at {}.",
+                    format_minute_of_day(pressure_at.as_minutes())
+                );
+            } else {
+                println!(
+                    "[INTERPRET] No patrol pattern is held, so the quiet-word time at {} is a blind guess inside a watched district, not a patrol-safe plan. If a response arrives, the abort is the lesson: blind counter-play in a hot district gambles.",
+                    format_minute_of_day(pressure_at.as_minutes())
+                );
+            }
         }
         let witness = scenario.target_owner;
         pending_witness_pressure = Some(authorize_witness_pressure(
@@ -342,16 +349,13 @@ fn record_daily_laundering(
     stand_down: &mut StandDownState,
 ) {
     stand_down.laundry_days += 1;
-    if narrative && absorbed != stand_down.last_absorbed {
-        match absorbed {
-            Some(gross) => println!(
-                "[LAUNDER] The front's daily absorbable volume moved to {}.",
-                format_cents(gross)
-            ),
-            None => println!(
-                "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
-            ),
-        }
+    // Daily amounts move with the till balance, not just the books' ceiling, so printing every
+    // small change buries the story. The [WAIT] heartbeat already quotes the accounted total;
+    // say something here only when the wash stalls and street cash starts pooling.
+    if narrative && absorbed.is_none() && stand_down.last_absorbed.is_some() {
+        println!(
+            "[LAUNDER] The front's books absorbed nothing today; the volume waits as street cash."
+        );
     }
     stand_down.last_absorbed = absorbed;
 }

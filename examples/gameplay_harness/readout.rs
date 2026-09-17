@@ -91,6 +91,9 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
 
 pub fn print_starting_player_view(scenario: &Scenario) {
     println!("[ORGANIZATION] Marrow Organization");
+    println!(
+        "  (Capabilities show as values; traits and drives are what the organization knows about its own people and its personal contacts. Recruitment pitches land when the approach matches what the candidate wants.)"
+    );
     for character in [
         scenario.boss,
         scenario.lieutenant,
@@ -102,6 +105,21 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .world()
             .get_character(character)
             .expect("scenario character must exist");
+        let traits = crimocracy::world::ALL_TRAIT_KINDS
+            .iter()
+            .filter(|kind| record.has_trait(**kind))
+            .map(|kind| format!("{kind:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let drives = crimocracy::world::ALL_DRIVE_KINDS
+            .iter()
+            .filter_map(|kind| {
+                record
+                    .drive(*kind)
+                    .map(|rating| format!("{kind:?} {}", rating.value()))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
             "  - {:<14} autonomy {:?}; management {:?}; burglary {:?}; surveillance {:?}; stealth {:?}",
             record.name(),
@@ -118,6 +136,19 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             record
                 .capability(CapabilityKind::Stealth)
                 .map(Rating::value),
+        );
+        println!(
+            "      traits [{}]; drives [{}]",
+            if traits.is_empty() {
+                "-".to_owned()
+            } else {
+                traits
+            },
+            if drives.is_empty() {
+                "-".to_owned()
+            } else {
+                drives
+            },
         );
     }
     println!(
@@ -225,8 +256,23 @@ pub fn print_starting_player_view(scenario: &Scenario) {
         .world()
         .get_character(scenario.danny_ferro)
         .expect("replacement candidate must exist");
+    let replacement_traits = crimocracy::world::ALL_TRAIT_KINDS
+        .iter()
+        .filter(|kind| replacement.has_trait(**kind))
+        .map(|kind| format!("{kind:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let replacement_drives = crimocracy::world::ALL_DRIVE_KINDS
+        .iter()
+        .filter_map(|kind| {
+            replacement
+                .drive(*kind)
+                .map(|rating| format!("{kind:?} {}", rating.value()))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "[STATE] {} is an independent with Burglary {} / Stealth {}; Marrow holds a personal relationship with him, so he is the fallback entry specialist if the current crew is lost.",
+        "[STATE] {} is an independent with Burglary {} / Stealth {}; traits [{}]; drives [{}]. Marrow holds a personal relationship with him, so he is the fallback entry specialist if the current crew is lost. A Money-driven, Greedy candidate answers a FinancialOpportunity pitch; a frightened, Safety-driven crew member answers Protection.",
         replacement.name(),
         replacement
             .capability(CapabilityKind::Burglary)
@@ -236,6 +282,50 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .capability(CapabilityKind::Stealth)
             .expect("replacement must have stealth capability")
             .value(),
+        if replacement_traits.is_empty() {
+            "-".to_owned()
+        } else {
+            replacement_traits
+        },
+        if replacement_drives.is_empty() {
+            "-".to_owned()
+        } else {
+            replacement_drives
+        },
+    );
+    let burglar_record = scenario
+        .state
+        .world()
+        .get_character(scenario.burglar)
+        .expect("burglar must exist");
+    let burglar_traits = crimocracy::world::ALL_TRAIT_KINDS
+        .iter()
+        .filter(|kind| burglar_record.has_trait(**kind))
+        .map(|kind| format!("{kind:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let burglar_drives = crimocracy::world::ALL_DRIVE_KINDS
+        .iter()
+        .filter_map(|kind| {
+            burglar_record
+                .drive(*kind)
+                .map(|rating| format!("{kind:?} {}", rating.value()))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "[STATE] {} carries traits [{}] and drives [{}]; if police exposure ever makes him a poaching target, leadership will need the approach that speaks to what he fears and wants, not a random pitch.",
+        burglar_record.name(),
+        if burglar_traits.is_empty() {
+            "-".to_owned()
+        } else {
+            burglar_traits
+        },
+        if burglar_drives.is_empty() {
+            "-".to_owned()
+        } else {
+            burglar_drives
+        },
     );
 }
 
@@ -550,6 +640,9 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         "\n[FINANCIAL VIEW {}]",
         stamp(scenario.state.now().as_minutes())
     );
+    println!(
+        "  Money states: street cash spends on the street but cannot buy legitimacy; accounted funds are washed money that can buy businesses; legitimate operating cash belongs to the fronts' own books. Fence proceeds sit as street cash until washed through the front's per-cycle plausibility ceiling."
+    );
     let member_count = scenario
         .state
         .world()
@@ -569,7 +662,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     );
     for line in &view.enterprise_lines {
         println!(
-            "  Delegated gambling, {}: {} cycle(s), net {}, street float {} (avg {} /day).",
+            "  Delegated gambling, {}: {} cycle(s), net {}, racket till (street, awaiting wash or float) {} (avg {} /day).",
             line.label,
             line.cycle_count,
             format_cents(line.net_cents),
@@ -586,7 +679,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         );
     }
     println!(
-        "  Resale liquidation cash balance: {}.",
+        "  Fence proceeds (street cash, awaiting wash): {}.",
         format_cents(view.liquidation_cash_cents),
     );
     println!(
@@ -1422,6 +1515,22 @@ pub fn optional_scalar<T: std::fmt::Display>(value: Option<T>) -> String {
 pub fn format_minute_of_day(minute: u64) -> String {
     let minute_of_day = minute % 1_440;
     format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
+}
+
+/// Renders patrol windows as the clock ranges a player reads in a surveillance report,
+/// e.g. `01:00-04:30, 20:00-23:00`, instead of raw minute tuples.
+pub fn format_patrol_windows(windows: &[(u64, u64)]) -> String {
+    windows
+        .iter()
+        .map(|(start, end)| {
+            format!(
+                "{}-{}",
+                format_minute_of_day(*start),
+                format_minute_of_day(*end)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Renders a player-facing tick beat as minute plus clock, e.g. `minute 160 (02:40)`.

@@ -112,15 +112,6 @@ pub(super) fn run_defector_trail(
                     );
                 }
             }
-            if found {
-                println!(
-                    "[VERIFY DEFECTOR] {defector_name} now appears among {rival_name}'s recurring personnel."
-                );
-            } else {
-                println!(
-                    "[VERIFY DEFECTOR] {rival_name}'s watch shows {defector_name} is not working there."
-                );
-            }
         }
     }
     metrics.defector_trail_confirmed = Some(resurfaced_at.is_some());
@@ -148,6 +139,11 @@ pub(super) fn run_defector_trail(
 
 /// One personal re-approach through canonical executive recruitment after the player's own trail
 /// confirms a defector. A refusal can leak the recruiter to the rival through production rules.
+///
+/// The approach is chosen the way a player chooses it: from what the organization knows about
+/// the candidate's drives and traits. A frightened, Safety-driven member answers Protection;
+/// a Money-driven, Greedy candidate answers FinancialOpportunity. Picking at random would
+/// manufacture failure; matching the pitch to the person is the actual recruitment decision.
 pub(super) fn run_win_back_attempt(
     scenario: &mut Scenario,
     narrative: bool,
@@ -184,13 +180,10 @@ pub(super) fn run_win_back_attempt(
         .expect("rival organization must persist")
         .name()
         .to_owned();
-    let approach = match bounded_policy_choice(scenario.seeds.policy, 0x5EED, 2) {
-        0 => RecruitmentApproach::PersonalAppeal,
-        _ => RecruitmentApproach::FinancialOpportunity,
-    };
+    let approach = choose_win_back_approach(scenario, defector);
     if narrative {
         println!(
-            "[DECIDE]  {boss_name} makes one {approach:?} pitch to {defector_name}: come home to {player_name}."
+            "[DECIDE]  {boss_name} makes one {approach:?} pitch to {defector_name}: come home to {player_name}. The pitch matches what leadership knows the candidate wants and fears, not a random line."
         );
     }
     let attempt = validate_recruitment_attempt(
@@ -215,9 +208,10 @@ pub(super) fn run_win_back_attempt(
     metrics.win_back_margin = Some(record.margin());
     if narrative {
         println!(
-            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance.",
+            "[NARRATION] The {:?} pitch resolves against {boss_name}'s old bond, {defector_name}'s fresh attachment to {}, and ordinary membership resistance. Documentary margin {} (leadership sees acceptance or refusal, not the number); matching the pitch to what the candidate wants is what moves it.",
             record.approach(),
             rival_name,
+            record.margin(),
         );
     }
     if accepted {
@@ -255,6 +249,54 @@ pub(super) fn run_win_back_attempt(
         println!(
             "[WIN BACK]  {defector_name} stayed with {rival_name}. The re-approach failed and membership did not move."
         );
+        if leaked {
+            println!(
+                "[WIN BACK]  Reaching out cost intelligence: {rival_name} now holds a production loyalty report naming {boss_name} as the recruiter who came calling."
+            );
+        }
     }
     Ok(())
+}
+
+/// Player-like approach selection from organization-visible candidate state. Protection speaks
+/// to Safety-driven, frightened candidates; FinancialOpportunity speaks to Money-driven,
+/// Greedy candidates; Advancement speaks to Status-driven, Ambitious candidates; otherwise a
+/// personal appeal on the existing bond. Deterministic over candidate state, never over hidden
+/// case or rival state, so matched branches choose identically.
+fn choose_win_back_approach(
+    scenario: &Scenario,
+    candidate: crimocracy::core::id::CharacterId,
+) -> RecruitmentApproach {
+    let record = scenario
+        .state
+        .world()
+        .get_character(candidate)
+        .expect("win-back candidate must persist");
+    let safety = record
+        .drive(crimocracy::world::DriveKind::Safety)
+        .map(|rating| rating.value())
+        .unwrap_or(0);
+    let money = record
+        .drive(crimocracy::world::DriveKind::Money)
+        .map(|rating| rating.value())
+        .unwrap_or(0);
+    let status = record
+        .drive(crimocracy::world::DriveKind::Status)
+        .map(|rating| rating.value())
+        .unwrap_or(0);
+    if safety >= money.max(status) && safety >= 60 {
+        return RecruitmentApproach::Protection;
+    }
+    if record.has_trait(crimocracy::world::TraitKind::EasilyFrightened) && safety >= 40 {
+        return RecruitmentApproach::Protection;
+    }
+    if money >= 60
+        || (record.has_trait(crimocracy::world::TraitKind::Greedy) && money >= status.max(safety))
+    {
+        return RecruitmentApproach::FinancialOpportunity;
+    }
+    if status >= 60 || record.has_trait(crimocracy::world::TraitKind::Ambitious) {
+        return RecruitmentApproach::Advancement;
+    }
+    RecruitmentApproach::PersonalAppeal
 }
